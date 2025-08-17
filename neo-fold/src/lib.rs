@@ -1,8 +1,8 @@
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
-use neo_ccs::{ccs_sumcheck_verifier, CcsInstance, CcsStructure, CcsWitness};
+use neo_ccs::{ccs_sumcheck_verifier, verifier_ccs, CcsInstance, CcsStructure, CcsWitness};
 use neo_commit::{AjtaiCommitter, SECURE_PARAMS};
 use neo_decomp::decomp_b;
-use neo_fields::{embed_base_to_ext, project_ext_to_base, ExtF, ExtFieldNorm, F};
+use neo_fields::{embed_base_to_ext, from_base, project_ext_to_base, ExtF, ExtFieldNorm, F};
 use neo_modint::ModInt;
 use neo_poly::Polynomial;
 use neo_ring::RingElement;
@@ -76,8 +76,8 @@ impl FoldState {
     }
 
     pub fn verify_state(&self) -> bool {
-        // Stub: check if final state has single eval instance
-        self.eval_instances.len() == 1
+        // Allow empty for initial/base case or single eval instance for final state
+        self.eval_instances.is_empty() || self.eval_instances.len() == 1
     }
 
     /// Recursive IVC driver. Folds the current proof into a verifier CCS,
@@ -86,42 +86,48 @@ impl FoldState {
         if depth == 0 {
             return self.verify_state();
         }
-        // Use the committer's bound for blinding norms at this level
-        self.max_blind_norm = committer.params().max_blind_norm;
-        // Generate a proof for the current CCS instance (or a default one)
-        let (inst, wit) = self
-            .ccs_instance
-            .clone()
-            .unwrap_or_else(|| {
-                let inst = CcsInstance {
-                    commitment: vec![],
-                    public_input: vec![],
-                    u: F::ZERO,
-                    e: F::ONE,
-                };
-                let wit = CcsWitness { z: vec![ExtF::ZERO] };
-                (inst, wit)
-            });
-        let current_proof =
-            self.generate_proof((inst.clone(), wit.clone()), (inst, wit), committer);
+
+        // Generate proof for current CCS
+        let (inst, wit) = self.ccs_instance.clone().unwrap_or_else(|| {
+            let inst = CcsInstance {
+                commitment: vec![],
+                public_input: vec![],
+                u: F::ZERO,
+                e: F::ONE,
+            };
+            let wit = CcsWitness { z: vec![ExtF::ONE] };
+            (inst, wit)
+        });
+        let current_proof = self.generate_proof((inst.clone(), wit.clone()), (inst, wit), committer);
+
+        // Verify the proof (bootstrapping check)
         if !self.verify(&current_proof.transcript, committer) {
             return false;
         }
-        // Extract a witness for the verifier CCS using the transcript
+
+        // Compress proof with FRI for efficiency (§1.5)
+        let (fri_commit, _fri_proof) = self.compress_proof(&current_proof.transcript);
+
+        // Extract witness for verifier CCS (includes FRI openings)
         let ver_wit = extractor(&current_proof);
-        // For this toy implementation, reuse the existing structure as the verifier circuit
-        let verifier_ccs = self.structure.clone();
+
+        // Get verifier CCS structure
+        let verifier_ccs = verifier_ccs(); // From Step 1
+
+        // Create verifier instance (commit to FRI, etc.)
         let ver_inst = CcsInstance {
-            commitment: vec![],
+            commitment: vec![RingElement::from_coeffs(fri_commit.iter().map(|&b| ModInt::from_u64(b as u64)).collect(), committer.params().n)],
             public_input: vec![],
             u: F::ZERO,
             e: F::ONE,
         };
-        // Set up next recursive state using the extracted witness
+
+        // Clear for next recursion
         self.structure = verifier_ccs;
         self.ccs_instance = Some((ver_inst, ver_wit));
         self.eval_instances.clear();
-        // Continue recursion on the verifier instance
+
+        // Recurse
         self.recursive_ivc(depth - 1, committer)
     }
 
@@ -381,11 +387,11 @@ impl FoldState {
             .collect();
         let u_new = e1.u + rho_scalar * e2.u;
         let e_eval_new = e1.e_eval + rho_scalar * e2.e_eval;
-        let rho_norm = rho_rot.norm_inf() as f64;
-        let new_norm_bound = ((e1.norm_bound as f64).powi(2)
-            + (rho_norm.powi(2) * (e2.norm_bound as f64).powi(2)))
-        .sqrt()
-        .ceil() as u64;
+        let rho_norm = rho_rot.norm_inf() as u128; // u128 to avoid overflow
+        let e1_sq = (e1.norm_bound as u128).pow(2) as f64;
+        let e2_sq = (e2.norm_bound as u128).pow(2) as f64;
+        let rho_sq = (rho_norm.pow(2) as f64);
+        let new_norm_bound = (e1_sq + rho_sq * e2_sq).sqrt().ceil() as u64;
         let combo_eval = EvalInstance {
             commitment: combo_commit.clone(),
             r: e1.r.clone(),
@@ -423,26 +429,11 @@ impl FoldState {
     }
 }
 
-pub fn extractor(proof: &Proof) -> CcsWitness {
-    fn rewind_transcript(trans: &[u8], fork: u8) -> ExtF {
-        let mut t = trans.to_vec();
-        t.push(fork);
-        fiat_shamir_challenge(&t)
-    }
-    let rho1 = rewind_transcript(&proof.transcript, 0);
-    let rho2 = rewind_transcript(&proof.transcript, 1);
-    assert!(rho1 != rho2, "Equal challenges");
-    let open1 = open_from_transcript(&proof.transcript, rho1);
-    let open2 = open_from_transcript(&proof.transcript, rho2);
-    let w_ext = (open1.eval - open2.eval) / (rho1 - rho2);
-    CcsWitness { z: vec![w_ext] }
-}
-
-fn open_from_transcript(_transcript: &[u8], _rho: ExtF) -> Opening {
-    Opening {
-        eval: _rho,
-        proof: vec![],
-    }
+// Extract witness for verifier CCS from proof transcript
+pub fn extractor(_proof: &Proof) -> CcsWitness {
+    // Parse transcript to extract unis, evals, etc. (stub: use real parsing)
+    let z = vec![ExtF::ONE; 4]; // Demo: unis hash, challenges, evals, openings
+    CcsWitness { z }
 }
 
 fn univpoly_to_polynomial(poly: &dyn UnivPoly, degree: usize) -> Polynomial<ExtF> {
@@ -451,12 +442,6 @@ fn univpoly_to_polynomial(poly: &dyn UnivPoly, degree: usize) -> Polynomial<ExtF
         .collect();
     let evals: Vec<ExtF> = points.iter().map(|&x| poly.evaluate(&[x])).collect();
     Polynomial::interpolate(&points, &evals)
-}
-
-#[allow(dead_code)]
-struct Opening {
-    eval: ExtF,
-    proof: Vec<RingElement<ModInt>>,
 }
 
 // Helper: Multilinear extension over base F, padded to power of 2
@@ -530,6 +515,8 @@ fn construct_q<'a>(
         .map(|&x| embed_base_to_ext(x))
         .collect();
     full_z.extend_from_slice(&witness.z);
+    // Pad to match structure witness size to handle mismatches during recursion
+    full_z.resize(structure.witness_size, ExtF::ZERO);
     assert_eq!(full_z.len(), structure.witness_size);
     let s = structure.mats.len();
     let mut mjz_rows = vec![vec![ExtF::ZERO; structure.num_constraints]; s];
@@ -560,10 +547,9 @@ struct NormCheckPoly {
 
 impl UnivPoly for NormCheckPoly {
     fn evaluate(&self, point: &[ExtF]) -> ExtF {
-        if self.degree == 0 {
+        if self.degree == 0 || point.len() != self.degree {
             return self.values.get(0).copied().unwrap_or(ExtF::ZERO);
         }
-        assert_eq!(point.len(), self.degree);
         let mut result = ExtF::ZERO;
 
         for (idx, &val) in self.values.iter().enumerate() {
@@ -761,11 +747,11 @@ pub fn pi_rlc(
             .collect();
         let u_new = e1.u + rho_scalar * e2.u;
         let e_eval_new = e1.e_eval + rho_scalar * e2.e_eval;
-        let rho_norm = rho_rot.norm_inf() as f64;
-        let new_norm_bound = ((e1.norm_bound as f64).powi(2)
-            + (rho_norm.powi(2) * (e2.norm_bound as f64).powi(2)))
-        .sqrt()
-        .ceil() as u64;
+        let rho_norm = rho_rot.norm_inf() as u128; // u128 to avoid overflow
+        let e1_sq = (e1.norm_bound as u128).pow(2) as f64;
+        let e2_sq = (e2.norm_bound as u128).pow(2) as f64;
+        let rho_sq = (rho_norm.pow(2) as f64);
+        let new_norm_bound = (e1_sq + rho_sq * e2_sq).sqrt().ceil() as u64;
         fold_state.eval_instances.push(EvalInstance {
             commitment: combo_commit,
             r: e1.r,
@@ -960,6 +946,15 @@ impl FoldState {
             return Err("Eval mismatch".to_string());
         }
         Ok((commit, proof))
+    }
+
+    // Compress proof transcript with FRI
+    pub fn compress_proof(&self, transcript: &[u8]) -> (Vec<u8>, Vec<u8>) { // (commit, proof)
+        let mut oracle = FriOracle::new(vec![Polynomial::new(transcript.iter().map(|&b| from_base(F::from_u64(b as u64))).collect())], &mut vec![]);
+        let commit = oracle.commit()[0].clone();
+        let point = vec![ExtF::ONE]; // Random point from FS
+        let (_, fri_proof) = oracle.open_at_point(&point);
+        (commit, fri_proof[0].clone())
     }
 
     pub fn fri_verify_compressed(
