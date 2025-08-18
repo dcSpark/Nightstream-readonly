@@ -39,6 +39,11 @@ p3-symmetric = "0.3.0"
 rand = { workspace = true }
 bincode = "1"
 
+[features]
+default = []
+fri_pow_16 = []   # enable to test with production-like PoW
+fri_debug = []    # optional: enable verbose eprintln!s
+
 [[bench]]
 name = "sumcheck"
 harness = false
