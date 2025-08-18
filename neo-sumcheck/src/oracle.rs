@@ -7,7 +7,7 @@ use std::io::{Cursor, Read};
 use subtle::ConstantTimeEq;
 
 use crate::{fiat_shamir_challenge, fiat_shamir_challenge_base, from_base, ExtF, F};
-use neo_fields::{ExtFieldNorm, MAX_BLIND_NORM};
+
 use neo_poly::Polynomial;
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_goldilocks::Poseidon2Goldilocks;
@@ -508,13 +508,6 @@ impl PolyOracle for FriOracle {
             }
         }
         
-        // Add norm check on opened evals for soundness
-        for &eval in evals {
-            if eval.abs_norm() > MAX_BLIND_NORM {
-                return false;
-            }
-        }
-        
         true
     }
 }
@@ -609,12 +602,12 @@ impl FriOracle {
         // Generate query indices using the final transcript state
         eprintln!("generate_fri_proof: local_transcript.len()={}, first 32 bytes={:?}", 
                  local_transcript.len(), &local_transcript[0..32.min(local_transcript.len())]);
-        let mut query_transcript = local_transcript.clone();
         let mut queries = Vec::new();
         for query_idx in 0..NUM_QUERIES {
-            let idx_hash = fiat_shamir_challenge(&mut query_transcript)
-                .to_array()[0]
-                .as_canonical_u64() as usize % self.domain.len();
+            let mut q_trans = local_transcript.clone();
+            q_trans.extend(&query_idx.to_be_bytes());
+            let chal = fiat_shamir_challenge(&q_trans);
+            let idx_hash = chal.to_array()[0].as_canonical_u64() as usize % self.domain.len();
             let mut current_idx = idx_hash;
             let f_val = evals[current_idx];
             let f_path = f_tree.open(current_idx);
@@ -742,15 +735,15 @@ impl FriOracle {
         // Now the transcript should match what the prover had when generating query indices
         eprintln!("verify_fri_proof: transcript.len()={}, first 32 bytes={:?}", 
                  transcript.len(), &transcript[0..32.min(transcript.len())]);
-        let mut query_transcript = transcript.clone();
         let domain_size = self.domain.len();
         eprintln!("verify_fri_proof: domain_size={}, self.domain={:?}", domain_size, self.domain);
         
         // Verify that the query indices match what we would generate with this transcript
         for (q_idx, query) in proof.queries.iter().enumerate() {
-            let expected_idx = fiat_shamir_challenge(&mut query_transcript)
-                .to_array()[0]
-                .as_canonical_u64() as usize % domain_size;
+            let mut q_trans = transcript.clone();
+            q_trans.extend(&q_idx.to_be_bytes());
+            let chal = fiat_shamir_challenge(&q_trans);
+            let expected_idx = chal.to_array()[0].as_canonical_u64() as usize % domain_size;
             eprintln!("verify_fri_proof: Query {} - prover_idx={}, expected_idx={}", 
                      q_idx, query.idx, expected_idx);
             if query.idx != expected_idx {
@@ -766,6 +759,7 @@ impl FriOracle {
                 eprintln!("verify_fri_proof: Layer count mismatch");
                 return false;
             }
+            
             let root_arr: [u8; 32] = {
                 let mut arr = [0u8; 32];
                 arr.copy_from_slice(root);

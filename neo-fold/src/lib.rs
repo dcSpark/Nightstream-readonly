@@ -1099,13 +1099,14 @@ impl FoldState {
         // Serialize the FRI proof struct (from neo_sumcheck::oracle::FriProof) to bytes
         let proof_bytes = neo_sumcheck::oracle::serialize_fri_proof(&fri_proof_struct);
         
-                // Verify consistency: polynomial evaluation should match e_eval
+                // Verify consistency: polynomial evaluation (blinded) should match e_eval
         let expected_unblinded = final_poly.eval(point[0]);
-        if expected_unblinded != e_eval {
-            eprintln!("fri_compress_final: Polynomial eval mismatch - expected_unblinded={:?}, e_eval={:?}, blind={:?}",
-                     expected_unblinded, e_eval, oracle.blinds[0]);
-            return Err(format!("Polynomial eval mismatch: expected_unblinded={:?} != e_eval={:?}",
-                               expected_unblinded, e_eval));
+        let expected_blinded = expected_unblinded + oracle.blinds[0];
+        if expected_blinded != e_eval {
+            eprintln!("fri_compress_final: Polynomial eval mismatch - expected_unblinded={:?}, expected_blinded={:?}, e_eval={:?}, blind={:?}",
+                     expected_unblinded, expected_blinded, e_eval, oracle.blinds[0]);
+            return Err(format!("Polynomial eval mismatch: expected_blinded={:?} != e_eval={:?}",
+                               expected_blinded, e_eval));
         }
 
         eprintln!("fri_compress_final: Final verification e_eval (blinded): {:?}", blinded_eval);
