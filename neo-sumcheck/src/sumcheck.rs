@@ -241,6 +241,7 @@ pub fn batched_sumcheck_verifier(
     comms: &[Commitment],
     oracle: &mut impl PolyOracle,
     transcript: &mut Vec<u8>,
+    pre_transcript: &[u8],  // NEW: Pass pre-sumcheck transcript for blind recomputation
 ) -> Option<(Vec<ExtF>, Vec<ExtF>)> {
     if claims.is_empty() || msgs.is_empty() {
         return Some((vec![], vec![]));
@@ -298,10 +299,11 @@ pub fn batched_sumcheck_verifier(
     eprintln!("VERIFIER_DEBUG: Opened evals (raw from FRI): {:?}", evals);
     eprintln!("VERIFIER_DEBUG: Expected current from sumcheck: {:?}", current);
     
-    // CRITICAL FIX: Use empty transcript state to match prover oracle creation
-    // The prover oracle was created with transcript.len()=18, which we approximate as minimal state
-    let mut blind_trans = vec![0u8; 18]; // Match prover oracle creation transcript length
+    // CRITICAL FIX: Use pre-sumcheck transcript state for blind recomputation (from other AI)
+    // The prover created oracle with pre_transcript, so blinds must be computed with same state
+    let mut blind_trans = pre_transcript.to_vec();  // Use pre-sumcheck state
     blind_trans.extend(b"fri_blind_seed");
+    eprintln!("VERIFIER_DEBUG: Using pre_transcript.len()={} for blind computation", pre_transcript.len());
     let hash_result = crate::fiat_shamir_challenge_base(&blind_trans);
     let mut seed = [0u8; 32];
     seed[0..8].copy_from_slice(&hash_result.as_canonical_u64().to_le_bytes());
@@ -313,7 +315,7 @@ pub fn batched_sumcheck_verifier(
     for blind in &mut blinds {
         *blind = crate::oracle::FriOracle::sample_discrete_gaussian(&mut rng, 3.2);
     }
-    eprintln!("VERIFIER_DEBUG: Computed blinds: {:?}", blinds);
+    eprintln!("VERIFIER_DEBUG: Recomputed blinds with correct transcript: {:?}", blinds);
     
     // Subtract FRI blinds to get unblinded evaluations
     let mut evals = evals;
@@ -817,7 +819,7 @@ mod tests {
         }
         let mut high_oracle = HighNormOracle;
         let mut vt = vec![];
-        let result = batched_sumcheck_verifier(&[claim], &msgs, &comms, &mut high_oracle, &mut vt);
+        let result = batched_sumcheck_verifier(&[claim], &msgs, &comms, &mut high_oracle, &mut vt, &[]);
         assert!(result.is_none());
     }
 

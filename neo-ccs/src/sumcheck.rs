@@ -600,7 +600,7 @@ mod tests {
         let (msgs, comms) =
             batched_sumcheck_prover(&[claim], &[&*poly], &mut oracle, &mut transcript).unwrap();
         let mut vt = vec![];
-        let result = batched_sumcheck_verifier(&[claim], &msgs, &comms, &mut oracle, &mut vt);
+        let result = batched_sumcheck_verifier(&[claim], &msgs, &comms, &mut oracle, &mut vt, &[]);
         assert!(result.is_some());
         let (r, final_evals) = result.unwrap();
         let poly = QuadraticPoly { num_vars };
@@ -648,7 +648,7 @@ mod tests {
                 .unwrap();
         let mut vt = vec![];
         assert!(
-            batched_sumcheck_verifier(&[correct_claim], &msgs, &comms, &mut oracle, &mut vt)
+            batched_sumcheck_verifier(&[correct_claim], &msgs, &comms, &mut oracle, &mut vt, &[])
                 .is_some()
         );
     }
@@ -751,7 +751,7 @@ mod tests {
             batched_sumcheck_prover(&[claim], &[&*poly], &mut oracle, &mut transcript).unwrap();
 
         let mut vt = vec![];
-        let result = batched_sumcheck_verifier(&[claim], &msgs, &comms, &mut oracle, &mut vt);
+        let result = batched_sumcheck_verifier(&[claim], &msgs, &comms, &mut oracle, &mut vt, &[]);
         assert!(result.is_some());
 
         let (r, final_evals) = result.unwrap();

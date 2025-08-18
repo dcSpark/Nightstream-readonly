@@ -1155,6 +1155,7 @@ pub fn pi_ccs(
             &comms,
             &mut vt_oracle,
             &mut vt_transcript,
+            &prover_oracle_transcript,  // CRITICAL FIX: Use oracle creation transcript (len=18), not pre-sumcheck (len=30)
         );
         
         let (challenges, evals) = match debug_result {
