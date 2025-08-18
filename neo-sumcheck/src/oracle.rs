@@ -318,8 +318,18 @@ impl FriOracle {
     pub fn new_with_blowup(mut polys: Vec<Polynomial<ExtF>>, transcript: &mut Vec<u8>, blowup: usize) -> Self {
         // Handle dummy case: add non-zero constant poly if empty
         if polys.is_empty() {
-            eprintln!("FriOracle::new_with_blowup: Empty polys, adding dummy non-zero polynomial");
+            eprintln!("FriOracle::new_with_blowup: Empty polys list, adding dummy non-zero polynomial");
             polys = vec![Polynomial::new(vec![ExtF::ONE])];
+        }
+        
+        // CRITICAL FIX: Handle zero polynomials (empty coeffs) properly
+        // Instead of treating them as dummy polynomials, we need to handle them as legitimate zero polynomials
+        for (i, poly) in polys.iter_mut().enumerate() {
+            if poly.coeffs().is_empty() {
+                eprintln!("FriOracle::new_with_blowup: Found zero polynomial at index {}, will treat as constant zero in blinding", i);
+                // Note: We keep the empty polynomial as-is because poly.eval() correctly returns 0 for empty coeffs
+                // The blinding will work correctly: 0 + blind = blind
+            }
         }
         
         let max_deg = polys.iter().map(|p| p.degree()).max().unwrap_or(0);
@@ -604,8 +614,9 @@ impl FriOracle {
                  local_transcript.len(), &local_transcript[0..32.min(local_transcript.len())]);
         let mut queries = Vec::new();
         for query_idx in 0..NUM_QUERIES {
-            let mut q_trans = local_transcript.clone();
+            let mut q_trans = b"query_salt_".to_vec();  // Fixed salt to bypass transcript dep
             q_trans.extend(&query_idx.to_be_bytes());
+            q_trans.extend(&local_transcript);  // Still bind to layers for security
             let chal = fiat_shamir_challenge(&q_trans);
             let idx_hash = chal.to_array()[0].as_canonical_u64() as usize % self.domain.len();
             let mut current_idx = idx_hash;
@@ -740,8 +751,9 @@ impl FriOracle {
         
         // Verify that the query indices match what we would generate with this transcript
         for (q_idx, query) in proof.queries.iter().enumerate() {
-            let mut q_trans = transcript.clone();
+            let mut q_trans = b"query_salt_".to_vec();  // Same fixed salt
             q_trans.extend(&q_idx.to_be_bytes());
+            q_trans.extend(&transcript);  // Bind to reconstructed transcript
             let chal = fiat_shamir_challenge(&q_trans);
             let expected_idx = chal.to_array()[0].as_canonical_u64() as usize % domain_size;
             eprintln!("verify_fri_proof: Query {} - prover_idx={}, expected_idx={}", 

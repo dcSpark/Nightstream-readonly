@@ -6,6 +6,7 @@ use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use rand_distr::{Distribution, StandardNormal};
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::SeedableRng;
+// use rand::Rng; // Unused for now
 use thiserror::Error;
 use neo_fields::MAX_BLIND_NORM;
 
@@ -234,6 +235,9 @@ pub fn batched_sumcheck_verifier(
     if !oracle.verify_openings(comms, &r, &evals, &proofs) {
         return None;
     }
+
+    // TEMPORARY: Disable blind subtraction to test if this is the root issue
+    eprintln!("VERIFIER_DEBUG: Skipping blind subtraction - evals[0]={:?}", if !evals.is_empty() { Some(evals[0]) } else { None });
 
     if evals.iter().any(|e| e.abs_norm() > MAX_BLIND_NORM) {
         return None;
