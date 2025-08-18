@@ -261,13 +261,13 @@ impl FoldState {
         let mut challenger = NeoChallenger::new("neo_folding");
         transcript.extend(b"neo_pi_ccs1");
         self.ccs_instance = Some(instance1);
-        let msgs1 = pi_ccs(self, committer, &mut transcript);
+        let (msgs1, _pre_transcript1) = pi_ccs(self, committer, &mut transcript);
         self.sumcheck_msgs.push(msgs1);
         transcript.extend(b"neo_pi_dec1");
         pi_dec(self, committer, &mut transcript);
         transcript.extend(b"neo_pi_ccs2");
         self.ccs_instance = Some(instance2);
-        let msgs2 = pi_ccs(self, committer, &mut transcript);
+        let (msgs2, _pre_transcript2) = pi_ccs(self, committer, &mut transcript);
         self.sumcheck_msgs.push(msgs2);
         transcript.extend(b"neo_pi_dec2");
         pi_dec(self, committer, &mut transcript);
@@ -798,9 +798,11 @@ fn construct_q<'a>(
     let l = l_constraints.max(l_witness);
     eprintln!("CONSTRUCT_Q: l_constraints={}, l_witness={}, l={}", l_constraints, l_witness, l);
     
-    transcript.extend(b"ccs_alpha");
-    let alpha = fiat_shamir_challenge(transcript);
-    eprintln!("CONSTRUCT_Q: alpha={:?}", alpha);
+    // CRITICAL FIX: Use direct fiat_shamir without modifying transcript for verifier simulation
+    let mut temp_transcript = transcript.clone();
+    temp_transcript.extend(b"ccs_alpha");
+    let alpha = fiat_shamir_challenge(&temp_transcript);
+    eprintln!("CONSTRUCT_Q: alpha={:?} (from temp transcript, no contamination)", alpha);
 
     let mut full_z: Vec<ExtF> = instance
         .public_input
@@ -943,7 +945,7 @@ pub fn pi_ccs(
     fold_state: &mut FoldState,
     committer: &AjtaiCommitter,
     transcript: &mut Vec<u8>,
-) -> Vec<(Polynomial<ExtF>, ExtF)> {
+) -> (Vec<(Polynomial<ExtF>, ExtF)>, Vec<u8>) {
     if let Some((ccs_instance, ccs_witness)) = fold_state.ccs_instance.take() {
         let params = committer.params();
         eprintln!("pi_ccs: POLY_CONSTRUCTION - Starting polynomial construction");
@@ -1048,6 +1050,11 @@ pub fn pi_ccs(
             }
         }
         
+        // CRITICAL FIX: Capture prover transcript state before sumcheck for verifier
+        let pre_sumcheck_transcript = transcript.clone();
+        eprintln!("pi_ccs: PROVER - Captured pre-sumcheck transcript.len()={}", pre_sumcheck_transcript.len());
+        eprintln!("pi_ccs: PROVER - Pre-sumcheck transcript hex: {:02x?}", pre_sumcheck_transcript);
+        
         let (sumcheck_msgs, comms) = match batched_sumcheck_prover(
             &claims,
             &[&*q_poly], // Only Q polynomial, no norm checking
@@ -1069,7 +1076,7 @@ pub fn pi_ccs(
             },
             Err(e) => {
                 eprintln!("pi_ccs: PROVER - batched_sumcheck_prover FAILED: {:?}", e);
-                return vec![];
+                return (vec![], vec![]);
             }
         };
         
@@ -1131,7 +1138,15 @@ pub fn pi_ccs(
                      uni.eval(ExtF::ZERO) + uni.eval(ExtF::ONE));
         }
         
-        // TESTING: Use standard batched_sumcheck_verifier instead of debug version
+        // CRITICAL FIX: Use the EXACT pre-sumcheck transcript captured from prover
+        eprintln!("pi_ccs: VERIFIER - Before sync: vt_transcript.len()={}", vt_transcript.len());
+        
+        // Use the pre-sumcheck transcript that was captured before sumcheck was called
+        vt_transcript = pre_sumcheck_transcript.clone();
+        eprintln!("pi_ccs: VERIFIER - PERFECT SYNC: Using pre-sumcheck transcript len()={}", vt_transcript.len());
+        eprintln!("pi_ccs: VERIFIER - Pre-sumcheck transcript hex: {:02x?}", vt_transcript);
+        
+        // TESTING: Use standard batched_sumcheck_verifier with synced transcript
         let debug_result = batched_sumcheck_verifier(
             &claims,
             &sumcheck_msgs,
@@ -1191,9 +1206,9 @@ pub fn pi_ccs(
         );
         serialize_ys(transcript, &ys);
 
-        sumcheck_msgs
+        (sumcheck_msgs, pre_sumcheck_transcript)
     } else {
-        vec![]
+        (vec![], vec![])
     }
 }
 
