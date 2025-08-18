@@ -261,13 +261,19 @@ impl FoldState {
         let mut challenger = NeoChallenger::new("neo_folding");
         transcript.extend(b"neo_pi_ccs1");
         self.ccs_instance = Some(instance1);
+        eprintln!("generate_proof: About to call pi_ccs #1");
         let (msgs1, _pre_transcript1) = pi_ccs(self, committer, &mut transcript);
+        eprintln!("generate_proof: pi_ccs #1 returned, msgs1.len()={}", msgs1.len());
         self.sumcheck_msgs.push(msgs1);
         transcript.extend(b"neo_pi_dec1");
+        eprintln!("generate_proof: About to call pi_dec #1");
         pi_dec(self, committer, &mut transcript);
+        eprintln!("generate_proof: pi_dec #1 returned");
         transcript.extend(b"neo_pi_ccs2");
         self.ccs_instance = Some(instance2);
+        eprintln!("generate_proof: About to call pi_ccs #2");
         let (msgs2, _pre_transcript2) = pi_ccs(self, committer, &mut transcript);
+        eprintln!("generate_proof: pi_ccs #2 returned, msgs2.len()={}", msgs2.len());
         self.sumcheck_msgs.push(msgs2);
         transcript.extend(b"neo_pi_dec2");
         pi_dec(self, committer, &mut transcript);
@@ -1186,8 +1192,16 @@ pub fn pi_ccs(
         // For now, test if the corrected claims help with simulation success
         eprintln!("pi_ccs: Skipping blind correction for now to test basic simulation");
 
+        eprintln!("pi_ccs: SIMULATION - structure.mats.len()={}, num_constraints={}, witness_size={}, challenges.len()={}", 
+                 fold_state.structure.mats.len(), 
+                 fold_state.structure.num_constraints,
+                 fold_state.structure.witness_size,
+                 challenges.len());
+        eprintln!("pi_ccs: SIMULATION - ccs_witness.z.len()={}", ccs_witness.z.len());
+
         let mut ys = Vec::new();
-        for mat in &fold_state.structure.mats {
+        for (mat_idx, mat) in fold_state.structure.mats.iter().enumerate() {
+            eprintln!("pi_ccs: SIMULATION - Processing matrix {}/{}", mat_idx + 1, fold_state.structure.mats.len());
             let mut mz = vec![ExtF::ZERO; fold_state.structure.num_constraints];
             for row in 0..fold_state.structure.num_constraints {
                 let mut sum = ExtF::ZERO;
@@ -1195,10 +1209,18 @@ pub fn pi_ccs(
                     sum += mat.get(row, col).unwrap_or(ExtF::ZERO) * ccs_witness.z[col];
                 }
                 mz[row] = sum;
+                if row % 10 == 0 {  // Debug every 10th row to avoid spam
+                    eprintln!("pi_ccs: SIMULATION - Matrix {} row {} complete", mat_idx, row);
+                }
             }
+            eprintln!("pi_ccs: SIMULATION - Matrix {} MLE evaluation starting", mat_idx);
             let mz_mle = multilinear_extension(&mz, challenges.len());
+            eprintln!("pi_ccs: SIMULATION - Matrix {} MLE evaluation complete", mat_idx);
             ys.push(mz_mle.evaluate(&challenges));
+            eprintln!("pi_ccs: SIMULATION - Matrix {} fully processed", mat_idx);
         }
+        eprintln!("pi_ccs: SIMULATION - All matrices processed, ys.len()={}", ys.len());
+        eprintln!("pi_ccs: SIMULATION - Creating EvalInstance with commitment.len()={}", ccs_instance.commitment.len());
         let eval = EvalInstance {
             commitment: ccs_instance.commitment.clone(),
             r: challenges.clone(),
@@ -1207,15 +1229,23 @@ pub fn pi_ccs(
             e_eval: *evals.get(1).unwrap_or(&ExtF::ZERO),
             norm_bound: params.norm_bound,
         };
+        eprintln!("pi_ccs: SIMULATION - EvalInstance created, adding to fold_state");
         fold_state.eval_instances.push(eval);
+        eprintln!("pi_ccs: SIMULATION - About to serialize commit, transcript.len()={}", transcript.len());
         transcript.extend(serialize_commit(&ccs_instance.commitment));
+        eprintln!("pi_ccs: SIMULATION - About to serialize sumcheck_msgs, msgs.len()={}", sumcheck_msgs.len());
         serialize_sumcheck_msgs(transcript, &sumcheck_msgs);
+        eprintln!("pi_ccs: SIMULATION - About to serialize comms_block, comms.len()={}", comms.len());
         // Append oracle commitments for sumcheck opening verification (must precede ys to match verifier)
         serialize_comms_block(
             transcript,
             &comms.iter().map(|c| c.clone()).collect::<Vec<_>>(),
         );
+        eprintln!("pi_ccs: SIMULATION - About to serialize ys");
         serialize_ys(transcript, &ys);
+        eprintln!("pi_ccs: SIMULATION - All serialization complete!");
+        eprintln!("pi_ccs: SIMULATION - About to return (sumcheck_msgs.len()={}, pre_sumcheck_transcript.len()={})", 
+                 sumcheck_msgs.len(), pre_sumcheck_transcript.len());
 
         (sumcheck_msgs, pre_sumcheck_transcript)
     } else {
@@ -1267,18 +1297,26 @@ pub fn pi_rlc(
 }
 
 pub fn pi_dec(fold_state: &mut FoldState, committer: &AjtaiCommitter, transcript: &mut Vec<u8>) {
+    eprintln!("pi_dec: Starting with eval_instances.len()={}", fold_state.eval_instances.len());
     if let Some(eval) = fold_state.eval_instances.last().cloned() {
+        eprintln!("pi_dec: Found eval instance with ys.len()={}", eval.ys.len());
         let params = committer.params();
+        eprintln!("pi_dec: Got params: b={}, d={}, n={}", params.b, params.d, params.n);
         let ys_base = eval.ys.iter().map(|&y| y.to_array()[0]).collect::<Vec<F>>();
+        eprintln!("pi_dec: About to call decomp_b with ys_base.len()={}", ys_base.len());
         let decomp_mat = decomp_b(&ys_base, params.b, params.d);
+        eprintln!("pi_dec: decomp_b returned, about to pack_decomp");
         let w = AjtaiCommitter::pack_decomp(&decomp_mat, &params);
+        eprintln!("pi_dec: pack_decomp returned, w.len()={}", w.len());
         let mut challenger = NeoChallenger::new("neo_pi_dec");
         challenger.observe_bytes("transcript", transcript);
         transcript.extend(b"dec_rand");
         challenger.observe_bytes("dec_rand", b"dec_rand");
         let seed = challenger.challenge_base("dec_seed").as_canonical_u64();
+        eprintln!("pi_dec: About to call commit_with_rng with seed={}, w.len()={}", seed, w.len());
         let mut rng = StdRng::seed_from_u64(seed);
         if let Ok((new_commit, _, _, _)) = committer.commit_with_rng(&w, &mut rng) {
+            eprintln!("pi_dec: commit_with_rng succeeded, new_commit.len()={}", new_commit.len());
             transcript.extend(serialize_commit(&new_commit));
 
             fold_state.eval_instances.push(EvalInstance {
@@ -1289,8 +1327,14 @@ pub fn pi_dec(fold_state: &mut FoldState, committer: &AjtaiCommitter, transcript
                 e_eval: eval.e_eval,
                 norm_bound: params.norm_bound,
             });
+            eprintln!("pi_dec: Successfully added new eval instance, total count={}", fold_state.eval_instances.len());
+        } else {
+            eprintln!("pi_dec: commit_with_rng failed!");
         }
+    } else {
+        eprintln!("pi_dec: No eval instances found");
     }
+    eprintln!("pi_dec: Function complete");
 }
 
 pub fn verify_ccs(
