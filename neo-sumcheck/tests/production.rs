@@ -37,9 +37,8 @@ fn test_fri_prod_folding() {
     let (new_evals, _new_domain) = oracle.fold_evals(&evals, &domain, challenge);
     assert_eq!(new_evals.len(), 2);
     let two_inv = ExtF::ONE / from_base(F::from_u64(2));
-    // Use first half vs second half pairing to match our implementation
-    let half = size / 2;
-    let expected0 = (evals[0] + evals[half]) * two_inv + challenge * (evals[0] - evals[half]) * two_inv / domain[0];
+    // Use consecutive pairing to match our implementation
+    let expected0 = (evals[0] + evals[1]) * two_inv + challenge * (evals[0] - evals[1]) * two_inv / domain[0];
     assert_eq!(new_evals[0], expected0);
 }
 
@@ -72,11 +71,11 @@ fn test_fri_prod_eval_consistency() {
 
 #[test]  
 fn test_fri_prod_domain_pairing() {
-    // Test that domain maintains proper pairing relationships
+    // Test that domain maintains proper consecutive pairing relationships  
     for size in [4, 8, 16] {
         let domain = generate_coset(size);
-        for i in 0..size/2 {
-            assert_eq!(domain[i + size/2], -domain[i], 
+        for i in (0..size).step_by(2) {
+            assert_eq!(domain[i + 1], -domain[i], 
                       "Domain pairing broken at size {} index {}", size, i);
         }
     }
