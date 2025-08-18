@@ -1116,11 +1116,13 @@ pub fn pi_ccs(
             eprintln!("pi_ccs: COMPARISON - Verifier Q coeffs (first 3): {:?}", &q_vt_dense.coeffs()[0..3.min(q_vt_dense.coeffs().len())]);
         }
         
-        // Key fix: Use the EXACT same transcript state that the prover oracle used
+        // CRITICAL FIX: Use the EXACT same transcript state for oracle creation that the prover used
         let mut oracle_transcript = prover_oracle_transcript.clone();
-        eprintln!("pi_ccs: VERIFIER - Using exact prover transcript.len()={} to match prover", oracle_transcript.len());
+        eprintln!("pi_ccs: VERIFIER - Using prover oracle transcript.len()={} for oracle creation", oracle_transcript.len());
         eprintln!("pi_ccs: VERIFIER - Creating oracle with transcript.len()={}", oracle_transcript.len());
         let mut vt_oracle = FriOracle::new(vec![q_vt_dense], &mut oracle_transcript);
+        
+        // Note: oracle_transcript is used only for oracle creation above
         eprintln!("pi_ccs: VERIFIER - Oracle created, blinds={:?}", vt_oracle.blinds);
         
         eprintln!("pi_ccs: VERIFIER - About to call batched_sumcheck_verifier");
