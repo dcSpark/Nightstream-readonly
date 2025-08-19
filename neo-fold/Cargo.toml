@@ -32,5 +32,9 @@ quickcheck_macros = "1"
 
 
 
+[[bench]]
+name = "folding"
+harness = false
+
 [features]
 prop-tests = []

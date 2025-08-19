@@ -9,3 +9,7 @@ p3-goldilocks = { workspace = true }
 p3-field = { version = "0.3" }
 rand = { workspace = true }
 subtle = "2.5"
+
+[dev-dependencies]
+quickcheck = "1"
+quickcheck_macros = "1"

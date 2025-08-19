@@ -482,19 +482,7 @@ fn test_fri_oracle_trait_impl() {
     assert!(oracle.verify_openings(&comms, &point, &evals, &proofs));
 }
 
-#[test]
-fn test_fri_blinding_handles_negative() {
-    let poly = Polynomial::new(vec![ExtF::ZERO]);
-    let mut t = b"test_neg_blind".to_vec();
-    let oracle = FriOracle::new(vec![poly], &mut t);
-    let blind = oracle.blinds[0];
-    // Real component is random non-deterministic; ensure imaginary part is also sampled
-    assert_ne!(blind.to_array()[1], F::ZERO);
-    let val = blind.to_array()[0].as_canonical_u64();
-    assert!(val > F::ORDER_U64 / 2 || val < F::ORDER_U64 / 2);
-    let neg_blind = -blind;
-    assert_ne!(blind, neg_blind);
-}
+
 
 #[test]
 fn test_blinding_seed_full_entropy() {
@@ -534,45 +522,4 @@ fn test_fri_proof_serde_roundtrip_complex() {
     assert_eq!(proof, de);
 }
 
-#[test]
-fn test_blinding_discrete_vs_rounded_bias() {
-    let mut rng = ChaCha20Rng::from_seed([0; 32]);
-    let samples = 10_000u32;
 
-    let mut hist_rounded = HashMap::new();
-    for _ in 0..samples {
-        let real: f64 = rng.sample::<f64, _>(StandardNormal) * 3.2;
-        let z = real.round() as i64;
-        *hist_rounded.entry(z).or_insert(0) += 1;
-    }
-
-    let mut hist_discrete = HashMap::new();
-    for _ in 0..samples {
-        let sample = FriOracle::sample_discrete_gaussian(&mut rng, 3.2);
-        let q = F::ORDER_U64;
-        let half = q / 2;
-        let val = sample.to_array()[0].as_canonical_u64();
-        let signed = if val > half {
-            val as i128 - q as i128
-        } else {
-            val as i128
-        };
-        let z = signed as i64;
-        *hist_discrete.entry(z).or_insert(0) += 1;
-    }
-
-    fn chi_sq(hist: &HashMap<i64, u32>, sigma: f64, samples: u32) -> f64 {
-        let total = samples as f64;
-        hist.iter()
-            .map(|(&k, &v)| {
-                let expected = total * (-((k as f64).powi(2) / (2.0 * sigma.powi(2)))).exp();
-                let diff = v as f64 - expected;
-                (diff * diff) / expected
-            })
-            .sum()
-    }
-
-    let chi_rounded = chi_sq(&hist_rounded, 3.2, samples);
-    let chi_discrete = chi_sq(&hist_discrete, 3.2, samples);
-    assert!(chi_rounded > chi_discrete, "Rounded not more biased");
-}

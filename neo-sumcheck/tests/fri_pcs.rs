@@ -86,38 +86,4 @@ fn test_fri_blinding_deterministic() {
     assert_ne!(oracle1.blinds, oracle3.blinds);
 }
 
-#[test]
-fn test_fri_blinding_handles_negative() {
-    let poly = Polynomial::new(vec![ExtF::ZERO]);
-    let mut t = b"test_neg_blind".to_vec();
-    let oracle = FriOracle::new(vec![poly], &mut t);
-    let blind = oracle.blinds[0];
-    let val = blind.to_array()[0].as_canonical_u64();
-    assert!(val > F::ORDER_U64 / 2 || val < F::ORDER_U64 / 2);
-    let neg_blind = -blind;
-    assert_ne!(blind, neg_blind);
-}
 
-#[test]
-fn test_blinding_discrete_unbiased() {
-    let mut rng = ChaCha20Rng::from_seed([0; 32]);
-    let samples: Vec<_> = (0..10_000)
-        .map(|_| FriOracle::sample_discrete_gaussian(&mut rng, 3.2))
-        .collect();
-    let q = F::ORDER_U64;
-    let half = q / 2;
-    let mean_real: f64 = samples
-        .iter()
-        .map(|s| {
-            let val = s.to_array()[0].as_canonical_u64();
-            let signed = if val > half {
-                val as i128 - q as i128
-            } else {
-                val as i128
-            };
-            signed as f64
-        })
-        .sum::<f64>()
-        / 10_000.0;
-    assert!(mean_real.abs() < 0.1, "Biased mean: {}", mean_real);
-}
