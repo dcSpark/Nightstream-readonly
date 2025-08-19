@@ -634,8 +634,8 @@ impl FriOracle {
             let chal = fiat_shamir_challenge(&q_trans);
             let idx_hash = chal.to_array()[0].as_canonical_u64() as usize % self.domain.len();
             let mut current_idx = idx_hash;
-            let f_val = evals[current_idx];
-            let f_path = f_tree.open(current_idx);
+            let f_val = evals[current_idx];  // Use original function values
+            let f_path = f_tree.open(current_idx);  // Open from original function tree
             eprintln!("generate_fri_proof: Query {} - idx_hash={}, current_idx={}, f_val={:?}", 
                      query_idx, idx_hash, current_idx, f_val);
             eprintln!("generate_fri_proof: Query {} - f_path.len()={}, domain.len()={}", 

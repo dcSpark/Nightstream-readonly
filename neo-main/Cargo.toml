@@ -13,6 +13,7 @@ neo-commit = { path = "../neo-commit" }
 neo-ccs = { path = "../neo-ccs" }
 neo-fold = { path = "../neo-fold" }
 neo-modint = { path = "../neo-modint" }
+neo-sumcheck = { path = "../neo-sumcheck", features = ["p3-fri"] }
 rand = { workspace = true }
 p3-field = "0.3"
 p3-matrix = { workspace = true }
