@@ -793,6 +793,9 @@ impl FriOracle {
                          query.f_val, query.idx, query.f_path.len());
                 return false;
             }
+            // CRITICAL FIX: Handle quotient verification correctly for min/max index pairs
+            // The issue was that we always compared against query.layers[0].val (min_idx value)
+            // but calculated q_expected using query.idx domain point, which might be max_idx
             let w = self.domain[query.idx];
             let denom = w - z;
             eprintln!("verify_fri_proof: w={:?}, denom={:?}, query.f_val={:?}", w, denom, query.f_val);
@@ -810,23 +813,51 @@ impl FriOracle {
             let mut current_q = if denom == ExtF::ZERO {
                 query.layers[0].val
             } else {
-                // Match prover: no r-scaling in the composed evaluations
-                let q_expected = (query.f_val - claimed_eval) / denom;
-                eprintln!("verify_fri_proof: q_expected={:?}, actual={:?}", q_expected, query.layers[0].val);
-                if query.layers[0].val != q_expected {
+                // Determine if query.idx is the minimum index in the pair
+                let layer_query = &query.layers[0];
+                let min_idx = layer_query.idx.min(layer_query.sib_idx);
+                let max_idx = layer_query.idx.max(layer_query.sib_idx);
+                let is_min = query.idx == min_idx;
+                
+                // Select the correct domain point, layer value, and denominator
+                let (correct_w, correct_layer_val, correct_denom) = if is_min {
+                    let d0 = self.domain[min_idx];
+                    (d0, layer_query.val, d0 - z)
+                } else {
+                    let d1 = self.domain[max_idx];
+                    (d1, layer_query.sib_val, d1 - z)
+                };
+                
+                // Calculate expected quotient using the correct domain point
+                let q_expected = (query.f_val - claimed_eval) / correct_denom;
+                eprintln!("verify_fri_proof: is_min={}, correct_w={:?}, correct_denom={:?}", is_min, correct_w, correct_denom);
+                eprintln!("verify_fri_proof: q_expected={:?}, actual={:?}", q_expected, correct_layer_val);
+                
+                if correct_layer_val != q_expected {
                     eprintln!("verify_fri_proof: FAIL - quotient mismatch");
                     return false;
                 }
-                q_expected
+                // Use the correct layer value as current_q for consistency
+                correct_layer_val
             };
             let mut size = domain_size;
             let mut domain_layer = self.domain.clone();
 
             let log_n = self.domain.len().trailing_zeros() as usize;
             for (layer_idx, layer_query) in query.layers.iter().enumerate() {
-                eprintln!("verify_fri_proof: Layer {} - checking val {:?} == current_q {:?}", 
-                         layer_idx, layer_query.val, current_q);
-                if layer_query.val != current_q {
+                // CRITICAL FIX: Use the same min/max logic for layer verification
+                // We need to select the correct layer value based on query.idx position
+                let min_idx = layer_query.idx.min(layer_query.sib_idx);
+                let is_min = query.idx == min_idx;
+                let correct_layer_val = if is_min {
+                    layer_query.val
+                } else {
+                    layer_query.sib_val
+                };
+                
+                eprintln!("verify_fri_proof: Layer {} - checking correct_val {:?} == current_q {:?} (is_min={})", 
+                         layer_idx, correct_layer_val, current_q, is_min);
+                if correct_layer_val != current_q {
                     eprintln!("verify_fri_proof: FAIL - Layer {} val mismatch", layer_idx);
                     return false;
                 }
@@ -1092,7 +1123,12 @@ impl CustomFri {
 
 impl FriBackend for CustomFri {
     fn commit(&mut self, polys: Vec<Polynomial<ExtF>>) -> Result<Vec<Commitment>, Box<dyn Error>> {
-        self.committed_polys = polys;
+        // CRITICAL FIX: Recreate the oracle with the new polynomials
+        if !polys.is_empty() {
+            let mut transcript = vec![]; // Fresh transcript for new oracle
+            self.oracle = FriOracle::new(polys.clone(), &mut transcript);
+            self.committed_polys = polys;
+        }
         Ok(self.oracle.commit())
     }
 
@@ -1107,7 +1143,11 @@ impl FriBackend for CustomFri {
         evals: &[ExtF],
         proofs: &[OpeningProof],
     ) -> bool {
-        self.oracle.verify_openings(comms, point, evals, proofs)
+        // CRITICAL FIX: Create a fresh verifier oracle that doesn't know the polynomials
+        // This matches the pattern used in all successful FRI tests
+        let domain_size = self.oracle.domain.len();
+        let verifier = FriOracle::new_for_verifier(domain_size);
+        verifier.verify_openings(comms, point, evals, proofs)
     }
 
     fn domain_size(&self) -> usize {
