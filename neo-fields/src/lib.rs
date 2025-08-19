@@ -1,8 +1,10 @@
 //! Field utilities wrapping the Goldilocks prime field.
 
-use p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing, PrimeField64};
-use subtle::{ConditionallySelectable, ConstantTimeLess};
+use p3_field::{extension::BinomialExtensionField, Field, PrimeCharacteristicRing, PrimeField64};use subtle::{ConditionallySelectable, ConstantTimeLess};
 pub use p3_goldilocks::Goldilocks as F;
+
+// Override the default W = NEG_ONE to use W = 7 (quadratic non-residue)
+// This ensures x^2 - 7 is irreducible, making the extension field mathematically sound
 
 /// Quadratic extension F[u] / (u^2 - β) with β=7 (non-residue mod p for Goldilocks).
 /// Note: BinomialExtensionField<F, 2> implements the Complex API for degree 2.

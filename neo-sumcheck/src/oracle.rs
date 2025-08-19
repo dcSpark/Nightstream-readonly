@@ -810,7 +810,8 @@ impl FriOracle {
             let mut current_q = if denom == ExtF::ZERO {
                 query.layers[0].val
             } else {
-                let q_expected = r * (query.f_val - claimed_eval) / denom;
+                // Match prover: no r-scaling in the composed evaluations
+                let q_expected = (query.f_val - claimed_eval) / denom;
                 eprintln!("verify_fri_proof: q_expected={:?}, actual={:?}", q_expected, query.layers[0].val);
                 if query.layers[0].val != q_expected {
                     eprintln!("verify_fri_proof: FAIL - quotient mismatch");
