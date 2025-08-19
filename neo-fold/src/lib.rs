@@ -15,6 +15,14 @@ use p3_matrix::Matrix;
 use rand::{rngs::StdRng, SeedableRng};
 use std::io::{Cursor, Read};
 
+/// Helper to compute Fiat-Shamir challenge without extending main transcript
+/// This prevents transcript contamination that causes verification failures
+fn compute_challenge_clean(transcript: &[u8], domain: &[u8]) -> ExtF {
+    let mut temp = transcript.to_vec();
+    temp.extend(domain);
+    fiat_shamir_challenge(&temp)
+}
+
 pub type FriCommitment = Commitment;
 pub type FriProof = OpeningProof;
 
@@ -265,19 +273,26 @@ impl FoldState {
         let (msgs1, _pre_transcript1) = pi_ccs(self, committer, &mut transcript);
         eprintln!("generate_proof: pi_ccs #1 returned, msgs1.len()={}", msgs1.len());
         self.sumcheck_msgs.push(msgs1);
+        eprintln!("generate_proof: About to add neo_pi_dec1 tag, transcript.len()={}", transcript.len());
         transcript.extend(b"neo_pi_dec1");
+        eprintln!("generate_proof: Added neo_pi_dec1 tag, transcript.len()={}", transcript.len());
         eprintln!("generate_proof: About to call pi_dec #1");
         pi_dec(self, committer, &mut transcript);
-        eprintln!("generate_proof: pi_dec #1 returned");
+        eprintln!("generate_proof: pi_dec #1 returned, transcript.len()={}", transcript.len());
         transcript.extend(b"neo_pi_ccs2");
         self.ccs_instance = Some(instance2);
         eprintln!("generate_proof: About to call pi_ccs #2");
         let (msgs2, _pre_transcript2) = pi_ccs(self, committer, &mut transcript);
         eprintln!("generate_proof: pi_ccs #2 returned, msgs2.len()={}", msgs2.len());
         self.sumcheck_msgs.push(msgs2);
+        eprintln!("generate_proof: About to add neo_pi_dec2 tag, transcript.len()={}", transcript.len());
         transcript.extend(b"neo_pi_dec2");
+        eprintln!("generate_proof: Added neo_pi_dec2 tag, transcript.len()={}", transcript.len());
         pi_dec(self, committer, &mut transcript);
+        eprintln!("generate_proof: pi_dec #2 returned, transcript.len()={}", transcript.len());
+        eprintln!("generate_proof: About to add neo_pi_rlc tag, transcript.len()={}", transcript.len());
         transcript.extend(b"neo_pi_rlc");
+        eprintln!("generate_proof: Added neo_pi_rlc tag, transcript.len()={}", transcript.len());
         // Derive rotation challenge ρ ∈ C using the challenger bound to current transcript
         challenger.observe_bytes("transcript_prefix", &transcript);
         let rho_rot = challenger.challenge_rotation("rlc_rho", committer.params().n);
@@ -294,8 +309,10 @@ impl FoldState {
         self.fri_commit = Some(commit);
         self.fri_proof = Some(proof);
         challenger.observe_bytes("fri_proof", &transcript);
+        eprintln!("generate_proof: Before hash, transcript.len()={}", transcript.len());
         let hash = self.hash_transcript(&transcript);
         transcript.extend(&hash);
+        eprintln!("generate_proof: After hash, final transcript.len()={}", transcript.len());
         self.transcript = transcript.clone();
         eprintln!("Proof generation complete");
         Proof { transcript }
@@ -307,7 +324,7 @@ impl FoldState {
         eprintln!("verify: transcript first_8_bytes={:?}", &full_transcript[0..full_transcript.len().min(8)]);
         
         if full_transcript.len() < 32 {
-            eprintln!("verify: FAIL - transcript too short");
+            eprintln!("verify: FAIL - transcript too short ({}), needs at least 32 bytes for hash", full_transcript.len());
             return false;
         }
         let (prefix, hash_bytes) = full_transcript.split_at(full_transcript.len() - 32);
@@ -337,13 +354,24 @@ impl FoldState {
             return false;
         }
         eprintln!("verify: Successfully read neo_pi_ccs1 tag");
-        eprintln!("verify: Reading commit1 with n={}", committer.params().n);
-        let commit1 = read_commit(&mut cursor, committer.params().n);
-        eprintln!("verify: Read commit1, length={}", commit1.len());
         
-        eprintln!("verify: Extracting msgs1 with max_deg={}", self.structure.max_deg);
+        // Debug: Check what bytes are at current position
+        let debug_pos = cursor.position() as usize;
+        let debug_remaining = &cursor.get_ref()[debug_pos..];
+        if debug_remaining.len() >= 16 {
+            eprintln!("verify: Next 16 bytes after neo_pi_ccs1: {:?}", &debug_remaining[0..16]);
+            if let Ok(s) = std::str::from_utf8(&debug_remaining[0..16]) {
+                eprintln!("verify: Next 16 bytes as string: '{}'", s);
+            }
+        }
+        
+        eprintln!("verify: Reading commit1 with n={}, cursor at {}", committer.params().n, cursor.position());
+        let commit1 = read_commit(&mut cursor, committer.params().n);
+        eprintln!("verify: Read commit1, length={}, cursor now at {}", commit1.len(), cursor.position());
+        
+        eprintln!("verify: Extracting msgs1 with max_deg={}, cursor at {}", self.structure.max_deg, cursor.position());
         let msgs1 = extract_msgs_ccs(&mut cursor, self.structure.max_deg);
-        eprintln!("verify: Extracted msgs1, length={}", msgs1.len());
+        eprintln!("verify: Extracted msgs1, length={}, cursor now at {}", msgs1.len(), cursor.position());
         
         // TODO: Handle case where prover skipped blind serialization causing malformed transcript
         if msgs1.len() > 20 {  // Sanity check: normal sumcheck should have ≤ 10 messages
@@ -355,6 +383,7 @@ impl FoldState {
         
         let mut vt_transcript = cursor.get_ref()[0..cursor.position() as usize].to_vec();
         eprintln!("verify: vt_transcript length={}", vt_transcript.len());
+        eprintln!("verify: cursor position before CCS1 verification: {}", cursor.position());
         
         let domain_size = (self.structure.max_deg + 1).next_power_of_two().max(1) * 4;
         eprintln!("verify: domain_size={}", domain_size);
@@ -432,6 +461,7 @@ impl FoldState {
             u: F::ZERO,
             e: F::ONE,
         };
+        eprintln!("verify: cursor position after CCS1 verification: {}", cursor.position());
         eprintln!("verify: About to call verify_ccs with msgs1.len()={}", msgs1.len());
         if !verify_ccs(
             &self.structure,
@@ -448,13 +478,35 @@ impl FoldState {
         reconstructed.push(first_eval);
 
         // --- Decomposition check for first instance ---
+        eprintln!("verify: About to read neo_pi_dec1 tag");
+        eprintln!("verify: Current cursor position: {}", cursor.position());
+        eprintln!("verify: Remaining bytes: {}", cursor.get_ref().len() - cursor.position() as usize);
+        
+        // Debug: Check what bytes are available at current position
+        let current_pos = cursor.position() as usize;
+        let remaining = &cursor.get_ref()[current_pos..];
+        if remaining.len() >= 12 {
+            eprintln!("verify: Next 12 bytes at cursor: {:?}", &remaining[0..12]);
+            if let Ok(s) = std::str::from_utf8(&remaining[0..12]) {
+                eprintln!("verify: Next 12 bytes as string: '{}'", s);
+            }
+        } else {
+            eprintln!("verify: Only {} bytes remaining", remaining.len());
+        }
+        
         if read_tag(&mut cursor, b"neo_pi_dec1").is_err() {
+            eprintln!("verify: FAIL - Could not read neo_pi_dec1 tag");
             return false;
         }
+        eprintln!("verify: Successfully read neo_pi_dec1 tag");
+        eprintln!("verify: About to read dec_rand tag");
         if read_tag(&mut cursor, b"dec_rand").is_err() {
+            eprintln!("verify: FAIL - Could not read dec_rand tag");
             return false;
         }
+        eprintln!("verify: Successfully read dec_rand tag");
         let dec_commit1 = read_commit(&mut cursor, committer.params().n);
+        eprintln!("verify: Read dec_commit1, length={}", dec_commit1.len());
         let prev_eval = reconstructed.last().cloned().unwrap();
         let dec_eval = EvalInstance {
             commitment: dec_commit1.clone(),
@@ -464,9 +516,12 @@ impl FoldState {
             e_eval: prev_eval.e_eval,
             norm_bound: committer.params().norm_bound,
         };
+        eprintln!("verify: About to call verify_dec for instance 1");
         if !verify_dec(committer, &prev_eval, &dec_eval) {
+            eprintln!("verify: FAIL - verify_dec failed for instance 1");
             return false;
         }
+        eprintln!("verify: verify_dec passed for instance 1");
         reconstructed.push(dec_eval);
 
         eprintln!("verify: CCS1 verification completed successfully");
@@ -479,13 +534,24 @@ impl FoldState {
         }
         eprintln!("verify: Successfully read neo_pi_ccs2 tag");
         let commit2 = read_commit(&mut cursor, committer.params().n);
+        eprintln!("verify: Read commit2, length={}", commit2.len());
         let msgs2 = extract_msgs_ccs(&mut cursor, self.structure.max_deg);
+        eprintln!("verify: Extracted msgs2, length={}", msgs2.len());
         let mut vt_transcript2 = cursor.get_ref()[0..cursor.position() as usize].to_vec();
+        eprintln!("verify: vt_transcript2 length={}", vt_transcript2.len());
         let mut oracle2 = FriOracle::new_for_verifier(domain_size);
+        eprintln!("verify: About to read comms2 block");
         let comms2 = match read_comms_block(&mut cursor) {
-            Some(c) => c,
-            None => return false,
+            Some(c) => {
+                eprintln!("verify: Read comms2 block, length={}", c.len());
+                c
+            },
+            None => {
+                eprintln!("verify: FAIL - Could not read comms2 block");
+                return false;
+            }
         };
+        eprintln!("verify: About to call ccs_sumcheck_verifier for CCS2");
         let (r2, final_eval2) = match ccs_sumcheck_verifier(
             &self.structure,
             ExtF::ZERO,
@@ -495,12 +561,25 @@ impl FoldState {
             &mut oracle2,
             &mut vt_transcript2,
         ) {
-            Some(res) => res,
-            None => return false,
+            Some(res) => {
+                eprintln!("verify: ccs_sumcheck_verifier CCS2 SUCCESS");
+                res
+            },
+            None => {
+                eprintln!("verify: FAIL - ccs_sumcheck_verifier CCS2 returned None");
+                return false;
+            }
         };
+        eprintln!("verify: About to read ys2 with expected length={}", self.structure.mats.len());
         let ys2 = match read_ys(&mut cursor, self.structure.mats.len()) {
-            Some(v) => v,
-            None => return false,
+            Some(v) => {
+                eprintln!("verify: Read ys2 successfully, length={}", v.len());
+                v
+            },
+            None => {
+                eprintln!("verify: FAIL - Could not read ys2");
+                return false;
+            }
         };
         let second_eval = EvalInstance {
             commitment: commit2.clone(),
@@ -516,6 +595,7 @@ impl FoldState {
             u: F::ZERO,
             e: F::ONE,
         };
+        eprintln!("verify: About to call verify_ccs for CCS2");
         if !verify_ccs(
             &self.structure,
             &second_instance,
@@ -524,18 +604,27 @@ impl FoldState {
             &[second_eval.clone()],
             committer,
         ) {
+            eprintln!("verify: FAIL - verify_ccs CCS2 returned false");
             return false;
         }
+        eprintln!("verify: verify_ccs CCS2 passed");
         reconstructed.push(second_eval);
 
         // --- Decomposition check for second instance ---
+        eprintln!("verify: About to read neo_pi_dec2 tag");
         if read_tag(&mut cursor, b"neo_pi_dec2").is_err() {
+            eprintln!("verify: FAIL - Could not read neo_pi_dec2 tag");
             return false;
         }
+        eprintln!("verify: Successfully read neo_pi_dec2 tag");
+        eprintln!("verify: About to read dec_rand tag for instance 2");
         if read_tag(&mut cursor, b"dec_rand").is_err() {
+            eprintln!("verify: FAIL - Could not read dec_rand tag for instance 2");
             return false;
         }
+        eprintln!("verify: Successfully read dec_rand tag for instance 2");
         let dec_commit2 = read_commit(&mut cursor, committer.params().n);
+        eprintln!("verify: Read dec_commit2, length={}", dec_commit2.len());
         let prev_eval = reconstructed.last().cloned().unwrap();
         let dec_eval2 = EvalInstance {
             commitment: dec_commit2.clone(),
@@ -545,22 +634,39 @@ impl FoldState {
             e_eval: prev_eval.e_eval,
             norm_bound: committer.params().norm_bound,
         };
+        eprintln!("verify: About to call verify_dec for instance 2");
         if !verify_dec(committer, &prev_eval, &dec_eval2) {
+            eprintln!("verify: FAIL - verify_dec failed for instance 2");
             return false;
         }
+        eprintln!("verify: verify_dec passed for instance 2");
         reconstructed.push(dec_eval2);
 
         // --- Random linear combination ---
+        eprintln!("verify: About to read neo_pi_rlc tag");
         if read_tag(&mut cursor, b"neo_pi_rlc").is_err() {
+            eprintln!("verify: FAIL - Could not read neo_pi_rlc tag");
             return false;
         }
+        eprintln!("verify: Successfully read neo_pi_rlc tag");
         // Read rotation challenge ρ
+        eprintln!("verify: About to read rotation challenge");
         let rho_rot = match read_rotation(&mut cursor, committer.params().n) {
-            Some(r) => r,
-            None => return false,
+            Some(r) => {
+                eprintln!("verify: Read rotation challenge successfully");
+                r
+            },
+            None => {
+                eprintln!("verify: FAIL - Could not read rotation challenge");
+                return false;
+            }
         };
+        eprintln!("verify: About to read combo_commit");
         let combo_commit = read_commit(&mut cursor, committer.params().n);
+        eprintln!("verify: Read combo_commit, length={}", combo_commit.len());
+        eprintln!("verify: Checking reconstructed.len()={} >= 4", reconstructed.len());
         if reconstructed.len() < 4 {
+            eprintln!("verify: FAIL - Not enough reconstructed evals ({})", reconstructed.len());
             return false;
         }
         let e1 = reconstructed[reconstructed.len() - 3].clone();
@@ -588,9 +694,12 @@ impl FoldState {
             e_eval: e_eval_new,
             norm_bound: new_norm_bound,
         };
+        eprintln!("verify: About to call verify_rlc");
         if !verify_rlc(&e1, &e2, &rho_rot, &combo_eval, committer) {
+            eprintln!("verify: FAIL - verify_rlc returned false");
             return false;
         }
+        eprintln!("verify: verify_rlc passed");
         reconstructed.push(combo_eval);
 
         // --- FRI compression ---
@@ -803,7 +912,7 @@ fn construct_q<'a>(
     structure: &'a CcsStructure,
     instance: &'a CcsInstance,
     witness: &'a CcsWitness,
-    transcript: &mut Vec<u8>,
+    alpha: ExtF, // Pass pre-computed alpha instead of transcript
 ) -> Box<dyn UnivPoly + 'a> {
     eprintln!("CONSTRUCT_Q: Starting Q polynomial construction");
     
@@ -812,11 +921,8 @@ fn construct_q<'a>(
     let l = l_constraints.max(l_witness);
     eprintln!("CONSTRUCT_Q: l_constraints={}, l_witness={}, l={}", l_constraints, l_witness, l);
     
-    // CRITICAL FIX: Use direct fiat_shamir without modifying transcript for verifier simulation
-    let mut temp_transcript = transcript.clone();
-    temp_transcript.extend(b"ccs_alpha");
-    let alpha = fiat_shamir_challenge(&temp_transcript);
-    eprintln!("CONSTRUCT_Q: alpha={:?} (from temp transcript, no contamination)", alpha);
+    // Use pre-computed alpha passed as parameter
+    eprintln!("CONSTRUCT_Q: alpha={:?} (pre-computed, no transcript contamination)", alpha);
 
     let mut full_z: Vec<ExtF> = instance
         .public_input
@@ -986,11 +1092,13 @@ pub fn pi_ccs(
         let f_result = fold_state.structure.f.evaluate(&test_inputs);
         eprintln!("pi_ccs: POLY_CONSTRUCTION - Direct f([2,3,6,5])={:?}", f_result);
         
+        // Compute alpha cleanly before constructing Q
+        let alpha = compute_challenge_clean(transcript, b"ccs_alpha");
         let q_poly = construct_q(
             &fold_state.structure,
             &ccs_instance,
             &ccs_witness,
-            transcript,
+            alpha,
         );
         eprintln!("pi_ccs: POLY_CONSTRUCTION - q_poly constructed, degree={}", q_poly.degree());
         
@@ -999,10 +1107,13 @@ pub fn pi_ccs(
         let l = l_constraints.max(l_witness);
         eprintln!("pi_ccs: POLY_CONSTRUCTION - l_constraints={}, l_witness={}, l={}", l_constraints, l_witness, l);
         
-        // CRITICAL FIX: Remove norm checking from pi_ccs as per paper specification
-        // Norm checking belongs to Π_DEC, not Π_CCS
-        transcript.extend(b"ccs_rho");
-        let _rho = fiat_shamir_challenge(transcript); // Keep for transcript consistency but don't use
+        // CRITICAL FIX: Write commit data FIRST to match verifier expectations
+        // The verifier expects commit data immediately after the neo_pi_ccs1 tag
+        eprintln!("pi_ccs: EARLY_SERIALIZATION - About to serialize commit, transcript.len()={}", transcript.len());
+        eprintln!("pi_ccs: EARLY_SERIALIZATION - ccs_instance.commitment.len()={}", ccs_instance.commitment.len());
+        transcript.extend(serialize_commit(&ccs_instance.commitment));
+        // Use clean challenge computation to avoid transcript contamination
+        let _rho = compute_challenge_clean(transcript, b"ccs_rho");
         
         // Convert Q polynomial to dense form for FRI commitment
         eprintln!("pi_ccs: DENSE_CONVERSION - Converting Q polynomial to dense with l={}", l);
@@ -1028,9 +1139,7 @@ pub fn pi_ccs(
         // Compute correct claim for Q (relaxed instances)
         let mut sum_alpha = ExtF::ZERO;
         let mut alpha_pow = ExtF::ONE;
-        // We need to get the alpha used in construct_q - for now use a derived challenge
-        transcript.extend(b"alpha_derive");
-        let alpha = fiat_shamir_challenge(transcript);
+        // Alpha already computed above for Q polynomial construction - reuse it
         for _ in 0..fold_state.structure.num_constraints {
             sum_alpha += alpha_pow;
             alpha_pow *= alpha;
@@ -1079,6 +1188,10 @@ pub fn pi_ccs(
                 eprintln!("pi_ccs: PROVER - batched_sumcheck_prover SUCCESS");
                 eprintln!("pi_ccs: PROVER - sumcheck_msgs.len()={}", v.0.len());
                 eprintln!("pi_ccs: PROVER - comms.len()={}", v.1.len());
+                
+                // CRITICAL FIX: Serialize sumcheck messages immediately after generation
+                eprintln!("pi_ccs: SUMCHECK_SERIALIZATION - About to serialize sumcheck_msgs, msgs.len()={}", v.0.len());
+                serialize_sumcheck_msgs(transcript, &v.0);
                 for (i, (uni, blind)) in v.0.iter().enumerate() {
                     eprintln!("pi_ccs: PROVER - msg[{}]: degree={}, blind={:?}", i, uni.degree(), blind);
                     eprintln!("pi_ccs: PROVER - msg[{}]: eval(0)={:?}, eval(1)={:?}, sum={:?}", 
@@ -1104,11 +1217,13 @@ pub fn pi_ccs(
         eprintln!("pi_ccs: VERIFIER - Creating fresh oracle with same initial conditions");
         eprintln!("pi_ccs: VERIFIER - vt_transcript.len()={} before construct_q", vt_transcript.len());
         
+        // Use same alpha derivation as prover for consistency  
+        let alpha_vt = compute_challenge_clean(&vt_transcript, b"ccs_alpha");
         let q_poly_vt = construct_q(
             &fold_state.structure,
             &ccs_instance,
             &ccs_witness,
-            &mut vt_transcript,
+            alpha_vt,
         );
         eprintln!("pi_ccs: VERIFIER - vt_transcript.len()={} after construct_q", vt_transcript.len());
         
@@ -1231,10 +1346,7 @@ pub fn pi_ccs(
         };
         eprintln!("pi_ccs: SIMULATION - EvalInstance created, adding to fold_state");
         fold_state.eval_instances.push(eval);
-        eprintln!("pi_ccs: SIMULATION - About to serialize commit, transcript.len()={}", transcript.len());
-        transcript.extend(serialize_commit(&ccs_instance.commitment));
-        eprintln!("pi_ccs: SIMULATION - About to serialize sumcheck_msgs, msgs.len()={}", sumcheck_msgs.len());
-        serialize_sumcheck_msgs(transcript, &sumcheck_msgs);
+        // NOTE: Commit and sumcheck messages already serialized earlier in function
         eprintln!("pi_ccs: SIMULATION - About to serialize comms_block, comms.len()={}", comms.len());
         // Append oracle commitments for sumcheck opening verification (must precede ys to match verifier)
         serialize_comms_block(
@@ -1771,16 +1883,22 @@ fn read_fri_proof(cursor: &mut Cursor<&[u8]>) -> FriProof {
 }
 
 fn read_commit(cursor: &mut Cursor<&[u8]>, n: usize) -> Vec<RingElement<ModInt>> {
-    let len = cursor.read_u8().unwrap_or(0) as usize;
+    let len_byte = cursor.read_u8().unwrap_or(0);
+    let len = len_byte as usize;
+    eprintln!("read_commit: Read length byte: {} (0x{:02x}), interpreting as {} elements with {} coeffs each", 
+              len_byte, len_byte, len, n);
+    eprintln!("read_commit: This means reading {} total bytes", len * n * 8);
     let mut commit = Vec::new();
-    for _ in 0..len {
+    for i in 0..len {
         let mut coeffs = Vec::new();
-        for _ in 0..n {
+        for _j in 0..n {
             let val = cursor.read_u64::<BigEndian>().unwrap_or(0);
             coeffs.push(ModInt::from_u64(val));
         }
         commit.push(RingElement::from_coeffs(coeffs, n));
+        eprintln!("read_commit: Read element {}/{}, cursor now at {}", i+1, len, cursor.position());
     }
+    eprintln!("read_commit: Finished reading commit, total elements: {}", commit.len());
     commit
 }
 
