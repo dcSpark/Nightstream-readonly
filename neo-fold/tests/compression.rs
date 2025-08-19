@@ -28,7 +28,7 @@ fn test_fri_compress_final_real_roundtrip() {
         norm_bound: 0,
     };
     state.eval_instances.push(eval_instance);
-    let (commit, proof) = state.fri_compress_final().expect("FRI");
+    let (commit, proof, _) = state.fri_compress_final().expect("FRI");
     let coeff_len = state.eval_instances.last().unwrap().ys.len();
     let claimed = state.eval_instances.last().unwrap().e_eval;
     assert!(FoldState::fri_verify_compressed(
@@ -91,7 +91,7 @@ fn test_fri_compress_final_ys_as_coeffs() {
         norm_bound: 0,
     };
     state.eval_instances.push(eval_instance);
-    let (commit, proof) = state.fri_compress_final().expect("FRI");
+    let (commit, proof, _) = state.fri_compress_final().expect("FRI");
     let coeff_len = 2;
     let claimed = state.eval_instances.last().unwrap().e_eval;
     assert!(deserialize_fri_proof(&proof).is_ok());

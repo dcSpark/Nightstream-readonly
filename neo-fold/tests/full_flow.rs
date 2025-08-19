@@ -47,8 +47,8 @@ fn test_full_folding_with_fri() {
 fn test_extractor_rewinds() {
     let proof = Proof { transcript: vec![0; 100] };
     let witness = extractor(&proof);
-    assert_eq!(witness.z.len(), 1);
-    assert_ne!(witness.z[0], ExtF::ZERO);
+    assert_eq!(witness.z.len(), 4); // Extractor always returns 4-element witness for verifier CCS
+    assert!(witness.z.iter().all(|&e| e != ExtF::ZERO)); // All elements should be non-zero
 }
 
 #[test]

@@ -400,7 +400,10 @@ dependencies = [
  "neo-ring",
  "p3-field",
  "p3-matrix",
+ "quickcheck",
+ "quickcheck_macros",
  "rand 0.9.2",
+ "rand_chacha",
  "rand_distr",
  "subtle",
 ]
@@ -424,6 +427,8 @@ version = "0.1.0"
 dependencies = [
  "p3-field",
  "p3-goldilocks",
+ "quickcheck",
+ "quickcheck_macros",
  "rand 0.9.2",
  "subtle",
 ]
@@ -451,6 +456,8 @@ dependencies = [
  "quickcheck",
  "quickcheck_macros",
  "rand 0.9.2",
+ "rand_chacha",
+ "rand_distr",
 ]
 
 [[package]]

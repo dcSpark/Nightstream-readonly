@@ -12,6 +12,6 @@ fn forged_sumcheck_rejected() {
     bad_msgs[0].0 = Polynomial::new(vec![ExtF::ONE]);
     let mut transcript = Vec::new();
     let mut oracle = FriOracle::new(vec![honest_poly], &mut transcript);
-    let result = batched_sumcheck_verifier(&[ExtF::ZERO], &bad_msgs, &[], &mut oracle, &mut transcript);
+    let result = batched_sumcheck_verifier(&[ExtF::ZERO], &bad_msgs, &[], &mut oracle, &mut transcript, &[]);
     assert!(result.is_none());
 }

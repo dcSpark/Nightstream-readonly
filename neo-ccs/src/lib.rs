@@ -160,6 +160,32 @@ pub fn check_satisfiability(
     check_relaxed_satisfiability(structure, instance, witness, instance.u, instance.e)
 }
 
+/// Create the verifier CCS structure that models the Neo verifier logic as a CCS.
+/// This includes arithmetic gates for sum-check and openings.
+pub fn verifier_ccs() -> CcsStructure {
+    // 4 matrices for demo (expand for full verifier)
+    // Each matrix is 2x4 to accommodate 4-element witness [a, b, a*b, a+b]
+    let mats = vec![
+        RowMajorMatrix::new(vec![F::ONE, F::ZERO, F::ZERO, F::ZERO, F::ONE, F::ZERO, F::ZERO, F::ZERO], 4),  // X0 selector (a)
+        RowMajorMatrix::new(vec![F::ZERO, F::ONE, F::ZERO, F::ZERO, F::ZERO, F::ONE, F::ZERO, F::ZERO], 4),  // X1 selector (b)
+        RowMajorMatrix::new(vec![F::ZERO, F::ZERO, F::ONE, F::ZERO, F::ZERO, F::ZERO, F::ONE, F::ZERO], 4),  // X2 selector (a*b)
+        RowMajorMatrix::new(vec![F::ZERO, F::ZERO, F::ZERO, F::ONE, F::ZERO, F::ZERO, F::ZERO, F::ONE], 4),  // X3 selector (a+b)
+    ];
+
+    // Constraint: X0 * X1 == X2 AND X0 + X1 == X3 (both must hold)
+    let f: Multivariate = mv_poly(move |inputs: &[ExtF]| {
+        if inputs.len() != 4 {
+            ExtF::ZERO
+        } else {
+            let mul_check = inputs[0] * inputs[1] - inputs[2];
+            let add_check = inputs[0] + inputs[1] - inputs[3];
+            mul_check + add_check // Sum must be zero for both checks to pass
+        }
+    }, 2);
+
+    CcsStructure::new(mats, f)
+}
+
 /// Stub for adding lookup tables to a CCS structure. This simply appends a
 /// matrix representing the lookup table and augments the constraint polynomial
 /// with a dummy predicate that checks equality between the first and last

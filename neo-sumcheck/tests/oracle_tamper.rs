@@ -71,7 +71,7 @@ fn test_tampered_eval_rejected() {
     };
     let mut oracle = tamper_oracle;
     let mut transcript = vec![];
-    let result = batched_sumcheck_verifier(&[claim], &msgs, &comms, &mut oracle, &mut transcript);
+    let result = batched_sumcheck_verifier(&[claim], &msgs, &comms, &mut oracle, &mut transcript, &[]);
     assert!(result.is_none());
 }
 
@@ -84,7 +84,7 @@ fn test_invalid_proof_rejected() {
     };
     let mut oracle = tamper_oracle;
     let mut transcript = vec![];
-    let result = batched_sumcheck_verifier(&[claim], &msgs, &comms, &mut oracle, &mut transcript);
+    let result = batched_sumcheck_verifier(&[claim], &msgs, &comms, &mut oracle, &mut transcript, &[]);
     assert!(result.is_none());
 }
 

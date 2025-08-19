@@ -4,8 +4,11 @@ use crate::oracle::serialize_comms;
 use crate::{from_base, Commitment, ExtF, ExtFieldNorm, PolyOracle, Polynomial, UnivPoly, F};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use rand_distr::{Distribution, StandardNormal};
+
+// Removed separate module - tests will be inline below
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::SeedableRng;
+// use rand::Rng; // Unused for now
 use thiserror::Error;
 use neo_fields::MAX_BLIND_NORM;
 
@@ -18,20 +21,30 @@ pub enum SumCheckError {
     InvalidSum(usize),
 }
 
-fn serialize_uni(uni: &Polynomial<ExtF>) -> Vec<u8> {
-    uni.coeffs()
-        .iter()
-        .flat_map(|&c| {
+pub fn serialize_uni(uni: &Polynomial<ExtF>) -> Vec<u8> {
+    // CRITICAL FIX: Prefix degree as u8 to match verifier expectation
+    let mut bytes = vec![uni.degree() as u8];
+    
+    // CRITICAL: The verifier expects degree+1 coefficients, but Polynomial::new trims zeros
+    // If the polynomial is empty (trimmed), we need to serialize it as a degree-0 polynomial with a zero coefficient
+    if uni.coeffs().is_empty() {
+        // Serialize as degree 0 with one zero coefficient
+        bytes[0] = 0; // Explicitly set degree to 0
+        let zero_arr = ExtF::ZERO.to_array();
+        bytes.extend_from_slice(&zero_arr[0].as_canonical_u64().to_be_bytes());
+        bytes.extend_from_slice(&zero_arr[1].as_canonical_u64().to_be_bytes());
+    } else {
+        // Normal case: serialize all coefficients
+        for &c in uni.coeffs().iter() {
             let arr = c.to_array();
-            let mut bytes = Vec::with_capacity(16);
             bytes.extend_from_slice(&arr[0].as_canonical_u64().to_be_bytes());
             bytes.extend_from_slice(&arr[1].as_canonical_u64().to_be_bytes());
-            bytes
-        })
-        .collect()
+        }
+    }
+    bytes
 }
 
-fn serialize_ext(e: ExtF) -> Vec<u8> {
+pub fn serialize_ext(e: ExtF) -> Vec<u8> {
     let arr = e.to_array();
     let mut bytes = Vec::with_capacity(16);
     bytes.extend_from_slice(&arr[0].as_canonical_u64().to_be_bytes());
@@ -60,8 +73,9 @@ pub fn batched_sumcheck_prover(
     let mut challenges = Vec::with_capacity(ell);
     // Drive DRBG from challenger for blinding randomness
     let mut seed = [0u8; 32];
-    // Bind to transcript length and claims for domain sep
+    // Bind to transcript content and claims for domain separation (CRITICAL: for computational hiding)
     let mut challenger = NeoChallenger::new("neo_sumcheck_batched");
+    challenger.observe_bytes("transcript_prefix", transcript);  // HIDING FIX: Observe transcript for unique seeds
     challenger.observe_bytes("claims", &claims.len().to_be_bytes());
     for i in 0..4 {
         let limb = challenger.challenge_base(&format!("blind_seed_{}", i)).as_canonical_u64();
@@ -69,11 +83,9 @@ pub fn batched_sumcheck_prover(
     }
     let mut rng = ChaCha20Rng::from_seed(seed);
 
+    // CRITICAL FIX: Add rho domain separator BEFORE deriving challenge (match verifier)
     transcript.extend(b"sumcheck_rho");
-    // Use stateful challenger for FS
-    let mut challenger = NeoChallenger::new("neo_sumcheck_batched");
-    challenger.observe_bytes("claims", &claims.len().to_be_bytes());
-    let rho = challenger.challenge_ext("batch_rho");
+    let rho = fiat_shamir_challenge(transcript);
 
     let mut rho_pow = ExtF::ONE;
     let mut current_batched = ExtF::ZERO;
@@ -84,15 +96,17 @@ pub fn batched_sumcheck_prover(
 
     let comms = oracle.commit();
     transcript.extend(serialize_comms(&comms));
+    eprintln!("SUMCHECK_PROVER_DEBUG: transcript.len()={} after serialize_comms", transcript.len());
 
     for round in 0..ell {
         // Frame round in transcript and challenger for domain separation
         transcript.extend(format!("sumcheck_round_{}", round).as_bytes());
+        eprintln!("SUMCHECK_PROVER_DEBUG: transcript.len()={} after round {} info", transcript.len(), round);
         challenger.observe_bytes("round_label", format!("neo_sumcheck_round_{}", round).as_bytes());
         let remaining = ell - round - 1;
         let mut uni_polys = vec![];
 
-        for poly in polys.iter() {
+        for (poly_idx, poly) in polys.iter().enumerate() {
             let points: Vec<ExtF> = (0..=max_d)
                 .map(|i| from_base(F::from_u64(i as u64)))
                 .collect();
@@ -122,9 +136,21 @@ pub fn batched_sumcheck_prover(
                     evals.truncate(half);
                 }
                 uni_evals.push(evals[0]);
+                
+                // DEBUG: Show what evaluations we're getting for zero polynomials
+                if round == 0 && poly_idx == 0 { // Focus on first polynomial in first round
+                    eprintln!("SUMCHECK_PROVER_DEBUG: poly[{}] eval at x={:?}, point_full={:?} -> sum={:?}", poly_idx, x, point_full, evals[0]);
+                }
             }
 
             let uni = Polynomial::interpolate(&points, &uni_evals);
+            
+            // DEBUG: Show interpolated univariate for zero polynomials  
+            if round == 0 && poly_idx == 0 {
+                eprintln!("SUMCHECK_PROVER_DEBUG: poly[{}] uni_evals = {:?}", poly_idx, uni_evals);
+                eprintln!("SUMCHECK_PROVER_DEBUG: poly[{}] interpolated uni coeffs = {:?}", poly_idx, uni.coeffs());
+            }
+            
             uni_polys.push(uni);
         }
 
@@ -143,22 +169,31 @@ pub fn batched_sumcheck_prover(
         let blind_factor = x_poly * xm1_poly * blind_poly;
         let mut uni_polys_with_blind = uni_polys.clone();
         uni_polys_with_blind.push(blind_factor.clone());
+        
+        // DEBUG: Show the individual univariates before batching
+        eprintln!("SUMCHECK_PROVER_DEBUG: Round {} univariate construction:", round);
+        for (i, uni) in uni_polys.iter().enumerate() {
+            eprintln!("SUMCHECK_PROVER_DEBUG: uni[{}] coeffs = {:?}", i, uni.coeffs());
+            eprintln!("SUMCHECK_PROVER_DEBUG: uni[{}] eval(0) = {:?}, eval(1) = {:?}", i, uni.eval(ExtF::ZERO), uni.eval(ExtF::ONE));
+        }
+        eprintln!("SUMCHECK_PROVER_DEBUG: blind_factor coeffs = {:?}", blind_factor.coeffs());
+        eprintln!("SUMCHECK_PROVER_DEBUG: blind_factor eval(0) = {:?}, eval(1) = {:?}", blind_factor.eval(ExtF::ZERO), blind_factor.eval(ExtF::ONE));
+        
         let batched_uni = batch_unis(&uni_polys_with_blind, rho);
+        
+        eprintln!("SUMCHECK_PROVER_DEBUG: batched_uni coeffs = {:?}", batched_uni.coeffs());
+        eprintln!("SUMCHECK_PROVER_DEBUG: batched_uni eval(0) = {:?}, eval(1) = {:?}", batched_uni.eval(ExtF::ZERO), batched_uni.eval(ExtF::ONE));
 
         if batched_uni.eval(ExtF::ZERO) + batched_uni.eval(ExtF::ONE) != current_batched {
             return Err(SumCheckError::InvalidSum(round));
         }
 
-        transcript.extend(batched_uni.coeffs().iter().flat_map(|&c| {
-            let arr = c.to_array();
-            let mut bytes = Vec::with_capacity(16);
-            bytes.extend_from_slice(&arr[0].as_canonical_u64().to_be_bytes());
-            bytes.extend_from_slice(&arr[1].as_canonical_u64().to_be_bytes());
-            bytes
-        }));
+        // CRITICAL FIX: Use serialize_uni to include degree prefix (matches verifier expectation)
+        transcript.extend(serialize_uni(&batched_uni));
+        eprintln!("SUMCHECK_PROVER_DEBUG: Round {} - transcript.len()={} after serialize_uni", round, transcript.len());
         challenger.observe_bytes("blinded_uni", &serialize_uni(&batched_uni));
 
-        let challenge = challenger.challenge_ext("round_challenge");
+        let challenge = fiat_shamir_challenge(transcript); // Direct FS to match verifier
         challenges.push(challenge);
 
         let num_polys = polys.len();
@@ -168,7 +203,29 @@ pub fn batched_sumcheck_prover(
         }
         let blind_eval = blind_factor.eval(challenge) * blind_weight;
 
-        current_batched = batched_uni.eval(challenge) - blind_eval;
+        // CRITICAL DEBUG: This is where the zero polynomial issue occurs
+        let batched_eval = batched_uni.eval(challenge);
+        eprintln!("SUMCHECK_PROVER_DEBUG: Round {}", round);
+        eprintln!("SUMCHECK_PROVER_DEBUG: challenge = {:?}", challenge);
+        eprintln!("SUMCHECK_PROVER_DEBUG: batched_uni.eval(challenge) = {:?}", batched_eval);
+        eprintln!("SUMCHECK_PROVER_DEBUG: blind_eval = {:?}", blind_eval);
+        eprintln!("SUMCHECK_PROVER_DEBUG: current_batched (before) = {:?}", current_batched);
+        
+        // For a zero polynomial Q, we expect:
+        // - batched_uni should evaluate to 0 at challenge (since Q is identically 0)
+        // - blind_eval should be exactly the blinding factor evaluation
+        // - So: batched_eval - blind_eval should be 0
+        // But we're seeing batched_eval != blind_eval for zero polynomials!
+        
+        current_batched = batched_eval - blind_eval;
+        eprintln!("SUMCHECK_PROVER_DEBUG: current_batched (after) = {:?}", current_batched);
+        
+        // This should be 0 for zero polynomials, but it's not!
+        if current_batched != ExtF::ZERO {
+            eprintln!("SUMCHECK_PROVER_DEBUG: ⚠️  PROBLEM: Zero polynomial producing non-zero current!");
+            eprintln!("SUMCHECK_PROVER_DEBUG: batched_uni coeffs = {:?}", batched_uni.coeffs());
+            eprintln!("SUMCHECK_PROVER_DEBUG: blind_factor coeffs = {:?}", blind_factor.coeffs());
+        }
         let blind_bytes: Vec<u8> = serialize_ext(blind_eval);
         transcript.extend(&blind_bytes);
         challenger.observe_bytes("blind_eval", &blind_bytes);
@@ -185,67 +242,107 @@ pub fn batched_sumcheck_verifier(
     comms: &[Commitment],
     oracle: &mut impl PolyOracle,
     transcript: &mut Vec<u8>,
+    pre_transcript: &[u8],  // NEW: Pass pre-sumcheck transcript for blind recomputation
 ) -> Option<(Vec<ExtF>, Vec<ExtF>)> {
     if claims.is_empty() || msgs.is_empty() {
         return Some((vec![], vec![]));
     }
-
+    
+    // CRITICAL FIX: Add rho domain separator BEFORE deriving challenge
     transcript.extend(b"sumcheck_rho");
-    let mut challenger = NeoChallenger::new("neo_sumcheck_batched");
-    challenger.observe_bytes("claims", &claims.len().to_be_bytes());
-    let rho = challenger.challenge_ext("batch_rho");
-
+    let rho = fiat_shamir_challenge(transcript);
+    eprintln!("VERIFIER_DEBUG: TRANSCRIPT_TRACE: Initial transcript.len()={}, using direct fiat_shamir rho={:?}", transcript.len(), rho);
+    
     let mut rho_pow = ExtF::ONE;
     let mut current = ExtF::ZERO;
     for &c in claims {
         current += rho_pow * c;
         rho_pow *= rho;
     }
-
-    transcript.extend(serialize_comms(comms));
-
+    
+    transcript.extend(serialize_comms(comms)); // Now matches prover
+    eprintln!("VERIFIER_DEBUG: TRANSCRIPT_TRACE: Extended transcript with serialize_comms, new len={}", transcript.len());
+    
     let mut r = Vec::new();
-
+    
     for (round, (uni, blind_eval)) in msgs.iter().enumerate() {
-        challenger.observe_bytes("round_label", format!("neo_sumcheck_round_{}", round).as_bytes());
         transcript.extend(format!("sumcheck_round_{}", round).as_bytes());
+        eprintln!("VERIFIER_DEBUG: TRANSCRIPT_TRACE: Round {} - extended transcript with round info", round);
         if uni.eval(ExtF::ZERO) + uni.eval(ExtF::ONE) != current {
+            eprintln!("VERIFIER_DEBUG: ❌ Round {} FAILED sum check: {} != {}", round, uni.eval(ExtF::ZERO) + uni.eval(ExtF::ONE), current);
             return None;
         }
-
-        transcript.extend(uni.coeffs().iter().flat_map(|&c| {
-            let arr = c.to_array();
-            let mut bytes = Vec::with_capacity(16);
-            bytes.extend_from_slice(&arr[0].as_canonical_u64().to_be_bytes());
-            bytes.extend_from_slice(&arr[1].as_canonical_u64().to_be_bytes());
-            bytes
-        }));
-        challenger.observe_bytes("blinded_uni", &serialize_uni(uni));
-
-        let challenge = challenger.challenge_ext("round_challenge");
+        eprintln!("VERIFIER_DEBUG: ✅ Round {} passed sum check", round);
+        
+        // CRITICAL FIX: Extend transcript with received uni to match prover
+        transcript.extend(serialize_uni(uni)); // Now matches prover's extension
+        eprintln!("VERIFIER_DEBUG: TRANSCRIPT_TRACE: Round {} - extended transcript with serialize_uni", round);
+        let challenge = fiat_shamir_challenge(transcript); // Direct FS to match prover
+        eprintln!("VERIFIER_DEBUG: Round {} - using direct fiat_shamir challenge={:?}", round, challenge);
+        eprintln!("VERIFIER_DEBUG: Round {} - challenge={:?}", round, challenge);
+        eprintln!("VERIFIER_DEBUG: Round {} - uni.eval(challenge)={:?}, blind_eval={:?}", round, uni.eval(challenge), *blind_eval);
         current = uni.eval(challenge) - *blind_eval;
+        eprintln!("VERIFIER_DEBUG: Round {} - updated current={:?}", round, current);
         let blind_bytes: Vec<u8> = serialize_ext(*blind_eval);
-        transcript.extend(&blind_bytes);
-        challenger.observe_bytes("blind_eval", &blind_bytes);
+        transcript.extend(&blind_bytes); // Now matches prover
+        eprintln!("VERIFIER_DEBUG: TRANSCRIPT_TRACE: Round {} - extended transcript with blind_bytes", round);
         r.push(challenge);
     }
 
+    eprintln!("VERIFIER_DEBUG: About to open at point r={:?}", r);
     let (evals, proofs) = oracle.open_at_point(&r);
     if !oracle.verify_openings(comms, &r, &evals, &proofs) {
         return None;
     }
 
+    // CRITICAL FIX: Subtract recomputed FRI blinds after opening (from other AI solution)
+    eprintln!("VERIFIER_DEBUG: Current transcript.len()={} when computing blinds", transcript.len());
+    eprintln!("VERIFIER_DEBUG: Opened evals (raw from FRI): {:?}", evals);
+    eprintln!("VERIFIER_DEBUG: Expected current from sumcheck: {:?}", current);
+    
+    // CRITICAL FIX: Use pre-sumcheck transcript state for blind recomputation (from other AI)
+    // The prover created oracle with pre_transcript, so blinds must be computed with same state
+    let mut blind_trans = pre_transcript.to_vec();  // Use pre-sumcheck state
+    blind_trans.extend(b"fri_blind_seed");
+    eprintln!("VERIFIER_DEBUG: Using pre_transcript.len()={} for blind computation", pre_transcript.len());
+    let hash_result = crate::fiat_shamir_challenge_base(&blind_trans);
+    let mut seed = [0u8; 32];
+    seed[0..8].copy_from_slice(&hash_result.as_canonical_u64().to_le_bytes());
+    for i in 8..32 {
+        seed[i] = ((hash_result.as_canonical_u64() >> (i % 8)) ^ (i as u64)) as u8;
+    }
+    let mut rng = rand_chacha::ChaCha20Rng::from_seed(seed);
+    let mut blinds = vec![ExtF::ZERO; evals.len()];
+    for blind in &mut blinds {
+        *blind = crate::oracle::FriOracle::sample_discrete_gaussian(&mut rng, 3.2);
+    }
+    eprintln!("VERIFIER_DEBUG: Recomputed blinds with correct transcript: {:?}", blinds);
+    
+    // Subtract FRI blinds to get unblinded evaluations
+    let mut evals = evals;
+    for (i, e) in evals.iter_mut().enumerate() {
+        *e -= blinds[i];
+    }
+    eprintln!("VERIFIER_DEBUG: Unblinded evals: {:?}", evals);
+
     if evals.iter().any(|e| e.abs_norm() > MAX_BLIND_NORM) {
+        eprintln!("VERIFIER_DEBUG: ❌ HIGH NORM DETECTED - evals norms: {:?}", evals.iter().map(|e| e.abs_norm()).collect::<Vec<_>>());
         return None;
     }
 
+    // Debug the batching computation step by step
     let mut rho_pow = ExtF::ONE;
     let mut final_batched = ExtF::ZERO;
-    for &e in &evals {
-        final_batched += rho_pow * e;
+    eprintln!("VERIFIER_DEBUG: Starting final batching with rho={:?}", rho);
+    for (i, &e) in evals.iter().enumerate() {
+        let contribution = rho_pow * e;
+        final_batched += contribution;
+        eprintln!("VERIFIER_DEBUG: eval[{}]={:?}, rho^{}={:?}, contribution={:?}, running_total={:?}", 
+                 i, e, i, rho_pow, contribution, final_batched);
         rho_pow *= rho;
     }
 
+    eprintln!("VERIFIER_DEBUG: FINAL COMPARISON: final_batched={:?}, current={:?}", final_batched, current);
     if final_batched == current {
         Some((r, evals))
     } else {
@@ -723,7 +820,7 @@ mod tests {
         }
         let mut high_oracle = HighNormOracle;
         let mut vt = vec![];
-        let result = batched_sumcheck_verifier(&[claim], &msgs, &comms, &mut high_oracle, &mut vt);
+        let result = batched_sumcheck_verifier(&[claim], &msgs, &comms, &mut high_oracle, &mut vt, &[]);
         assert!(result.is_none());
     }
 
@@ -738,5 +835,149 @@ mod tests {
         let xm1_poly = Polynomial::new(vec![-ExtF::ONE, ExtF::ONE]);
         let blind_factor = x_poly * xm1_poly * blind_poly;
         blind_factor.eval(ExtF::ZERO) == ExtF::ZERO && blind_factor.eval(ExtF::ONE) == ExtF::ZERO
+    }
+}
+
+#[cfg(test)]
+mod serialization_tests {
+    use super::*;
+    use neo_fields::*;
+    use neo_poly::Polynomial;
+    use std::io::Cursor;
+    use byteorder::{BigEndian, ReadBytesExt};
+
+    #[test]
+    fn test_serialize_uni_includes_degree_prefix() {
+        // Test the critical fix: serialize_uni should include degree prefix
+        let test_poly = Polynomial::new(vec![ExtF::from_u64(42), ExtF::from_u64(99)]);
+        let serialized = serialize_uni(&test_poly);
+        
+        // Should start with degree as u8
+        assert_eq!(serialized[0], test_poly.degree() as u8);
+        
+        // Should have 1 + (degree+1)*16 bytes total
+        let expected_len = 1 + (test_poly.degree() + 1) * 16;
+        assert_eq!(serialized.len(), expected_len);
+        
+        println!("✅ serialize_uni includes degree prefix - test passed");
+    }
+
+    #[test]
+    fn test_serialize_uni_zero_polynomial() {
+        // Critical test for zero polynomial serialization
+        let zero_poly = Polynomial::new(vec![ExtF::ZERO]);
+        
+        let serialized = serialize_uni(&zero_poly);
+        
+        // With our fixed serialize_uni, empty polynomials should serialize as degree-0 with one zero coefficient
+        assert_eq!(serialized[0], 0, "Degree should be 0");
+        assert_eq!(serialized.len(), 17, "Should be 1 + 1*16 = 17 bytes (degree + one zero coefficient)");
+        
+        // Verify coefficient can be deserialized correctly
+        let mut cursor = Cursor::new(&serialized[1..]);
+        let real = F::from_u64(cursor.read_u64::<BigEndian>().unwrap());
+        let imag = F::from_u64(cursor.read_u64::<BigEndian>().unwrap());
+        let coeff = ExtF::new_complex(real, imag);
+        assert_eq!(coeff, ExtF::ZERO);
+        
+        println!("✅ Zero polynomial serialization test passed");
+    }
+
+    #[test]
+    fn test_serialize_uni_roundtrip() {
+        // Test that we can serialize and deserialize correctly
+        let coeffs = vec![ExtF::from_u64(123), ExtF::from_u64(456), ExtF::from_u64(789)];
+        let original_poly = Polynomial::new(coeffs);
+        
+        let serialized = serialize_uni(&original_poly);
+        
+        // Deserialize manually
+        let mut cursor = Cursor::new(&serialized);
+        let deg = cursor.read_u8().unwrap() as usize;
+        assert_eq!(deg, original_poly.degree());
+        
+        let mut deserialized_coeffs = Vec::new();
+        for _ in 0..=deg {
+            let real = F::from_u64(cursor.read_u64::<BigEndian>().unwrap());
+            let imag = F::from_u64(cursor.read_u64::<BigEndian>().unwrap());
+            deserialized_coeffs.push(ExtF::new_complex(real, imag));
+        }
+        
+        let deserialized_poly = Polynomial::new(deserialized_coeffs);
+        
+        // Test equivalence by evaluation
+        for &test_point in &[ExtF::ZERO, ExtF::ONE, ExtF::from_u64(42)] {
+            assert_eq!(
+                original_poly.eval(test_point),
+                deserialized_poly.eval(test_point)
+            );
+        }
+        
+        println!("✅ Serialization roundtrip test passed");
+    }
+
+    #[test]
+    fn test_serialize_ext_format() {
+        let test_value = ExtF::from_u64(12345);
+        let serialized = serialize_ext(test_value);
+        
+        // Should be exactly 16 bytes
+        assert_eq!(serialized.len(), 16);
+        
+        // Deserialize and verify
+        let mut cursor = Cursor::new(&serialized);
+        let real = F::from_u64(cursor.read_u64::<BigEndian>().unwrap());
+        let imag = F::from_u64(cursor.read_u64::<BigEndian>().unwrap());
+        let deserialized = ExtF::new_complex(real, imag);
+        
+        assert_eq!(deserialized, test_value);
+        
+        println!("✅ ExtF serialization test passed");
+    }
+
+    #[test]
+    fn test_serialize_uni_compatibility_with_extract_msgs_ccs() {
+        // This test ensures our serialization is compatible with the extraction logic
+        use std::io::Cursor;
+        use byteorder::{BigEndian, ReadBytesExt};
+        
+        // Test cases including the problematic zero polynomial
+        let test_cases = vec![
+            vec![ExtF::ZERO], // Zero polynomial (gets trimmed)
+            vec![ExtF::from_u64(42)], // Constant polynomial
+            vec![ExtF::from_u64(1), ExtF::from_u64(2)], // Linear polynomial
+        ];
+        
+        for (i, coeffs) in test_cases.iter().enumerate() {
+            let poly = Polynomial::new(coeffs.clone());
+            let serialized = serialize_uni(&poly);
+            
+            // Simulate extract_msgs_ccs logic
+            let mut cursor = Cursor::new(&serialized);
+            let deg = cursor.read_u8().unwrap() as usize;
+            
+            let mut deserialized_coeffs = Vec::new();
+            for _ in 0..=deg {
+                let real = F::from_u64(cursor.read_u64::<BigEndian>().unwrap());
+                let imag = F::from_u64(cursor.read_u64::<BigEndian>().unwrap());
+                deserialized_coeffs.push(ExtF::new_complex(real, imag));
+            }
+            
+            let deserialized_poly = Polynomial::new(deserialized_coeffs);
+            
+            // Test polynomial equivalence by evaluation
+            let test_points = vec![ExtF::ZERO, ExtF::ONE, ExtF::from_u64(999)];
+            for point in test_points {
+                assert_eq!(
+                    poly.eval(point),
+                    deserialized_poly.eval(point),
+                    "Case {}: Polynomial evaluation mismatch at {:?}", i, point
+                );
+            }
+            
+            println!("✅ Compatibility test case {} passed", i);
+        }
+        
+        println!("✅ All compatibility tests passed");
     }
 }
