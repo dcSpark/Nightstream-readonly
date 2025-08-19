@@ -331,7 +331,7 @@ mod tests {
             },
         );
         let proof = state.generate_proof(instance.clone(), instance, &committer);
-        assert!(!proof.unwrap().transcript.is_empty(), "Proof transcript should not be empty");
+        assert!(!proof.transcript.is_empty(), "Proof transcript should not be empty");
     }
 
     #[test]

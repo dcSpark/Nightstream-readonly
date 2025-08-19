@@ -23,7 +23,7 @@ fn test_full_folding() {
     let witness1 = CcsWitness { z: vec![from_base(F::from_u64(2))] };
     let instance2 = CcsInstance { commitment: vec![], public_input: vec![], u: F::ZERO, e: F::ONE };
     let witness2 = CcsWitness { z: vec![from_base(F::from_u64(3))] };
-    let proof = state.generate_proof((instance1, witness1), (instance2, witness2), &committer).unwrap();
+    let proof = state.generate_proof((instance1, witness1), (instance2, witness2), &committer);
     assert!(state.verify(&proof.transcript, &committer));
 }
 
@@ -39,7 +39,7 @@ fn test_full_folding_with_fri() {
     let witness1 = CcsWitness { z: vec![from_base(F::from_u64(2))] };
     let instance2 = CcsInstance { commitment: vec![], public_input: vec![], u: F::ZERO, e: F::ONE };
     let witness2 = CcsWitness { z: vec![from_base(F::from_u64(3))] };
-    let proof = state.generate_proof((instance1, witness1), (instance2, witness2), &committer).unwrap();
+    let proof = state.generate_proof((instance1, witness1), (instance2, witness2), &committer);
     assert!(state.verify(&proof.transcript, &committer));
 }
 

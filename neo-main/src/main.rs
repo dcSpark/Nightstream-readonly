@@ -60,7 +60,7 @@ fn main() {
     };
 
     let mut state = FoldState::new(structure.clone());
-    let proof = state.generate_proof((instance1.clone(), witness1.clone()), (instance2.clone(), witness2.clone()), &committer).unwrap();
+    let proof = state.generate_proof((instance1.clone(), witness1.clone()), (instance2.clone(), witness2.clone()), &committer);
 
     let verifier_state = FoldState::new(structure);
     let verify_result = verifier_state.verify(&proof.transcript, &committer);
