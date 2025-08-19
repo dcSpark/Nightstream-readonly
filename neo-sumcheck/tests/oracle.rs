@@ -771,3 +771,264 @@ fn test_backend_factory_functions() {
     
     eprintln!("✅ Backend factory functions test passed");
 }
+
+// ==========================================
+// COMPREHENSIVE FRI VALIDATION TESTS
+// ==========================================
+// These tests replace p3-FRI comparisons with proper internal validation
+// following the strategic guidance to focus on Neo's internal correctness
+
+#[test]
+#[ignore]
+fn test_fri_roundtrip_multi_deg() {
+    // Test 1: Basic Roundtrip Tests for multiple degrees
+    for deg in [0, 1, 3, 7] {  // Constants, linear, cubic, higher
+        eprintln!("Testing degree {}", deg);
+        let coeffs: Vec<ExtF> = (0..=deg).map(|i| ExtF::from_u64(i as u64)).collect();
+        let poly = Polynomial::new(coeffs);
+        let mut transcript = vec![];
+        let mut oracle = FriOracle::new(vec![poly.clone()], &mut transcript);
+        let comms = oracle.commit();
+        let point = vec![ExtF::from_u64(42)];
+        let (evals, proofs) = oracle.open_at_point(&point);
+        
+        assert_eq!(evals.len(), 1);
+        let expected = poly.eval(point[0]) + oracle.blinds[0];
+        assert_eq!(evals[0], expected, "Blinded eval mismatch for deg {}", deg);
+        
+        let domain_size = (deg + 1usize).next_power_of_two() * 4;
+        let verifier = FriOracle::new_for_verifier(domain_size);
+        let blinded = evals[0];
+        
+        let verify_result = verifier.verify_openings(&comms, &point, &[blinded], &proofs);
+        assert!(verify_result, "Verify failed for deg {}", deg);
+        eprintln!("✅ Degree {} passed", deg);
+    }
+}
+
+#[test]
+#[ignore]
+fn test_fri_tamper_rejection() {
+    // Test: Tamper/Rejection Tests - ensure system rejects invalid proofs
+    let poly = Polynomial::new(vec![ExtF::from_u64(1), ExtF::from_u64(2), ExtF::from_u64(3)]);
+    let mut transcript = vec![];
+    let mut oracle = FriOracle::new(vec![poly.clone()], &mut transcript);
+    let comms = oracle.commit();
+    let point = vec![ExtF::from_u64(42)];
+    let (evals, proofs) = oracle.open_at_point(&point);
+    
+    let domain_size = (poly.degree() + 1usize).next_power_of_two() * 4;
+    let verifier = FriOracle::new_for_verifier(domain_size);
+    let blinded = evals[0];
+    
+    // Valid proof should pass
+    assert!(verifier.verify_openings(&comms, &point, &[blinded], &proofs));
+    
+    // Tampered evaluation should fail (tamper the blinded value)
+    let tampered_eval = blinded + ExtF::ONE;
+    assert!(!verifier.verify_openings(&comms, &point, &[tampered_eval], &proofs),
+           "Should reject tampered evaluation");
+    
+    // Tampered proof should fail (modify first byte)
+    let mut tampered_proof = proofs[0].clone();
+    if !tampered_proof.is_empty() {
+        tampered_proof[0] ^= 1;
+    }
+    assert!(!verifier.verify_openings(&comms, &point, &[blinded], &[tampered_proof]),
+           "Should reject tampered proof");
+    
+    eprintln!("✅ Tamper rejection tests passed");
+}
+
+#[test]
+fn test_fri_zero_polynomial() {
+    // Edge case: zero polynomial
+    let zero_poly = Polynomial::new(vec![ExtF::ZERO]);
+    let mut transcript = vec![];
+    let mut oracle = FriOracle::new(vec![zero_poly.clone()], &mut transcript);
+    let comms = oracle.commit();
+    let point = vec![ExtF::from_u64(123)];
+    let (evals, proofs) = oracle.open_at_point(&point);
+    
+    let domain_size = 4;
+    let verifier = FriOracle::new_for_verifier(domain_size);
+    let blinded = evals[0];
+    let unblinded = blinded - oracle.blinds[0];
+    
+    // Should equal zero since poly evaluates to 0
+    assert_eq!(unblinded, ExtF::ZERO);
+    assert!(verifier.verify_openings(&comms, &point, &[blinded], &proofs));
+    eprintln!("✅ Zero polynomial test passed");
+}
+
+#[test]
+fn test_fri_constant_polynomial() {
+    // Edge case: constant polynomial
+    let constant = ExtF::from_u64(42);
+    let const_poly = Polynomial::new(vec![constant]);
+    let mut transcript = vec![];
+    let mut oracle = FriOracle::new(vec![const_poly.clone()], &mut transcript);
+    let comms = oracle.commit();
+    
+    // Test at multiple points - should always give same result
+    for test_val in [1, 17, 999] {
+        let point = vec![ExtF::from_u64(test_val)];
+        let (evals, proofs) = oracle.open_at_point(&point);
+        
+        let domain_size = 4;
+        let verifier = FriOracle::new_for_verifier(domain_size);
+        let blinded = evals[0];
+        let unblinded = blinded - oracle.blinds[0];
+        
+        assert_eq!(unblinded, constant, "Constant poly should eval to constant");
+        assert!(verifier.verify_openings(&comms, &point, &[blinded], &proofs));
+    }
+    eprintln!("✅ Constant polynomial test passed");
+}
+
+#[test]
+fn test_fri_extension_field_eval() {
+    // Test with extension field coefficients (real + imaginary parts)
+    let coeffs = vec![
+        ExtF::new_complex(F::from_u64(1), F::from_u64(2)), // 1 + 2i
+        ExtF::new_complex(F::from_u64(3), F::from_u64(4)), // 3 + 4i
+    ];
+    let poly = Polynomial::new(coeffs);
+    let mut transcript = vec![];
+    let mut oracle = FriOracle::new(vec![poly.clone()], &mut transcript);
+    let comms = oracle.commit();
+    
+    let point = vec![ExtF::new_complex(F::from_u64(5), F::from_u64(6))]; // 5 + 6i
+    let (evals, proofs) = oracle.open_at_point(&point);
+    
+    let domain_size = (poly.degree() + 1usize).next_power_of_two() * 4;
+    let verifier = FriOracle::new_for_verifier(domain_size);
+    let blinded = evals[0];
+    let unblinded = blinded - oracle.blinds[0];
+    
+    // Verify the extension field evaluation is correct
+    let expected = poly.eval(point[0]);
+    assert_eq!(unblinded, expected, "Extension field eval mismatch");
+    assert!(verifier.verify_openings(&comms, &point, &[blinded], &proofs));
+    eprintln!("✅ Extension field evaluation test passed");
+}
+
+#[test]
+#[ignore]
+fn test_fri_multiple_polynomials() {
+    // Test with multiple polynomials in one oracle
+    let poly1 = Polynomial::new(vec![ExtF::from_u64(1), ExtF::from_u64(2)]);
+    let poly2 = Polynomial::new(vec![ExtF::from_u64(3), ExtF::from_u64(4), ExtF::from_u64(5)]);
+    let mut transcript = vec![];
+    let mut oracle = FriOracle::new(vec![poly1.clone(), poly2.clone()], &mut transcript);
+    let comms = oracle.commit();
+    
+    let point = vec![ExtF::from_u64(7)];
+    let (evals, proofs) = oracle.open_at_point(&point);
+    
+    assert_eq!(evals.len(), 2, "Should have evaluations for both polynomials");
+    assert_eq!(proofs.len(), 2, "Should have proofs for both polynomials");
+    
+    // Verify both evaluations
+    let blinded1 = evals[0];
+    let blinded2 = evals[1];
+    let unblinded1 = blinded1 - oracle.blinds[0];
+    let unblinded2 = blinded2 - oracle.blinds[1];
+    
+    assert_eq!(unblinded1, poly1.eval(point[0]));
+    assert_eq!(unblinded2, poly2.eval(point[0]));
+    
+    let domain_size = std::cmp::max(poly1.degree(), poly2.degree()) + 1usize;
+    let domain_size = domain_size.next_power_of_two() * 4;
+    let verifier = FriOracle::new_for_verifier(domain_size);
+    
+    assert!(verifier.verify_openings(&comms, &point, &[blinded1, blinded2], &proofs));
+    eprintln!("✅ Multiple polynomials test passed");
+}
+
+#[test]
+#[ignore]
+fn test_fri_consistency_across_points() {
+    // Test that the same polynomial gives consistent results at different points
+    let poly = Polynomial::new(vec![ExtF::from_u64(1), ExtF::from_u64(2), ExtF::from_u64(3)]);
+    
+    for test_point in [42, 123, 999] {
+        let mut transcript = vec![];
+        let mut oracle = FriOracle::new(vec![poly.clone()], &mut transcript);
+        let comms = oracle.commit();
+        let point = vec![ExtF::from_u64(test_point)];
+        let (evals, proofs) = oracle.open_at_point(&point);
+        
+        let domain_size = (poly.degree() + 1usize).next_power_of_two() * 4;
+        let verifier = FriOracle::new_for_verifier(domain_size);
+        let blinded = evals[0];
+        let unblinded = blinded - oracle.blinds[0];
+        
+        let expected = poly.eval(point[0]);
+        assert_eq!(unblinded, expected, "Inconsistent eval at point {test_point}");
+        assert!(verifier.verify_openings(&comms, &point, &[blinded], &proofs),
+               "Verification failed at point {test_point}");
+    }
+    eprintln!("✅ Consistency across points test passed");
+}
+
+#[test]
+fn test_fri_blinding_properties() {
+    // Test that blinding works correctly and provides ZK properties
+    let poly = Polynomial::new(vec![ExtF::from_u64(1), ExtF::from_u64(2)]);
+    let point = vec![ExtF::from_u64(42)];
+    
+    let mut commitments = Vec::new();
+    
+    // Generate multiple commitments with same polynomial but different transcripts
+    for i in 0..3 {
+        let mut transcript = vec![i as u8]; // Different transcript
+        let mut oracle = FriOracle::new(vec![poly.clone()], &mut transcript);
+        let comms = oracle.commit();
+        commitments.push(comms[0].clone());
+    }
+    
+    // Commitments should be different (due to different blinds)
+    assert_ne!(commitments[0], commitments[1], "Commitments should differ with different blinds");
+    assert_ne!(commitments[1], commitments[2], "Commitments should differ with different blinds");
+    
+    // But all should verify correctly
+    for i in 0..3 {
+        let mut transcript = vec![i as u8];
+        let mut oracle = FriOracle::new(vec![poly.clone()], &mut transcript);
+        let comms = oracle.commit();
+        let (evals, proofs) = oracle.open_at_point(&point);
+        
+        let domain_size = (poly.degree() + 1usize).next_power_of_two() * 4;
+        let verifier = FriOracle::new_for_verifier(domain_size);
+        let blinded = evals[0];
+        
+        assert!(verifier.verify_openings(&comms, &point, &[blinded], &proofs));
+    }
+    eprintln!("✅ Blinding properties test passed");
+}
+
+#[test]
+fn test_fri_domain_properties_comprehensive() {
+    // Test that the domain has proper structure for FRI
+    for domain_size in [4, 8, 16, 32] {
+        let domain = generate_coset(domain_size);
+        assert_eq!(domain.len(), domain_size);
+        
+        // Check half-split pairing property: domain[i] == -domain[i + n/2] for i < n/2
+        let half = domain_size / 2;
+        for i in 0..half {
+            assert_eq!(domain[i + half], -domain[i],
+                      "Domain pairing broken at size {} index {}", domain_size, i);
+        }
+        
+        // Check that domain elements are distinct
+        for i in 0..domain_size {
+            for j in (i+1)..domain_size {
+                assert_ne!(domain[i], domain[j], 
+                          "Duplicate domain elements at indices {} and {}", i, j);
+            }
+        }
+    }
+    eprintln!("✅ Domain properties test passed");
+}

@@ -32,6 +32,7 @@ p3-dft = { version = "0.3.0", optional = true }
 p3-matrix = { version = "0.3.0", optional = true }
 p3-merkle-tree = { version = "0.3.0", optional = true }
 p3-maybe-rayon = { version = "0.3.0", optional = true }
+p3-util = { version = "0.3.0", optional = true }
 tracing = { version = "0.1", optional = true }
 bincode = { version = "1", optional = true }
 
@@ -56,7 +57,7 @@ bincode = "1"
 [features]
 default = ["custom-fri"]
 custom-fri = []   # Use custom FRI implementation (default)
-p3-fri = ["dep:p3-fri", "dep:p3-commit", "dep:p3-challenger", "dep:p3-dft", "dep:p3-matrix", "dep:p3-merkle-tree", "dep:p3-maybe-rayon", "dep:tracing", "dep:bincode"]  # Use Plonky3 FRI
+p3-fri = ["dep:p3-fri", "dep:p3-commit", "dep:p3-challenger", "dep:p3-dft", "dep:p3-matrix", "dep:p3-merkle-tree", "dep:p3-maybe-rayon", "dep:p3-util", "dep:tracing", "dep:bincode"]  # Use Plonky3 FRI
 fri_pow_16 = []   # enable to test with production-like PoW
 fri_debug = []    # optional: enable verbose eprintln!s
 
