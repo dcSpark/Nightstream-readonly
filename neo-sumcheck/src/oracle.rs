@@ -1,3 +1,7 @@
+#![allow(clippy::needless_range_loop)]
+#![allow(clippy::assign_op_pattern)]
+#![allow(clippy::ptr_arg)]
+
 use byteorder::{BigEndian, ReadBytesExt, WriteBytesExt};
 use rand::Rng;
 use rand_chacha::{rand_core::SeedableRng, ChaCha20Rng};
@@ -12,6 +16,10 @@ use neo_poly::Polynomial;
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_goldilocks::Poseidon2Goldilocks;
 use p3_symmetric::{CryptographicHasher, PaddingFreeSponge};
+
+// Optional Plonky3 FRI imports (only when p3-fri feature is enabled)
+#[cfg(feature = "p3-fri")]
+use tracing::instrument;
 
 // FRI Constants tuned for ~128-bit security
 const BLOWUP: usize = 4;
@@ -36,6 +44,44 @@ pub trait PolyOracle {
         evals: &[ExtF],
         proofs: &[OpeningProof],
     ) -> bool;
+}
+
+/// Trait for configurable FRI backends
+/// 
+/// This trait allows switching between different FRI implementations:
+/// - CustomFri: The existing custom FRI implementation in this crate
+/// - PlonkyFri: Plonky3's optimized FRI implementation
+/// 
+/// Both implementations preserve equivalent security when configured with
+/// matching parameters (blowup=4, queries=40 for ~128-bit security, etc.)
+pub trait FriBackend: Send + Sync {
+    /// Commit to a set of polynomials and return their commitments
+    fn commit(&mut self, polys: Vec<Polynomial<ExtF>>) -> Result<Vec<Commitment>, Box<dyn Error>>;
+    
+    /// Open polynomials at a given point, returning evaluations and proofs
+    fn open_at_point(&mut self, point: &[ExtF]) -> Result<(Vec<ExtF>, Vec<OpeningProof>), Box<dyn Error>>;
+    
+    /// Verify opening proofs for committed polynomials
+    fn verify_openings(
+        &self,
+        comms: &[Commitment],
+        point: &[ExtF],
+        evals: &[ExtF],
+        proofs: &[OpeningProof],
+    ) -> bool;
+    
+    /// Get domain size for verifier setup
+    fn domain_size(&self) -> usize;
+}
+
+/// Configuration for FRI backend selection
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FriImpl {
+    /// Use the custom FRI implementation (default)
+    Custom,
+    /// Use Plonky3's FRI implementation
+    #[cfg(feature = "p3-fri")]
+    Plonky3,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -167,7 +213,7 @@ pub fn generate_coset(size: usize) -> Vec<ExtF> {
     for i in (0..size).step_by(2) {
         let a = coset[i];
         let b = coset[i + 1];
-        assert_eq!(b, -a, "Domain pairing broken: coset[{}] != -coset[{}]", i+1, i);
+        assert_eq!(b, -a, "Domain pairing broken: coset[{}] != -coset[{}]", i + 1, i);
     }
     coset
 }
@@ -446,7 +492,7 @@ impl PolyOracle for FriOracle {
     }
 
     fn open_at_point(&mut self, point: &[ExtF]) -> (Vec<ExtF>, Vec<OpeningProof>) {
-        let z = point.get(0).copied().unwrap_or(ExtF::ZERO);
+        let z = point.first().copied().unwrap_or(ExtF::ZERO);
         let mut evals = Vec::new();
         let mut proofs = Vec::new();
         for (i, poly) in self.committed_polys.iter().enumerate() {
@@ -1052,6 +1098,240 @@ pub fn deserialize_fri_proof(bytes: &[u8]) -> Result<FriProof, Box<dyn Error>> {
     })
 }
 
+// ==========================================
+// CONFIGURABLE FRI BACKEND IMPLEMENTATIONS
+// ==========================================
+
+/// Custom FRI backend wrapping the existing FriOracle implementation
+pub struct CustomFri {
+    oracle: FriOracle,
+    committed_polys: Vec<Polynomial<ExtF>>,
+}
+
+impl CustomFri {
+    pub fn new(polys: Vec<Polynomial<ExtF>>, transcript: &mut Vec<u8>) -> Self {
+        let oracle = FriOracle::new(polys.clone(), transcript);
+        Self {
+            oracle,
+            committed_polys: polys,
+        }
+    }
+
+    pub fn new_with_blowup(polys: Vec<Polynomial<ExtF>>, transcript: &mut Vec<u8>, blowup: usize) -> Self {
+        let oracle = FriOracle::new_with_blowup(polys.clone(), transcript, blowup);
+        Self {
+            oracle,
+            committed_polys: polys,
+        }
+    }
+
+    pub fn new_for_verifier(domain_size: usize) -> Self {
+        let oracle = FriOracle::new_for_verifier(domain_size);
+        Self {
+            oracle,
+            committed_polys: vec![],
+        }
+    }
+}
+
+impl FriBackend for CustomFri {
+    fn commit(&mut self, polys: Vec<Polynomial<ExtF>>) -> Result<Vec<Commitment>, Box<dyn Error>> {
+        self.committed_polys = polys;
+        Ok(self.oracle.commit())
+    }
+
+    fn open_at_point(&mut self, point: &[ExtF]) -> Result<(Vec<ExtF>, Vec<OpeningProof>), Box<dyn Error>> {
+        Ok(self.oracle.open_at_point(point))
+    }
+
+    fn verify_openings(
+        &self,
+        comms: &[Commitment],
+        point: &[ExtF],
+        evals: &[ExtF],
+        proofs: &[OpeningProof],
+    ) -> bool {
+        self.oracle.verify_openings(comms, point, evals, proofs)
+    }
+
+    fn domain_size(&self) -> usize {
+        self.oracle.domain.len()
+    }
+}
+
+/// Plonky3 FRI backend using p3-fri
+/// 
+/// NOTE: This is currently a simplified implementation that demonstrates 
+/// the configurable FRI backend pattern. The full p3-fri integration requires
+/// careful API mapping which is beyond the scope of this initial implementation.
+/// 
+/// For production use, this would implement proper p3-fri commitment and opening
+/// protocols with the correct parameter mapping to maintain security equivalence.
+#[cfg(feature = "p3-fri")]
+pub struct PlonkyFri {
+    // For now, use the custom implementation internally
+    // In production, this would be replaced with p3-fri structures
+    custom_oracle: CustomFri,
+    domain_size: usize,
+}
+
+#[cfg(feature = "p3-fri")]
+impl PlonkyFri {
+    #[instrument(name = "PlonkyFri::new", level = "info", skip_all)]
+    pub fn new(polys: Vec<Polynomial<ExtF>>, transcript: &mut Vec<u8>) -> Self {
+        eprintln!("PlonkyFri::new - Using simplified implementation (p3-fri integration WIP)");
+        
+        // For this demo, delegate to custom implementation
+        let custom_oracle = CustomFri::new(polys, transcript);
+        let max_deg = custom_oracle.committed_polys.iter().map(|p| p.degree()).max().unwrap_or(0);
+        let domain_size = (max_deg + 1).next_power_of_two() * BLOWUP;
+
+        Self {
+            custom_oracle,
+            domain_size,
+        }
+    }
+
+    pub fn new_for_verifier(domain_size: usize) -> Self {
+        eprintln!("PlonkyFri::new_for_verifier - Using simplified implementation");
+        
+        let custom_oracle = CustomFri::new_for_verifier(domain_size);
+        Self {
+            custom_oracle,
+            domain_size,
+        }
+    }
+}
+
+#[cfg(feature = "p3-fri")]
+impl FriBackend for PlonkyFri {
+    #[instrument(name = "PlonkyFri::commit", level = "info", skip_all)]
+    fn commit(&mut self, polys: Vec<Polynomial<ExtF>>) -> Result<Vec<Commitment>, Box<dyn Error>> {
+        // TODO: Replace with actual p3-fri commitment scheme
+        // For now, delegate to custom implementation
+        eprintln!("PlonkyFri::commit - delegating to custom implementation");
+        self.custom_oracle.commit(polys)
+    }
+
+    #[instrument(name = "PlonkyFri::open_at_point", level = "info", skip_all)]
+    fn open_at_point(&mut self, point: &[ExtF]) -> Result<(Vec<ExtF>, Vec<OpeningProof>), Box<dyn Error>> {
+        // TODO: Replace with actual p3-fri opening protocol
+        eprintln!("PlonkyFri::open_at_point - delegating to custom implementation");
+        self.custom_oracle.open_at_point(point)
+    }
+
+    fn verify_openings(
+        &self,
+        comms: &[Commitment],
+        point: &[ExtF],
+        evals: &[ExtF],
+        proofs: &[OpeningProof],
+    ) -> bool {
+        // TODO: Replace with actual p3-fri verification
+        eprintln!("PlonkyFri::verify_openings - delegating to custom implementation");
+        self.custom_oracle.verify_openings(comms, point, evals, proofs)
+    }
+
+    fn domain_size(&self) -> usize {
+        self.domain_size
+    }
+}
+
+// ==========================================
+// FACTORY FUNCTIONS AND UTILITIES
+// ==========================================
+
+/// Create a new FRI backend based on the implementation type
+pub fn create_fri_backend(
+    impl_type: FriImpl,
+    polys: Vec<Polynomial<ExtF>>,
+    transcript: &mut Vec<u8>,
+) -> Box<dyn FriBackend> {
+    match impl_type {
+        FriImpl::Custom => Box::new(CustomFri::new(polys, transcript)),
+        #[cfg(feature = "p3-fri")]
+        FriImpl::Plonky3 => Box::new(PlonkyFri::new(polys, transcript)),
+    }
+}
+
+/// Create a new FRI backend for verification
+pub fn create_fri_verifier(impl_type: FriImpl, domain_size: usize) -> Box<dyn FriBackend> {
+    match impl_type {
+        FriImpl::Custom => Box::new(CustomFri::new_for_verifier(domain_size)),
+        #[cfg(feature = "p3-fri")]
+        FriImpl::Plonky3 => Box::new(PlonkyFri::new_for_verifier(domain_size)),
+    }
+}
+
+/// Adaptive FRI Oracle that wraps the configurable backend system
+/// This maintains backward compatibility with the existing PolyOracle interface
+pub struct AdaptiveFriOracle {
+    backend: Box<dyn FriBackend>,
+    impl_type: FriImpl,
+}
+
+impl AdaptiveFriOracle {
+    /// Create a new adaptive FRI oracle with the specified backend
+    pub fn new(impl_type: FriImpl, polys: Vec<Polynomial<ExtF>>, transcript: &mut Vec<u8>) -> Self {
+        let backend = create_fri_backend(impl_type, polys, transcript);
+        Self { backend, impl_type }
+    }
+
+    /// Create a new adaptive FRI oracle for verification
+    pub fn new_for_verifier(impl_type: FriImpl, domain_size: usize) -> Self {
+        let backend = create_fri_verifier(impl_type, domain_size);
+        Self { backend, impl_type }
+    }
+
+    /// Get the implementation type
+    pub fn impl_type(&self) -> FriImpl {
+        self.impl_type
+    }
+
+    /// Get the domain size
+    pub fn domain_size(&self) -> usize {
+        self.backend.domain_size()
+    }
+}
+
+impl PolyOracle for AdaptiveFriOracle {
+    fn commit(&mut self) -> Vec<Commitment> {
+        // Note: We can't easily pass polys here due to interface constraints
+        // For now, this will work with the current backend's stored polynomials
+        // In a more complete refactor, we might adjust the PolyOracle interface
+        self.backend.commit(vec![]).unwrap_or_default()
+    }
+
+    fn open_at_point(&mut self, point: &[ExtF]) -> (Vec<ExtF>, Vec<OpeningProof>) {
+        self.backend.open_at_point(point).unwrap_or_default()
+    }
+
+    fn verify_openings(
+        &self,
+        comms: &[Commitment],
+        point: &[ExtF],
+        evals: &[ExtF],
+        proofs: &[OpeningProof],
+    ) -> bool {
+        self.backend.verify_openings(comms, point, evals, proofs)
+    }
+}
+
+/// Default FRI implementation selection
+impl Default for FriImpl {
+    fn default() -> Self {
+        #[cfg(feature = "custom-fri")]
+        return FriImpl::Custom;
+        
+        #[cfg(all(feature = "p3-fri", not(feature = "custom-fri")))]
+        return FriImpl::Plonky3;
+        
+        // Fallback to custom if no features are enabled
+        #[cfg(not(any(feature = "custom-fri", feature = "p3-fri")))]
+        return FriImpl::Custom;
+    }
+}
+
 pub fn serialize_comms(comms: &[Commitment]) -> Vec<u8> {
     let mut out = Vec::new();
     out.write_u32::<BigEndian>(comms.len() as u32).unwrap();
@@ -1427,5 +1707,102 @@ mod tests {
             }
         }
         eprintln!("✅ Domain properties test passed");
+    }
+
+    #[test]
+    fn test_configurable_fri_backends() {
+        // Test that both backends can be created and used
+        let poly = Polynomial::new(vec![ExtF::from_u64(1), ExtF::from_u64(2), ExtF::from_u64(3)]);
+        let polys = vec![poly.clone()];
+        let mut transcript = vec![];
+
+        // Test custom backend
+        let mut custom_backend = create_fri_backend(FriImpl::Custom, polys.clone(), &mut transcript);
+        let custom_commits = custom_backend.commit(polys.clone()).unwrap();
+        assert!(!custom_commits.is_empty());
+        assert!(!custom_commits[0].is_empty());
+
+        let point = vec![ExtF::from_u64(42)];
+        let (custom_evals, custom_proofs) = custom_backend.open_at_point(&point).unwrap();
+        assert_eq!(custom_evals.len(), 1);
+        assert_eq!(custom_proofs.len(), 1);
+
+        // Verify custom backend
+        let verified = custom_backend.verify_openings(&custom_commits, &point, &custom_evals, &custom_proofs);
+        assert!(verified, "Custom backend verification should pass");
+
+        // Test p3-fri backend (if enabled)
+        #[cfg(feature = "p3-fri")]
+        {
+            let mut p3_transcript = vec![];
+            let mut p3_backend = create_fri_backend(FriImpl::Plonky3, polys.clone(), &mut p3_transcript);
+            let p3_commits = p3_backend.commit(polys.clone()).unwrap();
+            assert!(!p3_commits.is_empty());
+
+            let (p3_evals, p3_proofs) = p3_backend.open_at_point(&point).unwrap();
+            assert_eq!(p3_evals.len(), 1);
+            assert_eq!(p3_proofs.len(), 1);
+
+            // Note: Since p3-fri currently delegates to custom, evaluations should be similar
+            // In a full implementation, they might differ due to different blinding
+            eprintln!("Custom eval: {:?}, P3 eval: {:?}", custom_evals[0], p3_evals[0]);
+
+            let p3_verified = p3_backend.verify_openings(&p3_commits, &point, &p3_evals, &p3_proofs);
+            assert!(p3_verified, "P3 backend verification should pass");
+        }
+
+        eprintln!("✅ Configurable FRI backends test passed");
+    }
+
+    #[test]
+    fn test_adaptive_fri_oracle() {
+        // Test the adaptive oracle that maintains PolyOracle compatibility
+        let poly = Polynomial::new(vec![ExtF::from_u64(5), ExtF::from_u64(10)]);
+        let mut transcript = vec![];
+        
+        let mut adaptive_oracle = AdaptiveFriOracle::new(FriImpl::Custom, vec![poly.clone()], &mut transcript);
+        
+        // Test that it implements PolyOracle interface
+        let commits = adaptive_oracle.commit();
+        assert!(!commits.is_empty());
+        
+        let point = vec![ExtF::from_u64(7)];
+        let (evals, proofs) = adaptive_oracle.open_at_point(&point);
+        assert_eq!(evals.len(), 1);
+        assert_eq!(proofs.len(), 1);
+        
+        let verified = adaptive_oracle.verify_openings(&commits, &point, &evals, &proofs);
+        assert!(verified, "Adaptive oracle verification should pass");
+        
+        // Test implementation type access
+        assert_eq!(adaptive_oracle.impl_type(), FriImpl::Custom);
+        assert!(adaptive_oracle.domain_size() > 0);
+        
+        eprintln!("✅ Adaptive FRI oracle test passed");
+    }
+
+    #[test]
+    fn test_fri_impl_default() {
+        // Test that the default implementation is Custom
+        let default_impl = FriImpl::default();
+        assert_eq!(default_impl, FriImpl::Custom);
+        eprintln!("✅ Default FRI implementation is Custom");
+    }
+
+    #[test]
+    fn test_backend_factory_functions() {
+        // Test the factory functions work correctly
+        let poly = Polynomial::new(vec![ExtF::ONE, ExtF::from_u64(2)]);
+        let mut transcript = vec![];
+        
+        // Test backend creation
+        let backend = create_fri_backend(FriImpl::Custom, vec![poly], &mut transcript);
+        assert!(backend.domain_size() > 0);
+        
+        // Test verifier creation
+        let verifier = create_fri_verifier(FriImpl::Custom, 16);
+        assert_eq!(verifier.domain_size(), 16);
+        
+        eprintln!("✅ Backend factory functions test passed");
     }
 }
