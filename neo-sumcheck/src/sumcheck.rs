@@ -73,8 +73,9 @@ pub fn batched_sumcheck_prover(
     let mut challenges = Vec::with_capacity(ell);
     // Drive DRBG from challenger for blinding randomness
     let mut seed = [0u8; 32];
-    // Bind to transcript length and claims for domain sep
+    // Bind to transcript content and claims for domain separation (CRITICAL: for computational hiding)
     let mut challenger = NeoChallenger::new("neo_sumcheck_batched");
+    challenger.observe_bytes("transcript_prefix", transcript);  // HIDING FIX: Observe transcript for unique seeds
     challenger.observe_bytes("claims", &claims.len().to_be_bytes());
     for i in 0..4 {
         let limb = challenger.challenge_base(&format!("blind_seed_{}", i)).as_canonical_u64();

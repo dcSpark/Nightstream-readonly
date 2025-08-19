@@ -367,4 +367,31 @@ mod tests {
         // Note: This might not pass due to implementation details, but at least it shouldn't panic
         eprintln!("Dummy FRI verify result: {}", verify_result);
     }
+
+    #[test]
+    fn test_ivc_rejects_invalid_witness() {
+        let mut bad_state = FoldState::new(verifier_ccs());
+        bad_state.ccs_instance = Some((
+            CcsInstance { commitment: vec![], public_input: vec![], u: F::ZERO, e: F::ONE },
+            CcsWitness { z: vec![
+                embed_base_to_ext(F::from_u64(2)),
+                embed_base_to_ext(F::from_u64(3)),
+                embed_base_to_ext(F::from_u64(7)), // Invalid mul: should be 6
+                embed_base_to_ext(F::from_u64(5)),
+            ] },
+        ));
+        let committer = AjtaiCommitter::setup(TOY_PARAMS);
+        assert!(!bad_state.recursive_ivc(1, &committer), "Should reject invalid witness");
+    }
+
+    #[test]
+    fn test_extractor_varies_with_proof() {
+        let proof1 = Proof { transcript: vec![1u8, 2u8, 3u8, 4u8, 5u8] };
+        let proof2 = Proof { transcript: vec![10u8, 20u8, 30u8, 40u8, 50u8] };
+        
+        let wit1 = extractor(&proof1);
+        let wit2 = extractor(&proof2);
+        
+        assert_ne!(wit1.z, wit2.z, "Extractor should produce different witnesses for different proofs");
+    }
 }
