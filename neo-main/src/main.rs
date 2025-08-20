@@ -112,33 +112,87 @@ fn run_proof_generation_and_verification(impl_name: &str, log: &mut String) -> B
 fn main() {
     let mut log = String::new();
     
-    // Detect which FRI implementation is being used
-    let fri_impl = if cfg!(feature = "custom-fri") {
-        "CUSTOM FRI"
-    } else if cfg!(feature = "p3-fri") {
-        "p3-fri (Plonky3)"
+    writeln!(log, "\n=== FRI IMPLEMENTATION COMPARISON ===").unwrap();
+    writeln!(log, "Running proof generation and verification with BOTH implementations...").unwrap();
+    writeln!(log).unwrap();
+
+    // Test CUSTOM FRI (if available)
+    let custom_result = if cfg!(feature = "custom-fri") {
+        writeln!(log, "🔧 Testing CUSTOM FRI implementation...").unwrap();
+        Some(run_proof_generation_and_verification("CUSTOM FRI", &mut log))
     } else {
-        "Unknown FRI Implementation"
+        writeln!(log, "⚠️  CUSTOM FRI not available (feature not enabled)").unwrap();
+        None
     };
-    
-    writeln!(log, "\n=== {} BENCHMARK ===", fri_impl).unwrap();
-    writeln!(log, "Running proof generation and verification...").unwrap();
     writeln!(log).unwrap();
 
-    // Run single test with proper FRI implementation name
-    let result = run_proof_generation_and_verification(fri_impl, &mut log);
+    // Test p3-fri (if available)  
+    let p3_result = if cfg!(feature = "p3-fri") {
+        writeln!(log, "🔧 Testing p3-fri (Plonky3) implementation...").unwrap();
+        Some(run_proof_generation_and_verification("p3-fri (Plonky3)", &mut log))
+    } else {
+        writeln!(log, "⚠️  p3-fri not available (feature not enabled)").unwrap();
+        None
+    };
     writeln!(log).unwrap();
 
-    writeln!(log, "\n").unwrap();
+    // Generate FINAL PERFORMANCE SUMMARY
     writeln!(log, "==========================================").unwrap();
     writeln!(log, "🏁 FINAL PERFORMANCE SUMMARY").unwrap();
     writeln!(log, "==========================================").unwrap();
-    writeln!(log, "🔧 FRI Implementation: {}", fri_impl).unwrap();
-    writeln!(log, "Setup time:       {:>8.2} ms", result.setup_time.as_secs_f64() * 1000.0).unwrap();
-    writeln!(log, "Proof generation: {:>8.2} ms", result.proof_generation_time.as_secs_f64() * 1000.0).unwrap();
-    writeln!(log, "Verification:     {:>8.2} ms", result.verification_time.as_secs_f64() * 1000.0).unwrap();
-    writeln!(log, "Total time:       {:>8.2} ms", result.total_time.as_secs_f64() * 1000.0).unwrap();
-    writeln!(log, "Success:          {}", if result.success { "✅ PASSED" } else { "❌ FAILED" }).unwrap();
+    
+    match (custom_result, p3_result) {
+        (Some(custom), Some(p3)) => {
+            // Both implementations available - show comparison
+            writeln!(log, "📊 CUSTOM FRI vs p3-fri (Plonky3) Comparison:").unwrap();
+            writeln!(log, "").unwrap();
+            writeln!(log, "{:<20} {:>15} {:>15}", "Metric", "CUSTOM FRI", "p3-fri").unwrap();
+            writeln!(log, "----------------------------------------------------").unwrap();
+            writeln!(log, "{:<20} {:>12.2} ms {:>12.2} ms", "Setup time:", custom.setup_time.as_secs_f64() * 1000.0, p3.setup_time.as_secs_f64() * 1000.0).unwrap();
+            writeln!(log, "{:<20} {:>12.2} ms {:>12.2} ms", "Proof generation:", custom.proof_generation_time.as_secs_f64() * 1000.0, p3.proof_generation_time.as_secs_f64() * 1000.0).unwrap();
+            writeln!(log, "{:<20} {:>12.2} ms {:>12.2} ms", "Verification:", custom.verification_time.as_secs_f64() * 1000.0, p3.verification_time.as_secs_f64() * 1000.0).unwrap();
+            writeln!(log, "{:<20} {:>12.2} ms {:>12.2} ms", "Total time:", custom.total_time.as_secs_f64() * 1000.0, p3.total_time.as_secs_f64() * 1000.0).unwrap();
+            writeln!(log, "----------------------------------------------------").unwrap();
+            
+            // Determine winner
+            let custom_total = custom.total_time.as_secs_f64() * 1000.0;
+            let p3_total = p3.total_time.as_secs_f64() * 1000.0;
+            let (winner, diff) = if custom_total < p3_total {
+                ("CUSTOM FRI", p3_total - custom_total)
+            } else {
+                ("p3-fri", custom_total - p3_total)
+            };
+            
+            writeln!(log, "").unwrap();
+            writeln!(log, "🏆 Winner: {} (faster by {:.2} ms)", winner, diff).unwrap();
+            writeln!(log, "").unwrap();
+            writeln!(log, "✅ Both implementations: {}", 
+                if custom.success && p3.success { "PASSED" } else { "SOME FAILED" }).unwrap();
+        },
+        (Some(custom), None) => {
+            // Only CUSTOM FRI available
+            writeln!(log, "🔧 CUSTOM FRI Results:").unwrap();
+            writeln!(log, "Setup time:       {:>8.2} ms", custom.setup_time.as_secs_f64() * 1000.0).unwrap();
+            writeln!(log, "Proof generation: {:>8.2} ms", custom.proof_generation_time.as_secs_f64() * 1000.0).unwrap();
+            writeln!(log, "Verification:     {:>8.2} ms", custom.verification_time.as_secs_f64() * 1000.0).unwrap();
+            writeln!(log, "Total time:       {:>8.2} ms", custom.total_time.as_secs_f64() * 1000.0).unwrap();
+            writeln!(log, "Success:          {}", if custom.success { "✅ PASSED" } else { "❌ FAILED" }).unwrap();
+        },
+        (None, Some(p3)) => {
+            // Only p3-fri available
+            writeln!(log, "🔧 p3-fri (Plonky3) Results:").unwrap();
+            writeln!(log, "Setup time:       {:>8.2} ms", p3.setup_time.as_secs_f64() * 1000.0).unwrap();
+            writeln!(log, "Proof generation: {:>8.2} ms", p3.proof_generation_time.as_secs_f64() * 1000.0).unwrap();
+            writeln!(log, "Verification:     {:>8.2} ms", p3.verification_time.as_secs_f64() * 1000.0).unwrap();
+            writeln!(log, "Total time:       {:>8.2} ms", p3.total_time.as_secs_f64() * 1000.0).unwrap();
+            writeln!(log, "Success:          {}", if p3.success { "✅ PASSED" } else { "❌ FAILED" }).unwrap();
+        },
+        (None, None) => {
+            writeln!(log, "❌ No FRI implementations available!").unwrap();
+            writeln!(log, "Please enable either 'custom-fri' or 'p3-fri' features.").unwrap();
+        }
+    }
+    
     writeln!(log, "==========================================").unwrap();
 
     print!("{}", log);
