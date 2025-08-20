@@ -807,7 +807,6 @@ fn test_fri_roundtrip_multi_deg() {
 }
 
 #[test]
-#[ignore]
 fn test_fri_tamper_rejection() {
     // Test: Tamper/Rejection Tests - ensure system rejects invalid proofs
     let poly = Polynomial::new(vec![ExtF::from_u64(1), ExtF::from_u64(2), ExtF::from_u64(3)]);
@@ -914,7 +913,6 @@ fn test_fri_extension_field_eval() {
 }
 
 #[test]
-#[ignore]
 fn test_fri_multiple_polynomials() {
     // Test with multiple polynomials in one oracle
     let poly1 = Polynomial::new(vec![ExtF::from_u64(1), ExtF::from_u64(2)]);
@@ -947,7 +945,6 @@ fn test_fri_multiple_polynomials() {
 }
 
 #[test]
-#[ignore]
 fn test_fri_consistency_across_points() {
     // Test that the same polynomial gives consistent results at different points
     let poly = Polynomial::new(vec![ExtF::from_u64(1), ExtF::from_u64(2), ExtF::from_u64(3)]);

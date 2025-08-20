@@ -4,6 +4,11 @@ edition = { workspace = true }
 version = { workspace = true }
 authors = { workspace = true }
 
+[features]
+default = ["p3-fri"]
+custom-fri = ["neo-sumcheck/custom-fri"]
+p3-fri = ["neo-sumcheck/p3-fri"]
+
 [dependencies]
 neo-ring = { path = "../neo-ring" }
 neo-fields = { path = "../neo-fields" }
@@ -13,7 +18,7 @@ neo-commit = { path = "../neo-commit" }
 neo-ccs = { path = "../neo-ccs" }
 neo-fold = { path = "../neo-fold" }
 neo-modint = { path = "../neo-modint" }
-neo-sumcheck = { path = "../neo-sumcheck", features = ["p3-fri"] }
+neo-sumcheck = { path = "../neo-sumcheck" }
 rand = { workspace = true }
 p3-field = "0.3"
 p3-matrix = { workspace = true }

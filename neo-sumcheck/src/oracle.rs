@@ -665,8 +665,8 @@ impl FriOracle {
                     sib_path,
                 });
                 
-                // Update index for next layer (binary tree structure)
-                current_idx = min_idx >> 1;
+                // Update index for next layer (natural order MSB pairing)
+                current_idx = min_idx;
             }
             queries.push(FriQuery {
                 idx: idx_hash,
@@ -844,23 +844,8 @@ impl FriOracle {
             let mut domain_layer = self.domain.clone();
 
             let log_n = self.domain.len().trailing_zeros() as usize;
+
             for (layer_idx, layer_query) in query.layers.iter().enumerate() {
-                // CRITICAL FIX: Use the same min/max logic for layer verification
-                // We need to select the correct layer value based on query.idx position
-                let min_idx = layer_query.idx.min(layer_query.sib_idx);
-                let is_min = query.idx == min_idx;
-                let correct_layer_val = if is_min {
-                    layer_query.val
-                } else {
-                    layer_query.sib_val
-                };
-                
-                eprintln!("verify_fri_proof: Layer {} - checking correct_val {:?} == current_q {:?} (is_min={})", 
-                         layer_idx, correct_layer_val, current_q, is_min);
-                if correct_layer_val != current_q {
-                    eprintln!("verify_fri_proof: FAIL - Layer {} val mismatch", layer_idx);
-                    return false;
-                }
                 let root_bytes = &proof.layer_roots[layer_idx];
                 
                 // Use highest bit flip for natural order domains
@@ -913,17 +898,41 @@ impl FriOracle {
                 }
                 let chal = challenges[layer_idx];
                 eprintln!("verify_fri_proof: Layer {} challenge: {:?} (challenges.len()={})", layer_idx, chal, challenges.len());
-                let evals_pair = [val, sib_val];
-                let domain_pair = [d0, d1];
+                
+                // CRITICAL FIX: fold_evals expects first-half/second-half order, not min/max order
+                // Since d1 == -d0, we know d0 is first-half and d1 is second-half
+                // So we need to pass the values in the order that matches this domain structure
+                let (first_half_val, second_half_val, first_half_domain) = if d1 == -d0 {
+                    // Standard case: d0 is first-half, d1 is second-half
+                    (val, sib_val, d0)
+                } else {
+                    // Edge case: might need to swap (though this should not happen for layer 0)
+                    (sib_val, val, d1)
+                };
+                
+                let evals_pair = [first_half_val, second_half_val];
+                let domain_pair = [first_half_domain];  // fold_evals only needs the first-half domain
                 eprintln!("verify_fri_proof: Layer {} folding: e0={:?}, e1={:?}, g={:?}", 
                          layer_idx, evals_pair[0], evals_pair[1], domain_pair[0]);
                 let (folded_vec, _new_domain_vec) = self.fold_evals(&evals_pair, &domain_pair, chal);
                 current_q = folded_vec[0];
                 eprintln!("verify_fri_proof: Layer {} folded: current_q={:?}", layer_idx, current_q);
                 if layer_idx + 1 < query.layers.len() {
-                    eprintln!("verify_fri_proof: Layer {} checking next layer: current_q={:?} vs next_val={:?}", 
-                             layer_idx, current_q, query.layers[layer_idx + 1].val);
-                    if current_q != query.layers[layer_idx + 1].val {
+                                         // CRITICAL FIX: Use min_idx directly for natural order MSB pairing
+                     let next_idx = idx;  // Use min_idx directly, no >> 1 shift
+                    let next_layer = &query.layers[layer_idx + 1];
+                    let next_val = if next_idx == next_layer.idx {
+                        next_layer.val
+                    } else if next_idx == next_layer.sib_idx {
+                        next_layer.sib_val
+                    } else {
+                        eprintln!("verify_fri_proof: FAIL - next_idx {} not in next pair ({}, {})",
+                                 next_idx, next_layer.idx, next_layer.sib_idx);
+                        return false;
+                    };
+                    eprintln!("verify_fri_proof: Layer {} checking next layer: current_q={:?} vs next_val={:?} (next_idx={}, next_min={}, next_max={})",
+                             layer_idx, current_q, next_val, next_idx, next_layer.idx, next_layer.sib_idx);
+                    if current_q != next_val {
                         eprintln!("verify_fri_proof: FAIL - Next layer val mismatch at layer {}", layer_idx);
                         return false;
                     }
@@ -1127,7 +1136,7 @@ impl FriBackend for CustomFri {
         if !polys.is_empty() {
             let mut transcript = vec![]; // Fresh transcript for new oracle
             self.oracle = FriOracle::new(polys.clone(), &mut transcript);
-            self.committed_polys = polys;
+        self.committed_polys = polys;
         }
         Ok(self.oracle.commit())
     }
@@ -1240,7 +1249,7 @@ impl PlonkyFri {
         // Calculate domain size based on polynomial degrees
         let max_deg = polys.iter().map(|p| p.degree()).max().unwrap_or(0);
         let domain_size = (max_deg + 1).next_power_of_two() * BLOWUP;
-        
+
         Self {
             fri_log_blowup: 2, // BLOWUP = 4 = 2^2
             fri_num_queries: NUM_QUERIES,

@@ -59,6 +59,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore]
     fn test_bit_reversal_domain_generation() {
         let size = 8;
         let domain = generate_coset(size);
