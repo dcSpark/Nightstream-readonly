@@ -55,9 +55,6 @@ fn test_domain_sep_multilinear() {
 
 #[test]
 fn test_multilinear_zk_blinding() {
-    if std::env::var("RUN_LONG_TESTS").is_err() {
-        return;
-    }
     let claim = from_base(F::from_u64(4));
     let mut rng = rng();
     let mut evals1 = vec![ExtF::ONE; 4];
@@ -215,9 +212,6 @@ fn prop_blind_vanishes(coeffs: Vec<i64>) -> bool {
 
 #[test]
 fn test_multilinear_sumcheck_roundtrip() {
-    if std::env::var("RUN_LONG_TESTS").is_err() {
-        return;
-    }
     let ell = 3;
     let n = 1 << ell;
     let original_evals: Vec<ExtF> = (0..n - 2)
@@ -247,9 +241,6 @@ fn test_multilinear_sumcheck_roundtrip() {
 
 #[test]
 fn test_quadratic_sumcheck() {
-    if std::env::var("RUN_LONG_TESTS").is_err() {
-        return;
-    }
     let num_vars = 3;
     struct QuadraticPoly {
         num_vars: usize,
@@ -306,9 +297,6 @@ fn test_quadratic_sumcheck() {
 
 #[test]
 fn test_linear_sumcheck() {
-    if std::env::var("RUN_LONG_TESTS").is_err() {
-        return;
-    }
     let num_vars = 2;
 
     struct LinearPoly {

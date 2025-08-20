@@ -779,7 +779,6 @@ fn test_backend_factory_functions() {
 // following the strategic guidance to focus on Neo's internal correctness
 
 #[test]
-#[ignore]
 fn test_fri_roundtrip_multi_deg() {
     // Test 1: Basic Roundtrip Tests for multiple degrees
     for deg in [0, 1, 3, 7] {  // Constants, linear, cubic, higher
