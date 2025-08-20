@@ -192,10 +192,6 @@ pub fn bit_reversed_sibling(i: usize, log_n: usize) -> usize {
     bit_reverse(logical_sib, log_n)
 }
 
-
-
-
-
 pub fn generate_coset(size: usize) -> Vec<ExtF> {
     assert!(size.is_power_of_two(), "Size must be power of 2");
     let omega = from_base(F::from_u64(PRIMITIVE_ROOT_2_32));
