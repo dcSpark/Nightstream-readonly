@@ -13,5 +13,5 @@ pub use sumcheck::{
     multilinear_sumcheck_verifier,
 };
 
-pub use neo_fields::{from_base, ExtF, ExtFieldNorm, F};
+pub use neo_fields::{from_base, ExtF, ExtFieldNormTrait, F};
 pub use neo_poly::Polynomial;

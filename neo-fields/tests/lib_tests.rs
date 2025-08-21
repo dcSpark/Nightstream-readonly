@@ -35,16 +35,15 @@ fn test_inverse_roundtrip() {
         if val == F::ZERO {
             val = F::ONE;
         }
-        let inv = inverse(val);
+        let inv = val.inverse();
         assert_eq!(val * inv, F::ONE);
     }
 }
 
 #[test]
 fn test_extf_ops() {
-    let mut rng = rand::rng();
-    let x = random_extf(&mut rng);
-    let y = random_extf(&mut rng);
+    let x = random_extf();
+    let y = random_extf();
     let z = x * y;
     assert_eq!(z * y.inverse(), x);
 }
@@ -61,7 +60,7 @@ fn test_extf_traits() {
 fn test_extension_field_structure() {
     // Test that our extension field has the correct structure
     let _a = from_base(F::from_u64(2));
-    let b = from_base_pair(0, 1); // This represents the primitive element α where α² = 7
+    let b = ExtF::new_imag(F::ONE); // This represents the primitive element α where α² = 7
     
     // Verify α² = 7 in our extension
     let alpha_squared = b * b;

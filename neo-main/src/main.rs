@@ -1,4 +1,4 @@
-use neo_fold::FoldState;
+use neo_fold::{FoldState, spartan_compress, spartan_verify};
 use neo_ccs::{mv_poly, CcsInstance, CcsStructure, CcsWitness};
 use neo_commit::{AjtaiCommitter, TOY_PARAMS};
 use neo_fields::{from_base, ExtF, F};
@@ -109,8 +109,94 @@ fn run_proof_generation_and_verification(impl_name: &str, log: &mut String) -> B
     }
 }
 
+fn run_recursive_ivc_demo(log: &mut String) -> BenchmarkResults {
+    writeln!(log, "=== Running Recursive IVC with Spartan Demo ===").unwrap();
+    let total_start = Instant::now();
+
+    // Setup phase
+    let setup_start = Instant::now();
+    let structure = setup_test_structure();
+    let params = TOY_PARAMS;
+    let committer = AjtaiCommitter::setup_unchecked(params);
+
+    // Setup initial CCS instance for recursive IVC
+    let z_base = vec![F::from_u64(2), F::from_u64(3), F::from_u64(6)]; // 2 * 3 = 6
+    let z = z_base.iter().copied().map(from_base).collect();
+    let witness = CcsWitness { z };
+    let z_mat = decomp_b(&z_base, params.b, params.d);
+    let w = AjtaiCommitter::pack_decomp(&z_mat, &params);
+    let mut t = Vec::new();
+    let (commit, _, _, _) = committer.commit(&w, &mut t).expect("commit");
+    let instance = CcsInstance {
+        commitment: commit,
+        public_input: vec![],
+        u: F::ZERO,
+        e: F::ONE,
+    };
+    let setup_time = setup_start.elapsed();
+    writeln!(log, "Setup completed in {:.2} ms", setup_time.as_secs_f64() * 1000.0).unwrap();
+
+    // Recursive IVC phase
+    let ivc_start = Instant::now();
+    let mut state = FoldState::new(structure.clone());
+    state.ccs_instance = Some((instance.clone(), witness.clone()));
+    
+    writeln!(log, "Starting recursive IVC with depth 3...").unwrap();
+    let ivc_result = state.recursive_ivc(3, &committer);
+    let ivc_time = ivc_start.elapsed();
+    writeln!(log, "Recursive IVC completed in {:.2} ms", ivc_time.as_secs_f64() * 1000.0).unwrap();
+
+    // Test Spartan compression directly
+    let spartan_start = Instant::now();
+    writeln!(log, "Testing Spartan compression directly...").unwrap();
+    match spartan_compress(&structure, &instance, &witness, b"test_transcript") {
+        Ok((proof, vk)) => {
+            writeln!(log, "Spartan compression successful: proof.len()={}, vk.len()={}", 
+                    proof.len(), vk.len()).unwrap();
+            
+            // Test verification (NARK mode - dummy verification)
+            let transcript = b"demo_transcript";
+            
+            match spartan_verify(&proof, &vk, &structure, &instance, transcript) {
+                Ok(true) => writeln!(log, "Spartan verification: PASSED").unwrap(),
+                Ok(false) => writeln!(log, "Spartan verification: FAILED").unwrap(),
+                Err(e) => writeln!(log, "Spartan verification error: {}", e).unwrap(),
+            }
+        },
+        Err(e) => {
+            writeln!(log, "Spartan compression failed: {}", e).unwrap();
+        }
+    }
+    let spartan_time = spartan_start.elapsed();
+    writeln!(log, "Spartan test completed in {:.2} ms", spartan_time.as_secs_f64() * 1000.0).unwrap();
+
+    let total_time = total_start.elapsed();
+
+    if ivc_result {
+        writeln!(log, "Recursive IVC succeeded!").unwrap();
+    } else {
+        writeln!(log, "Recursive IVC failed!").unwrap();
+    }
+    
+    BenchmarkResults {
+        setup_time,
+        proof_generation_time: ivc_time,
+        verification_time: spartan_time,
+        total_time,
+        success: ivc_result,
+    }
+}
+
 fn main() {
     let mut log = String::new();
+    
+    writeln!(log, "\n=== NEO + SPARTAN RECURSIVE IVC DEMO ===").unwrap();
+    writeln!(log, "Running Neo folding with Spartan compression for recursive IVC...").unwrap();
+    writeln!(log).unwrap();
+
+    // Run the recursive IVC demo first
+    let ivc_result = run_recursive_ivc_demo(&mut log);
+    writeln!(log).unwrap();
     
     writeln!(log, "\n=== FRI IMPLEMENTATION COMPARISON ===").unwrap();
     writeln!(log, "Running proof generation and verification with BOTH implementations...").unwrap();
@@ -140,6 +226,15 @@ fn main() {
     writeln!(log, "==========================================").unwrap();
     writeln!(log, "🏁 FINAL PERFORMANCE SUMMARY").unwrap();
     writeln!(log, "==========================================").unwrap();
+    
+    // Show IVC results first
+    writeln!(log, "🔄 Recursive IVC Results:").unwrap();
+    writeln!(log, "Setup time:       {:>8.2} ms", ivc_result.setup_time.as_secs_f64() * 1000.0).unwrap();
+    writeln!(log, "IVC execution:    {:>8.2} ms", ivc_result.proof_generation_time.as_secs_f64() * 1000.0).unwrap();
+    writeln!(log, "Spartan test:     {:>8.2} ms", ivc_result.verification_time.as_secs_f64() * 1000.0).unwrap();
+    writeln!(log, "Total time:       {:>8.2} ms", ivc_result.total_time.as_secs_f64() * 1000.0).unwrap();
+    writeln!(log, "Success:          {}", if ivc_result.success { "✅ PASSED" } else { "❌ FAILED" }).unwrap();
+    writeln!(log, "").unwrap();
     
     match (custom_result, p3_result) {
         (Some(custom), Some(p3)) => {

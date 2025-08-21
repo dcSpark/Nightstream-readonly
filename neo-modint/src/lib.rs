@@ -261,8 +261,8 @@ impl Coeff for ExtF {
         <F as PrimeField64>::ORDER_U64
     }
 
-    fn random(rng: &mut impl Rng) -> Self {
-        neo_fields::random_extf(rng)
+    fn random(_rng: &mut impl Rng) -> Self {
+        neo_fields::random_extf()
     }
 
     fn inverse(&self) -> Self {

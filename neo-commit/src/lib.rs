@@ -1,4 +1,4 @@
-use neo_fields::{from_base, ExtF, ExtFieldNorm, F};
+use neo_fields::{from_base, ExtF, ExtFieldNormTrait, F};
 use neo_modint::{Coeff, ModInt};
 use neo_ring::RingElement;
 use p3_field::{PrimeCharacteristicRing, PrimeField64};

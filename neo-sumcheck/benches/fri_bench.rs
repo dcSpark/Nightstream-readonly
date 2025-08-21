@@ -52,7 +52,7 @@ fn to_p3(e: ExtF) -> Val {
 fn bench_fri(c: &mut Criterion, log_deg: usize) {
     let mut rng = rng();
     let degree = (1 << log_deg) - 1;
-    let coeffs: Vec<ExtF> = (0..=degree).map(|_| random_extf(&mut rng)).collect();
+    let coeffs: Vec<ExtF> = (0..=degree).map(|_| random_extf()).collect();
     let poly = Polynomial::new(coeffs.clone());
 
     let mut neo_oracle = FriOracle::new_with_blinds(vec![poly.clone()], vec![ExtF::ZERO]);

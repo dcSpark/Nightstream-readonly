@@ -5,6 +5,8 @@ use p3_field::PrimeCharacteristicRing;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
 use std::sync::Arc;
+// use ark_r1cs_std::fields::fp::FpVar;
+// use ark_relations::r1cs::ConstraintSystemRef;
 
 /// Trait for querying the total degree of a polynomial.
 pub trait Degree {
@@ -21,7 +23,7 @@ pub trait MvPolynomial: Send + Sync + Degree {
 }
 
 /// Convenience wrapper for closures with an associated degree.
-struct ClosureMv<F>
+pub struct ClosureMv<F>
 where
     F: Fn(&[ExtF]) -> ExtF + Send + Sync,
 {
@@ -218,4 +220,5 @@ pub fn add_lookups(structure: &mut CcsStructure, table: Vec<F>) {
     structure.max_deg = structure.f.degree();
 }
 
-
+// Spartan2-specific R1CS conversion functions removed
+// Plonky3 handles R1CS conversion natively with field operations

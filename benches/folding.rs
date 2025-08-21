@@ -2,7 +2,7 @@ use criterion::{criterion_group, criterion_main, Criterion};
 use neo_ccs::{mv_poly, CcsInstance, CcsStructure, CcsWitness};
 use neo_commit::{AjtaiCommitter, NeoParams, SECURE_PARAMS};
 use neo_decomp::decomp_b;
-use neo_fields::{ExtF, F};
+use neo_fields::{ExtF, F, from_base};
 use neo_fold::{pi_ccs, pi_rlc, FoldState};
 use neo_ring::RingElement;
 use neo_modint::ModInt;
@@ -110,15 +110,15 @@ fn large_fold_bench(c: &mut Criterion) {
     z2[1] = b2;
     z2[2] = c2;
 
-    let witness1 = CcsWitness { z: z1.clone() };
-    let witness2 = CcsWitness { z: z2.clone() };
+    let witness1 = CcsWitness { z: z1.iter().map(|&x| from_base(x)).collect() };
+    let witness2 = CcsWitness { z: z2.iter().map(|&x| from_base(x)).collect() };
 
     let committer = AjtaiCommitter::setup_unchecked(params);
 
     let z1_mat = decomp_b(&z1, params.b, params.d);
     let w1 = AjtaiCommitter::pack_decomp(&z1_mat, &params);
     let mut t1 = Vec::new();
-    let (commit1, _, _, _) = committer.commit(&w1, &mut t1);
+    let (commit1, _, _, _) = committer.commit(&w1, &mut t1).unwrap();
     let instance1 = CcsInstance {
         commitment: commit1,
         public_input: vec![],
@@ -129,7 +129,7 @@ fn large_fold_bench(c: &mut Criterion) {
     let z2_mat = decomp_b(&z2, params.b, params.d);
     let w2 = AjtaiCommitter::pack_decomp(&z2_mat, &params);
     let mut t2 = Vec::new();
-    let (commit2, _, _, _) = committer.commit(&w2, &mut t2);
+    let (commit2, _, _, _) = committer.commit(&w2, &mut t2).unwrap();
     let instance2 = CcsInstance {
         commitment: commit2,
         public_input: vec![],

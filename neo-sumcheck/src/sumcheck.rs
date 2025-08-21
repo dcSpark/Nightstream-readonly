@@ -1,13 +1,13 @@
 use crate::fiat_shamir::{batch_unis, fiat_shamir_challenge};
 use crate::challenger::NeoChallenger;
 use crate::oracle::serialize_comms;
-use crate::{from_base, Commitment, ExtF, ExtFieldNorm, PolyOracle, Polynomial, UnivPoly, F};
+use crate::{from_base, Commitment, ExtF, PolyOracle, Polynomial, UnivPoly, F};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use rand_distr::{Distribution, StandardNormal};
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::SeedableRng;
 use thiserror::Error;
-use neo_fields::MAX_BLIND_NORM;
+use neo_fields::{MAX_BLIND_NORM, ExtFieldNormTrait};
 
 /// Batched sum-check prover for multiple polynomial instances
 const ZK_SIGMA: f64 = 3.2;
