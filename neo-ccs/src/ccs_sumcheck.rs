@@ -3,8 +3,7 @@ use neo_fields::{embed_base_to_ext, from_base};
 use neo_sumcheck::{
     challenger::NeoChallenger,
     fiat_shamir::{batch_unis, fiat_shamir_challenge},
-    oracle::serialize_comms,
-    Commitment, ExtF, PolyOracle, Polynomial, F,
+    ExtF, Polynomial, F,
 };
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha20Rng;
@@ -21,8 +20,6 @@ pub fn ccs_sumcheck_verifier(
     claim: ExtF,
     msgs: &[(Polynomial<ExtF>, ExtF)],
     _norm_bound: u64,
-    comms: &[Commitment],
-    oracle: &mut impl PolyOracle,
     transcript: &mut Vec<u8>,
 ) -> Option<(Vec<ExtF>, ExtF)> {
     transcript.extend(b"norm_alpha");
@@ -54,26 +51,9 @@ pub fn ccs_sumcheck_verifier(
         r.push(challenge);
     }
 
-    // Toy mode (no PCS): skip openings and return the algebraic current.
-    if comms.is_empty() {
-        return Some((r, current));
-    }
-
-    transcript.extend(serialize_comms(comms));
-
-    let (evals, proofs) = oracle.open_at_point(&r);
-    if !oracle.verify_openings(comms, &r, &evals, &proofs) {
-        return None;
-    }
-    // Note: We don't check norm of evals here because they are actual polynomial evaluations,
-    // not blinding values. The norm check should only apply to blinding noise.
-    let final_eval = match evals.get(0) {
-        Some(&e) => e,
-        None => return Some((r, current)),
-    };
-
-    if final_eval == current {
-        Some((r, final_eval))
+    // NARK mode: Direct polynomial check - verify that current reduces to zero
+    if current == ExtF::ZERO {
+        Some((r, ExtF::ZERO))
     } else {
         None
     }
@@ -93,9 +73,8 @@ pub fn ccs_sumcheck_prover(
     instance: &CcsInstance,
     witness: &CcsWitness,
     norm_bound: u64,
-    oracle: &mut impl PolyOracle,
     transcript: &mut Vec<u8>,
-) -> Result<(Vec<(Polynomial<ExtF>, ExtF)>, Vec<Commitment>), ProverError> {
+) -> Result<Vec<(Polynomial<ExtF>, ExtF)>, ProverError> {
     let m = structure.num_constraints;
     let l_ccs = (m as f64).log2().ceil() as usize;
 
@@ -160,8 +139,7 @@ pub fn ccs_sumcheck_prover(
     }
     let mut rng = ChaCha20Rng::from_seed(seed);
 
-    let comms = oracle.commit();
-    transcript.extend(serialize_comms(&comms));
+    // NARK mode: No commitments needed
 
     fn naive_mul(a: &[ExtF], b: &[ExtF]) -> Vec<ExtF> {
         let mut res = vec![ExtF::ZERO; a.len() + b.len() - 1];
@@ -349,7 +327,7 @@ pub fn ccs_sumcheck_prover(
             witness_table.truncate(half);
             alpha_table.truncate(half);
         }
-        return Ok((msgs, comms));
+        return Ok(msgs);
     }
 
     for round in 0..l {
@@ -461,7 +439,7 @@ pub fn ccs_sumcheck_prover(
         alpha_table.truncate(half);
     }
 
-    Ok((msgs, comms))
+    Ok(msgs)
 }
 
 

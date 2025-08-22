@@ -9,6 +9,7 @@ neo-fields = { path = "../neo-fields" }
 p3-field = "0.3"
 rand = { workspace = true }
 quickcheck = { version = "1", optional = true }
+subtle = "2.4"
 
 [features]
 quickcheck = ["dep:quickcheck"]

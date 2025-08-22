@@ -20,55 +20,26 @@ p3-poseidon2 = "0.3.0"
 p3-symmetric = "0.3.0"
 p3-goldilocks = { workspace = true }
 thiserror = "1.0"
-# blake3 removed - not used in NARK mode
+blake3 = "1.5"
 byteorder = "1.5"
 subtle = "2.5"
 
-# Optional p3-fri dependencies (enabled by p3-fri feature)
-p3-fri = { version = "0.3.0", optional = true }
-p3-commit = { version = "0.3.0", optional = true }
-p3-challenger = { version = "0.3.0", optional = true }
-p3-dft = { version = "0.3.0", optional = true }
-p3-matrix = { version = "0.3.0", optional = true }
-p3-merkle-tree = { version = "0.3.0", optional = true }
-p3-maybe-rayon = { version = "0.3.0", optional = true }
-p3-util = { version = "0.3.0", optional = true }
-tracing = { version = "0.1", optional = true }
-bincode = { version = "1", optional = true }
+# FRI dependencies removed - using direct polynomial checks in NARK mode
 
 [dev-dependencies]
 quickcheck = "1"
 quickcheck_macros = "1"
 criterion = { version = "0.5", features = ["html_reports"] }
-p3-fri = "0.3.0"
-p3-commit = "0.3.0"
-p3-challenger = "0.3.0"
-p3-dft = "0.3.0"
 p3-field = "0.3.0"
-p3-matrix = "0.3.0"
 p3-goldilocks = "0.3.0"
 p3-poseidon2 = "0.3.0"
-p3-merkle-tree = "0.3.0"
-p3-maybe-rayon = "0.3.0"
 p3-symmetric = "0.3.0"
 rand = { workspace = true }
-bincode = "1"
 
 [features]
-default = ["custom-fri"]
-custom-fri = []   # Use custom FRI implementation (default)
-p3-fri = ["dep:p3-fri", "dep:p3-commit", "dep:p3-challenger", "dep:p3-dft", "dep:p3-matrix", "dep:p3-merkle-tree", "dep:p3-maybe-rayon", "dep:p3-util", "dep:tracing", "dep:bincode"]  # Use Plonky3 FRI
-fri_pow_16 = []   # enable to test with production-like PoW
-fri_debug = []    # optional: enable verbose eprintln!s
+default = []
+# FRI features removed - using direct polynomial checks in NARK mode
 
 [[bench]]
 name = "sumcheck"
-harness = false
-
-[[bench]]
-name = "fri_bench"
-harness = false
-
-[[bench]]
-name = "fri_backends"
 harness = false

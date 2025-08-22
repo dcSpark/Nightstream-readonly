@@ -1,6 +1,6 @@
 use neo_arithmetize::fibonacci_ccs;
 use neo_ccs::{CcsInstance, CcsWitness, check_satisfiability};
-use neo_commit::{AjtaiCommitter, TOY_PARAMS};
+use neo_commit::{AjtaiCommitter, SECURE_PARAMS};
 use neo_decomp::decomp_b;
 use neo_fields::{embed_base_to_ext, ExtF, F};
 use neo_fold::FoldState;
@@ -12,8 +12,8 @@ use std::time::Instant;
 fn main() {
     println!("Neo Lattice Demo: Proving Fibonacci Series");
 
-    // Toy parameters for fast demo
-    let committer = AjtaiCommitter::setup_unchecked(TOY_PARAMS);
+    // Secure parameters for production use
+    let committer = AjtaiCommitter::setup_unchecked(SECURE_PARAMS);
 
     // High-level input: Length of Fibonacci series to prove (toy size)
     let fib_length = 3;

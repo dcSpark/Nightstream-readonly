@@ -53,12 +53,8 @@ p3-symmetric = "0.3.0"   # Poseidon2 hashing for Fiat-Shamir
 criterion = { version = "0.5.1", features = ["html_reports"] }
 rayon = "1.10"
 
-# Additional p3 crates for benchmarks and advanced features
+# Additional p3 crates for benchmarks only
 p3-challenger = "0.3.0"  # Used in benchmarks
-p3-commit = "0.3.0"      # Used in benchmarks  
-p3-dft = "0.3.0"         # Used in benchmarks
-p3-fri = "0.3.0"         # Used in benchmarks and FRI implementation
-p3-merkle-tree = "0.3.0" # Used in benchmarks
 
 # NARK mode: Pure field operations, no external SNARK dependencies needed
 # Future: Will add Spartan2 dependencies when compatibility is resolved
