@@ -1,5 +1,5 @@
 use neo_ccs::{ccs_sumcheck_prover, mv_poly, CcsInstance, CcsStructure, CcsWitness};
-use neo_sumcheck::{from_base, ExtF, FnOracle, F};
+use neo_sumcheck::{from_base, ExtF, F};
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::dense::RowMajorMatrix;
 use rand::Rng;

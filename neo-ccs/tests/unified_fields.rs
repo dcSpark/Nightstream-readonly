@@ -2,7 +2,7 @@ use neo_ccs::{
     ccs_sumcheck_prover, check_satisfiability, mv_poly, CcsInstance, CcsStructure, CcsWitness,
 };
 use neo_fields::{embed_base_to_ext, project_ext_to_base, ExtF, F};
-use neo_sumcheck::FnOracle;
+// Oracle removed in NARK mode
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::dense::RowMajorMatrix;
 

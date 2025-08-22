@@ -1,6 +1,6 @@
 use neo_ccs::*;
 use neo_fields::{from_base, ExtF, F};
-use neo_sumcheck::{fiat_shamir::fiat_shamir_challenge, FnOracle};
+use neo_sumcheck::fiat_shamir::fiat_shamir_challenge;
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_matrix::dense::RowMajorMatrix;
 
