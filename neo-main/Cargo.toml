@@ -14,6 +14,7 @@ neo-ccs = { path = "../neo-ccs" }
 neo-fold = { path = "../neo-fold" }
 neo-modint = { path = "../neo-modint" }
 neo-sumcheck = { path = "../neo-sumcheck", default-features = false }
+neo-arithmetize = { path = "../neo-arithmetize" }
 rand = { workspace = true }
 p3-field = "0.3"
 p3-matrix = { workspace = true }
