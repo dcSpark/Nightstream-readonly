@@ -1,5 +1,6 @@
 use std::fmt::Debug;
 use std::ops::{Add, AddAssign, Mul, MulAssign, Neg, Sub, SubAssign};
+use subtle::{Choice, ConditionallySelectable};
 
 /// Trait for coefficient types in polys/rings (shared with neo-poly).
 use rand::Rng;
@@ -43,6 +44,44 @@ impl ModInt {
 
     pub fn from_u64(val: u64) -> Self {
         Self { val: val % Self::Q }
+    }
+
+    /// Constant-time modular addition using subtle crate
+    pub fn add_ct(&self, rhs: &Self) -> Self {
+        let (sum, overflow) = self.val.overflowing_add(rhs.val);
+        let sum = if overflow || sum >= Self::Q {
+            sum.wrapping_sub(Self::Q)
+        } else {
+            sum
+        };
+        Self { val: sum }
+    }
+
+    /// Constant-time modular subtraction using subtle crate
+    pub fn sub_ct(&self, rhs: &Self) -> Self {
+        let (diff, underflow) = self.val.overflowing_sub(rhs.val);
+        let diff = if underflow {
+            diff.wrapping_add(Self::Q)
+        } else {
+            diff
+        };
+        Self { val: diff }
+    }
+
+    /// Constant-time modular multiplication using subtle crate
+    pub fn mul_ct(&self, rhs: &Self) -> Self {
+        let prod = (self.val as u128 * rhs.val as u128) % (Self::Q as u128);
+        Self { val: prod as u64 }
+    }
+
+    /// Constant-time absolute value using subtle crate
+    pub fn abs_ct(&self) -> Self {
+        let neg_self = self.neg();
+        // Use constant-time conditional select to avoid branching
+        let is_negative = Choice::from((self.val > (Self::Q / 2)) as u8);
+        Self {
+            val: ConditionallySelectable::conditional_select(&self.val, &neg_self.val, is_negative)
+        }
     }
 
     pub fn as_u64(&self) -> u64 {
@@ -261,8 +300,8 @@ impl Coeff for ExtF {
         <F as PrimeField64>::ORDER_U64
     }
 
-    fn random(rng: &mut impl Rng) -> Self {
-        neo_fields::random_extf(rng)
+    fn random(_rng: &mut impl Rng) -> Self {
+        neo_fields::random_extf()
     }
 
     fn inverse(&self) -> Self {

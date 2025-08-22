@@ -14,11 +14,12 @@ neo-ccs = { path = "../neo-ccs" }
 neo-fold = { path = "../neo-fold" }
 neo-modint = { path = "../neo-modint" }
 neo-sumcheck = { path = "../neo-sumcheck", default-features = false }
+neo-arithmetize = { path = "../neo-arithmetize" }
+neo-orchestrator = { path = "../neo-orchestrator" }
 rand = { workspace = true }
 p3-field = "0.3"
 p3-matrix = { workspace = true }
 
 [features]
-default = ["custom-fri", "p3-fri"]
-custom-fri = ["neo-sumcheck/custom-fri"]
-p3-fri = ["neo-sumcheck/p3-fri"]
+default = []
+# FRI features removed - using direct polynomial checks in NARK mode

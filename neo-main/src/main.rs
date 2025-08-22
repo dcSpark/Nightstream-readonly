@@ -1,199 +1,104 @@
-use neo_fold::FoldState;
-use neo_ccs::{mv_poly, CcsInstance, CcsStructure, CcsWitness};
-use neo_commit::{AjtaiCommitter, TOY_PARAMS};
-use neo_fields::{from_base, ExtF, F};
+use neo_arithmetize::fibonacci_ccs;
+use neo_ccs::{CcsInstance, CcsWitness, check_satisfiability};
+use neo_commit::{AjtaiCommitter, SECURE_PARAMS};
 use neo_decomp::decomp_b;
-use p3_matrix::dense::RowMajorMatrix;
+use neo_fields::{embed_base_to_ext, ExtF, F};
+use neo_orchestrator::{prove, verify};
+use neo_ring::RingElement;
+use neo_modint::ModInt;
 use p3_field::PrimeCharacteristicRing;
-use std::time::{Duration, Instant};
-use std::fmt::Write;
-
-fn setup_test_structure() -> CcsStructure {
-    let a = RowMajorMatrix::new(vec![F::ONE, F::ZERO, F::ZERO, F::ONE, F::ZERO, F::ZERO], 3);
-    let b = RowMajorMatrix::new(vec![F::ZERO, F::ONE, F::ZERO, F::ZERO, F::ONE, F::ZERO], 3);
-    let c = RowMajorMatrix::new(vec![F::ZERO, F::ZERO, F::ONE, F::ZERO, F::ZERO, F::ONE], 3);
-    let mats = vec![a, b, c];
-    let f = mv_poly(
-        |inputs: &[ExtF]| {
-            if inputs.len() != 3 {
-                ExtF::ZERO
-            } else {
-                inputs[0] * inputs[1] - inputs[2]
-            }
-        },
-        2,
-    );
-    CcsStructure::new(mats, f)
-}
-
-struct BenchmarkResults {
-    setup_time: Duration,
-    proof_generation_time: Duration,
-    verification_time: Duration,
-    total_time: Duration,
-    success: bool,
-}
-
-
-
-fn run_proof_generation_and_verification(impl_name: &str, log: &mut String) -> BenchmarkResults {
-    writeln!(log, "=== Running proof generation and verification with {} ===", impl_name).unwrap();
-    let total_start = Instant::now();
-
-    // Setup phase
-    let setup_start = Instant::now();
-    let structure = setup_test_structure();
-    let params = TOY_PARAMS;
-    let committer = AjtaiCommitter::setup_unchecked(params);
-
-    // Setup first instance
-    let z1_base = vec![F::ONE, F::from_u64(3), F::from_u64(3)];
-    let z1 = z1_base.iter().copied().map(from_base).collect();
-    let witness1 = CcsWitness { z: z1 };
-    let z1_mat = decomp_b(&z1_base, params.b, params.d);
-    let w1 = AjtaiCommitter::pack_decomp(&z1_mat, &params);
-    let mut t1 = Vec::new();
-    let (commit1, _, _, _) = committer.commit(&w1, &mut t1).expect("commit");
-    let instance1 = CcsInstance {
-        commitment: commit1,
-        public_input: vec![],
-        u: F::ZERO,
-        e: F::ONE,
-    };
-
-    // Setup second instance
-    let z2_base = vec![F::from_u64(2), F::from_u64(2), F::from_u64(4)];
-    let z2 = z2_base.iter().copied().map(from_base).collect();
-    let witness2 = CcsWitness { z: z2 };
-    let z2_mat = decomp_b(&z2_base, params.b, params.d);
-    let w2 = AjtaiCommitter::pack_decomp(&z2_mat, &params);
-    let mut t2 = Vec::new();
-    let (commit2, _, _, _) = committer.commit(&w2, &mut t2).expect("commit");
-    let instance2 = CcsInstance {
-        commitment: commit2,
-        public_input: vec![],
-        u: F::ZERO,
-        e: F::ONE,
-    };
-    let setup_time = setup_start.elapsed();
-    writeln!(log, "Setup completed in {:.2} ms", setup_time.as_secs_f64() * 1000.0).unwrap();
-
-    // Proof generation phase
-    let proof_start = Instant::now();
-    let mut state = FoldState::new(structure.clone());
-    let proof = state.generate_proof((instance1.clone(), witness1.clone()), (instance2.clone(), witness2.clone()), &committer);
-    let proof_generation_time = proof_start.elapsed();
-    writeln!(log, "Proof generation completed in {:.2} ms", proof_generation_time.as_secs_f64() * 1000.0).unwrap();
-
-    // Verification phase
-    let verify_start = Instant::now();
-    let verifier_state = FoldState::new(structure);
-    let verify_result = verifier_state.verify(&proof.transcript, &committer);
-    let verification_time = verify_start.elapsed();
-    writeln!(log, "Verification completed in {:.2} ms", verification_time.as_secs_f64() * 1000.0).unwrap();
-
-    let total_time = total_start.elapsed();
-
-    if verify_result {
-        writeln!(log, "{} proof verification succeeded!", impl_name).unwrap();
-    } else {
-        writeln!(log, "{} proof verification failed!", impl_name).unwrap();
-    }
-    
-    BenchmarkResults {
-        setup_time,
-        proof_generation_time,
-        verification_time,
-        total_time,
-        success: verify_result,
-    }
-}
+use std::time::Instant;
 
 fn main() {
-    let mut log = String::new();
-    
-    writeln!(log, "\n=== FRI IMPLEMENTATION COMPARISON ===").unwrap();
-    writeln!(log, "Running proof generation and verification with BOTH implementations...").unwrap();
-    writeln!(log).unwrap();
+    println!("Neo Lattice Demo: Proving Fibonacci Series");
 
-    // Test CUSTOM FRI (if available)
-    let custom_result = if cfg!(feature = "custom-fri") {
-        writeln!(log, "🔧 Testing CUSTOM FRI implementation...").unwrap();
-        Some(run_proof_generation_and_verification("CUSTOM FRI", &mut log))
-    } else {
-        writeln!(log, "⚠️  CUSTOM FRI not available (feature not enabled)").unwrap();
-        None
-    };
-    writeln!(log).unwrap();
+    // Using secure parameters for production-level security
+    println!("DEBUG: Setting up committer with SECURE_PARAMS...");
+    println!("DEBUG: SECURE_PARAMS - d: {}, b: {}", SECURE_PARAMS.d, SECURE_PARAMS.b);
+    let committer = AjtaiCommitter::setup_unchecked(SECURE_PARAMS);
+    println!("DEBUG: Committer setup completed!");
 
-    // Test p3-fri (if available)  
-    let p3_result = if cfg!(feature = "p3-fri") {
-        writeln!(log, "🔧 Testing p3-fri (Plonky3) implementation...").unwrap();
-        Some(run_proof_generation_and_verification("p3-fri (Plonky3)", &mut log))
-    } else {
-        writeln!(log, "⚠️  p3-fri not available (feature not enabled)").unwrap();
-        None
-    };
-    writeln!(log).unwrap();
+    // High-level input: Length of Fibonacci series to prove
+    let fib_length = 3;
 
-    // Generate FINAL PERFORMANCE SUMMARY
-    writeln!(log, "==========================================").unwrap();
-    writeln!(log, "🏁 FINAL PERFORMANCE SUMMARY").unwrap();
-    writeln!(log, "==========================================").unwrap();
-    
-    match (custom_result, p3_result) {
-        (Some(custom), Some(p3)) => {
-            // Both implementations available - show comparison
-            writeln!(log, "📊 CUSTOM FRI vs p3-fri (Plonky3) Comparison:").unwrap();
-            writeln!(log, "").unwrap();
-            writeln!(log, "{:<20} {:>15} {:>15}", "Metric", "CUSTOM FRI", "p3-fri").unwrap();
-            writeln!(log, "----------------------------------------------------").unwrap();
-            writeln!(log, "{:<20} {:>12.2} ms {:>12.2} ms", "Setup time:", custom.setup_time.as_secs_f64() * 1000.0, p3.setup_time.as_secs_f64() * 1000.0).unwrap();
-            writeln!(log, "{:<20} {:>12.2} ms {:>12.2} ms", "Proof generation:", custom.proof_generation_time.as_secs_f64() * 1000.0, p3.proof_generation_time.as_secs_f64() * 1000.0).unwrap();
-            writeln!(log, "{:<20} {:>12.2} ms {:>12.2} ms", "Verification:", custom.verification_time.as_secs_f64() * 1000.0, p3.verification_time.as_secs_f64() * 1000.0).unwrap();
-            writeln!(log, "{:<20} {:>12.2} ms {:>12.2} ms", "Total time:", custom.total_time.as_secs_f64() * 1000.0, p3.total_time.as_secs_f64() * 1000.0).unwrap();
-            writeln!(log, "----------------------------------------------------").unwrap();
-            
-            // Determine winner
-            let custom_total = custom.total_time.as_secs_f64() * 1000.0;
-            let p3_total = p3.total_time.as_secs_f64() * 1000.0;
-            let (winner, diff) = if custom_total < p3_total {
-                ("CUSTOM FRI", p3_total - custom_total)
-            } else {
-                ("p3-fri", custom_total - p3_total)
-            };
-            
-            writeln!(log, "").unwrap();
-            writeln!(log, "🏆 Winner: {} (faster by {:.2} ms)", winner, diff).unwrap();
-            writeln!(log, "").unwrap();
-            writeln!(log, "✅ Both implementations: {}", 
-                if custom.success && p3.success { "PASSED" } else { "SOME FAILED" }).unwrap();
-        },
-        (Some(custom), None) => {
-            // Only CUSTOM FRI available
-            writeln!(log, "🔧 CUSTOM FRI Results:").unwrap();
-            writeln!(log, "Setup time:       {:>8.2} ms", custom.setup_time.as_secs_f64() * 1000.0).unwrap();
-            writeln!(log, "Proof generation: {:>8.2} ms", custom.proof_generation_time.as_secs_f64() * 1000.0).unwrap();
-            writeln!(log, "Verification:     {:>8.2} ms", custom.verification_time.as_secs_f64() * 1000.0).unwrap();
-            writeln!(log, "Total time:       {:>8.2} ms", custom.total_time.as_secs_f64() * 1000.0).unwrap();
-            writeln!(log, "Success:          {}", if custom.success { "✅ PASSED" } else { "❌ FAILED" }).unwrap();
-        },
-        (None, Some(p3)) => {
-            // Only p3-fri available
-            writeln!(log, "🔧 p3-fri (Plonky3) Results:").unwrap();
-            writeln!(log, "Setup time:       {:>8.2} ms", p3.setup_time.as_secs_f64() * 1000.0).unwrap();
-            writeln!(log, "Proof generation: {:>8.2} ms", p3.proof_generation_time.as_secs_f64() * 1000.0).unwrap();
-            writeln!(log, "Verification:     {:>8.2} ms", p3.verification_time.as_secs_f64() * 1000.0).unwrap();
-            writeln!(log, "Total time:       {:>8.2} ms", p3.total_time.as_secs_f64() * 1000.0).unwrap();
-            writeln!(log, "Success:          {}", if p3.success { "✅ PASSED" } else { "❌ FAILED" }).unwrap();
-        },
-        (None, None) => {
-            writeln!(log, "❌ No FRI implementations available!").unwrap();
-            writeln!(log, "Please enable either 'custom-fri' or 'p3-fri' features.").unwrap();
-        }
+    // Convert high-level input to CCS (using new module)
+    println!("DEBUG: Creating CCS for fibonacci length {}...", fib_length);
+    let ccs = fibonacci_ccs(fib_length);
+    println!("DEBUG: CCS creation completed!");
+
+    // Generate witness: Fibonacci sequence
+    println!("DEBUG: Generating witness...");
+    let mut z: Vec<ExtF> = vec![ExtF::ZERO; fib_length];
+    z[0] = embed_base_to_ext(F::ZERO);
+    z[1] = embed_base_to_ext(F::ONE);
+    for i in 2..fib_length {
+        z[i] = z[i - 1] + z[i - 2];
     }
-    
-    writeln!(log, "==========================================").unwrap();
+    let witness = CcsWitness { z: z.clone() };
+    println!("DEBUG: Witness generation completed!");
 
-    print!("{}", log);
+    // Pack witness into ring elements for commitment
+    println!("DEBUG: Starting witness packing...");
+    let z_base: Vec<F> = z.iter().map(|e| e.to_array()[0]).collect();  // Project to base (real part)
+    println!("DEBUG: Computing decomposition matrix...");
+    let decomp_mat = decomp_b(&z_base, committer.params().b, committer.params().d);
+    println!("DEBUG: Packing decomposition...");
+    let z_packed: Vec<RingElement<ModInt>> = AjtaiCommitter::pack_decomp(&decomp_mat, &committer.params());
+    println!("DEBUG: Witness packing completed!");
+
+    // Commit to packed witness
+    println!("DEBUG: Creating commitment...");
+    println!("DEBUG: z_packed length: {}", z_packed.len());
+    let commit_start = Instant::now();
+    let (commitment, _, _, _) = committer.commit(&z_packed, &mut vec![]).unwrap();
+    let commit_time = commit_start.elapsed();
+    println!("DEBUG: Commitment created in {:.2} ms!", commit_time.as_secs_f64() * 1000.0);
+
+    // Create CCS instance
+    println!("DEBUG: Creating CCS instance...");
+    let instance = CcsInstance {
+        commitment,
+        public_input: vec![],
+        u: F::ZERO,
+        e: F::ONE,
+    };
+    println!("DEBUG: CCS instance created!");
+
+    // Check satisfiability
+    println!("DEBUG: Checking satisfiability...");
+    if !check_satisfiability(&ccs, &instance, &witness) {
+        println!("Error: Fibonacci witness does not satisfy CCS constraints");
+        return;
+    }
+    println!("DEBUG: Satisfiability check passed!");
+
+    // Generate proof using the orchestrator
+    println!("\n=== PROOF GENERATION ===");
+    println!("DEBUG: Starting proof generation...");
+    let (proof, metrics) = prove(&ccs, &instance, &witness).expect("proof generation");
+    println!("DEBUG: Proof generation completed!");
+    println!("Proof generation completed in {:.2} ms", metrics.prove_ms);
+    println!("Proof size: {} bytes", metrics.proof_bytes);
+
+    // Verify the proof using the orchestrator
+    println!("\n=== PROOF VERIFICATION ===");
+    println!("DEBUG: Starting proof verification...");
+    let verify_start = Instant::now();
+    let verified = verify(&ccs, &proof);
+    println!("DEBUG: Proof verification completed!");
+    let verification_time = verify_start.elapsed();
+    println!("Proof verification: {}", if verified { "SUCCESS" } else { "FAILURE" });
+    println!("Verification completed in {:.2} ms", verification_time.as_secs_f64() * 1000.0);
+
+    // Final Performance Summary
+    println!("\n==========================================");
+    println!("🏁 FINAL PERFORMANCE SUMMARY");
+    println!("==========================================");
+    println!("Proof Generation Time:    {:>8.2} ms", metrics.prove_ms);
+    println!("Proof Size:               {:>8} bytes", metrics.proof_bytes);
+    println!("Proof Verification Time:  {:>8.2} ms", verification_time.as_secs_f64() * 1000.0);
+    println!("Total Time:               {:>8.2} ms", metrics.prove_ms + verification_time.as_secs_f64() * 1000.0);
+    println!("Verification Result:      {}", if verified { "✅ PASSED" } else { "❌ FAILED" });
+    println!("Fibonacci Length:         {:>8}", fib_length);
+    println!("==========================================");
 }

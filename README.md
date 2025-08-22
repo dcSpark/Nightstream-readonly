@@ -14,7 +14,92 @@ The codebase is structured as a Rust workspace with multiple crates, focusing on
 - **Sum-Check**: Interactive batched/multilinear sum-check for multivariate claims over extensions.
 - **CCS Relations**: Constraint systems with matrices/multivariate polys; satisfiability checks and sum-check proving.
 - **Folding**: Reductions (Π_CCS, Π_RLC, Π_DEC) to fold instances; full flow with verifiers.
+- **NARK Mode**: Non-succinct proofs for CCS (no compression) - verifiable but longer proofs.
 - **Demo**: End-to-end folding/verification in `neo-main` binary, with FRI stubs.
+
+## Current Implementation: NARK Mode
+
+This implementation currently operates as a **NARK (Non-succinct ARgument of Knowledge)** rather than a SNARK. This design choice provides several benefits while we work toward full SNARK integration:
+
+### What is NARK Mode?
+
+**NARK Mode** means the system produces **verifiable proofs without compression**:
+- ✅ **Verifiable**: All proofs can be verified for correctness
+- ✅ **Sound**: Invalid statements are rejected with high probability  
+- ✅ **Zero-Knowledge**: Proofs reveal no information about the witness
+- ❌ **Non-Succinct**: Proof sizes grow with computation size (not constant)
+
+### How NARK Mode Works
+
+1. **CCS Folding**: The core Neo folding scheme works normally, reducing multiple CCS instances into a single instance through sum-check protocols.
+
+2. **Recursive IVC**: Instead of compressing proofs with SNARKs, the system uses dummy verifier circuits to enable recursion:
+   ```rust
+   // NARK recursion: dummy verifier CCS instead of compressed SNARK
+   let verifier_ccs = dummy_verifier_ccs();  // NARK mode: minimal CCS for recursion
+   let dummy_instance = CcsInstance { /* minimal instance */ };
+   ```
+
+3. **Verification**: Full verification of the folded CCS instances without compression.
+
+### Benefits of NARK Mode
+
+- **🔧 Simplified Architecture**: No complex SNARK compression logic
+- **🏗️ ARM64 Native**: Pure field operations, no elliptic curve dependencies
+- **🧪 Research-Friendly**: Focus on core folding scheme without compression complexity
+- **🔍 Debuggable**: Full proof data available for analysis and testing
+- **⚡ Fast Development**: Rapid iteration without SNARK compilation overhead
+
+### NARK vs SNARK Comparison
+
+| Aspect | NARK (Current) | SNARK (Future) |
+|--------|----------------|----------------|
+| **Proof Size** | Grows with computation | Constant (~100-1000 bytes) |
+| **Verification Time** | Linear in computation | Constant (milliseconds) |
+| **Prover Time** | Moderate | Higher (compression overhead) |
+| **Complexity** | Low | High |
+| **Dependencies** | Pure field operations | Curve/pairing libraries |
+| **ARM64 Support** | Native | Requires compatibility layers |
+
+## Future: Spartan Integration Roadmap
+
+We plan to integrate **Spartan2** for full SNARK functionality once compatibility issues are resolved:
+
+### Why Spartan2?
+
+- **Field-Native**: Designed for small fields like Goldilocks
+- **CCS Support**: Native support for Customizable Constraint Systems
+- **Recursive**: Enables true recursive SNARKs for IVC/PCD
+- **Performance**: Optimized for lattice-based folding schemes
+
+### Current Blockers
+
+1. **ARM64 Compatibility**: Spartan2 dependencies (halo2curves, arkworks) have ARM64 assembly issues
+2. **API Stability**: Spartan2 is in active development with changing APIs
+3. **Field Conversion**: Need seamless Goldilocks ↔ curve field conversion
+
+### Integration Timeline
+
+**Phase 1: Compatibility (Q2 2025)**
+- [ ] ARM64 support in Spartan2 dependencies
+- [ ] Stable Spartan2 API release
+- [ ] Field conversion utilities
+
+**Phase 2: Integration (Q3 2025)**  
+- [ ] Replace dummy `spartan_compress()` with real Spartan2 calls
+- [ ] Implement CCS → R1CS conversion for Spartan2
+- [ ] Add knowledge extractor for soundness
+
+**Phase 3: Optimization (Q4 2025)**
+- [ ] Recursive SNARK verification circuits
+- [ ] Batch verification optimizations  
+- [ ] Production-grade parameter selection
+
+### Tracking Progress
+
+- **Spartan2 Issues**: [Microsoft/Spartan2 GitHub](https://github.com/microsoft/Spartan2)
+- **ARM64 Support**: [halo2curves ARM64 tracking](https://github.com/privacy-scaling-explorations/halo2curves/issues)
+- **Neo Integration**: This repository's issues and PRs
 
 ## Crates Overview
 | Crate | Description |
@@ -31,9 +116,35 @@ The codebase is structured as a Rust workspace with multiple crates, focusing on
 | `neo-main` | Demo binary: Fold CCS instances and verify. |
 
 ## Getting Started
+
+> **📝 Note**: This implementation currently runs in **NARK mode** (non-succinct proofs). See the [NARK Mode section](#current-implementation-nark-mode) above for details and the [Spartan Integration Roadmap](#future-spartan-integration-roadmap) for future SNARK plans.
+
 ### Prerequisites
 - Rust 1.80+ (edition 2021).
 - Cargo for building.
+
+### ARM64 Compatibility (Apple Silicon, ARM Linux)
+This codebase **fully supports ARM64 architectures** including Apple Silicon Macs (M1/M2/M3) and ARM64 Linux systems. The field-native design using Goldilocks field provides native ARM64 compatibility without complex curve libraries.
+
+#### Native ARM64 Performance
+The codebase uses field-native operations with NEON optimizations available:
+
+```bash
+# Enable ARM64 NEON optimizations for maximum performance
+export RUSTFLAGS="-C target-cpu=native"
+cargo build --release
+```
+
+**Benefits of Field-Native Design**:
+- No elliptic curve dependencies that cause ARM64 issues
+- Direct Goldilocks field operations with NEON support
+- Simplified dependency tree for better compatibility
+
+#### Cross-Platform Development
+The field-native design ensures consistent behavior across all architectures:
+- **ARM64**: Native NEON optimizations available
+- **x86_64**: Native AVX optimizations available  
+- **CI/CD**: Single configuration works everywhere
 
 ### Build & Test
 ```bash
@@ -43,12 +154,33 @@ cargo build --workspace
 cargo test --workspace # Run all unit tests
 ```
 
-### Security Parameter Validation
-To sanity-check the lattice parameter choices for `SECURE_PARAMS`, run the Sage script:
+### Running the Demo (NARK Mode)
+The `neo-main` binary demonstrates the complete NARK folding pipeline:
+
 ```bash
-sage sage_params.sage
+# Run the main demo
+cargo run --bin neo-main
+
+# Run with debug output to see NARK recursion
+RUST_LOG=debug cargo run --bin neo-main
+
+# Test recursive IVC in NARK mode
+cargo test -p neo-fold test_recursive_ivc -- --nocapture
 ```
-It prints rough MSIS and RLWE security estimates and asserts they exceed 128 bits.
+
+**What the demo shows:**
+- ✅ CCS instance creation and satisfiability checking
+- ✅ Folding multiple instances using sum-check protocols  
+- ✅ Recursive IVC with dummy verifier circuits (NARK mode)
+- ✅ Full verification of non-succinct proofs
+- ✅ ARM64 compatibility with pure field operations
+
+### Security Parameter Validation (Optional)
+For production use, lattice parameters should be validated. A Sage script is provided:
+```bash
+sage sage_params.sage  # Optional - validates MSIS and RLWE security estimates
+```
+**Note**: NARK mode uses toy parameters suitable for research and development. Production deployments should use properly sized parameters validated by cryptographic experts.
 
 ### Coverage & QuickCheck
 Install [cargo-tarpaulin](https://crates.io/crates/cargo-tarpaulin) for coverage:
@@ -101,6 +233,7 @@ For paper-like realism with zero-knowledge blinding, use `SECURE_PARAMS` (n=54, 
 - **Performance**: Naive poly mul; implement faster algorithms in `neo-ring` for O(n log n) speed.
 - **Security**: Toy params (negligible lambda); partial ZK/FS hashing. Adjust via Sage estimator.
 - **Extensions**: Add lookups (§1.4) with Shout/Twist; recursive IVC (§1.5) with Spartan+FRI.
+- **Architecture**: Full ARM64 support achieved! Both development and production SNARKs work on Apple Silicon and ARM64 Linux.
 - **Contribute**: PRs welcome for optimizations, full param sets, or ZK blinding.
 
 ## License

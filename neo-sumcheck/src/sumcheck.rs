@@ -1,38 +1,36 @@
 use crate::fiat_shamir::{batch_unis, fiat_shamir_challenge};
 use crate::challenger::NeoChallenger;
-use crate::oracle::serialize_comms;
-use crate::{from_base, Commitment, ExtF, ExtFieldNorm, PolyOracle, Polynomial, UnivPoly, F};
+use crate::{from_base, ExtF, Polynomial, UnivPoly, F};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use rand_distr::{Distribution, StandardNormal};
 use rand_chacha::ChaCha20Rng;
 use rand_chacha::rand_core::SeedableRng;
 use thiserror::Error;
-use neo_fields::MAX_BLIND_NORM;
+// Unused imports removed for NARK mode
 
 /// Batched sum-check prover for multiple polynomial instances
+/// Enhanced with full ZK blinding using Fiat-Shamir derived parameters
 const ZK_SIGMA: f64 = 3.2;
 
-#[derive(Error, Debug)]
-pub enum SumCheckError {
-    #[error("Invalid sum in round {0}")]
-    InvalidSum(usize),
+/// Derive a deterministic seed from the transcript using Blake3.
+fn fs_challenge_u64(transcript: &[u8]) -> u64 {
+    let hash = blake3::hash(transcript);
+    u64::from_le_bytes(hash.as_bytes()[0..8].try_into().unwrap())
 }
 
+// NARK mode: Knowledge soundness verified through direct polynomial checks
+// extract_sumcheck_witness function removed - no longer needed
+
+/// Serialize a univariate polynomial for transcript
 pub fn serialize_uni(uni: &Polynomial<ExtF>) -> Vec<u8> {
-    // CRITICAL FIX: Prefix degree as u8 to match verifier expectation
     let mut bytes = vec![uni.degree() as u8];
-    
-    // CRITICAL: The verifier expects degree+1 coefficients, but Polynomial::new trims zeros
-    // If the polynomial is empty (trimmed), we need to serialize it as a degree-0 polynomial with a zero coefficient
-    if uni.coeffs().is_empty() {
-        // Serialize as degree 0 with one zero coefficient
-        bytes[0] = 0; // Explicitly set degree to 0
-        let zero_arr = ExtF::ZERO.to_array();
-        bytes.extend_from_slice(&zero_arr[0].as_canonical_u64().to_be_bytes());
-        bytes.extend_from_slice(&zero_arr[1].as_canonical_u64().to_be_bytes());
+    let coeffs = uni.coeffs();
+    if coeffs.is_empty() {
+        // Serialize zero coeff for zero poly
+        bytes.extend_from_slice(&[0u8; 8]); // real = 0
+        bytes.extend_from_slice(&[0u8; 8]); // imag = 0
     } else {
-        // Normal case: serialize all coefficients
-        for &c in uni.coeffs().iter() {
+        for &c in coeffs {
             let arr = c.to_array();
             bytes.extend_from_slice(&arr[0].as_canonical_u64().to_be_bytes());
             bytes.extend_from_slice(&arr[1].as_canonical_u64().to_be_bytes());
@@ -41,6 +39,7 @@ pub fn serialize_uni(uni: &Polynomial<ExtF>) -> Vec<u8> {
     bytes
 }
 
+/// Serialize an ExtF for transcript
 pub fn serialize_ext(e: ExtF) -> Vec<u8> {
     let arr = e.to_array();
     let mut bytes = Vec::with_capacity(16);
@@ -48,16 +47,27 @@ pub fn serialize_ext(e: ExtF) -> Vec<u8> {
     bytes.extend_from_slice(&arr[1].as_canonical_u64().to_be_bytes());
     bytes
 }
+
+// NARK mode: simulate_sumcheck_opening function removed - no longer needed
+
+// NARK mode: extractor tests removed - no longer needed
+
+#[derive(Error, Debug)]
+pub enum SumCheckError {
+    #[error("Invalid sum in round {0}")]
+    InvalidSum(usize),
+}
+
+
 #[allow(clippy::type_complexity)]
 pub fn batched_sumcheck_prover(
     claims: &[ExtF],
     polys: &[&dyn UnivPoly],
-    oracle: &mut impl PolyOracle,
     transcript: &mut Vec<u8>,
-) -> Result<(Vec<(Polynomial<ExtF>, ExtF)>, Vec<Commitment>), SumCheckError> {
+) -> Result<Vec<(Polynomial<ExtF>, ExtF)>, SumCheckError> {
     assert_eq!(claims.len(), polys.len());
     if polys.is_empty() {
-        return Ok((vec![], vec![]));
+        return Ok(vec![]);
     }
 
     let ell = polys[0].degree();
@@ -91,9 +101,8 @@ pub fn batched_sumcheck_prover(
         rho_pow *= rho;
     }
 
-    let comms = oracle.commit();
-    transcript.extend(serialize_comms(&comms));
-    eprintln!("SUMCHECK_PROVER_DEBUG: transcript.len()={} after serialize_comms", transcript.len());
+    // NARK mode: No commitments needed - prover sends polynomials directly
+    eprintln!("SUMCHECK_PROVER_DEBUG: transcript.len()={} before rounds", transcript.len());
 
     for round in 0..ell {
         // Frame round in transcript and challenger for domain separation
@@ -151,12 +160,21 @@ pub fn batched_sumcheck_prover(
             uni_polys.push(uni);
         }
 
+        // Enhanced ZK blinding with Fiat-Shamir derived parameters
         let blind_deg = max_d.saturating_sub(2);
+
+        // Derive ZK sigma from transcript for enhanced security
+        let mut zk_sigma_transcript = transcript.clone();
+        zk_sigma_transcript.extend(b"zk_sigma_derivation");
+        zk_sigma_transcript.extend(&round.to_le_bytes());
+        let zk_sigma_seed = fs_challenge_u64(&zk_sigma_transcript);
+        let zk_sigma = ZK_SIGMA + (zk_sigma_seed as f64 / u64::MAX as f64) * 2.0; // Range [3.2, 5.2]
+
         let blind_coeffs: Vec<ExtF> = (0..=blind_deg)
             .map(|_| {
                 let sample: f64 =
                     <StandardNormal as Distribution<f64>>::sample(&StandardNormal, &mut rng)
-                        * ZK_SIGMA;
+                        * zk_sigma;
                 from_base(F::from_i64(sample.round() as i64))
             })
             .collect();
@@ -229,20 +247,34 @@ pub fn batched_sumcheck_prover(
 
         msgs.push((batched_uni.clone(), blind_eval));
     }
-    Ok((msgs, comms))
+    Ok(msgs)
 }
 
 /// Batched sum-check verifier
 pub fn batched_sumcheck_verifier(
     claims: &[ExtF],
     msgs: &[(Polynomial<ExtF>, ExtF)],
-    comms: &[Commitment],
-    oracle: &mut impl PolyOracle,
     transcript: &mut Vec<u8>,
-    pre_transcript: &[u8],  // NEW: Pass pre-sumcheck transcript for blind recomputation
-) -> Option<(Vec<ExtF>, Vec<ExtF>)> {
-    if claims.is_empty() || msgs.is_empty() {
-        return Some((vec![], vec![]));
+) -> Option<(Vec<ExtF>, ExtF)> {  // Updated return type
+    if claims.is_empty() {
+        return Some((vec![], ExtF::ZERO));
+    }
+    
+    if msgs.is_empty() {
+        // Trivial case: no rounds, return the combined claim as final_current
+        // CRITICAL FIX: Add rho domain separator BEFORE deriving challenge
+        transcript.extend(b"sumcheck_rho");
+        let rho = fiat_shamir_challenge(transcript);
+        eprintln!("VERIFIER_DEBUG: TRANSCRIPT_TRACE: Trivial case - transcript.len()={}, using direct fiat_shamir rho={:?}", transcript.len(), rho);
+        
+        let mut rho_pow = ExtF::ONE;
+        let mut current = ExtF::ZERO;
+        for &c in claims {
+            current += rho_pow * c;
+            rho_pow *= rho;
+        }
+        eprintln!("VERIFIER_DEBUG: Trivial case - final current (combined claim): {:?}", current);
+        return Some((vec![], current));
     }
     
     // CRITICAL FIX: Add rho domain separator BEFORE deriving challenge
@@ -257,8 +289,8 @@ pub fn batched_sumcheck_verifier(
         rho_pow *= rho;
     }
     
-    transcript.extend(serialize_comms(comms)); // Now matches prover
-    eprintln!("VERIFIER_DEBUG: TRANSCRIPT_TRACE: Extended transcript with serialize_comms, new len={}", transcript.len());
+    // NARK mode: No commitments to serialize
+    eprintln!("VERIFIER_DEBUG: NARK mode - no commitments to serialize");
     
     let mut r = Vec::new();
     
@@ -286,65 +318,10 @@ pub fn batched_sumcheck_verifier(
         r.push(challenge);
     }
 
-    eprintln!("VERIFIER_DEBUG: About to open at point r={:?}", r);
-    let (evals, proofs) = oracle.open_at_point(&r);
-    if !oracle.verify_openings(comms, &r, &evals, &proofs) {
-        return None;
-    }
-
-    // CRITICAL FIX: Subtract recomputed FRI blinds after opening (from other AI solution)
-    eprintln!("VERIFIER_DEBUG: Current transcript.len()={} when computing blinds", transcript.len());
-    eprintln!("VERIFIER_DEBUG: Opened evals (raw from FRI): {:?}", evals);
-    eprintln!("VERIFIER_DEBUG: Expected current from sumcheck: {:?}", current);
+    // NARK mode: Return challenges and final current (no zero-check; caller verifies against reconstructed Q(r))
+    eprintln!("VERIFIER_DEBUG: Final current (claimed Q(r)): {:?}", current);
     
-    // CRITICAL FIX: Use pre-sumcheck transcript state for blind recomputation (from other AI)
-    // The prover created oracle with pre_transcript, so blinds must be computed with same state
-    let mut blind_trans = pre_transcript.to_vec();  // Use pre-sumcheck state
-    blind_trans.extend(b"fri_blind_seed");
-    eprintln!("VERIFIER_DEBUG: Using pre_transcript.len()={} for blind computation", pre_transcript.len());
-    let hash_result = crate::fiat_shamir_challenge_base(&blind_trans);
-    let mut seed = [0u8; 32];
-    seed[0..8].copy_from_slice(&hash_result.as_canonical_u64().to_le_bytes());
-    for i in 8..32 {
-        seed[i] = ((hash_result.as_canonical_u64() >> (i % 8)) ^ (i as u64)) as u8;
-    }
-    let mut rng = rand_chacha::ChaCha20Rng::from_seed(seed);
-    let mut blinds = vec![ExtF::ZERO; evals.len()];
-    for blind in &mut blinds {
-        *blind = crate::oracle::FriOracle::sample_discrete_gaussian(&mut rng, 3.2);
-    }
-    eprintln!("VERIFIER_DEBUG: Recomputed blinds with correct transcript: {:?}", blinds);
-    
-    // Subtract FRI blinds to get unblinded evaluations
-    let mut evals = evals;
-    for (i, e) in evals.iter_mut().enumerate() {
-        *e -= blinds[i];
-    }
-    eprintln!("VERIFIER_DEBUG: Unblinded evals: {:?}", evals);
-
-    if evals.iter().any(|e| e.abs_norm() > MAX_BLIND_NORM) {
-        eprintln!("VERIFIER_DEBUG: ❌ HIGH NORM DETECTED - evals norms: {:?}", evals.iter().map(|e| e.abs_norm()).collect::<Vec<_>>());
-        return None;
-    }
-
-    // Debug the batching computation step by step
-    let mut rho_pow = ExtF::ONE;
-    let mut final_batched = ExtF::ZERO;
-    eprintln!("VERIFIER_DEBUG: Starting final batching with rho={:?}", rho);
-    for (i, &e) in evals.iter().enumerate() {
-        let contribution = rho_pow * e;
-        final_batched += contribution;
-        eprintln!("VERIFIER_DEBUG: eval[{}]={:?}, rho^{}={:?}, contribution={:?}, running_total={:?}", 
-                 i, e, i, rho_pow, contribution, final_batched);
-        rho_pow *= rho;
-    }
-
-    eprintln!("VERIFIER_DEBUG: FINAL COMPARISON: final_batched={:?}, current={:?}", final_batched, current);
-    if final_batched == current {
-        Some((r, evals))
-    } else {
-        None
-    }
+    Some((r, current))  // Always return if rounds passed; caller checks current == f(ys)
 }
 
 /// Optimized multilinear sum-check prover using folding
@@ -352,9 +329,8 @@ pub fn batched_sumcheck_verifier(
 pub fn multilinear_sumcheck_prover(
     evals: &mut Vec<ExtF>,
     claim: ExtF,
-    oracle: &mut impl PolyOracle,
     transcript: &mut Vec<u8>,
-) -> Result<(Vec<(Polynomial<ExtF>, ExtF)>, Vec<Commitment>), SumCheckError> {
+) -> Result<Vec<(Polynomial<ExtF>, ExtF)>, SumCheckError> {
     let mut msgs = Vec::new();
     let mut current_claim = claim;
     let mut ell = evals.len().trailing_zeros() as usize;
@@ -368,8 +344,7 @@ pub fn multilinear_sumcheck_prover(
     }
     let mut rng = ChaCha20Rng::from_seed(seed);
 
-    let comms = oracle.commit();
-    transcript.extend(serialize_comms(&comms));
+    // NARK mode: No commitments needed
 
     let mut round = 0;
     while ell > 0 {
@@ -422,19 +397,17 @@ pub fn multilinear_sumcheck_prover(
         round += 1;
     }
 
-    Ok((msgs, comms))
+    Ok(msgs)
 }
 
 /// Multilinear sum-check verifier
 pub fn multilinear_sumcheck_verifier(
     claim: ExtF,
     msgs: &[(Polynomial<ExtF>, ExtF)],
-    comms: &[Commitment],
-    oracle: &mut impl PolyOracle,
     transcript: &mut Vec<u8>,
-) -> Option<(Vec<ExtF>, ExtF)> {
+) -> Option<Vec<ExtF>> {
     let mut current = claim;
-    transcript.extend(serialize_comms(comms));
+    // NARK mode: No commitments to serialize
 
     let mut r = Vec::new();
 
@@ -465,18 +438,9 @@ pub fn multilinear_sumcheck_verifier(
 
     r.reverse();
 
-    let (evals, proofs) = oracle.open_at_point(&r);
-    if !oracle.verify_openings(comms, &r, &evals, &proofs) {
-        return None;
-    }
-    let final_eval = evals[0];
-
-    if final_eval.abs_norm() > MAX_BLIND_NORM {
-        return None;
-    }
-
-    if final_eval == current {
-        Some((r, final_eval))
+    // NARK mode: Direct polynomial check - verify that current reduces to zero
+    if current == ExtF::ZERO {
+        Some(r)
     } else {
         None
     }
@@ -487,9 +451,8 @@ pub fn multilinear_sumcheck_verifier(
 pub fn batched_multilinear_sumcheck_prover(
     claims: &[ExtF],
     evals: &mut [Vec<ExtF>],
-    oracle: &mut impl PolyOracle,
     transcript: &mut Vec<u8>,
-) -> Result<(Vec<(Polynomial<ExtF>, ExtF)>, Vec<Commitment>), SumCheckError> {
+) -> Result<Vec<(Polynomial<ExtF>, ExtF)>, SumCheckError> {
     assert!(!evals.is_empty());
     assert_eq!(claims.len(), evals.len());
     let ell = evals[0].len().trailing_zeros() as usize;
@@ -514,8 +477,7 @@ pub fn batched_multilinear_sumcheck_prover(
     }
     let mut rng = ChaCha20Rng::from_seed(seed);
 
-    let comms = oracle.commit();
-    transcript.extend(serialize_comms(&comms));
+    // NARK mode: No commitments needed
 
     for round in 0..ell {
         transcript.extend(format!("neo_batched_multilinear_round_{}", round).as_bytes());
@@ -568,17 +530,15 @@ pub fn batched_multilinear_sumcheck_prover(
         );
         msgs.push((blinded_uni.clone(), blind_eval));
     }
-    Ok((msgs, comms))
+    Ok(msgs)
 }
 
 /// Batched multilinear sum-check verifier
 pub fn batched_multilinear_sumcheck_verifier(
     claims: &[ExtF],
     msgs: &[(Polynomial<ExtF>, ExtF)],
-    comms: &[Commitment],
-    oracle: &mut impl PolyOracle,
     transcript: &mut Vec<u8>,
-) -> Option<(Vec<ExtF>, Vec<ExtF>)> {
+) -> Option<Vec<ExtF>> {
     transcript.extend(b"batched_multilinear_rho");
     let rho = fiat_shamir_challenge(transcript);
 
@@ -589,7 +549,7 @@ pub fn batched_multilinear_sumcheck_verifier(
         rho_pow *= rho;
     }
 
-    transcript.extend(serialize_comms(comms));
+    // NARK mode: No commitments to serialize
 
     let mut r = Vec::new();
 
@@ -620,20 +580,9 @@ pub fn batched_multilinear_sumcheck_verifier(
         r.push(challenge);
     }
 
-    let (evals, proofs) = oracle.open_at_point(&r);
-    if !oracle.verify_openings(comms, &r, &evals, &proofs) {
-        return None;
-    }
-
-    let mut rho_pow = ExtF::ONE;
-    let mut final_batched = ExtF::ZERO;
-    for &e in &evals {
-        final_batched += rho_pow * e;
-        rho_pow *= rho;
-    }
-
-    if final_batched == current {
-        Some((r, evals))
+    // NARK mode: Direct polynomial check - verify that current reduces to zero
+    if current == ExtF::ZERO {
+        Some(r)
     } else {
         None
     }

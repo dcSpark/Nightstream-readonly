@@ -10,6 +10,8 @@ members = [
     "neo-sumcheck",
     "neo-ccs",
     "neo-fold",
+    "neo-arithmetize",
+    "neo-orchestrator",
 ]
 resolver = "2"
 
@@ -19,6 +21,16 @@ edition = { workspace = true }
 version = { workspace = true }
 authors = { workspace = true }
 
+# ARM64 verification binary removed - NARK mode has native ARM64 support
+
+[dependencies]
+neo-fields = { path = "neo-fields" }
+neo-ccs = { path = "neo-ccs" }
+neo-commit = { path = "neo-commit" }
+p3-field = "0.3"
+p3-matrix = { workspace = true }
+rand = { workspace = true }
+
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
@@ -26,14 +38,27 @@ authors = ["Nico Arqueros <nico.arquerosr@gmail.com>"]
 rust-version = "1.88"
 
 [workspace.dependencies]
+# Core dependencies
 rand = "0.9"
 rand_chacha = "0.9"
 rand_distr = "0.5"
 hex = "0.4"
-p3-goldilocks = "0.3.0"
+
+# Plonky3 field and matrix operations (NARK mode - core functionality only)
+p3-goldilocks = { version = "0.3.0", default-features = false }
 p3-matrix = "0.3.0"
+p3-field = "0.3.0"
+p3-symmetric = "0.3.0"   # Poseidon2 hashing for Fiat-Shamir
+
+# Benchmarking and testing dependencies
 criterion = { version = "0.5.1", features = ["html_reports"] }
 rayon = "1.10"
+
+# Additional p3 crates for benchmarks only
+p3-challenger = "0.3.0"  # Used in benchmarks
+
+# NARK mode: Pure field operations, no external SNARK dependencies needed
+# Future: Will add Spartan2 dependencies when compatibility is resolved
 
 [workspace.lints.clippy]
 uninlined_format_args = "allow"

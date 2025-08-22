@@ -1,4 +1,4 @@
-use neo_fields::{ExtF, F, ExtFieldNorm};
+use neo_fields::{ExtF, F, ExtFieldNormTrait};
 use p3_field::{PrimeCharacteristicRing, PrimeField64, Field};
 
 /// Test basic field operations for F (base field)

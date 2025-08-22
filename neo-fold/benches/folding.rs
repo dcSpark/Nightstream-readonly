@@ -22,7 +22,7 @@ fn create_test_structure(size: usize) -> CcsStructure {
     }).collect();
     
     // Sum of all variables polynomial
-    let poly = mv_poly(|vars: &[ExtF]| vars.iter().sum(), size);
+    let poly = mv_poly(|vars: &[ExtF]| vars.iter().copied().sum(), size);
     CcsStructure::new(matrices, poly)
 }
 

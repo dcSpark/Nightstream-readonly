@@ -68,6 +68,43 @@ impl<C: Coeff> RingElement<C> {
         max_val
     }
 
+    /// Enhanced constant-time infinity norm computation with additional security checks.
+    /// This version is fully constant-time and includes bounds checking for security.
+    pub fn norm_inf_ct(&self) -> u64
+    where
+        C: Copy + Into<u64>,
+    {
+        let q: u64 = C::modulus();
+        let half = q / 2;
+        let mut max_val = 0u64;
+
+        // Process each coefficient in constant time
+        for &c in self.poly.coeffs() {
+            let val: u64 = c.into();
+
+            // Constant-time sign handling
+            let gt = Choice::from((val > half) as u8);
+            let neg_val = val.wrapping_sub(q);
+            let signed_val = u64::conditional_select(&val, &neg_val, gt);
+
+            // Constant-time absolute value
+            let signed = signed_val as i64;
+            let mask = signed >> 63;  // Get sign bit
+            let abs_val = ((signed ^ mask) - mask) as u64;
+
+            // Constant-time maximum computation
+            let is_greater = Choice::from((max_val < abs_val) as u8);
+            max_val = u64::conditional_select(&max_val, &abs_val, is_greater);
+        }
+
+        // Additional security: ensure result is within expected bounds
+        let max_bound = q / 2 + 1;
+        let within_bounds = Choice::from((max_val <= max_bound) as u8);
+        max_val = u64::conditional_select(&max_val, &max_bound, !within_bounds);
+
+        max_val
+    }
+
     fn reduce_mod_xn_plus1(mut poly: Polynomial<C>, n: usize) -> Polynomial<C> {
         while poly.degree() >= n {
             let deg = poly.degree();
