@@ -1,4 +1,5 @@
 use neo_fields::{from_base, ExtF, ExtFieldNormTrait, F};
+
 use subtle::{Choice, ConstantTimeLess};
 use neo_modint::{Coeff, ModInt};
 use neo_ring::RingElement;
@@ -8,11 +9,7 @@ use rand::{rngs::StdRng, Rng, SeedableRng};
 use rand_distr::StandardNormal;
 
 
-/// Derive a deterministic seed from the transcript using Blake3.
-fn fs_challenge_u64(transcript: &[u8]) -> u64 {
-    let hash = blake3::hash(transcript);
-    u64::from_le_bytes(hash.as_bytes()[0..8].try_into().unwrap())
-}
+
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NeoParams {
@@ -72,7 +69,6 @@ pub const TOY_PARAMS: NeoParams = NeoParams {
     max_blind_norm: 64,
 };
 
-#[allow(dead_code)]
 pub struct AjtaiCommitter {
     a: Vec<Vec<RingElement<ModInt>>>,        // Public matrix
     trapdoor: Vec<Vec<RingElement<ModInt>>>, // Trapdoor matrix
@@ -224,7 +220,6 @@ impl AjtaiCommitter {
         }
     }
 
-    #[allow(dead_code)]
     pub fn sample_gaussian_ring(
         &self,
         center: &RingElement<ModInt>,
@@ -402,9 +397,12 @@ impl AjtaiCommitter {
         Vec<RingElement<ModInt>>, // blinded witness
         Vec<RingElement<ModInt>>, // blinding vector r
     ), &'static str> {
-        transcript.extend(b"commit_blind");
-        let seed = fs_challenge_u64(transcript);
-        let mut rng = StdRng::seed_from_u64(seed);
+        // Domain-separated seed for blinding randomness using canonical 256-bit seeding
+        use neo_sumcheck::fiat_shamir::Transcript;
+        let mut fs_transcript = Transcript::new("commit");
+        fs_transcript.absorb_bytes("transcript_state", transcript);
+        fs_transcript.absorb_tag("NEO/V1/commit/blinding");
+        let mut rng = fs_transcript.rng("NEO/V1/commit/rng");
         self.commit_with_rng(w, &mut rng)
     }
 
@@ -559,14 +557,12 @@ impl AjtaiCommitter {
             .collect()
     }
 
-    /// Derive a ModInt challenge from transcript+label via Blake3, reduced mod q.
+    /// Derive a ModInt challenge from transcript+label using bias-free canonical FS.
     fn fs_challenge_modint_labeled(transcript: &[u8], label: &str) -> ModInt {
-        let mut h = blake3::Hasher::new();
-        h.update(label.as_bytes());
-        h.update(transcript);
-        let bytes = h.finalize();
-        let limb = u64::from_le_bytes(bytes.as_bytes()[0..8].try_into().unwrap());
-        let challenge = ModInt::from_u64(limb % <ModInt as Coeff>::modulus());
+        use neo_sumcheck::fiat_shamir::Transcript;
+        let mut fs_transcript = Transcript::new("commit");
+        fs_transcript.absorb_bytes("base_state", transcript);
+        let challenge = fs_transcript.challenge_modint(label);
         
         if cfg!(test) {
             eprintln!("EXTRACTOR_DEBUG: FS challenge for '{}': {} (from transcript len={})", 
@@ -609,14 +605,16 @@ impl AjtaiCommitter {
         let combo1 = self.random_linear_combo(c1, c2, rho1_f);
         let combo2 = self.random_linear_combo(c1, c2, rho2_f);
 
-        // GPV preimages for combos (use transcript-derived seeds for determinism).
-        let seed1 = fs_challenge_u64(&[transcript, b"|combo_seed_0"].concat());
-        let seed2 = fs_challenge_u64(&[transcript, b"|combo_seed_1"].concat());
-        let mut rng1 = rand::rngs::StdRng::seed_from_u64(seed1);
-        let mut rng2 = rand::rngs::StdRng::seed_from_u64(seed2);
+        // GPV preimages for combos (use transcript-derived seeds for determinism) via canonical FS with 256-bit entropy.
+        use neo_sumcheck::fiat_shamir::Transcript;
+        let mut fs_transcript = Transcript::new("commit");
+        fs_transcript.absorb_bytes("transcript_state", transcript);
+        fs_transcript.absorb_tag("NEO/V1/extract/gpv");
+        let mut rng1 = fs_transcript.rng("NEO/V1/extract/combo_seed/0");
+        let mut rng2 = fs_transcript.rng("NEO/V1/extract/combo_seed/1");
         
         if cfg!(test) {
-            eprintln!("EXTRACTOR_DEBUG: GPV sampling with seeds seed1={}, seed2={}", seed1, seed2);
+            eprintln!("EXTRACTOR_DEBUG: GPV sampling with canonical 256-bit seeds");
         }
         
         let y1 = self.gpv_trapdoor_sample(&combo1, self.params.sigma, &mut rng1)?;

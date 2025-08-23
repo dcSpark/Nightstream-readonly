@@ -8,7 +8,7 @@ use neo_poly::Polynomial;
 use neo_ring::RingElement;
 use neo_sumcheck::{
     batched_sumcheck_prover, batched_sumcheck_verifier, challenger::NeoChallenger,
-    fiat_shamir_challenge, UnivPoly,
+    fiat_shamir_challenge, fiat_shamir::Transcript, UnivPoly,
 };
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_matrix::Matrix;
@@ -63,13 +63,17 @@ pub use spartan_ivc::knowledge_extractor;
 // #[cfg(test)]
 // mod soundness_attack_test; // Disabled due to API changes
 
-/// Helper to compute Fiat-Shamir challenge without extending main transcript
-/// This prevents transcript contamination that causes verification failures
-fn compute_challenge_clean(transcript: &[u8], domain: &[u8]) -> ExtF {
-    let mut temp = transcript.to_vec();
-    temp.extend(domain);
-    fiat_shamir_challenge(&temp)
+/// Compute a challenge from transcript bytes using the canonical Transcript API
+/// This replaces the old compute_challenge_clean pattern with proper domain separation
+fn compute_challenge_canonical(transcript_bytes: &[u8], module: &str, phase: &str, name: &str) -> ExtF {
+    let mut transcript = Transcript::new(module);
+    transcript.absorb_bytes("base_state", transcript_bytes);
+    transcript.challenge_ext(&format!("{}/{}", phase, name))
 }
+
+
+
+
 
 // FRI types removed - using direct polynomial checks in NARK mode
 
@@ -298,12 +302,12 @@ impl FoldState {
 
     // Poseidon2-based transcript hash to align with FS challenges
     fn hash_transcript(&self, data: &[u8]) -> [u8; 32] {
-        // Derive 32 bytes by calling the Poseidon2-based FS challenge twice with domain separation
+        // Derive 32 bytes via Poseidon2 FS with explicit domain separation
         let mut t0 = data.to_vec();
-        t0.extend_from_slice(b"|hash0");
+        t0.extend_from_slice(b"|NEO_FS_V1|hash0");
         let h0 = fiat_shamir_challenge(&t0);
         let mut t1 = data.to_vec();
-        t1.extend_from_slice(b"|hash1");
+        t1.extend_from_slice(b"|NEO_FS_V1|hash1");
         let h1 = fiat_shamir_challenge(&t1);
         let a0 = h0.to_array();
         let a1 = h1.to_array();
@@ -514,7 +518,7 @@ impl FoldState {
         // TRANSCRIPT FIX: Compute correct claim for CCS1 verification using joint FS
         let mut sum_alpha1 = ExtF::ZERO;
         let mut alpha_pow = ExtF::ONE;
-        let alpha1 = compute_challenge_clean(&joint_fs, b"ccs_alpha");
+        let alpha1 = compute_challenge_canonical(&joint_fs, "ccs", "sumcheck", "alpha");
         for _ in 0..self.structure.num_constraints {
             sum_alpha1 += alpha_pow;
             alpha_pow *= alpha1;
@@ -763,7 +767,7 @@ impl FoldState {
         // TRANSCRIPT FIX: Compute correct claim for CCS2 verification using same joint FS
         let mut sum_alpha2 = ExtF::ZERO;
         let mut alpha_pow = ExtF::ONE;
-        let alpha2 = compute_challenge_clean(&joint_fs, b"ccs_alpha");
+        let alpha2 = compute_challenge_canonical(&joint_fs, "ccs", "sumcheck", "alpha");
         for _ in 0..self.structure.num_constraints {
             sum_alpha2 += alpha_pow;
             alpha_pow *= alpha2;
@@ -1198,95 +1202,11 @@ fn construct_q<'a>(
     })
 }
 
-#[allow(dead_code)]
-struct NormCheckPoly {
-    values: Vec<ExtF>,
-    degree: usize,
-}
 
-impl UnivPoly for NormCheckPoly {
-    fn evaluate(&self, point: &[ExtF]) -> ExtF {
-        if self.degree == 0 || point.len() != self.degree {
-            return self.values.get(0).copied().unwrap_or(ExtF::ZERO);
-        }
-        let mut result = ExtF::ZERO;
 
-        for (idx, &val) in self.values.iter().enumerate() {
-            let mut basis = ExtF::ONE;
-            for (j, &x) in point.iter().enumerate() {
-                let bit = (idx >> j) & 1;
-                basis *= if bit == 1 { x } else { ExtF::ONE - x };
-            }
 
-            result += basis * val;
-        }
 
-        result
-    }
 
-    fn degree(&self) -> usize {
-        self.degree
-    }
-
-    fn max_individual_degree(&self) -> usize {
-        1
-    }
-}
-
-#[allow(dead_code)]
-fn batch_norm_checks(
-    witness: &CcsWitness,
-    b: u64,
-    degree: usize,
-    transcript: &mut Vec<u8>,
-) -> Box<dyn UnivPoly> {
-    // Derive random alpha for batching the witness entries
-    transcript.extend(b"norm_alpha");
-    let alpha = fiat_shamir_challenge(transcript);
-
-    let padded = 1usize << degree;
-    let mut values = vec![ExtF::ZERO; padded];
-
-    let mut alpha_pow = ExtF::ONE;
-    for (i, value) in values.iter_mut().enumerate() {
-        let w = if i < witness.z.len() {
-            witness.z[i]
-        } else {
-            ExtF::ZERO
-        };
-        // Polynomial that vanishes for all integers in [-(b-1)/2, (b-1)/2]
-        let mut prod = w; // include root at 0
-        let bound = (b - 1) / 2;
-        for k in 1..=bound {
-            let kf = embed_base_to_ext(F::from_u64(k));
-            prod *= w * w - kf * kf;
-        }
-        *value = alpha_pow * prod;
-        alpha_pow *= alpha;
-    }
-
-    Box::new(NormCheckPoly { values, degree })
-}
-
-#[allow(dead_code)]
-struct ScaledPoly<'a> {
-    poly: &'a dyn UnivPoly,
-    scalar: ExtF,
-}
-
-impl<'a> UnivPoly for ScaledPoly<'a> {
-    fn evaluate(&self, point: &[ExtF]) -> ExtF {
-        self.scalar * self.poly.evaluate(point)
-    }
-
-    fn degree(&self) -> usize {
-        self.poly.degree()
-    }
-
-    fn max_individual_degree(&self) -> usize {
-        self.poly.max_individual_degree()
-    }
-}
 
 pub fn pi_ccs(
     fold_state: &mut FoldState,
@@ -1324,7 +1244,7 @@ pub fn pi_ccs(
         let fs_base = sumcheck_fs_prefix
             .map(|b| b.to_vec())
             .unwrap_or_else(|| transcript.clone());
-        let alpha = compute_challenge_clean(&fs_base, b"ccs_alpha");
+        let alpha = compute_challenge_canonical(&fs_base, "ccs", "sumcheck", "alpha");
         let q_poly = construct_q(
             &fold_state.structure,
             &ccs_instance,
@@ -1356,7 +1276,7 @@ pub fn pi_ccs(
         }
 
         // Use clean challenge computation to avoid transcript contamination
-        let _rho = compute_challenge_clean(transcript, b"ccs_rho");
+        let _rho = compute_challenge_canonical(transcript, "ccs", "sumcheck", "rho");
         
         // Convert Q polynomial to dense form for FRI commitment
         // Removed dense conversion and zero-check special case for full ZK security
@@ -1472,7 +1392,7 @@ pub fn pi_ccs(
         
         // Use same alpha derivation as prover for consistency  
         // CRITICAL: Use the same transcript state that prover used for alpha computation
-        let alpha_vt = compute_challenge_clean(&pre_sumcheck_transcript, b"ccs_alpha");
+        let alpha_vt = compute_challenge_canonical(&pre_sumcheck_transcript, "ccs", "sumcheck", "alpha");
         let q_poly_vt = construct_q(
             &fold_state.structure,
             &ccs_instance,
@@ -2023,17 +1943,7 @@ fn serialize_ys(transcript: &mut Vec<u8>, ys: &[ExtF]) {
     }
 }
 
-#[allow(dead_code)]
-fn serialize_comms_block(transcript: &mut Vec<u8>, comms: &[Vec<u8>]) {
-    // Write number of commitments (u8), then for each write length (u32) + bytes
-    let len = comms.len() as u8;
-    transcript.push(len);
-    for c in comms {
-        let clen = c.len() as u32;
-        transcript.extend_from_slice(&clen.to_be_bytes());
-        transcript.extend_from_slice(c);
-    }
-}
+
 
 // FRI serialization functions removed - using direct polynomial checks in NARK mode
 
@@ -2057,33 +1967,11 @@ fn extract_msgs_ccs(cursor: &mut Cursor<&[u8]>, _max_deg: usize) -> Vec<(Polynom
     msgs
 }
 
-#[allow(dead_code)]
-fn read_f(cursor: &mut Cursor<&[u8]>) -> F {
-    F::from_u64(cursor.read_u64::<BigEndian>().unwrap_or(0))
-}
 
-#[allow(dead_code)]
-fn serialize_rotation(rot: &RingElement<ModInt>, transcript: &mut Vec<u8>) {
-    // Write length (n) followed by n limbs as u64 (canonical)
-    transcript.extend(&(rot.coeffs().len() as u32).to_be_bytes());
-    for c in rot.coeffs() {
-        transcript.extend(&c.as_canonical_u64().to_be_bytes());
-    }
-}
 
-#[allow(dead_code)]
-fn read_rotation(cursor: &mut Cursor<&[u8]>, n: usize) -> Option<RingElement<ModInt>> {
-    let len = cursor.read_u32::<BigEndian>().ok()? as usize;
-    if len != n {
-        return None;
-    }
-    let mut coeffs = Vec::with_capacity(n);
-    for _ in 0..n {
-        let limb = cursor.read_u64::<BigEndian>().ok()?;
-        coeffs.push(ModInt::from_u64(limb));
-    }
-    Some(RingElement::from_coeffs(coeffs, n))
-}
+
+
+
 
 /// Derive an extension-field scalar ρ from a rotation element using Fiat–Shamir.
 /// This hashes the coefficients of the rotation so that both prover and verifier
@@ -2092,15 +1980,16 @@ fn read_rotation(cursor: &mut Cursor<&[u8]>, n: usize) -> Option<RingElement<Mod
 /// for that instead.
 pub fn rho_scalar_from_rotation(rot: &RingElement<ModInt>) -> ExtF {
     let mut bytes = Vec::new();
-    bytes.extend_from_slice(b"rho_ext_from_rotation");
+    // Canonical domain separation
+    bytes.extend_from_slice(b"NEO_FS_V1|neo.rlc.rho_ext_from_rotation");
     bytes.extend(&(rot.coeffs().len() as u32).to_be_bytes());
     for c in rot.coeffs() {
         bytes.extend(c.as_canonical_u64().to_be_bytes());
     }
+    // Poseidon2-based FS for extension-field challenge
     fiat_shamir_challenge(&bytes)
 }
 
-#[allow(dead_code)]
 fn read_ys(cursor: &mut Cursor<&[u8]>, expected_len: usize) -> Option<Vec<ExtF>> {
     let len = cursor.read_u8().ok()? as usize;
     if len != expected_len {
@@ -2115,21 +2004,7 @@ fn read_ys(cursor: &mut Cursor<&[u8]>, expected_len: usize) -> Option<Vec<ExtF>>
     Some(ys)
 }
 
-#[allow(dead_code)]
-fn read_comms_block(cursor: &mut Cursor<&[u8]>) -> Option<Vec<Vec<u8>>> {
-    let len = cursor.read_u8().ok()? as usize;
-    eprintln!("read_comms_block: Attempting to read {} comms", len);
-    let mut comms = Vec::with_capacity(len);
-    for i in 0..len {
-        let clen = cursor.read_u32::<BigEndian>().ok()? as usize;
-        eprintln!("read_comms_block: Comm {} has length {}", i, clen);
-        let mut buf = vec![0u8; clen];
-        cursor.read_exact(&mut buf).ok()?;
-        comms.push(buf);
-    }
-    eprintln!("read_comms_block: Successfully read {} comms", comms.len());
-    Some(comms)
-}
+
 
 // FRI helper functions removed - using direct polynomial checks in NARK mode
 

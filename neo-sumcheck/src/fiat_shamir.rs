@@ -4,6 +4,8 @@ use p3_goldilocks::Poseidon2Goldilocks;
 use p3_symmetric::{CryptographicHasher, PaddingFreeSponge};
 use rand::rngs::StdRng;
 use rand::SeedableRng;
+use rand_chacha::ChaCha20Rng;
+use neo_modint::{Coeff, ModInt};
 
 /// Poseidon2 parameters: 16-element state, 15-element rate, 2-element output for ExtF
 const WIDTH: usize = 16;
@@ -163,6 +165,195 @@ pub fn fs_challenge_base(transcript: &mut Vec<u8>, label: &[u8]) -> F {
     e.to_array()[0]
 }
 
+/// Canonical domain separator for all FS in this workspace.
+pub const NEO_FS_DOMAIN: &[u8] = b"NEO_FS_V1";
+
+/// Canonical: challenge in base field `F` from (domain,label,transcript).
+/// Stateless (Sponge is fed from bytes); use when you don't have a live challenger object.
+pub fn fs_challenge_base_labeled(transcript: &[u8], label: &str) -> F {
+    // Keep the construction consistent everywhere:
+    // input := NEO_FS_V1 || label || transcript
+    let mut buf = Vec::with_capacity(NEO_FS_DOMAIN.len() + label.len() + transcript.len());
+    buf.extend_from_slice(NEO_FS_DOMAIN);
+    buf.extend_from_slice(label.as_bytes());
+    buf.extend_from_slice(transcript);
+    fiat_shamir_challenge_base(&buf)
+}
+
+/// Canonical: challenge in extension field `ExtF` from (domain,label,transcript).
+pub fn fs_challenge_ext_labeled(transcript: &[u8], label: &str) -> ExtF {
+    let mut buf = Vec::with_capacity(NEO_FS_DOMAIN.len() + label.len() + transcript.len());
+    buf.extend_from_slice(NEO_FS_DOMAIN);
+    buf.extend_from_slice(label.as_bytes());
+    buf.extend_from_slice(transcript);
+    fiat_shamir_challenge(&buf)
+}
+
+/// Canonical: derive a u64 from the base-field challenge (useful for seeds etc.).
+pub fn fs_challenge_u64_labeled(transcript: &[u8], label: &str) -> u64 {
+    fs_challenge_base_labeled(transcript, label).as_canonical_u64()
+}
+
+/// Unified Transcript facade for consistent Fiat-Shamir transcript construction.
+/// 
+/// This provides a single, canonical API for all transcript operations, eliminating
+/// the dual-surface problem of mixing typed absorb/challenge with ad-hoc byte manipulation.
+/// All domain separation follows the NEO/V1/<module>/<phase>/<name> scheme.
+#[derive(Clone)]
+pub struct Transcript {
+    /// Internal transcript state as bytes
+    state: Vec<u8>,
+}
+
+impl Transcript {
+    /// Create a new transcript with protocol identifier
+    pub fn new(protocol: &str) -> Self {
+        let mut state = Vec::new();
+        state.extend_from_slice(b"NEO/V1/");
+        state.extend_from_slice(protocol.as_bytes());
+        Self { state }
+    }
+
+    /// Absorb a domain separation tag (zero-copy marker)
+    pub fn absorb_tag(&mut self, tag: &str) {
+        self.absorb_bytes("tag", tag.as_bytes());
+    }
+
+    /// Absorb bytes with structured framing to prevent concatenation ambiguities
+    pub fn absorb_bytes(&mut self, label: &str, bytes: &[u8]) {
+        // Frame: "FS" | len(label) | label | len(bytes) | bytes
+        self.state.extend_from_slice(b"FS");
+        self.state.extend_from_slice(&(label.len() as u32).to_be_bytes());
+        self.state.extend_from_slice(label.as_bytes());
+        self.state.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+        self.state.extend_from_slice(bytes);
+    }
+
+    /// Absorb a u64 value
+    pub fn absorb_u64(&mut self, label: &str, value: u64) {
+        self.absorb_bytes(label, &value.to_be_bytes());
+    }
+
+    /// Absorb an extension field element
+    pub fn absorb_extf(&mut self, label: &str, value: ExtF) {
+        let arr = value.to_array();
+        let mut bytes = Vec::with_capacity(16);
+        bytes.extend_from_slice(&arr[0].as_canonical_u64().to_be_bytes());
+        bytes.extend_from_slice(&arr[1].as_canonical_u64().to_be_bytes());
+        self.absorb_bytes(label, &bytes);
+    }
+
+    /// Absorb a polynomial
+    pub fn absorb_poly(&mut self, label: &str, poly: &Polynomial<ExtF>) {
+        let mut bytes = Vec::new();
+        let deg = poly.degree() as u32;
+        let coeffs = poly.coeffs();
+        let count = coeffs.len() as u32;
+        
+        // Header: degree | coefficient count
+        bytes.extend_from_slice(&deg.to_be_bytes());
+        bytes.extend_from_slice(&count.to_be_bytes());
+        
+        // Coefficients
+        for &coeff in coeffs {
+            let arr = coeff.to_array();
+            bytes.extend_from_slice(&arr[0].as_canonical_u64().to_be_bytes());
+            bytes.extend_from_slice(&arr[1].as_canonical_u64().to_be_bytes());
+        }
+        
+        self.absorb_bytes(label, &bytes);
+    }
+
+    /// Generate a base field challenge
+    pub fn challenge_base(&mut self, label: &str) -> F {
+        self.absorb_tag("challenge");
+        self.absorb_bytes("challenge_label", label.as_bytes());
+        fiat_shamir_challenge_base(&self.state)
+    }
+
+    /// Generate an extension field challenge
+    pub fn challenge_ext(&mut self, label: &str) -> ExtF {
+        self.absorb_tag("challenge");
+        self.absorb_bytes("challenge_label", label.as_bytes());
+        fiat_shamir_challenge(&self.state)
+    }
+
+    /// Generate a ModInt challenge with bias-free rejection sampling
+    pub fn challenge_modint(&mut self, label: &str) -> ModInt {
+        let q = <ModInt as Coeff>::modulus() as u128;
+        let max_attempts = 1000; // Prevent infinite loops
+        
+        for _ in 0..max_attempts {
+            // Squeeze 128 bits for better rejection sampling
+            let wide_bytes = self.challenge_wide(label);
+            let x = u128::from_be_bytes([
+                wide_bytes[0], wide_bytes[1], wide_bytes[2], wide_bytes[3],
+                wide_bytes[4], wide_bytes[5], wide_bytes[6], wide_bytes[7],
+                wide_bytes[8], wide_bytes[9], wide_bytes[10], wide_bytes[11],
+                wide_bytes[12], wide_bytes[13], wide_bytes[14], wide_bytes[15],
+            ]);
+            
+            // Rejection sampling to avoid bias
+            let k = (u128::MAX / q) * q; // Largest multiple of q ≤ 2^128
+            if x < k {
+                return ModInt::from_u64((x % q) as u64);
+            }
+            
+            // Modify state slightly for next attempt
+            self.absorb_bytes("retry", &[0u8]);
+        }
+        
+        // Fallback (should be extremely rare)
+        ModInt::from_u64(0)
+    }
+
+    /// Generate 32 bytes of randomness
+    pub fn challenge_wide(&mut self, label: &str) -> [u8; 32] {
+        self.absorb_tag("wide_challenge");
+        self.absorb_bytes("wide_label", label.as_bytes());
+        
+        // Generate two extension field elements for 32 bytes total
+        let h0 = fiat_shamir_challenge(&self.state);
+        
+        // Modify state for second challenge
+        self.absorb_bytes("wide_second", &[1u8]);
+        let h1 = fiat_shamir_challenge(&self.state);
+        
+        let a0 = h0.to_array();
+        let a1 = h1.to_array();
+        let mut result = [0u8; 32];
+        result[0..8].copy_from_slice(&a0[0].as_canonical_u64().to_be_bytes());
+        result[8..16].copy_from_slice(&a0[1].as_canonical_u64().to_be_bytes());
+        result[16..24].copy_from_slice(&a1[0].as_canonical_u64().to_be_bytes());
+        result[24..32].copy_from_slice(&a1[1].as_canonical_u64().to_be_bytes());
+        result
+    }
+
+    /// Create a properly seeded ChaCha20Rng with 256-bit entropy
+    pub fn rng(&mut self, label: &str) -> ChaCha20Rng {
+        let seed = self.challenge_wide(label);
+        ChaCha20Rng::from_seed(seed)
+    }
+
+    /// Create an immutable fork of the transcript
+    pub fn fork(&self, fork_label: &str) -> Self {
+        let mut forked = self.clone();
+        forked.absorb_tag("fork");
+        forked.absorb_bytes("fork_label", fork_label.as_bytes());
+        forked
+    }
+
+    /// Get the current transcript state (for compatibility with existing code)
+    pub fn state(&self) -> &[u8] {
+        &self.state
+    }
+
+    /// Get a mutable reference to the state (for compatibility, use sparingly)
+    pub fn state_mut(&mut self) -> &mut Vec<u8> {
+        &mut self.state
+    }
+}
+
 // --- Tests for structured FS ---
 
 #[cfg(test)]
@@ -183,6 +374,102 @@ mod fs_tests {
         let c2 = fs_challenge_ext(&mut t2, b"final");
 
         assert_ne!(c1, c2, "structured FS must not collide on chunking differences");
+    }
+
+    #[test]
+    fn canonical_helpers_work() {
+        let transcript = b"test_transcript";
+        let label = "test_label";
+        
+        let base_challenge = fs_challenge_base_labeled(transcript, label);
+        let _ext_challenge = fs_challenge_ext_labeled(transcript, label);
+        let u64_challenge = fs_challenge_u64_labeled(transcript, label);
+        
+        // Verify u64 challenge matches base challenge
+        assert_eq!(u64_challenge, base_challenge.as_canonical_u64());
+        
+        // Verify different labels produce different challenges
+        let different_challenge = fs_challenge_base_labeled(transcript, "different_label");
+        assert_ne!(base_challenge, different_challenge);
+    }
+
+    #[test]
+    fn transcript_facade_basic_functionality() {
+        let mut transcript = Transcript::new("test_protocol");
+        
+        // Test absorbing different types
+        transcript.absorb_tag("phase1");
+        transcript.absorb_u64("round", 42);
+        transcript.absorb_bytes("data", b"test_data");
+        
+        // Test challenges
+        let base_challenge = transcript.challenge_base("test_base");
+        let ext_challenge = transcript.challenge_ext("test_ext");
+        
+        // Challenges should be deterministic
+        let mut transcript2 = Transcript::new("test_protocol");
+        transcript2.absorb_tag("phase1");
+        transcript2.absorb_u64("round", 42);
+        transcript2.absorb_bytes("data", b"test_data");
+        
+        let base_challenge2 = transcript2.challenge_base("test_base");
+        let ext_challenge2 = transcript2.challenge_ext("test_ext");
+        
+        assert_eq!(base_challenge, base_challenge2);
+        assert_eq!(ext_challenge, ext_challenge2);
+    }
+
+    #[test]
+    fn transcript_fork_independence() {
+        let mut transcript = Transcript::new("test_protocol");
+        transcript.absorb_tag("common");
+        
+        let mut fork1 = transcript.fork("branch1");
+        let mut fork2 = transcript.fork("branch2");
+        
+        fork1.absorb_bytes("data", b"fork1_data");
+        fork2.absorb_bytes("data", b"fork2_data");
+        
+        let challenge1 = fork1.challenge_base("test");
+        let challenge2 = fork2.challenge_base("test");
+        
+        // Forks should produce different challenges
+        assert_ne!(challenge1, challenge2);
+    }
+
+    #[test]
+    fn transcript_modint_challenge_no_bias() {
+        let mut transcript = Transcript::new("bias_test");
+        
+        // Generate multiple challenges and verify they're in range
+        for i in 0..100 {
+            transcript.absorb_u64("iteration", i);
+            let challenge = transcript.challenge_modint("test_modint");
+            let q = <ModInt as Coeff>::modulus();
+            assert!(challenge.as_canonical_u64() < q, "Challenge {} out of range", challenge.as_canonical_u64());
+        }
+    }
+
+    #[test]
+    fn transcript_rng_quality() {
+        // Test that same transcript state + same label = same RNG
+        let mut transcript1 = Transcript::new("rng_test");
+        transcript1.absorb_tag("seed_test");
+        let transcript1_clone = transcript1.clone();
+        
+        let mut rng1 = transcript1.rng("test_rng");
+        let mut rng2 = transcript1_clone.clone().rng("test_rng"); // Same state, same label
+        
+        // Same seed should produce same sequence
+        use rand::Rng;
+        let val1: u64 = rng1.random();
+        let val2: u64 = rng2.random();
+        assert_eq!(val1, val2);
+        
+        // Different labels should give different RNGs
+        let mut rng3 = transcript1_clone.clone().rng("different_label");
+        let val3: u64 = rng3.random();
+        assert_ne!(val1, val3);
     }
 }
 

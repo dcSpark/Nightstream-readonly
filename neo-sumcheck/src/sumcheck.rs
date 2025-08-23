@@ -1,5 +1,6 @@
 use crate::fiat_shamir::{batch_unis, fiat_shamir_challenge};
 use crate::fiat_shamir::{fs_absorb_poly, fs_absorb_extf, fs_absorb_u64, fs_challenge_ext};
+use crate::fiat_shamir::{fs_challenge_base_labeled, NEO_FS_DOMAIN};
 use crate::challenger::NeoChallenger;
 use crate::{from_base, ExtF, Polynomial, UnivPoly, F};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
@@ -13,11 +14,7 @@ use thiserror::Error;
 /// Enhanced with full ZK blinding using Fiat-Shamir derived parameters
 const ZK_SIGMA: f64 = 3.2;
 
-/// Derive a deterministic seed from the transcript using Blake3.
-fn fs_challenge_u64(transcript: &[u8]) -> u64 {
-    let hash = blake3::hash(transcript);
-    u64::from_le_bytes(hash.as_bytes()[0..8].try_into().unwrap())
-}
+// No BLAKE3 here; use canonical helpers via fiat_shamir.rs when we need seeds.
 
 // NARK mode: Knowledge soundness verified through direct polynomial checks
 // extract_sumcheck_witness function removed - no longer needed
@@ -163,11 +160,11 @@ pub fn batched_sumcheck_prover(
         // Enhanced ZK blinding with Fiat-Shamir derived parameters
         let blind_deg = max_d.saturating_sub(2);
 
-        // Derive ZK sigma from transcript for enhanced security
         let mut zk_sigma_transcript = transcript.clone();
-        zk_sigma_transcript.extend(b"zk_sigma_derivation");
-        zk_sigma_transcript.extend(&round.to_le_bytes());
-        let zk_sigma_seed = fs_challenge_u64(&zk_sigma_transcript);
+        zk_sigma_transcript.extend_from_slice(NEO_FS_DOMAIN);
+        zk_sigma_transcript.extend_from_slice(b"|neo.sumcheck.zk_sigma");
+        zk_sigma_transcript.extend_from_slice(&round.to_le_bytes());
+        let zk_sigma_seed = fs_challenge_base_labeled(&zk_sigma_transcript, "neo.sumcheck.zk_sigma.seed").as_canonical_u64();
         let zk_sigma = ZK_SIGMA + (zk_sigma_seed as f64 / u64::MAX as f64) * 2.0; // Range [3.2, 5.2]
 
         let mut blind_coeffs: Vec<ExtF> = (0..=blind_deg)
