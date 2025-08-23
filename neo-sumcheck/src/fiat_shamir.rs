@@ -137,8 +137,13 @@ pub fn fs_absorb_poly(transcript: &mut Vec<u8>, label: &[u8], p: &Polynomial<Ext
     fs_write_u32_be(transcript, 8); // 8 bytes follow in "payload header"
     fs_write_u32_be(transcript, deg);
     fs_write_u32_be(transcript, count);
-    // then each coefficient (two limbs)
-    fs_write_u32_be(transcript, count * 16);
+    // then each coefficient (two limbs) - use checked_mul to prevent overflow
+    let payload_size = count.checked_mul(16).unwrap_or_else(|| {
+        // Cap at max u32 for very large polynomials (extremely unlikely in practice)
+        eprintln!("Warning: polynomial too large for u32 framing, capping payload size");
+        u32::MAX
+    });
+    fs_write_u32_be(transcript, payload_size);
     for &c in coeffs {
         let a = c.to_array();
         transcript.extend_from_slice(&a[0].as_canonical_u64().to_be_bytes());
