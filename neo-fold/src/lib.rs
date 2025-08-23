@@ -372,20 +372,16 @@ impl FoldState {
     }
 
     // Helper function for joint Fiat-Shamir prefix
-fn joint_sumcheck_prefix(
-    c1: &[RingElement<ModInt>],
-    c2: &[RingElement<ModInt>],
-) -> Vec<u8> {
-    let mut p = Vec::new();
-    p.extend_from_slice(b"neo_joint_sumcheck_v1");
-    p.extend(serialize_commit(c1));
-    p.extend(serialize_commit(c2));
-    p
-}
-
-
-
-
+    fn joint_sumcheck_prefix(
+        c1: &[RingElement<ModInt>],
+        c2: &[RingElement<ModInt>],
+    ) -> Vec<u8> {
+        let mut p = Vec::new();
+        p.extend_from_slice(b"neo_joint_sumcheck_v1");
+        p.extend(serialize_commit(c1));
+        p.extend(serialize_commit(c2));
+        p
+    }
 
     pub fn verify(&self, full_transcript: &[u8], committer: &AjtaiCommitter) -> bool {
         eprintln!("=== VERIFY START ===");
