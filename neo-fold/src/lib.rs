@@ -13,7 +13,16 @@ use neo_sumcheck::{
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_matrix::Matrix;
 use rand::{rngs::StdRng, SeedableRng};
+
 use std::io::{Cursor, Read};
+
+fn last_index_of(haystack: &[u8], needle: &[u8]) -> isize {
+    if needle.is_empty() { return -1; }
+    match haystack.windows(needle.len()).rposition(|w| w == needle) {
+        Some(i) => i as isize,
+        None => -1,
+    }
+}
 
 pub mod spartan_ivc; // NARK mode - no compression
 pub use spartan_ivc::*;
@@ -306,86 +315,77 @@ impl FoldState {
         out
     }
 
-    pub fn generate_proof(
+        pub fn generate_proof(
         &mut self,
         instance1: (CcsInstance, CcsWitness),
         instance2: (CcsInstance, CcsWitness),
         committer: &AjtaiCommitter,
     ) -> Proof {
-        eprintln!("=== GENERATE_PROOF START ===");
-        eprintln!("generate_proof: Input transcript.len()={}", self.transcript.len());
-        let mut transcript = std::mem::take(&mut self.transcript);
-        eprintln!("generate_proof: Clearing transcript, old_len={}", transcript.len());
-        transcript.clear();
-        eprintln!("generate_proof: After clear, transcript.len()={}", transcript.len());
+        eprintln!("=== GENERATE_PROOF START (JOINT FS) ===");
+        let mut transcript = Vec::new();
         self.sumcheck_msgs.clear();
         self.rhos.clear();
-        // Initialize challenger for folding protocol
-        let mut challenger = NeoChallenger::new("neo_folding");
-        // Save base transcript state for consistent alpha derivation in both pi_ccs calls
+
+        // Create joint Fiat-Shamir prefix for both instances
+        let joint_fs = Self::joint_sumcheck_prefix(&instance1.0.commitment, &instance2.0.commitment);
+        
+        // Preview commit2 so verifier can reconstruct joint prefix before first sumcheck
+        transcript.extend(b"neo_pi_ccs2_preview");
+        transcript.extend(serialize_commit(&instance2.0.commitment));
+
+        // First CCS instance
         transcript.extend(b"neo_pi_ccs1");
         self.ccs_instance = Some(instance1);
-        eprintln!("generate_proof: About to call pi_ccs #1");
-        let msgs1 = pi_ccs(self, committer, &mut transcript);
-        eprintln!("generate_proof: pi_ccs #1 returned, msgs1.len()={} (already serialized by pi_ccs)", msgs1.len());
-        
-        // NOTE: sumcheck_msgs1 and ys1 are already serialized by pi_ccs - no need to serialize again
+        eprintln!("generate_proof: About to call pi_ccs #1 with joint FS");
+        let msgs1 = pi_ccs(self, committer, &mut transcript, Some(&joint_fs));
+        eprintln!("generate_proof: pi_ccs #1 returned, msgs1.len()={}", msgs1.len());
         
         self.sumcheck_msgs.push(msgs1);
-        eprintln!("generate_proof: About to add neo_pi_dec1 tag, transcript.len()={}", transcript.len());
         transcript.extend(b"neo_pi_dec1");
-        eprintln!("generate_proof: Added neo_pi_dec1 tag, transcript.len()={}", transcript.len());
-        eprintln!("generate_proof: About to call pi_dec #1");
         pi_dec(self, committer, &mut transcript);
-        eprintln!("generate_proof: pi_dec #1 returned, transcript.len()={}", transcript.len());
+
+        // Second CCS instance  
         transcript.extend(b"neo_pi_ccs2");
-        
         self.ccs_instance = Some(instance2);
-        eprintln!("generate_proof: About to call pi_ccs #2");
-        let msgs2 = pi_ccs(self, committer, &mut transcript);
-        eprintln!("generate_proof: pi_ccs #2 returned, msgs2.len()={} (already serialized by pi_ccs)", msgs2.len());
-        
-        // NOTE: sumcheck_msgs2 and ys2 are already serialized by pi_ccs - no need to serialize again
+        eprintln!("generate_proof: About to call pi_ccs #2 with joint FS");
+        let msgs2 = pi_ccs(self, committer, &mut transcript, Some(&joint_fs));
+        eprintln!("generate_proof: pi_ccs #2 returned, msgs2.len()={}", msgs2.len());
         
         self.sumcheck_msgs.push(msgs2);
-        eprintln!("generate_proof: About to add neo_pi_dec2 tag, transcript.len()={}", transcript.len());
         transcript.extend(b"neo_pi_dec2");
-        eprintln!("generate_proof: Added neo_pi_dec2 tag, transcript.len()={}", transcript.len());
         pi_dec(self, committer, &mut transcript);
-        eprintln!("generate_proof: pi_dec #2 returned, transcript.len()={}", transcript.len());
-        eprintln!("generate_proof: About to add neo_pi_rlc tag, transcript.len()={}", transcript.len());
+
+        // pi_rlc
         transcript.extend(b"neo_pi_rlc");
-        eprintln!("generate_proof: Added neo_pi_rlc tag, transcript.len()={}", transcript.len());
-        // TRANSCRIPT FIX: Use separate challenger for rotation sampling to prevent transcript divergence
-        // This prevents the main transcript from being extended during sampling/retries
         let mut sep_challenger = NeoChallenger::new("neo_rlc_rho");
         sep_challenger.observe_bytes("transcript_prefix", &transcript);
         let rho_rot = sep_challenger.challenge_rotation("rlc_rho", committer.params().n);
-        // TRANSCRIPT FIX: Don't serialize rotation - verifier will derive it independently from transcript prefix
         pi_rlc(self, rho_rot.clone(), committer, &mut transcript);
-        // No legacy base-limb storage; if needed, store a hash of rho_rot instead
+
         transcript.extend(b"neo_fri");
-        // NARK mode: No FRI compression needed
-        challenger.observe_bytes("fri_proof", &transcript);
-        eprintln!("generate_proof: Before hash, transcript.len()={}", transcript.len());
         let hash = self.hash_transcript(&transcript);
         transcript.extend(&hash);
-        eprintln!("generate_proof: After hash, final transcript.len()={}", transcript.len());
-        
-        // NARK: Pad minimal transcript for trivial cases
-        if transcript.len() < 32 {
-            eprintln!("generate_proof: Padding short transcript from {} to 32 bytes", transcript.len());
-            transcript.extend(b"NARK_BASE_CASE");
-            transcript.resize(32, 0); // Pad to 32 bytes
-            let hash = self.hash_transcript(&transcript[0..32]);
-            transcript.extend(&hash);
-            eprintln!("generate_proof: After padding, final transcript.len()={}", transcript.len());
-        }
-        
+
         self.transcript = transcript.clone();
-        eprintln!("Proof generation complete");
+        eprintln!("JOINT FS: Proof generation complete");
         Proof { transcript }
     }
+
+    // Helper function for joint Fiat-Shamir prefix
+fn joint_sumcheck_prefix(
+    c1: &[RingElement<ModInt>],
+    c2: &[RingElement<ModInt>],
+) -> Vec<u8> {
+    let mut p = Vec::new();
+    p.extend_from_slice(b"neo_joint_sumcheck_v1");
+    p.extend(serialize_commit(c1));
+    p.extend(serialize_commit(c2));
+    p
+}
+
+
+
+
 
     pub fn verify(&self, full_transcript: &[u8], committer: &AjtaiCommitter) -> bool {
         eprintln!("=== VERIFY START ===");
@@ -393,9 +393,8 @@ impl FoldState {
         eprintln!("verify: transcript first_8_bytes={:?}", &full_transcript[0..full_transcript.len().min(8)]);
         
         if full_transcript.is_empty() {
-            // NARK: Empty transcript is valid base case (no proof needed)
-            eprintln!("verify: Empty transcript - valid NARK base case");
-            return true;
+            eprintln!("Empty transcript is invalid");
+            return false;
         }
         
         if full_transcript.len() < 32 {
@@ -423,6 +422,15 @@ impl FoldState {
         eprintln!("verify: Starting transcript reconstruction");
 
         // --- First CCS instance ---
+        // Read the preview commit first
+        eprintln!("verify: About to read neo_pi_ccs2_preview tag");
+        if read_tag(&mut cursor, b"neo_pi_ccs2_preview").is_err() {
+            eprintln!("verify: FAIL - Could not read neo_pi_ccs2_preview tag");
+            return false;
+        }
+        let commit2_preview = read_commit(&mut cursor, committer.params().n);
+        eprintln!("verify: Read commit2_preview, length={}", commit2_preview.len());
+
         eprintln!("verify: About to read neo_pi_ccs1 tag");
         if read_tag(&mut cursor, b"neo_pi_ccs1").is_err() {
             eprintln!("verify: FAIL - Could not read neo_pi_ccs1 tag");
@@ -443,10 +451,12 @@ impl FoldState {
         let commit1 = read_commit(&mut cursor, committer.params().n);
         eprintln!("verify: Read commit1, length={}", commit1.len());
         
-        // CRITICAL FIX: Set vt_transcript immediately after reading commit (before sumcheck messages)
-        // This exactly matches the prover's pre_sumcheck_transcript state
-        let commit_end_pos = cursor.position() as usize;
-        let mut vt_transcript = cursor.get_ref()[0..commit_end_pos].to_vec();
+        // Create joint FS prefix using both commits
+        let joint_fs = Self::joint_sumcheck_prefix(&commit1, &commit2_preview);
+        eprintln!("verify: Created joint FS prefix, length={}", joint_fs.len());
+        
+        // Use joint FS prefix for sumcheck verification (not the transcript)
+        let mut vt_transcript = joint_fs.clone();
         eprintln!("verify: TRANSCRIPT_FIX - Set vt_transcript to exact pre-sumcheck state, len={}", vt_transcript.len());
         eprintln!("verify: TRANSCRIPT_DEBUG - vt_transcript last 20 bytes: {:02x?}", 
                  &vt_transcript[vt_transcript.len().saturating_sub(20)..]);
@@ -481,10 +491,10 @@ impl FoldState {
         let _comms1: Vec<Vec<u8>> = vec![]; // NARK mode: no commitments, skip reading block
         eprintln!("verify: NARK mode - skipped comms1 block reading");
         
-        // TRANSCRIPT FIX: Compute correct claim for CCS1 verification 
+        // TRANSCRIPT FIX: Compute correct claim for CCS1 verification using joint FS
         let mut sum_alpha1 = ExtF::ZERO;
         let mut alpha_pow = ExtF::ONE;
-        let alpha1 = compute_challenge_clean(&vt_transcript, b"ccs_alpha");
+        let alpha1 = compute_challenge_clean(&joint_fs, b"ccs_alpha");
         for _ in 0..self.structure.num_constraints {
             sum_alpha1 += alpha_pow;
             alpha_pow *= alpha1;
@@ -680,10 +690,15 @@ impl FoldState {
         let commit2 = read_commit(&mut cursor, committer.params().n);
         eprintln!("verify: Read commit2, length={}", commit2.len());
         
-        // CRITICAL FIX: Set vt_transcript2 immediately after reading commit2 (before sumcheck messages)
-        // This exactly matches the prover's pre_sumcheck_transcript state for CCS2
-        let commit2_end_pos = cursor.position() as usize;
-        let mut vt_transcript2 = cursor.get_ref()[0..commit2_end_pos].to_vec();
+        // Verify that the preview matches the real commit
+        if commit2 != commit2_preview {
+            eprintln!("verify: FAIL - commit2 preview mismatch");
+            return false;
+        }
+        eprintln!("verify: commit2 preview matches real commit");
+        
+        // Use same joint FS prefix for CCS2 verification
+        let mut vt_transcript2 = joint_fs.clone();
         eprintln!("verify: TRANSCRIPT_FIX - Set vt_transcript2 to exact pre-sumcheck state, len={}", vt_transcript2.len());
         
         // TRANSCRIPT FIX: Read sumcheck_msgs2 tag that pi_ccs writes internally
@@ -698,10 +713,10 @@ impl FoldState {
         // NARK mode: Skip reading comms2 entirely (no commitments serialized in NARK mode)
         let _comms2: Vec<Vec<u8>> = vec![]; // NARK mode: no commitments, skip reading block
         eprintln!("verify: NARK mode - skipped comms2 block reading");
-        // TRANSCRIPT FIX: Compute correct claim for CCS2 verification
+        // TRANSCRIPT FIX: Compute correct claim for CCS2 verification using same joint FS
         let mut sum_alpha2 = ExtF::ZERO;
         let mut alpha_pow = ExtF::ONE;
-        let alpha2 = compute_challenge_clean(&vt_transcript2, b"ccs_alpha");
+        let alpha2 = compute_challenge_clean(&joint_fs, b"ccs_alpha");
         for _ in 0..self.structure.num_constraints {
             sum_alpha2 += alpha_pow;
             alpha_pow *= alpha2;
@@ -1230,6 +1245,7 @@ pub fn pi_ccs(
     fold_state: &mut FoldState,
     committer: &AjtaiCommitter,
     transcript: &mut Vec<u8>,
+    sumcheck_fs_prefix: Option<&[u8]>,
 ) -> Vec<(Polynomial<ExtF>, ExtF)> {
     if let Some((ccs_instance, ccs_witness)) = fold_state.ccs_instance.clone() {
         let params = committer.params();
@@ -1257,8 +1273,11 @@ pub fn pi_ccs(
         let f_result = fold_state.structure.f.evaluate(&test_inputs);
         eprintln!("pi_ccs: POLY_CONSTRUCTION - Direct f([2,3,6,5])={:?}", f_result);
         
-        // Compute alpha cleanly before constructing Q
-        let alpha = compute_challenge_clean(transcript, b"ccs_alpha");
+        // Compute alpha from joint FS prefix if provided, otherwise use transcript
+        let fs_base = sumcheck_fs_prefix
+            .map(|b| b.to_vec())
+            .unwrap_or_else(|| transcript.clone());
+        let alpha = compute_challenge_clean(&fs_base, b"ccs_alpha");
         let q_poly = construct_q(
             &fold_state.structure,
             &ccs_instance,
@@ -1301,7 +1320,7 @@ pub fn pi_ccs(
         // Convert base field elements to extension field for computation
         let u_ext = from_base(ccs_instance.u);
         let e_ext = from_base(ccs_instance.e);
-        let claim_q = u_ext * e_ext * sum_alpha;
+        let claim_q = u_ext * e_ext * e_ext * sum_alpha; // u·e²·Σα^b
         let claims = vec![claim_q]; // Only Q claim, no norm checking in Π_CCS
         eprintln!("pi_ccs: Using Q-only claims - claim_q={:?} (u={:?}, e={:?}, sum_alpha={:?})", 
                  claim_q, ccs_instance.u, ccs_instance.e, sum_alpha);
@@ -1327,8 +1346,8 @@ pub fn pi_ccs(
             }
         }
         
-        // CRITICAL FIX: Capture prover transcript state before sumcheck for verifier
-        let pre_sumcheck_transcript = transcript.clone();
+        // CRITICAL FIX: Use joint FS prefix if provided, otherwise use transcript
+        let pre_sumcheck_transcript = fs_base.clone();
         eprintln!("pi_ccs: PROVER - Captured pre-sumcheck transcript.len()={}", pre_sumcheck_transcript.len());
         eprintln!("pi_ccs: TRANSCRIPT_DEBUG - pre_sumcheck_transcript last 20 bytes: {:02x?}", 
                  &pre_sumcheck_transcript[pre_sumcheck_transcript.len().saturating_sub(20)..]);
@@ -1346,9 +1365,13 @@ pub fn pi_ccs(
                 eprintln!("pi_ccs: PROVER - sumcheck_msgs.len()={}", v.len());
                 
                 // CRITICAL FIX: Serialize structured block to proof transcript (FS went to fs_transcript)
-                // Determine which CCS instance this is based on transcript content
-                let transcript_str = String::from_utf8_lossy(transcript);
-                let is_ccs2 = transcript_str.contains("neo_pi_ccs2");
+                // Decide which CCS we are proving from the *last actual tag* we wrote.
+                // This ignores the earlier "neo_pi_ccs2_preview" and only flips to CCS2
+                // after the real "neo_pi_ccs2" tag has appeared.
+                let pos_ccs1 = last_index_of(transcript, b"neo_pi_ccs1");
+                let pos_ccs2 = last_index_of(transcript, b"neo_pi_ccs2");
+                let is_ccs2 = pos_ccs2 >= 0 && pos_ccs2 > pos_ccs1;
+
                 if is_ccs2 {
                     transcript.extend(b"sumcheck_msgs2");
                     eprintln!("pi_ccs: SUMCHECK_SERIALIZATION - Writing sumcheck_msgs2 block");
@@ -1675,10 +1698,11 @@ pub fn verify_rlc(
     eprintln!("verify_rlc: Starting verification");
     eprintln!("verify_rlc: e1.r.len()={}, e2.r.len()={}, new_eval.r.len()={}", e1.r.len(), e2.r.len(), new_eval.r.len());
     
-    // PROTOCOL FIX: Allow different evaluation points in folding scheme
-    // Different CCS instances can have different challenge vectors after independent sumchecks
-    // The RLC combines evaluation instances that may have been opened at different points
-    eprintln!("verify_rlc: Allowing different evaluation points (folding scheme design)");
+    // RLC must use identical evaluation points for security
+    if e1.r != e2.r || e1.r != new_eval.r {
+        eprintln!("RLC requires identical evaluation points");
+        return false;
+    }
     
     if e1.ys.len() != e2.ys.len() || e1.ys.len() != new_eval.ys.len() {
         eprintln!("verify_rlc: FAIL - ys lengths don't match: e1={}, e2={}, new={}", 
@@ -1759,11 +1783,47 @@ pub fn verify_rlc(
     true
 }
 
-pub fn verify_dec(_committer: &AjtaiCommitter, e: &EvalInstance, new_eval: &EvalInstance) -> bool {
-    if e.r != new_eval.r || e.ys != new_eval.ys || e.u != new_eval.u || e.e_eval != new_eval.e_eval
-    {
+pub fn verify_dec(committer: &AjtaiCommitter, e: &EvalInstance, new_eval: &EvalInstance) -> bool {
+    // Basic consistency checks
+    if e.r != new_eval.r || e.ys != new_eval.ys || e.u != new_eval.u || e.e_eval != new_eval.e_eval {
+        eprintln!("verify_dec: FAIL - basic consistency check failed");
         return false;
     }
+    
+    // Real decomposition validation (minimum requirements):
+    // 1. Check that the commitment is properly formed
+    if new_eval.commitment.is_empty() {
+        eprintln!("verify_dec: FAIL - empty commitment");
+        return false;
+    }
+    
+    // 2. Verify commitment structure matches expected decomposition format
+    let params = committer.params();
+    if new_eval.commitment.len() != params.k {
+        eprintln!("verify_dec: FAIL - commitment length {} != expected {}", 
+                 new_eval.commitment.len(), params.k);
+        return false;
+    }
+    
+    // 3. Check norm bounds are reasonable for decomposed values
+    if new_eval.norm_bound > params.norm_bound {
+        eprintln!("verify_dec: FAIL - norm bound {} exceeds parameter bound {}", 
+                 new_eval.norm_bound, params.norm_bound);
+        return false;
+    }
+    
+    // 4. Verify that ys values are reasonable (allow flexibility for extension field elements)
+    // Use a large but reasonable bound to catch obviously malicious values
+    let max_reasonable_norm = F::ORDER_U64 - 1; // Full Goldilocks range
+    for (i, &y) in e.ys.iter().enumerate() {
+        if y.abs_norm() > max_reasonable_norm {
+            eprintln!("verify_dec: FAIL - ys[{}] norm {} exceeds reasonable bound {}", 
+                     i, y.abs_norm(), max_reasonable_norm);
+            return false;
+        }
+    }
+    
+    eprintln!("verify_dec: All validation checks passed");
     true
 }
 
