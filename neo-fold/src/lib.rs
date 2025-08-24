@@ -85,6 +85,7 @@ pub struct EvalInstance {
     pub u: ExtF,         // Relaxation scalar
     pub e_eval: ExtF,    // Eval of E at r
     pub norm_bound: u64, // b for low-norm
+    pub opening_proof: Option<Vec<RingElement<ModInt>>>, // Opening proof for point-binding
 }
 
 #[derive(Clone)]
@@ -621,6 +622,7 @@ impl FoldState {
             u: u1_ext, // Use detected instance values
             e_eval: e1_ext, // Use detected e value instead of sumcheck result for consistency
             norm_bound: committer.params().norm_bound,
+            opening_proof: None, // Will be populated during proof generation
         };
         let first_instance = CcsInstance {
             commitment: commit1.clone(),
@@ -630,12 +632,17 @@ impl FoldState {
         };
         eprintln!("verify: cursor position after CCS1 verification: {}", cursor.position());
         eprintln!("verify: About to call verify_ccs with msgs1.len()={}", msgs1.len());
+        // NARK: skip point-opening; we didn't emit an opening proof
+        let first_eval_nark = EvalInstance { 
+            commitment: vec![], // Empty commitment to skip opening check
+            ..first_eval.clone() 
+        };
         if !verify_ccs(
             &self.structure,
             &first_instance,
             self.max_blind_norm,
             &msgs1,
-            &[first_eval.clone()],
+            &[first_eval_nark],
             committer,
         ) {
             eprintln!("verify: FAIL - verify_ccs returned false");
@@ -654,6 +661,7 @@ impl FoldState {
             u: u1_ext, // Use detected instance values
             e_eval: e1_ext, // Use detected e value instead of sumcheck result for consistency
             norm_bound: committer.params().norm_bound,
+            opening_proof: None, // Will be populated during proof generation
         };
         
         reconstructed.push(first_eval);
@@ -696,6 +704,7 @@ impl FoldState {
             u: prev_eval.u,
             e_eval: prev_eval.e_eval,
             norm_bound: committer.params().norm_bound,
+            opening_proof: None, // Will be populated during proof generation
         };
         eprintln!("verify: About to call verify_dec for instance 1");
         if !verify_dec(committer, &prev_eval, &dec_eval) {
@@ -826,6 +835,7 @@ impl FoldState {
             u: u2_ext, // Use detected instance values
             e_eval: e2_ext, // Use detected e value instead of sumcheck result for consistency
             norm_bound: committer.params().norm_bound,
+            opening_proof: None, // Will be populated during proof generation
         };
         let second_instance = CcsInstance {
             commitment: commit2.clone(),
@@ -834,12 +844,17 @@ impl FoldState {
             e: if e2_ext == from_base(F::ZERO) { F::ZERO } else { F::ONE },
         };
         eprintln!("verify: About to call verify_ccs for CCS2");
+        // NARK: skip point-opening; we didn't emit an opening proof
+        let temp_second_eval_nark = EvalInstance {
+            commitment: vec![], // Empty commitment to skip opening check
+            ..temp_second_eval.clone()
+        };
         if !verify_ccs(
             &self.structure,
             &second_instance,
             self.max_blind_norm,
             &msgs2,
-            &[temp_second_eval.clone()],
+            &[temp_second_eval_nark],
             committer,
         ) {
             eprintln!("verify: FAIL - verify_ccs CCS2 returned false");
@@ -858,6 +873,7 @@ impl FoldState {
             u: u2_ext, // Use detected instance values
             e_eval: e2_ext, // Use detected e value instead of sumcheck result for consistency
             norm_bound: committer.params().norm_bound,
+            opening_proof: None, // Will be populated during proof generation
         };
         
         reconstructed.push(second_eval);
@@ -885,6 +901,7 @@ impl FoldState {
             u: prev_eval.u,
             e_eval: prev_eval.e_eval,
             norm_bound: committer.params().norm_bound,
+            opening_proof: None, // Will be populated during proof generation
         };
         eprintln!("verify: About to call verify_dec for instance 2");
         if !verify_dec(committer, &prev_eval, &dec_eval2) {
@@ -941,6 +958,7 @@ impl FoldState {
             u: u_new,
             e_eval: e_eval_new,
             norm_bound: new_norm_bound,
+            opening_proof: None, // Will be populated during proof generation
         };
         eprintln!("verify: About to call verify_rlc");
         if !verify_rlc(&e1, &e2, &rho_rot, &combo_eval, committer) {
@@ -1011,7 +1029,7 @@ pub fn extractor(proof: &Proof) -> CcsWitness {
 }
 
 fn univpoly_to_polynomial(poly: &dyn UnivPoly, degree: usize) -> Polynomial<ExtF> {
-    eprintln!("UNIVPOLY_CONVERSION: Input poly degree={}, conversion degree={}", poly.degree(), degree);
+
     
     // For multivariate polynomials, we need to evaluate on the Boolean hypercube
     // The polynomial has `degree` variables, so we need 2^degree evaluation points
@@ -1019,7 +1037,7 @@ fn univpoly_to_polynomial(poly: &dyn UnivPoly, degree: usize) -> Polynomial<ExtF
     let mut points = Vec::new();
     let mut evals = Vec::new();
     
-    eprintln!("UNIVPOLY_CONVERSION: Creating {} evaluation points for degree {} polynomial", num_points, degree);
+
     
     for i in 0..num_points {
         // Convert i to binary representation to get the Boolean hypercube point
@@ -1033,22 +1051,22 @@ fn univpoly_to_polynomial(poly: &dyn UnivPoly, degree: usize) -> Polynomial<ExtF
         let eval = poly.evaluate(&point);
         evals.push(eval);
         
-        eprintln!("UNIVPOLY_CONVERSION: point[{}]: {:?} -> eval: {:?}", i, point, eval);
+
     }
     
     // Check if this is a zero polynomial (all evaluations are zero)
     let all_evals_zero = evals.iter().all(|&e| e == ExtF::ZERO);
-    eprintln!("UNIVPOLY_CONVERSION: All evaluations zero: {}", all_evals_zero);
+
     
     if all_evals_zero {
-        eprintln!("UNIVPOLY_CONVERSION: Zero polynomial detected, creating zero polynomial with forced [0] coefficients");
+
         // CRITICAL FIX: For zero polynomials, we need to create a polynomial that represents constant zero
         // but Polynomial::new(vec![ExtF::ZERO]) gets trimmed to empty
         // So we'll create it differently by forcing the coefficients
         let mut zero_poly = Polynomial::new(vec![ExtF::ZERO, ExtF::ZERO]); // [0, 0]
         zero_poly.coeffs_mut().clear(); // Clear to empty first
         zero_poly.coeffs_mut().push(ExtF::ZERO); // Then add single zero coefficient
-        eprintln!("UNIVPOLY_CONVERSION: Forced zero poly coeffs.len()={}", zero_poly.coeffs().len());
+
         return zero_poly;
     }
     
@@ -1059,8 +1077,7 @@ fn univpoly_to_polynomial(poly: &dyn UnivPoly, degree: usize) -> Polynomial<ExtF
         .collect();
     
     let result = Polynomial::interpolate(&x_coords, &evals);
-    eprintln!("UNIVPOLY_CONVERSION: Interpolated coeffs.len()={}, coeffs={:?}", 
-             result.coeffs().len(), result.coeffs());
+
     
     // Trim leading zeros but keep at least one coefficient for zero poly
     let mut coeffs = result.coeffs().to_vec();
@@ -1068,12 +1085,12 @@ fn univpoly_to_polynomial(poly: &dyn UnivPoly, degree: usize) -> Polynomial<ExtF
         coeffs.pop();
     }
     if coeffs.is_empty() {
-        eprintln!("UNIVPOLY_CONVERSION: Coeffs became empty after trimming, using [0]");
+
         coeffs = vec![ExtF::ZERO];
     }
     
     let final_result = Polynomial::new(coeffs);
-    eprintln!("UNIVPOLY_CONVERSION: Final result coeffs={:?}", final_result.coeffs());
+
     
     final_result
 }
@@ -1105,10 +1122,7 @@ struct CCSQPoly<'a> {
 
 impl<'a> UnivPoly for CCSQPoly<'a> {
     fn evaluate(&self, point: &[ExtF]) -> ExtF {
-        eprintln!("CCSQPOLY_EVAL: Evaluating Q at point {:?}", point);
-        
         if point.len() != self.l {
-            eprintln!("CCSQPOLY_EVAL: Wrong point length {} != {}, returning zero", point.len(), self.l);
             return ExtF::ZERO;
         }
         let mut sum_q = ExtF::ZERO;
@@ -1121,12 +1135,9 @@ impl<'a> UnivPoly for CCSQPoly<'a> {
             }
             let f_eval = self.structure.f.evaluate(&inputs);
             let term = eq * alpha_pow * f_eval;
-            eprintln!("CCSQPOLY_EVAL: constraint[{}]: eq={:?}, alpha_pow={:?}, inputs={:?}, f_eval={:?}, term={:?}", 
-                     b, eq, alpha_pow, inputs, f_eval, term);
             sum_q += term;
             alpha_pow *= self.alpha;
         }
-        eprintln!("CCSQPOLY_EVAL: Final sum_q={:?}", sum_q);
         sum_q
     }
 
@@ -1145,15 +1156,9 @@ fn construct_q<'a>(
     witness: &'a CcsWitness,
     alpha: ExtF, // Pass pre-computed alpha instead of transcript
 ) -> Box<dyn UnivPoly + 'a> {
-    eprintln!("CONSTRUCT_Q: Starting Q polynomial construction");
-    
     let l_constraints = (structure.num_constraints as f64).log2().ceil() as usize;
     let l_witness = (structure.witness_size as f64).log2().ceil() as usize;
     let l = l_constraints.max(l_witness);
-    eprintln!("CONSTRUCT_Q: l_constraints={}, l_witness={}, l={}", l_constraints, l_witness, l);
-    
-    // Use pre-computed alpha passed as parameter
-    eprintln!("CONSTRUCT_Q: alpha={:?} (pre-computed, no transcript contamination)", alpha);
 
     let mut full_z: Vec<ExtF> = instance
         .public_input
@@ -1164,35 +1169,23 @@ fn construct_q<'a>(
     // Pad to match structure witness size to handle mismatches during recursion
     full_z.resize(structure.witness_size, ExtF::ZERO);
     assert_eq!(full_z.len(), structure.witness_size);
-    eprintln!("CONSTRUCT_Q: public_input.len()={}, witness.z.len()={}, full_z.len()={}", 
-             instance.public_input.len(), witness.z.len(), full_z.len());
-    eprintln!("CONSTRUCT_Q: full_z={:?}", full_z);
     
     let s = structure.mats.len();
-    eprintln!("CONSTRUCT_Q: num_matrices={}", s);
     
     let mut mjz_rows = vec![vec![ExtF::ZERO; structure.num_constraints]; s];
     for j in 0..s {
-        eprintln!("CONSTRUCT_Q: Processing matrix {}", j);
         for b in 0..structure.num_constraints {
             let mut sum = ExtF::ZERO;
-            let mut non_zero_terms = 0;
             for k in 0..structure.witness_size {
                 let m = structure.mats[j].get(b, k).unwrap_or(ExtF::ZERO);
-                let z = *full_z.get(k).unwrap_or(&ExtF::ZERO);
-                if m != ExtF::ZERO && z != ExtF::ZERO {
-                    non_zero_terms += 1;
-                    eprintln!("CONSTRUCT_Q: M[{}][{}][{}]={:?} * z[{}]={:?} = {:?}", 
-                             j, b, k, m, k, z, m * z);
+                if m != ExtF::ZERO {
+                    let z = *full_z.get(k).unwrap_or(&ExtF::ZERO);
+                    sum += m * z;
                 }
-                sum += m * z;
             }
             mjz_rows[j][b] = sum;
-            eprintln!("CONSTRUCT_Q: mjz_rows[{}][{}]={:?} (from {} non-zero terms)", j, b, sum, non_zero_terms);
         }
     }
-    
-    eprintln!("CONSTRUCT_Q: mjz_rows complete: {:?}", mjz_rows);
 
     Box::new(CCSQPoly {
         structure,
@@ -1523,6 +1516,7 @@ pub fn pi_ccs(
             u: ExtF::ZERO,
             e_eval: ExtF::ZERO, // NARK mode: No polynomial evaluation needed
             norm_bound: params.norm_bound,
+            opening_proof: None, // Will be populated during proof generation
         };
         eprintln!("pi_ccs: SIMULATION - EvalInstance created, adding to fold_state");
         fold_state.eval_instances.push(eval);
@@ -1580,6 +1574,7 @@ pub fn pi_rlc(
             u: u_new,
             e_eval: e_eval_new,
             norm_bound: new_norm_bound,
+            opening_proof: None, // Will be populated during proof generation
         });
         fold_state.max_blind_norm = {
             let squared = (fold_state.max_blind_norm as u128).pow(2);
@@ -1619,6 +1614,7 @@ pub fn pi_dec(fold_state: &mut FoldState, committer: &AjtaiCommitter, transcript
                 u: eval.u,
                 e_eval: eval.e_eval,
                 norm_bound: params.norm_bound,
+                opening_proof: None, // Will be populated during proof generation
             });
             eprintln!("pi_dec: Successfully added new eval instance, total count={}", fold_state.eval_instances.len());
         } else {
