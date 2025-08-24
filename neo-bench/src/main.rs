@@ -67,7 +67,7 @@ fn main() {
     let mut run_neo_fibo  = false;
 
     let mut min_pow: u32 = 3;  // 2^3 = 8 steps (fast for development)
-    let mut max_pow: u32 = 5;  // 2^5 = 32 steps
+    let mut max_pow: u32 = 6;  // 2^6 = 64 steps
 
     // Fibonacci seeds (z0 = [a0, a1])
     let mut a0_u64: u64 = 0;
