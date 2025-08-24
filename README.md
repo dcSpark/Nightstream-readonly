@@ -65,41 +65,11 @@ This implementation currently operates as a **NARK (Non-succinct ARgument of Kno
 
 We plan to integrate **Spartan2** for full SNARK functionality once compatibility issues are resolved:
 
-### Why Spartan2?
-
-- **Field-Native**: Designed for small fields like Goldilocks
-- **CCS Support**: Native support for Customizable Constraint Systems
-- **Recursive**: Enables true recursive SNARKs for IVC/PCD
-- **Performance**: Optimized for lattice-based folding schemes
-
 ### Current Blockers
 
 1. **ARM64 Compatibility**: Spartan2 dependencies (halo2curves, arkworks) have ARM64 assembly issues
 2. **API Stability**: Spartan2 is in active development with changing APIs
 3. **Field Conversion**: Need seamless Goldilocks ↔ curve field conversion
-
-### Integration Timeline
-
-**Phase 1: Compatibility (Q2 2025)**
-- [ ] ARM64 support in Spartan2 dependencies
-- [ ] Stable Spartan2 API release
-- [ ] Field conversion utilities
-
-**Phase 2: Integration (Q3 2025)**  
-- [ ] Replace dummy `spartan_compress()` with real Spartan2 calls
-- [ ] Implement CCS → R1CS conversion for Spartan2
-- [ ] Add knowledge extractor for soundness
-
-**Phase 3: Optimization (Q4 2025)**
-- [ ] Recursive SNARK verification circuits
-- [ ] Batch verification optimizations  
-- [ ] Production-grade parameter selection
-
-### Tracking Progress
-
-- **Spartan2 Issues**: [Microsoft/Spartan2 GitHub](https://github.com/microsoft/Spartan2)
-- **ARM64 Support**: [halo2curves ARM64 tracking](https://github.com/privacy-scaling-explorations/halo2curves/issues)
-- **Neo Integration**: This repository's issues and PRs
 
 ## Crates Overview
 | Crate | Description |
