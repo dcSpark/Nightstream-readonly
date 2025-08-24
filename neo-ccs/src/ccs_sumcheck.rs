@@ -1,35 +1,66 @@
 use crate::{CcsInstance, CcsStructure, CcsWitness};
 use neo_fields::{embed_base_to_ext, from_base};
 use neo_sumcheck::{
-    challenger::NeoChallenger,
     fiat_shamir::{batch_unis, fs_absorb_poly, fs_absorb_extf, fs_absorb_u64, fs_challenge_ext},
     ExtF, Polynomial, F,
 };
-use rand_chacha::rand_core::SeedableRng;
-use rand_chacha::ChaCha20Rng;
-use rand_distr::{Distribution, StandardNormal};
 use thiserror::Error;
-use p3_field::{PrimeCharacteristicRing, PrimeField64};
+use p3_field::PrimeCharacteristicRing;
 use p3_matrix::Matrix;
 use rayon::prelude::*;
 use std::sync::Mutex;
 
+/// Sample blind polynomial coefficients from Fiat-Shamir transcript
+fn fs_sample_blind_poly(transcript: &mut Vec<u8>, deg: usize) -> Polynomial<ExtF> {
+    let mut coeffs = Vec::with_capacity(deg + 1);
+    for i in 0..=deg {
+        let label = format!("ccs.blind_coeff_{}", i);
+        coeffs.push(fs_challenge_ext(transcript, label.as_bytes()));
+    }
+    Polynomial::new(coeffs)
+}
+
 /// CCS sum-check verifier
 pub fn ccs_sumcheck_verifier(
-    _structure: &CcsStructure,
+    structure: &CcsStructure,
     claim: ExtF,
     msgs: &[(Polynomial<ExtF>, ExtF)],
-    _norm_bound: u64,
+    norm_bound: u64,
     transcript: &mut Vec<u8>,
 ) -> Option<(Vec<ExtF>, ExtF)> {
+    let do_norm = norm_bound != 0;
     let _alpha = fs_challenge_ext(transcript, b"ccs.norm_alpha");
-    let _rho = fs_challenge_ext(transcript, b"ccs.norm_rho");
+    let rho = fs_challenge_ext(transcript, b"ccs.norm_rho");
 
     let mut current = claim;
     let mut r = Vec::new();
 
     for (round, (uni, blind_eval)) in msgs.iter().enumerate() {
         fs_absorb_u64(transcript, b"ccs.round", round as u64);
+        
+        // Reconstruct blind_factor at the same transcript state as prover
+        let batch_deg_bound = if structure.f.max_individual_degree() == 1 {
+            // Multilinear branch
+            if do_norm {
+                (2 * (norm_bound as usize) + 2).max(2)
+            } else {
+                2
+            }
+        } else {
+            // General-degree branch
+            let deg_f = structure.max_deg;
+            if do_norm {
+                (deg_f + 1).max(2 * (norm_bound as usize) + 2)
+            } else {
+                deg_f + 1
+            }
+        };
+        let blind_deg = batch_deg_bound.saturating_sub(2);
+        let blind_poly = fs_sample_blind_poly(transcript, blind_deg);
+        let x_poly = Polynomial::new(vec![ExtF::ZERO, ExtF::ONE]);
+        let xm1_poly = Polynomial::new(vec![-ExtF::ONE, ExtF::ONE]);
+        let blind_factor = x_poly * xm1_poly * blind_poly;
+        
         let eval_0 = uni.eval(ExtF::ZERO);
         let eval_1 = uni.eval(ExtF::ONE);
         let sum = eval_0 + eval_1;
@@ -38,9 +69,20 @@ pub fn ccs_sumcheck_verifier(
             eprintln!("ccs_sumcheck_verifier: FAIL - sum check failed in round {round}");
             return None;
         }
+        
         fs_absorb_poly(transcript, b"ccs.uni", uni);
         let challenge = fs_challenge_ext(transcript, b"ccs.challenge");
-        current = uni.eval(challenge) - *blind_eval;
+        let blind_weight = if do_norm { rho * rho } else { rho };
+        let blind_eval_expected = blind_factor.eval(challenge) * blind_weight;
+        
+        // Security check: verify the provided blind_eval matches expected
+        if *blind_eval != blind_eval_expected {
+            eprintln!("ccs_sumcheck_verifier: FAIL - blind_eval mismatch in round {round}: got {:?}, expected {:?}", 
+                     *blind_eval, blind_eval_expected);
+            return None;
+        }
+        
+        current = uni.eval(challenge) - blind_eval_expected;
         fs_absorb_extf(transcript, b"ccs.blind_eval", *blind_eval);
         r.push(challenge);
     }
@@ -54,7 +96,6 @@ pub fn ccs_sumcheck_verifier(
 }
 
 /// CCS sum-check prover
-const ZK_SIGMA: f64 = 3.2;
 
 #[derive(Error, Debug)]
 pub enum ProverError {
@@ -122,17 +163,6 @@ pub fn ccs_sumcheck_prover(
 
     let mut current;
     let mut msgs = Vec::with_capacity(l);
-    // Derive prover randomness from FS via a challenger bound to transcript
-    let mut ch = NeoChallenger::new("neo_ccs_sumcheck");
-    ch.observe_bytes("transcript_prefix", transcript);
-    let mut seed = [0u8; 32];
-    for i in 0..4 {
-        let limb = ch
-            .challenge_base(&format!("blind_seed_{i}"))
-            .as_canonical_u64();
-        seed[i * 8..(i + 1) * 8].copy_from_slice(&limb.to_be_bytes());
-    }
-    let mut rng = ChaCha20Rng::from_seed(seed);
 
     // NARK mode: No commitments needed
 
@@ -283,22 +313,14 @@ pub fn ccs_sumcheck_prover(
                 Polynomial::new(vec![ExtF::ZERO])
             };
 
-            // Blind and batch
+            // Blind and batch - use deterministic FS sampling for security
             let batch_deg_bound = if do_norm {
                 (2 * (norm_bound as usize) + 2).max(2) // norm vs CCS(≤2)
             } else {
                 2
             };
             let blind_deg = batch_deg_bound.saturating_sub(2);
-            let blind_coeffs: Vec<ExtF> = (0..=blind_deg)
-                .map(|_| {
-                    let sample: f64 =
-                        <StandardNormal as Distribution<f64>>::sample(&StandardNormal, &mut rng)
-                            * ZK_SIGMA;
-                    from_base(F::from_i64(sample.round() as i64))
-                })
-                .collect();
-            let blind_poly = Polynomial::new(blind_coeffs);
+            let blind_poly = fs_sample_blind_poly(transcript, blind_deg);
             let x_poly = Polynomial::new(vec![ExtF::ZERO, ExtF::ONE]);
             let xm1_poly = Polynomial::new(vec![-ExtF::ONE, ExtF::ONE]);
             let blind_factor = x_poly * xm1_poly * blind_poly;
@@ -431,15 +453,7 @@ pub fn ccs_sumcheck_prover(
             deg_f + 1
         };
         let blind_deg = batch_deg_bound.saturating_sub(2);
-        let blind_coeffs: Vec<ExtF> = (0..=blind_deg)
-            .map(|_| {
-                let sample: f64 =
-                    <StandardNormal as Distribution<f64>>::sample(&StandardNormal, &mut rng)
-                        * ZK_SIGMA;
-                from_base(F::from_i64(sample.round() as i64))
-            })
-            .collect();
-        let blind_poly = Polynomial::new(blind_coeffs);
+        let blind_poly = fs_sample_blind_poly(transcript, blind_deg);
         let x_poly = Polynomial::new(vec![ExtF::ZERO, ExtF::ONE]);
         let xm1_poly = Polynomial::new(vec![-ExtF::ONE, ExtF::ONE]);
         let blind_factor = x_poly * xm1_poly * blind_poly;
