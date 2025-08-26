@@ -1,4 +1,7 @@
 use std::time::Instant;
+
+pub mod spartan2;
+pub mod neutronnova_integration;
 use thiserror::Error;
 
 use neo_ccs::{CcsInstance, CcsStructure, CcsWitness, check_satisfiability};

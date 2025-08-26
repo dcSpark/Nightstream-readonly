@@ -99,7 +99,8 @@ pub fn ccs_witness_to_r1cs_format(
 /// Field conversion utilities for Spartan2 integration
 pub mod field_conversion {
     use super::*;
-    use neo_fields::spartan2_engine::field_conversion::*;
+    use neo_fields::spartan2_compat::field_conversion::*;
+
     
     /// Convert CCS matrices to Spartan2-compatible field format
     pub fn ccs_matrices_to_spartan2(matrices: &(Vec<Vec<F>>, Vec<Vec<F>>, Vec<Vec<F>>)) -> (

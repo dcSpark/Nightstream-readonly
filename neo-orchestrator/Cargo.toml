@@ -9,12 +9,16 @@ neo-ccs         = { path = "../neo-ccs" }
 neo-commit      = { path = "../neo-commit" }
 neo-fields      = { path = "../neo-fields" }
 neo-fold        = { path = "../neo-fold" }
+neo-sumcheck    = { path = "../neo-sumcheck" }
 neo-arithmetize = { path = "../neo-arithmetize" }
 neo-modint      = { path = "../neo-modint" }
 neo-ring        = { path = "../neo-ring" }
 neo-decomp      = { path = "../neo-decomp" }
 p3-field        = "0.3"
+p3-matrix       = "0.3"
 spartan2        = { workspace = true }
+memchr          = "2.0"
+bincode         = "1.0"
 
 [features]
 default = []

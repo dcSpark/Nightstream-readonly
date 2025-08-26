@@ -55,8 +55,10 @@ p3-symmetric = "0.3.0"   # Poseidon2 hashing for Fiat-Shamir
 criterion = { version = "0.5.1", features = ["html_reports"] }
 rayon = "1.10"
 
-# Additional p3 crates for benchmarks only
+# Additional p3 crates for benchmarks and PCS
 p3-challenger = "0.3.0"  # Used in benchmarks
+p3-fri = "0.3.0"         # FRI PCS for interim succinctness
+p3-poseidon2 = "0.3.0"   # Hash function for FRI
 
 # SNARK mode: Spartan2 dependencies for succinctness  
 spartan2 = { git = "https://github.com/microsoft/Spartan2.git", rev = "cc21201d0d0293794ccc8ddd24903a9e570afb6e", default-features = false }

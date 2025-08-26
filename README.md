@@ -17,42 +17,58 @@ The codebase is structured as a Rust workspace with multiple crates, focusing on
 - **SNARK Mode**: Succinct proofs for CCS with Spartan2 compression - constant-size verifiable proofs.
 - **Demo**: End-to-end folding/verification in `neo-main` binary, with FRI stubs.
 
-## Current Implementation: SNARK Mode
+## Current Implementation: NARK Mode with SNARK Architecture
 
-This implementation uses **SNARK (Succinct Non-interactive ARgument of Knowledge)** through Spartan2 integration for all proof generation:
+**⚠️ IMPORTANT**: This implementation currently operates in **NARK mode** (Non-succinct ARguments of Knowledge) with architectural preparation for SNARK integration:
 
-### SNARK-Only Operation
+### Current Status: NARK Mode
 
-The system always uses Spartan2 for succinct, production-ready proofs:
+The system currently provides:
 
-**SNARK proofs provide**:
-- ✅ **Succinct**: Constant-size proofs (~100-1000 bytes) regardless of computation size
-- ✅ **Verifiable**: All proofs can be verified for correctness in constant time
+**NARK proofs (current implementation)**:
+- ✅ **Verifiable**: Proofs can be verified for correctness
 - ✅ **Sound**: Invalid statements are rejected with high probability  
 - ✅ **Zero-Knowledge**: Proofs reveal no information about the witness
-- ✅ **Production-Ready**: Real Spartan2 backend with security guarantees
+- ⚠️ **Non-Succinct**: Proof size grows linearly with computation size
+- ⚠️ **Research-Grade**: Placeholder implementations for production features
 
-### How the SNARK System Works
+### SNARK Integration Status
 
-1. **CCS to R1CS Conversion**: Converts Neo's CCS constraints to Spartan2's R1CS format:
+**Architectural Foundation** (✅ Complete):
+- Clean module boundaries with feature gates
+- Spartan2 dependency integration
+- Field conversion utilities with safety checks
+- p3-fri PCS dependency integration
+
+**Implementation Status** (🚧 In Progress):
+- ❌ **Real Spartan2 Integration**: Currently uses placeholder shims
+- ❌ **Real FRI PCS**: Currently uses simulated commitments  
+- ❌ **CCS→R1CS Conversion**: Currently uses placeholder conversion
+- ❌ **Succinct Proofs**: Proofs are still linear in computation size
+
+### Planned SNARK Architecture
+
+When fully implemented, the SNARK system will work as follows:
+
+1. **CCS to R1CS Conversion** (🚧 Placeholder):
    ```rust
-   // Convert CCS to Spartan2 R1CS format
+   // TODO: Real conversion from Neo CCS to Spartan2 R1CS
    let r1cs = convert_ccs_to_r1cs(ccs_structure, ccs_instance, ccs_witness)?;
    ```
 
-2. **Field Conversion**: Safe conversion between Goldilocks and Pallas fields with truncation checks:
+2. **Field Conversion** (✅ Implemented):
    ```rust
    // Safe field conversion with error handling
    let pallas_scalar = goldilocks_to_pallas_scalar(&goldilocks_field);
    let converted_back = pallas_scalar_to_goldilocks_safe(&pallas_scalar)?;
    ```
 
-3. **Spartan2 Integration**: Real SNARK proof generation and verification:
+3. **Spartan2 Integration** (🚧 Shimmed):
    ```rust
-   // Generate Spartan2 proof
-   let (proof, vk) = GoldilocksEngine::prove(&r1cs, &mut transcript)?;
-   // Verify with constant-time verification
-   let result = GoldilocksEngine::verify(&proof, &vk, &public_inputs, &mut transcript)?;
+   // TODO: Real Spartan2 NeutronNovaSNARK calls
+   let (proof, vk) = NeutronNovaSNARK::prove(&r1cs, &mut transcript)?;
+   // TODO: Real verification with constant-time complexity
+   let result = NeutronNovaSNARK::verify(&proof, &vk, &public_inputs, &mut transcript)?;
    ```
 
 ### SNARK vs Traditional Proof Systems
@@ -68,17 +84,22 @@ The system always uses Spartan2 for succinct, production-ready proofs:
 
 ## Spartan2 Integration Status
 
-✅ **Completed Integration Features**:
+**🚧 Integration Progress**:
 
-1. **✅ Sumcheck Integration**: Real Spartan2 sumcheck prover/verifier with field conversion
-2. **✅ PCS Integration**: Ajtai commitment scheme bridged to Spartan2 PCS interface  
-3. **✅ Folding Integration**: CCS to R1CS conversion with Spartan2 proof generation
-4. **✅ Security Hardening**: 
-   - Secure parameter enforcement in production builds
-   - Field truncation checks to prevent data loss
-   - Enhanced knowledge extraction with rewinding simulation
-5. **✅ Comprehensive Testing**: Real integration tests replacing placeholder stubs
-6. **✅ SNARK-Only Operation**: Always uses Spartan2 for production-ready proofs
+**✅ Architectural Foundation**:
+1. **✅ Module Structure**: Clean separation between NARK and SNARK components
+2. **✅ Feature Gates**: `snark_mode` feature for conditional compilation
+3. **✅ Dependencies**: Spartan2 and p3-fri integrated in workspace
+4. **✅ Field Conversion**: Safe Goldilocks ↔ Pallas conversion utilities
+5. **✅ Interface Compatibility**: Stable APIs that can delegate to real implementations
+
+**🚧 Implementation Status**:
+1. **🚧 Sumcheck Integration**: Currently shimmed - delegates to NARK sumcheck
+2. **🚧 PCS Integration**: FRI PCS simulated via hashing, not real p3-fri
+3. **🚧 CCS→R1CS Conversion**: Placeholder conversion, not real matrix transformation  
+4. **🚧 Spartan2 Calls**: All `spartan_compress`/`spartan_verify` are placeholder shims
+5. **❌ Real Succinctness**: Proofs are still linear in computation size (NARK mode)
+6. **❌ Knowledge Extraction**: Placeholder implementation, not real rewinding
 
 ### Integration Architecture
 

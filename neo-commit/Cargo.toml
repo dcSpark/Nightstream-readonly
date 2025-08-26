@@ -17,8 +17,13 @@ neo-modint = { path = "../neo-modint" }
 rand_distr = { workspace = true }
 subtle = "2.5"
 spartan2 = { workspace = true }
+p3-fri = { workspace = true }
+p3-challenger = { workspace = true }
+p3-poseidon2 = { workspace = true }
+p3-symmetric = { workspace = true }
 
 [features]
+default = []
 prop-tests = []
 
 [dev-dependencies]

@@ -2209,11 +2209,14 @@ pub fn verify_with_knowledge_soundness(
 // NeutronNova integration
 pub mod neutronnova_integration {
     use super::*;
+    #[allow(unused_imports)]
     use neo_fields::spartan2_engine::GoldilocksEngine;
     use neo_ccs::{integration, CcsStructure, CcsInstance, CcsWitness};
+    #[allow(unused_imports)]
     use spartan2::traits::transcript::TranscriptEngineTrait;
     #[allow(unused_imports)]
     use spartan2::neutronnova::{NeutronNovaNIFS, NeutronNovaSNARK};
+    #[allow(unused_imports)]
     use spartan2::traits::Engine;
     
     /// Enhanced FoldState with NeutronNova integration
@@ -2251,11 +2254,10 @@ pub mod neutronnova_integration {
                         let _ = (public_inputs2, witness2);
                         
                         // Use NeutronNova for batch folding
-                        let _transcript = <GoldilocksEngine as Engine>::TE::new(b"neutronnova");
-                        
-                        // For now, fall back to NARK mode if NeutronNova fails
-                        // In a full implementation, this would use proper NeutronNova folding
-                        eprintln!("SNARK mode: Using NeutronNova folding (placeholder)");
+                        {
+                            // let _transcript = <GoldilocksEngine as Engine>::TE::new(b"neutronnova");
+                            eprintln!("SNARK mode: Using NeutronNova folding (placeholder)");
+                        }
                         
                         // Generate NARK proof as fallback
                         self.nark_state.generate_proof(pair1, pair2, committer)

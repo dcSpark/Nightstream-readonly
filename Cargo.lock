@@ -753,8 +753,12 @@ dependencies = [
  "neo-poly",
  "neo-ring",
  "neo-sumcheck",
+ "p3-challenger",
  "p3-field",
+ "p3-fri",
  "p3-matrix",
+ "p3-poseidon2",
+ "p3-symmetric",
  "quickcheck",
  "quickcheck_macros",
  "rand 0.9.2",
@@ -856,6 +860,8 @@ dependencies = [
 name = "neo-orchestrator"
 version = "0.1.0"
 dependencies = [
+ "bincode",
+ "memchr",
  "neo-arithmetize",
  "neo-ccs",
  "neo-commit",
@@ -864,7 +870,9 @@ dependencies = [
  "neo-fold",
  "neo-modint",
  "neo-ring",
+ "neo-sumcheck",
  "p3-field",
+ "p3-matrix",
  "spartan2",
  "thiserror 1.0.69",
 ]
@@ -1087,6 +1095,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "p3-fri"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8c4e95bfdd1bf5a798152b65a54c02e04dec23c4b276ef5eb1a808c61b14cf63"
+dependencies = [
+ "itertools 0.14.0",
+ "p3-challenger",
+ "p3-commit",
+ "p3-dft",
+ "p3-field",
+ "p3-interpolation",
+ "p3-matrix",
+ "p3-maybe-rayon",
+ "p3-util",
+ "rand 0.9.2",
+ "serde",
+ "tracing",
+]
+
+[[package]]
 name = "p3-goldilocks"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1102,6 +1130,18 @@ dependencies = [
  "paste",
  "rand 0.9.2",
  "serde",
+]
+
+[[package]]
+name = "p3-interpolation"
+version = "0.3.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "001c8017284709b5cbb1c78ffa6423db2e45c58ae3b97a7ce73cd273626ab3f4"
+dependencies = [
+ "p3-field",
+ "p3-matrix",
+ "p3-maybe-rayon",
+ "p3-util",
 ]
 
 [[package]]

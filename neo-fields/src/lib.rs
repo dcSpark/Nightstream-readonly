@@ -2,6 +2,8 @@
 
 use p3_field::{extension::BinomialExtensionField, PrimeField64, PrimeCharacteristicRing};
 
+pub mod spartan2_engine; // always present (stub in NARK, real impl under snark_mode later)
+
 pub use p3_goldilocks::Goldilocks as F;
 
 /// Quadratic extension F[u] / (u^2 - β) with β=7 (non-residue mod p for Goldilocks).
@@ -58,10 +60,8 @@ impl ExtFieldNormTrait for ExtF {
 
 // Display implementation removed due to orphan rule - ExtF already has Debug
 
-// Spartan2 Engine implementation
-pub mod spartan2_engine {
-    // Re-export Spartan2's PallasHyraxEngine for Neo integration
-    pub use spartan2::provider::PallasHyraxEngine as GoldilocksEngine;
+// Legacy Spartan2 field conversion utilities (moved to separate module)
+pub mod spartan2_compat {
     
     /// Conversion utilities between Neo's Goldilocks field and Spartan2's Pallas field
     pub mod field_conversion {
@@ -89,9 +89,9 @@ pub mod spartan2_engine {
             let repr = f.to_repr();
             let bytes = repr.as_ref();
             
-            // Check if high bits are zero
+            // Check if high bits are zero - enhanced check as recommended
             if bytes[8..].iter().any(|&b| b != 0) {
-                return Err("Field truncation: value exceeds 64 bits".to_string());
+                return Err("Field truncation: Pallas base value exceeds Goldilocks range".to_string());
             }
             
             // Safe to extract lower 64 bits
@@ -100,18 +100,24 @@ pub mod spartan2_engine {
                 val |= (byte as u64) << (8 * i);
             }
             
-            Ok(F::from_u64(val))
+            // Additional safety check: ensure the value is within Goldilocks field
+            let goldilocks_val = F::from_u64(val);
+            if goldilocks_val.as_canonical_u64() != val {
+                return Err("Field conversion: Value not canonical in Goldilocks field".to_string());
+            }
+            
+            Ok(goldilocks_val)
         }
         
         /// Convert Pallas scalar field element to Goldilocks field element
-        /// Returns Err if truncation would occur
+        /// Returns Err if truncation would occur (high bits non-zero)
         pub fn pallas_scalar_to_goldilocks(f: &pallas::Scalar) -> Result<F, String> {
             let repr = f.to_repr();
             let bytes = repr.as_ref();
             
-            // Check if high bits are zero
+            // Check if high bits are zero - enhanced check as recommended
             if bytes[8..].iter().any(|&b| b != 0) {
-                return Err("Field truncation: value exceeds 64 bits".to_string());
+                return Err("Field truncation: Pallas scalar value exceeds Goldilocks range".to_string());
             }
             
             // Safe to extract lower 64 bits
@@ -120,7 +126,13 @@ pub mod spartan2_engine {
                 val |= (byte as u64) << (8 * i);
             }
             
-            Ok(F::from_u64(val))
+            // Additional safety check: ensure the value is within Goldilocks field
+            let goldilocks_val = F::from_u64(val);
+            if goldilocks_val.as_canonical_u64() != val {
+                return Err("Field conversion: Value not canonical in Goldilocks field".to_string());
+            }
+            
+            Ok(goldilocks_val)
         }
         
         /// Legacy unsafe conversion - use pallas_base_to_goldilocks instead

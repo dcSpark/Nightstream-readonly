@@ -16,9 +16,9 @@ neo-ring = { path = "../neo-ring" }
 p3-matrix = { workspace = true }
 p3-field = { version = "0.3" }
 p3-commit = "0.3"
-p3-poseidon2 = "0.3.0"
-p3-symmetric = "0.3.0"
-p3-goldilocks = "0.3.0"
+p3-poseidon2 = { workspace = true }
+p3-symmetric = { workspace = true }
+p3-goldilocks = { workspace = true }
 byteorder = "1.5.0"
 rand = { workspace = true }
 rand_chacha = { workspace = true }
@@ -39,4 +39,5 @@ name = "folding"
 harness = false
 
 [features]
+default = []
 prop-tests = []

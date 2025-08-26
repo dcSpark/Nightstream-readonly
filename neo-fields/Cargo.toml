@@ -4,6 +4,9 @@ edition = { workspace = true }
 version = { workspace = true }
 authors = { workspace = true }
 
+[features]
+default = []
+
 [dependencies]
 p3-goldilocks = { workspace = true }
 p3-field = { version = "0.3" }

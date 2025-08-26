@@ -1,6 +1,8 @@
 use neo_fields::{from_base, ExtF, ExtFieldNormTrait, F};
 
 use subtle::{Choice, ConstantTimeLess};
+
+pub mod fri_pcs;
 use neo_modint::{Coeff, ModInt};
 use neo_ring::RingElement;
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
@@ -1122,7 +1124,7 @@ pub mod spartan2_pcs {
     /// Field conversion utilities for PCS integration
     pub mod pcs_conversion {
         use super::*;
-        use neo_fields::spartan2_engine::field_conversion::*;
+        use neo_fields::spartan2_compat::field_conversion::*;
         
         /// Convert Neo polynomial to Spartan2 format
         pub fn neo_poly_to_spartan2(poly: &[F]) -> Vec<spartan2::provider::pasta::pallas::Scalar> {
