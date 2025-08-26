@@ -856,10 +856,14 @@ dependencies = [
 name = "neo-orchestrator"
 version = "0.1.0"
 dependencies = [
+ "neo-arithmetize",
  "neo-ccs",
  "neo-commit",
+ "neo-decomp",
  "neo-fields",
  "neo-fold",
+ "neo-modint",
+ "neo-ring",
  "p3-field",
  "spartan2",
  "thiserror 1.0.69",

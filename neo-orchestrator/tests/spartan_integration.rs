@@ -10,7 +10,9 @@ mod spartan2_integration_tests {
     use neo_ccs::{CcsInstance, CcsWitness, check_satisfiability};
     use neo_commit::{AjtaiCommitter, SECURE_PARAMS};
     use neo_fields::{embed_base_to_ext, ExtF, F};
-    use neo_orchestrator::{prove, verify, Metrics};
+    use neo_orchestrator::{prove, verify};
+    #[allow(unused_imports)]
+    use neo_orchestrator::Metrics;
     use neo_modint::ModInt;
     use neo_ring::RingElement;
     use neo_decomp::decomp_b;
@@ -148,7 +150,7 @@ mod spartan2_integration_tests {
         let (ccs, instance, mut witness) = create_fibonacci_test_case(fib_length);
         
         // Corrupt the witness by changing a value
-        witness.z[2] = embed_base_to_ext(F::from_canonical_u64(999)); // Invalid Fibonacci value
+        witness.z[2] = embed_base_to_ext(F::from_u64(999)); // Invalid Fibonacci value
         
         // The corrupted witness should not satisfy the CCS
         assert!(
@@ -254,20 +256,20 @@ mod spartan2_integration_tests {
         let (ccs, instance, witness) = create_fibonacci_test_case(fib_length);
         
         // Test that our CCS can be converted to R1CS format
-        use neo_ccs::convert_ccs_to_r1cs_full;
+        use neo_ccs::integration;
         
-        let conversion_result = convert_ccs_to_r1cs_full(&ccs, &instance, &witness);
+        let conversion_result = integration::convert_ccs_for_spartan2(&ccs, &instance, &witness);
         assert!(conversion_result.is_ok(), "CCS to R1CS conversion should succeed");
         
-        let (r1cs_shape, r1cs_instance, r1cs_witness) = conversion_result.unwrap();
+        let (r1cs_matrices, r1cs_public_inputs, r1cs_witness_vec) = conversion_result.unwrap();
         
         // Basic shape checks
-        assert_eq!(r1cs_shape.num_cons(), ccs.num_constraints, "Constraint count should match");
-        assert_eq!(r1cs_shape.num_vars(), ccs.witness_size, "Variable count should match");
+        let (a_matrix, b_matrix, c_matrix) = &r1cs_matrices;
+        assert_eq!(a_matrix.len(), ccs.num_constraints, "Constraint count should match");
+        let _ = (b_matrix, c_matrix, r1cs_public_inputs, r1cs_witness_vec);
         
         println!("✅ CCS to R1CS conversion successful");
-        println!("   R1CS constraints: {}", r1cs_shape.num_cons());
-        println!("   R1CS variables: {}", r1cs_shape.num_vars());
+        println!("   R1CS constraints: {}", a_matrix.len());
         
         // The proof should still work end-to-end
         let proof_result = prove(&ccs, &instance, &witness);

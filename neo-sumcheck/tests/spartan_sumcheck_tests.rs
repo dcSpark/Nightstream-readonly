@@ -3,15 +3,17 @@
 //! These tests validate that the sum-check protocol integration with Spartan2
 //! works correctly and maintains compatibility with Neo's existing sum-check.
 
-#[cfg(all(test, feature = "snark_mode"))]
+
 mod spartan2_sumcheck_tests {
+    #[allow(unused_imports)]
     use neo_sumcheck::{
         batched_sumcheck_prover, batched_sumcheck_verifier,
         multilinear_sumcheck_prover, multilinear_sumcheck_verifier,
         challenger::NeoChallenger, UnivPoly
     };
+    use neo_poly::Polynomial;
     use neo_fields::{ExtF, F, embed_base_to_ext};
-    use p3_field::PrimeCharacteristicRing;
+    use p3_field::{PrimeCharacteristicRing, PrimeField64};
     use std::sync::Arc;
 
     /// Create a simple test polynomial for sum-check
@@ -47,7 +49,7 @@ mod spartan2_sumcheck_tests {
         
         // Create a simple evaluation point
         let eval_point: Vec<ExtF> = (0..num_vars)
-            .map(|i| embed_base_to_ext(F::from_canonical_u64(i as u64 + 1)))
+            .map(|i| embed_base_to_ext(F::from_u64(i as u64 + 1)))
             .collect();
         
         // Evaluate the polynomial at the point
@@ -63,7 +65,7 @@ mod spartan2_sumcheck_tests {
         println!("🧪 Testing multilinear sum-check integration");
 
         let poly = create_multilinear_test_polynomial();
-        let num_vars = 2;
+        let _num_vars = 2;
         
         // Test evaluation at different points
         let test_points = vec![
@@ -88,21 +90,21 @@ mod spartan2_sumcheck_tests {
         println!("🧪 Testing batched sum-check functionality");
 
         // Create multiple polynomials for batching
-        let poly1 = Arc::new(|vars: &[ExtF]| {
+        let poly1: Arc<dyn Fn(&[ExtF]) -> ExtF + Send + Sync> = Arc::new(|vars: &[ExtF]| {
             if vars.is_empty() { ExtF::ZERO } else { vars[0] }
         });
         
-        let poly2 = Arc::new(|vars: &[ExtF]| {
+        let poly2: Arc<dyn Fn(&[ExtF]) -> ExtF + Send + Sync> = Arc::new(|vars: &[ExtF]| {
             if vars.len() < 2 { ExtF::ZERO } else { vars[0] + vars[1] }
         });
         
         let polys = vec![poly1, poly2];
         
         // Test that we can handle multiple polynomials
-        let num_vars = 2;
+        let _num_vars = 2;
         let test_point: Vec<ExtF> = vec![
-            embed_base_to_ext(F::from_canonical_u64(2)),
-            embed_base_to_ext(F::from_canonical_u64(3)),
+            embed_base_to_ext(F::from_u64(2)),
+            embed_base_to_ext(F::from_u64(3)),
         ];
         
         for (i, poly) in polys.iter().enumerate() {
@@ -123,7 +125,7 @@ mod spartan2_sumcheck_tests {
         let test_points = vec![
             vec![ExtF::ONE],
             vec![ExtF::ZERO],
-            vec![embed_base_to_ext(F::from_canonical_u64(42))],
+            vec![embed_base_to_ext(F::from_u64(42))],
         ];
         
         for point in test_points {
@@ -138,14 +140,14 @@ mod spartan2_sumcheck_tests {
     fn test_sumcheck_with_constant_polynomial() {
         println!("🧪 Testing sum-check with constant polynomial");
 
-        let constant_value = embed_base_to_ext(F::from_canonical_u64(7));
+        let constant_value = embed_base_to_ext(F::from_u64(7));
         let constant_poly = Arc::new(move |_vars: &[ExtF]| constant_value);
         
         // Constant polynomial should always return the same value
         let test_points = vec![
             vec![ExtF::ONE],
             vec![ExtF::ZERO],
-            vec![embed_base_to_ext(F::from_canonical_u64(100))],
+            vec![embed_base_to_ext(F::from_u64(100))],
         ];
         
         for point in test_points {
@@ -187,13 +189,13 @@ mod spartan2_sumcheck_tests {
         println!("🧪 Testing sum-check challenger integration");
 
         // Test that our challenger works with sum-check
-        let mut challenger = NeoChallenger::new();
+        let mut challenger = NeoChallenger::new("test_sumcheck");
         
         // Add some test data to the challenger
-        challenger.observe_bytes(b"test_sumcheck_data");
+        challenger.observe_bytes("test", b"test_sumcheck_data");
         
         // Get a challenge
-        let challenge = challenger.sample_ext_element();
+        let challenge = challenger.challenge_ext("test_challenge");
         
         // Challenge should be non-zero with high probability
         assert_ne!(challenge, ExtF::ZERO, "Challenge should be non-zero");
@@ -208,22 +210,22 @@ mod spartan2_sumcheck_tests {
 
         // Create a simple univariate polynomial: 2x + 3
         let coeffs = vec![
-            embed_base_to_ext(F::from_canonical_u64(3)), // constant term
-            embed_base_to_ext(F::from_canonical_u64(2)), // linear term
+            embed_base_to_ext(F::from_u64(3)), // constant term
+            embed_base_to_ext(F::from_u64(2)), // linear term
         ];
-        let poly = UnivPoly::new(coeffs);
+        let poly = Polynomial::new(coeffs);
         
         // Test evaluation at x = 0: should be 3
-        let eval_at_0 = poly.evaluate(&ExtF::ZERO);
-        assert_eq!(eval_at_0, embed_base_to_ext(F::from_canonical_u64(3)));
+        let eval_at_0 = poly.eval(ExtF::ZERO);
+        assert_eq!(eval_at_0, embed_base_to_ext(F::from_u64(3)));
         
         // Test evaluation at x = 1: should be 2*1 + 3 = 5
-        let eval_at_1 = poly.evaluate(&ExtF::ONE);
-        assert_eq!(eval_at_1, embed_base_to_ext(F::from_canonical_u64(5)));
+        let eval_at_1 = poly.eval(ExtF::ONE);
+        assert_eq!(eval_at_1, embed_base_to_ext(F::from_u64(5)));
         
         // Test evaluation at x = 2: should be 2*2 + 3 = 7
-        let eval_at_2 = poly.evaluate(&embed_base_to_ext(F::from_canonical_u64(2)));
-        assert_eq!(eval_at_2, embed_base_to_ext(F::from_canonical_u64(7)));
+        let eval_at_2 = poly.eval(embed_base_to_ext(F::from_u64(2)));
+        assert_eq!(eval_at_2, embed_base_to_ext(F::from_u64(7)));
         
         println!("✅ Univariate polynomial operations test passed");
     }
@@ -232,8 +234,8 @@ mod spartan2_sumcheck_tests {
     fn test_field_arithmetic_consistency() {
         println!("🧪 Testing field arithmetic consistency");
 
-        let a = embed_base_to_ext(F::from_canonical_u64(5));
-        let b = embed_base_to_ext(F::from_canonical_u64(3));
+        let a = embed_base_to_ext(F::from_u64(5));
+        let b = embed_base_to_ext(F::from_u64(3));
         
         // Test basic operations
         let sum = a + b;
@@ -241,9 +243,9 @@ mod spartan2_sumcheck_tests {
         let prod = a * b;
         
         // Verify results
-        assert_eq!(sum, embed_base_to_ext(F::from_canonical_u64(8)));
-        assert_eq!(diff, embed_base_to_ext(F::from_canonical_u64(2)));
-        assert_eq!(prod, embed_base_to_ext(F::from_canonical_u64(15)));
+        assert_eq!(sum, embed_base_to_ext(F::from_u64(8)));
+        assert_eq!(diff, embed_base_to_ext(F::from_u64(2)));
+        assert_eq!(prod, embed_base_to_ext(F::from_u64(15)));
         
         // Test that operations are consistent with polynomial evaluation
         let poly = Arc::new(move |vars: &[ExtF]| {
@@ -257,13 +259,15 @@ mod spartan2_sumcheck_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "snark_mode")))]
+#[allow(dead_code)]
 mod nark_mode_sumcheck_tests {
+    #[allow(unused_imports)]
     use neo_sumcheck::{
         batched_sumcheck_prover, batched_sumcheck_verifier,
         challenger::NeoChallenger
     };
     use neo_fields::{ExtF, F, embed_base_to_ext};
+    use p3_field::PrimeCharacteristicRing;
     use std::sync::Arc;
 
     #[test]
@@ -275,10 +279,10 @@ mod nark_mode_sumcheck_tests {
             if vars.is_empty() { ExtF::ZERO } else { vars[0] }
         });
         
-        let test_point = vec![embed_base_to_ext(F::from_canonical_u64(42))];
+        let test_point = vec![embed_base_to_ext(F::from_u64(42))];
         let eval = poly(&test_point);
         
-        assert_eq!(eval, embed_base_to_ext(F::from_canonical_u64(42)));
+        assert_eq!(eval, embed_base_to_ext(F::from_u64(42)));
         
         println!("✅ NARK mode sum-check backward compatibility confirmed");
     }

@@ -3,19 +3,22 @@
 //! These tests validate the NeutronNova folding integration and ensure
 //! that the folding operations work correctly with the Neo protocol.
 
-#[cfg(all(test, feature = "snark_mode"))]
+
 mod neutronnova_folding_tests {
+    #[allow(unused_imports)]
     use neo_fold::{
         FoldState, Proof,
         neutronnova_integration::{NeutronNovaFoldState, create_neutronnova_fold_state}
     };
     use neo_ccs::{CcsStructure, CcsInstance, CcsWitness, verifier_ccs, check_satisfiability};
     use neo_commit::{AjtaiCommitter, SECURE_PARAMS};
-    use neo_fields::{embed_base_to_ext, ExtF, F};
+    use neo_fields::{embed_base_to_ext, F};
+    use p3_field::PrimeCharacteristicRing;
+    #[allow(unused_imports)]
+    use neo_fields::ExtF;
     use neo_modint::ModInt;
     use neo_ring::RingElement;
     use neo_decomp::decomp_b;
-    use p3_field::PrimeCharacteristicRing;
     use std::time::Instant;
 
     /// Helper function to create a test CCS instance and witness
@@ -24,10 +27,10 @@ mod neutronnova_folding_tests {
         
         // Create test witness: [a=2, b=3, ab=6, a+b=5]
         let witness_values = vec![
-            embed_base_to_ext(F::from_canonical_u64(2)),  // a
-            embed_base_to_ext(F::from_canonical_u64(3)),  // b
-            embed_base_to_ext(F::from_canonical_u64(6)),  // a*b
-            embed_base_to_ext(F::from_canonical_u64(5)),  // a+b
+            embed_base_to_ext(F::from_u64(2)),  // a
+            embed_base_to_ext(F::from_u64(3)),  // b
+            embed_base_to_ext(F::from_u64(6)),  // a*b
+            embed_base_to_ext(F::from_u64(5)),  // a+b
         ];
         let witness = CcsWitness { z: witness_values.clone() };
         
@@ -58,7 +61,7 @@ mod neutronnova_folding_tests {
         // Verify the fold state is properly initialized
         assert_eq!(fold_state.nark_state.structure.num_constraints, ccs.num_constraints);
         assert_eq!(fold_state.nark_state.structure.witness_size, ccs.witness_size);
-        assert!(fold_state.r1cs_shape.is_none(), "R1CS shape should be None initially");
+        assert!(fold_state.conversion_cache.is_none(), "R1CS shape should be None initially");
         
         println!("✅ NeutronNova fold state creation successful");
         println!("   CCS constraints: {}", ccs.num_constraints);
@@ -179,7 +182,7 @@ mod neutronnova_folding_tests {
     }
 
     #[test]
-    fn test_fold_state_r1cs_shape_caching() {
+    fn test_fold_state_conversion_cache_caching() {
         println!("🧪 Testing R1CS shape caching in fold state");
 
         let (ccs, instance, witness) = create_test_fold_case();
@@ -187,7 +190,7 @@ mod neutronnova_folding_tests {
         let committer = AjtaiCommitter::setup_unchecked(SECURE_PARAMS);
         
         // Initially, R1CS shape should be None
-        assert!(fold_state.r1cs_shape.is_none(), "R1CS shape should be None initially");
+        assert!(fold_state.conversion_cache.is_none(), "R1CS shape should be None initially");
         
         // Generate a proof (this should populate the R1CS shape)
         let _proof = fold_state.generate_proof_snark(
@@ -272,7 +275,7 @@ mod neutronnova_folding_tests {
     }
 }
 
-#[cfg(all(test, not(feature = "snark_mode")))]
+#[allow(dead_code)]
 mod nark_mode_folding_tests {
     use neo_fold::FoldState;
     use neo_ccs::verifier_ccs;

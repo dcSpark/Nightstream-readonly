@@ -88,7 +88,7 @@ pub struct EvalInstance {
     pub opening_proof: Option<Vec<RingElement<ModInt>>>, // Opening proof for point-binding
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Proof {
     pub transcript: Vec<u8>,
 }

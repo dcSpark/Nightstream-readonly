@@ -62,7 +62,6 @@ fn bench_proof_generation(c: &mut Criterion) {
         
         group.throughput(Throughput::Elements(length as u64));
         
-        #[cfg(feature = "snark_mode")]
         group.bench_with_input(
             BenchmarkId::new("snark_mode", length),
             &length,
@@ -70,19 +69,6 @@ fn bench_proof_generation(c: &mut Criterion) {
                 b.iter(|| {
                     let result = prove(&ccs, &instance, &witness);
                     assert!(result.is_ok(), "SNARK proof should succeed");
-                    result.unwrap()
-                });
-            },
-        );
-        
-        #[cfg(not(feature = "snark_mode"))]
-        group.bench_with_input(
-            BenchmarkId::new("nark_mode", length),
-            &length,
-            |b, _| {
-                b.iter(|| {
-                    let result = prove(&ccs, &instance, &witness);
-                    assert!(result.is_ok(), "NARK proof should succeed");
                     result.unwrap()
                 });
             },
@@ -106,7 +92,6 @@ fn bench_proof_verification(c: &mut Criterion) {
         
         group.throughput(Throughput::Elements(length as u64));
         
-        #[cfg(feature = "snark_mode")]
         group.bench_with_input(
             BenchmarkId::new("snark_verify", length),
             &length,
@@ -114,19 +99,6 @@ fn bench_proof_verification(c: &mut Criterion) {
                 b.iter(|| {
                     let result = verify(&ccs, &proof);
                     assert!(result, "SNARK verification should succeed");
-                    result
-                });
-            },
-        );
-        
-        #[cfg(not(feature = "snark_mode"))]
-        group.bench_with_input(
-            BenchmarkId::new("nark_verify", length),
-            &length,
-            |b, _| {
-                b.iter(|| {
-                    let result = verify(&ccs, &proof);
-                    assert!(result, "NARK verification should succeed");
                     result
                 });
             },
@@ -148,7 +120,7 @@ fn bench_end_to_end(c: &mut Criterion) {
         
         group.throughput(Throughput::Elements(length as u64));
         
-        #[cfg(feature = "snark_mode")]
+        
         group.bench_with_input(
             BenchmarkId::new("snark_end_to_end", length),
             &length,
@@ -162,7 +134,7 @@ fn bench_end_to_end(c: &mut Criterion) {
             },
         );
         
-        #[cfg(not(feature = "snark_mode"))]
+        #[allow(dead_code)]
         group.bench_with_input(
             BenchmarkId::new("nark_end_to_end", length),
             &length,
@@ -252,7 +224,7 @@ fn bench_proof_size_analysis(c: &mut Criterion) {
         
         group.throughput(Throughput::Elements(length as u64));
         
-        #[cfg(feature = "snark_mode")]
+        
         group.bench_with_input(
             BenchmarkId::new("snark_proof_size", length),
             &length,
@@ -280,7 +252,7 @@ fn bench_proof_size_analysis(c: &mut Criterion) {
             },
         );
         
-        #[cfg(not(feature = "snark_mode"))]
+        #[allow(dead_code)]
         group.bench_with_input(
             BenchmarkId::new("nark_proof_size", length),
             &length,
@@ -312,7 +284,7 @@ fn bench_proof_size_analysis(c: &mut Criterion) {
     group.finish();
 }
 
-#[cfg(all(feature = "snark_mode", test))]
+#[cfg(test)]
 /// Benchmark CCS to R1CS conversion (SNARK mode only)
 fn bench_ccs_to_r1cs_conversion(c: &mut Criterion) {
     use neo_ccs::convert_ccs_to_r1cs_full;
@@ -353,14 +325,14 @@ criterion_group!(
     bench_proof_size_analysis,
 );
 
-#[cfg(all(feature = "snark_mode", test))]
+#[cfg(test)]
 criterion_group!(
     snark_benches,
     bench_ccs_to_r1cs_conversion,
 );
 
-#[cfg(feature = "snark_mode")]
+
 criterion_main!(benches, snark_benches);
 
-#[cfg(not(feature = "snark_mode"))]
+#[allow(dead_code)]
 criterion_main!(benches);
