@@ -299,7 +299,7 @@ pub fn knowledge_extractor(_transcript: &[u8]) -> Result<Vec<ExtF>, String> {
     Ok(vec![ExtF::new_real(F::ONE)])
 }
 
-#[cfg(all(test, feature = "snark_spartan2"))]
+#[cfg(test)]
 mod tests {
     use super::*;
     use neo_ccs::{CcsStructure, CcsInstance, CcsWitness};

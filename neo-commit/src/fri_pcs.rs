@@ -4,7 +4,7 @@
 
 use neo_fields::{F, ExtF};
 
-#[cfg(feature = "real_fri")]
+
 mod real {
     use super::*;
     use p3_field::{PrimeCharacteristicRing, PrimeField64};
@@ -336,7 +336,9 @@ mod real {
     };
 }
 
-#[cfg(not(feature = "real_fri"))]
+
+// Simulated module removed - using real FRI only
+#[allow(dead_code)]
 mod simulated {
     use super::*;
     use neo_sumcheck::fiat_shamir::Transcript;
@@ -410,14 +412,13 @@ mod simulated {
         }
     }
     
-    pub use {FriPCSWrapper as RealFriPCSWrapper, FriCommitment as RealFriCommitment, FriProof as RealFriProof, ProverData as RealProverData};
+    // Exports handled by real module
 }
 
 // Public re-exports (stable surface)
-#[cfg(feature = "real_fri")]
+
+// Always use real FRI implementation
 pub use real::*;
-#[cfg(not(feature = "real_fri"))]
-pub use simulated::*;
 
 pub mod fri_pcs_wrapper {
     pub use super::*;

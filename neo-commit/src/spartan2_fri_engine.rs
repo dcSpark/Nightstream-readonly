@@ -293,7 +293,8 @@ impl<E: Engine<Scalar = pallas::Scalar>> PCSEngineTrait<E> for P3FriEngine {
         let t_point = ExtF::new_real(F::ONE);
         let prf = pcs.open(&RealFriCommitment { 
             root: c_again.root, 
-            size: size,
+            domain_size: size,
+            n_polys: 1,
         }, &pd, 0, t_point)
             .map_err(|_| SpartanError::InvalidPCS)?;
 
@@ -328,7 +329,8 @@ impl<E: Engine<Scalar = pallas::Scalar>> PCSEngineTrait<E> for P3FriEngine {
 
         let commitment = RealFriCommitment { 
             root: comm.root, 
-            size: size,
+            domain_size: size,
+            n_polys: 1,
         };
         let proof = RealFriProof { 
             proof_bytes: arg.fri_proof.clone(), 

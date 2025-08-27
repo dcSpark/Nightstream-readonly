@@ -25,15 +25,8 @@ version = { workspace = true }
 authors = { workspace = true }
 
 [features]
-# Default: Spartan2 + FRI (post-quantum SNARK system)
-default = [
-  "dep:spartan2",
-  "dep:bincode", 
-  "dep:bellpepper-core",
-  "dep:bellpepper",
-  "dep:ff",
-  "dep:serde"
-]
+# Default: Spartan2 + FRI (post-quantum SNARK system) - always enabled
+default = []
 
 [dependencies]
 neo-fields = { path = "neo-fields" }
