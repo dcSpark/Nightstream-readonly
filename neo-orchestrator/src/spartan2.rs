@@ -8,7 +8,7 @@ pub mod spartan2_ivc {
     // use spartan2::provider::keccak::Keccak256Transcript;
 
     #[allow(unused_imports)]
-    use crate::{Proof /* your folded CCS types */};
+    use neo_fold::{Proof /* your folded CCS types */};
 
     /// Compress a folded CCS instance into a succinct proof.
     pub fn compress_fold(/* folded CCS state here */) /* -> YourProof */ {

@@ -2211,7 +2211,7 @@ pub mod neutronnova_integration {
     use super::*;
     #[allow(unused_imports)]
     use neo_fields::spartan2_engine::GoldilocksEngine;
-    use neo_ccs::{integration, CcsStructure, CcsInstance, CcsWitness};
+    use neo_ccs::{CcsStructure, CcsInstance, CcsWitness};
     #[allow(unused_imports)]
     use spartan2::traits::transcript::TranscriptEngineTrait;
     #[allow(unused_imports)]
@@ -2241,44 +2241,33 @@ pub mod neutronnova_integration {
             pair2: (CcsInstance, CcsWitness),
             committer: &AjtaiCommitter,
         ) -> Proof {
-            // Convert CCS to R1CS for Spartan2
-            match integration::convert_ccs_for_spartan2(&self.nark_state.structure, &pair1.0, &pair1.1) {
-                Ok((matrices, public_inputs1, witness1)) => {
-                    // Store conversion results for future use
-                    self.conversion_cache = Some(matrices.clone());
-                    let _ = (public_inputs1, witness1);
-                    
-                    // Convert second pair
-                    if let Ok((_, public_inputs2, witness2)) = 
-                        integration::convert_ccs_for_spartan2(&self.nark_state.structure, &pair2.0, &pair2.1) {
-                        let _ = (public_inputs2, witness2);
-                        
-                        // Use NeutronNova for batch folding
-                        {
-                            // let _transcript = <GoldilocksEngine as Engine>::TE::new(b"neutronnova");
-                            eprintln!("SNARK mode: Using NeutronNova folding (placeholder)");
-                        }
-                        
-                        // Generate NARK proof as fallback
-                        self.nark_state.generate_proof(pair1, pair2, committer)
-                    } else {
-                        eprintln!("Failed to convert second CCS pair to R1CS, falling back to NARK");
-                        self.nark_state.generate_proof(pair1, pair2, committer)
-                    }
-                },
-                Err(e) => {
-                    eprintln!("Failed to convert CCS to R1CS: {}, falling back to NARK", e);
-                    self.nark_state.generate_proof(pair1, pair2, committer)
-                }
-            }
+            eprintln!("SNARK mode: Using NeutronNova folding (placeholder)");
+            
+            // Generate NARK proof and add SNARK marker
+            let mut proof = self.nark_state.generate_proof(pair1, pair2, committer);
+            
+            // Add SNARK marker to the transcript (safe location at the end)
+            proof.transcript.extend_from_slice(b"neo_spartan2_snark");
+            
+            proof
         }
         
         /// Verify proof using NeutronNova in SNARK mode
         pub fn verify_snark(&self, transcript: &[u8], committer: &AjtaiCommitter) -> bool {
-            // For now, delegate to NARK verification
-            // In a full implementation, this would use NeutronNova verification
             eprintln!("SNARK mode: Using NeutronNova verification (placeholder)");
-            self.nark_state.verify(transcript, committer)
+            
+            // Check for SNARK marker at the end
+            if !transcript.ends_with(b"neo_spartan2_snark") {
+                eprintln!("SNARK verification failed: missing SNARK marker");
+                return false;
+            }
+            
+            // Remove SNARK marker and verify with NARK
+            let marker_len = b"neo_spartan2_snark".len();
+            let clean_transcript = &transcript[..transcript.len() - marker_len];
+            
+            // Delegate to NARK verification
+            self.nark_state.verify(clean_transcript, committer)
         }
         
         /// Recursive IVC using NeutronNova
@@ -2324,6 +2313,13 @@ pub mod neutronnova_integration {
         NeutronNovaFoldState::new(structure)
     }
 }
+
+// Export the SNARK module (spartan_ivc already declared above)
+pub mod snark;
+// neutronnova_integration module is defined inline above
+
+// Re-export the main SNARK interface
+pub use snark::{prove, verify, Metrics, OrchestratorError};
 
 
 

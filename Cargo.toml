@@ -24,6 +24,10 @@ edition = { workspace = true }
 version = { workspace = true }
 authors = { workspace = true }
 
+[features]
+real_fri = []            # Enable real p3-fri PCS instead of simulated
+default = []             # Keep default as simulated for now
+
 [dependencies]
 neo-fields = { path = "neo-fields" }
 neo-ccs = { path = "neo-ccs" }
@@ -59,6 +63,9 @@ rayon = "1.10"
 p3-challenger = "0.3.0"  # Used in benchmarks
 p3-fri = "0.3.0"         # FRI PCS for interim succinctness
 p3-poseidon2 = "0.3.0"   # Hash function for FRI
+p3-commit = "0.3.0"      # Commitment schemes for p3-fri
+p3-merkle-tree = "0.3.0" # Merkle tree MMCS for p3-fri
+p3-dft = "0.3.0"         # DFT operations for p3-fri
 
 # SNARK mode: Spartan2 dependencies for succinctness  
 spartan2 = { git = "https://github.com/microsoft/Spartan2.git", rev = "cc21201d0d0293794ccc8ddd24903a9e570afb6e", default-features = false }
@@ -69,9 +76,6 @@ uninlined_format_args = "allow"
 [workspace.metadata.clippy]
 all-targets = true
 all-features = true
-
-[features]
-default = []
 
 [dev-dependencies]
 criterion = { workspace = true }

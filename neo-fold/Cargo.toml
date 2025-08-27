@@ -24,6 +24,8 @@ rand = { workspace = true }
 rand_chacha = { workspace = true }
 rand_distr = { workspace = true }
 spartan2 = { workspace = true }
+memchr = "2.6"
+thiserror = "1"
 
 [dev-dependencies]
 criterion = { workspace = true }
