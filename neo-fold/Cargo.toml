@@ -26,6 +26,10 @@ rand_distr = { workspace = true }
 spartan2 = { workspace = true }
 memchr = "2.6"
 thiserror = "1"
+bincode = { workspace = true }
+bellpepper-core = { workspace = true }
+bellpepper = { workspace = true }
+ff = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

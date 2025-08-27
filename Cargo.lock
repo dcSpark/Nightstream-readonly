@@ -803,8 +803,12 @@ dependencies = [
 name = "neo-fold"
 version = "0.1.0"
 dependencies = [
+ "bellpepper",
+ "bellpepper-core",
+ "bincode",
  "byteorder",
  "criterion",
+ "ff",
  "memchr",
  "neo-arithmetize",
  "neo-ccs",
