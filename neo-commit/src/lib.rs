@@ -1122,6 +1122,7 @@ pub mod spartan2_pcs {
     }
     
     /// Field conversion utilities for PCS integration
+    #[cfg(feature = "snark_spartan2")]
     pub mod pcs_conversion {
         use super::*;
         use neo_fields::spartan2_compat::field_conversion::*;

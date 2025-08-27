@@ -19,7 +19,7 @@ neo-orchestrator = { path = "../neo-orchestrator" }
 rand = { workspace = true }
 p3-field = "0.3"
 p3-matrix = { workspace = true }
-spartan2 = { workspace = true }
+spartan2 = { git = "https://github.com/microsoft/Spartan2.git", rev = "cc21201d0d0293794ccc8ddd24903a9e570afb6e", default-features = false, optional = true }
 
 [features]
 default = []

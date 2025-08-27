@@ -2210,12 +2210,17 @@ pub fn verify_with_knowledge_soundness(
 pub mod neutronnova_integration {
     use super::*;
     #[allow(unused_imports)]
-    use neo_fields::spartan2_engine::GoldilocksEngine;
     use neo_ccs::{CcsStructure, CcsInstance, CcsWitness};
+    #[cfg(feature = "snark_spartan2")]
+    #[allow(unused_imports)]
+    use neo_fields::spartan2_engine::GoldilocksEngine;
+    #[cfg(feature = "snark_spartan2")]
     #[allow(unused_imports)]
     use spartan2::traits::transcript::TranscriptEngineTrait;
+    #[cfg(feature = "snark_spartan2")]
     #[allow(unused_imports)]
     use spartan2::neutronnova::{NeutronNovaNIFS, NeutronNovaSNARK};
+    #[cfg(feature = "snark_spartan2")]
     #[allow(unused_imports)]
     use spartan2::traits::Engine;
     

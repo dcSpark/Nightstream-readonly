@@ -70,8 +70,9 @@ pub use ccs_sumcheck::{ccs_sumcheck_prover, ccs_sumcheck_verifier};
 pub mod converters;
 pub use converters::{
     ccs_to_r1cs_format, ccs_instance_to_r1cs_format, ccs_witness_to_r1cs_format,
-    field_conversion
 };
+#[cfg(feature = "snark_spartan2")]
+pub use converters::field_conversion;
 
 pub mod to_r1cs;
 pub mod integration; // Real CCS → R1CS conversion for Spartan2

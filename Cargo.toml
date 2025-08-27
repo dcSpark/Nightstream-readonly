@@ -26,7 +26,7 @@ authors = { workspace = true }
 
 [features]
 real_fri = []            # Enable real p3-fri PCS instead of simulated
-default = []             # Keep default as simulated for now
+default = ["real_fri"]   # Use PQ-friendly FRI by default
 
 [dependencies]
 neo-fields = { path = "neo-fields" }
@@ -67,12 +67,8 @@ p3-commit = "0.3.0"      # Commitment schemes for p3-fri
 p3-merkle-tree = "0.3.0" # Merkle tree MMCS for p3-fri
 p3-dft = "0.3.0"         # DFT operations for p3-fri
 
-# SNARK mode: Spartan2 dependencies for succinctness  
-spartan2 = { git = "https://github.com/microsoft/Spartan2.git", rev = "cc21201d0d0293794ccc8ddd24903a9e570afb6e", default-features = false }
-bincode = "1.3"           # Serialization for Spartan2 proofs and VKs
-bellpepper-core = "0.4"   # Circuit constraints for Spartan2
-bellpepper = "0.4"        # Circuit gadgets for Spartan2
-ff = "0.13"               # Field trait for bellpepper circuits
+# SNARK mode: Spartan2 dependencies for succinctness (moved to individual crates)
+# spartan2, bincode, bellpepper-core, bellpepper, ff are now optional per-crate dependencies
 
 [workspace.lints.clippy]
 uninlined_format_args = "allow"

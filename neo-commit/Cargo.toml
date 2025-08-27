@@ -16,7 +16,7 @@ rand = { workspace = true }
 neo-modint = { path = "../neo-modint" }
 rand_distr = { workspace = true }
 subtle = "2.5"
-spartan2 = { workspace = true }
+spartan2 = { git = "https://github.com/microsoft/Spartan2.git", rev = "cc21201d0d0293794ccc8ddd24903a9e570afb6e", default-features = false, optional = true }
 p3-fri = { workspace = true }
 p3-challenger = { workspace = true }
 p3-poseidon2 = { workspace = true }
@@ -30,6 +30,7 @@ p3-dft = { workspace = true }
 default = []
 prop-tests = []
 real_fri = []  # Enable real p3-fri PCS implementation
+snark_spartan2 = ["dep:spartan2", "neo-fields/snark_spartan2"]
 
 [dev-dependencies]
 criterion = { workspace = true }

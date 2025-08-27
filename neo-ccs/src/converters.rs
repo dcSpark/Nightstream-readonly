@@ -97,6 +97,7 @@ pub fn ccs_witness_to_r1cs_format(
 }
 
 /// Field conversion utilities for Spartan2 integration
+#[cfg(feature = "snark_spartan2")]
 pub mod field_conversion {
     use super::*;
     use neo_fields::spartan2_compat::field_conversion::*;
