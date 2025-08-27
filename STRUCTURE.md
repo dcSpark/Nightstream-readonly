@@ -10,31 +10,33 @@
 neo/
 ├─ Cargo.toml               # [workspace], shared profiles (no features)
 └─ crates/
-   ├─ neo-math/             # F_q (Goldilocks) + K=F_{q^2}; R_q; cf/cf^{-1}; rotation ring S
+   ├─ neo-params/           # typed parameter sets; GL-128 preset; validates (k+1)T(b-1)<B
+   ├─ neo-math/             # F_q (Goldilocks) + K=F_{q^s}; R_q; cf/cf^{-1}; rotation ring S
    ├─ neo-ajtai/            # Ajtai matrix commitment (S-homomorphic) + Decomp_b, split_b
    ├─ neo-challenge/        # strong sampling set C ⊂ S; invertibility & expansion checks
    ├─ neo-ccs/              # CCS frontend; linearized relations MCS/ME types
    ├─ neo-fold/             # single transcript + sum-check; Π_CCS, Π_RLC, Π_DEC
    ├─ neo-spartan-bridge/   # final compression: ME → Spartan2(+real FRI)
-   └─ neo-integration/      # (tests only) cross-crate & e2e tests
+   └─ neo-tests/            # (tests only) cross-crate & e2e tests
 ```
 
 **Dependency graph (acyclic):**
 
 ```
-neo-math (foundation: Fq, K, rings, S-action)
-  ├─→ neo-ajtai (matrix commitment)
-  ├─→ neo-challenge (strong sampling)
-  ├─→ neo-ccs (CCS frontend)
-  ├─→ neo-spartan-bridge (final compression)
-  └─→ neo-integration (tests only)
+neo-params (typed parameter sets: q, η, d, κ, m, b, k, B, T, C, s)
+  └─→ neo-math (foundation: Fq, K, rings, S-action)
+      ├─→ neo-ajtai (matrix commitment)
+      ├─→ neo-challenge (strong sampling)
+      ├─→ neo-ccs (CCS frontend)
+      ├─→ neo-spartan-bridge (final compression)
+      └─→ neo-tests (tests only)
 
 neo-ajtai, neo-challenge, neo-ccs
   └─→ neo-fold (single transcript + sum-check)
        └─→ neo-spartan-bridge
-            └─→ neo-integration
+            └─→ neo-tests
 
-(simplified view: neo-math → {ajtai,challenge,ccs} → neo-fold → spartan-bridge → integration)
+(simplified view: neo-params → neo-math → {ajtai,challenge,ccs} → neo-fold → spartan-bridge → tests)
 ```
 
 Why this is enough: it mirrors Neo's constructions—Ajtai with **pay-per-bit** embedding and S-homomorphism (§3), one sum-check over an **extension of a small prime field** (§2.1, §1.3), CCS→ME relations (§4.1), RLC with **small-norm challenges** (§3.4, §4.5), DEC for norm control (§4.6), and a final **Spartan(+FRI)** compression (§1.5).&#x20;
@@ -42,6 +44,14 @@ Why this is enough: it mirrors Neo's constructions—Ajtai with **pay-per-bit** 
 ---
 
 ## Crates (what/why)
+
+### `neo-params/`
+
+* **Typed parameter sets:** `NeoParams` struct with validation and security estimates; exports $(q,\eta,d,\kappa,m,b,k,B,T,C,s)$ as typed presets.
+* **GL-128 preset:** `GOLDILOCKS_128` with Goldilocks field, $\eta=81$, $s=2$, and measured $T\approx 216$ from the chosen challenge distribution.  
+* **Guard enforcement:** validates $(k+1)T(b-1)<B$ at load; rejects unsafe parameter combinations.
+* **Extension degree:** computes minimal $s$ for target soundness; v1 supports $s=2$ only.
+  **Contract:** centralizes all numbers; lower crates consume typed params and stay generic.
 
 ### `neo-math/`
 
@@ -83,15 +93,15 @@ Why this is enough: it mirrors Neo's constructions—Ajtai with **pay-per-bit** 
 
 ---
 
-## Parameters (fixed **Goldilocks** profile)
+## Parameters (from **neo-params** GL-128 preset)
 
-* **Field:** $q=2^{64}-2^{32}+1$; **extension:** $K=\mathbb F_{q^2}$ (\~128-bit soundness).
+* **Field:** $q=2^{64}-2^{32}+1$; **extension:** $K=\mathbb F_{q^s}$ with $s=2$ (\~128-bit soundness).
 * **Cyclotomic:** $\eta=81$, $\Phi_\eta=X^{54}+X^{27}+1$, $d=54$.
-* **Ajtai/MSIS rows:** $\kappa=16$.
+* **Ajtai/MSIS:** $\kappa=16$ rows, $m=54$ columns.
 * **Norm schedule:** $b=2$, $k=12$, $B=b^k=4096$.
 * **Strong set $C$:** coeffs in $[-2,-1,0,1,2]$ ⇒ **$T\approx 216$**; invertibility bound $b_{\text{inv}}\approx 2.5\cdot 10^9$.
-* **Sanity:** $(k{+}1)T(b{-}1)=13·216·1=2808<B=4096$.
-  All match §6.2's "Goldilocks: $2^{64}-2^{32}+1$" profile.&#x20;
+* **Guard validated:** $(k{+}1)T(b{-}1)=13·216·1=2808<B=4096$ ✓
+  All sourced from `neo-params::GOLDILOCKS_128` preset (§6.2).&#x20;
 
 ---
 
@@ -135,13 +145,14 @@ Why this is enough: it mirrors Neo's constructions—Ajtai with **pay-per-bit** 
 ```toml
 [workspace]
 members = [
+  "crates/neo-params",
   "crates/neo-math",
   "crates/neo-ajtai",
   "crates/neo-challenge",
   "crates/neo-ccs",
   "crates/neo-fold",
   "crates/neo-spartan-bridge",
-  "crates/neo-integration",
+  "crates/neo-tests",
 ]
 resolver = "2"
 
@@ -175,6 +186,9 @@ pub type SMatrix = rot::SMatrix;
 ## Public surfaces (minimal)
 
 ```rust
+// parameters (typed presets)
+use neo_params::{NeoParams, GOLDILOCKS_128};
+
 // math & rings
 use neo_math::{Fq, K, SMatrix, /* cf, rot, etc. */};
 

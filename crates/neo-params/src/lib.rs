@@ -93,8 +93,8 @@ impl NeoParams {
         msis.min(rlwe)
     }
 
-    /// Check if parameters meet minimum security requirements
-    pub fn is_secure(&self) -> bool {
+    /// Check if parameters meet minimum security requirements (rough estimate)
+    pub fn rough_is_secure(&self) -> bool {
         self.security_estimate() >= 128.0
     }
 
@@ -147,10 +147,10 @@ mod tests {
 
     #[test]
     fn test_security_estimates() {
-        assert!(GOLDILOCKS_PARAMS.is_secure());
-        assert!(MERSENNE61_PARAMS.is_secure());
+        assert!(GOLDILOCKS_PARAMS.rough_is_secure());
+        assert!(MERSENNE61_PARAMS.rough_is_secure());
         // Toy parameters are intentionally insecure
-        assert!(!TOY_PARAMS.is_secure());
+        assert!(!TOY_PARAMS.rough_is_secure());
     }
 
     #[test]

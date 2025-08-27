@@ -250,7 +250,7 @@ impl Coeff for ModInt {
     }
 
     fn random(rng: &mut impl Rng) -> Self {
-        let val = rng.gen::<u64>() % Self::Q;
+        let val = rng.random::<u64>() % Self::Q;
         Self::from_u64(val)
     }
 
@@ -277,7 +277,7 @@ impl Coeff for F {
     }
 
     fn random(rng: &mut impl Rng) -> Self {
-        let val = rng.gen::<u64>() % <F as PrimeField64>::ORDER_U64;
+        let val = rng.random::<u64>() % <F as PrimeField64>::ORDER_U64;
         <F as QuotientMap<u64>>::from_int(val)
     }
 

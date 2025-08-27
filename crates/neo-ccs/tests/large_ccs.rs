@@ -1,10 +1,10 @@
-use neo_ccs::ccs_sumcheck::ProverError;
+use neo_ccs::ccs_sumcheck::CcsSumcheckError;
 use neo_ccs::{
     ccs_sumcheck_prover, check_satisfiability, mv_poly, CcsInstance, CcsStructure, CcsWitness,
 };
-use neo_fields::{from_base, ExtF, F};
-// Oracle removed in NARK mode
+use neo_math::{from_base, ExtF, F};
 use p3_field::PrimeCharacteristicRing;
+// Oracle removed in NARK mode
 use p3_matrix::dense::RowMajorMatrix;
 use rand::{rng, Rng};
 
@@ -82,13 +82,11 @@ fn test_sumcheck_prover_returns_err_on_fail() {
     let witness = CcsWitness {
         z: vec![from_base(F::ONE)],
     };
-    let mut transcript = vec![];
+    let mut _transcript: Vec<u8> = vec![];
     let result = ccs_sumcheck_prover(
         &structure,
         &invalid_instance,
         &witness,
-        0,
-        &mut transcript,
     );
-    assert!(matches!(result, Err(ProverError::SumMismatch(_))));
+    assert!(matches!(result, Err(CcsSumcheckError::VerificationFailed(_))));
 }

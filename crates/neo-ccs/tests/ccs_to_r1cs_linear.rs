@@ -1,8 +1,8 @@
 // neo-ccs/tests/ccs_to_r1cs_linear.rs
 use neo_ccs::{CcsInstance, CcsStructure, CcsWitness, mv_poly};
 use neo_ccs::integration::convert_ccs_for_spartan2;
-use neo_fields::{from_base, ExtF, F};
-use p3_field::{PrimeCharacteristicRing, PrimeField64};
+use neo_math::{from_base, ExtF, F};
+use p3_field::{PrimeField64, PrimeCharacteristicRing};
 use p3_matrix::dense::RowMajorMatrix;
 
 #[test]

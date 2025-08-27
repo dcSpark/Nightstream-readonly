@@ -122,8 +122,8 @@ pub fn reconstruct_split<C: Coeff + Send + Sync>(
 }
 
 /// Pack decomposed matrix into ring elements for commitment
-/// Maps F_q^{d × m} matrix to Vec<RingElement<ModInt>> by placing columns into coefficient vectors
-pub fn pack_decomp_matrix(mat: &RowMajorMatrix<F>, params_n: usize) -> Vec<RingElement<ModInt>> {
+/// Maps F_q^{d × m} matrix to Vec<RingElement> by placing columns into coefficient vectors
+pub fn pack_decomp_matrix(mat: &RowMajorMatrix<F>, params_n: usize) -> Vec<RingElement> {
     let d = mat.height();
     let m = mat.width();
     
@@ -147,7 +147,7 @@ pub fn pack_decomp_matrix(mat: &RowMajorMatrix<F>, params_n: usize) -> Vec<RingE
 
 /// Unpack ring elements back to matrix form
 pub fn unpack_to_matrix(
-    ring_elements: &[RingElement<ModInt>], 
+    ring_elements: &[RingElement], 
     m: usize
 ) -> RowMajorMatrix<F> {
     let d = ring_elements.len();
@@ -179,10 +179,10 @@ pub fn pay_per_bit_cost(witness_bits: usize, params_k: usize, params_d: usize, p
 /// Bit-sparse ring multiplication: cost scales with number of 1-bits
 /// Optimizes ring multiplication when coefficient vectors have few non-zero bits
 pub fn bit_sparse_ring_multiply(
-    a: &RingElement<ModInt>,
+    a: &RingElement,
     b_sparse_coeffs: &[(usize, ModInt)], // (index, coefficient) pairs for sparse b
     n: usize,
-) -> RingElement<ModInt> {
+) -> RingElement {
     let mut result_coeffs = vec![ModInt::zero(); n];
     
     // Only multiply by non-zero coefficients of b
@@ -209,7 +209,7 @@ pub fn bit_sparse_ring_multiply(
 }
 
 /// Extract sparse representation from ring element (for bit-sparse operations)
-pub fn extract_sparse_coeffs(ring: &RingElement<ModInt>) -> Vec<(usize, ModInt)> {
+pub fn extract_sparse_coeffs(ring: &RingElement) -> Vec<(usize, ModInt)> {
     ring.coeffs()
         .iter()
         .enumerate()

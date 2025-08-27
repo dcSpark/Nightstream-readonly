@@ -23,14 +23,14 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-# Core dependencies
-rand = "0.8"
+# Core
+rand = "0.9"
 rand_chacha = "0.9"
-rand_distr = "0.5"
-serde = { version = "1", features = ["derive"] }
-thiserror = "1.0"
-subtle = "2.5"
-rayon = "1.8"
+rand_distr = "0.5.1"
+serde = { version = "1.0.219", features = ["derive"] }
+thiserror = "2"
+subtle = "2.6"
+rayon = "1.10"
 
 # Plonky3 field and matrix operations
 p3-field = "0.3.0"
@@ -51,9 +51,9 @@ spartan2 = { git = "https://github.com/microsoft/Spartan2.git", rev = "cc21201d0
 bellpepper-core = { version = "0.4" }
 ff = { version = "0.13" }
 
-# Benchmarking and testing
-criterion = { version = "0.5.1", features = ["html_reports"] }
-proptest = "1.0"
+# Benches & tests
+criterion = { version = "0.6", features = ["html_reports"] }
+proptest = "1.7"
 
 
 
@@ -72,15 +72,3 @@ version = "0.1.0"
 authors = ["Nico Arqueros <nico.arquerosr@gmail.com>"]
 rust-version = "1.88"
 
-# Legacy package (will be removed)
-[package]
-name = "learn-neo-lattice"
-edition = { workspace = true }
-version = { workspace = true }
-authors = { workspace = true }
-
-[features]
-default = []
-
-[dependencies]
-# Will be replaced with new crate structure

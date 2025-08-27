@@ -1,225 +1,72 @@
-//! # Neo Math: Small Prime Fields and Cyclotomic Rings
+#![forbid(unsafe_code)]
+#![allow(missing_docs)]
+#![cfg_attr(docsrs, feature(doc_auto_cfg))]
+
+//! neo-math: Fq (Goldilocks), K=F_{q^2}, R_q = F_q[X]/(Phi_eta), cf/cf^{-1}, and S-action.
 //!
-//! This crate provides the mathematical foundations for Neo:
-//! - Small prime fields F_q (Goldilocks, Mersenne-61, Almost-Goldilocks)  
-//! - Quadratic extensions K = F_q^2 for 128-bit security in sum-check
-//! - Cyclotomic rings R_q = F_q[X]/(Φ_η) with coefficient maps cf/cf^{-1}
-//! - Rotation ring S ≅ R_q for S-module homomorphism
+//! **Normative language:** "MUST", "SHOULD" are used as in BCP‑14 (RFC 2119 / RFC 8174).
+//! Violations of **MUST** return errors; **SHOULD** are surfaced as warnings (or errors in strict mode).
 
-// Re-export the original neo-fields functionality
-use p3_field::{extension::BinomialExtensionField, PrimeField64, PrimeCharacteristicRing};
+pub mod norms;
+pub mod field;
+pub mod ring;
+pub mod s_action;
 
-pub mod spartan2_engine; // Spartan2 engine integration for SNARK mode
+pub use field::{Fq, K, GOLDILOCKS_MODULUS, TWO_ADICITY, nonresidue, two_adic_generator, KExtensions};
+pub use ring::{ETA, D, Rq, cf, cf_inv, inf_norm};
+pub use s_action::SAction;
+pub use norms::{NeoMathError, Norms};
 
-pub use p3_goldilocks::Goldilocks as F;
+// Import trait for field operations
+use p3_field::PrimeCharacteristicRing;
 
-/// Quadratic extension F[u] / (u^2 - β) with β=7 (non-residue mod p for Goldilocks).
-pub type ExtF = BinomialExtensionField<F, 2>;
+// Backward compatibility exports for existing crates
+pub use Fq as F;  // Field type alias
+pub type ExtF = K; // Extension field type alias
 
-/// Convert base field element to extension field (embed in constant term)
-pub fn embed_base_to_ext(base: F) -> ExtF {
-    ExtF::new_real(base)
+// Legacy module compatibility - keeping the old modules for now but they won't be actively used
+pub mod modint;
+pub mod poly;
+pub mod decomp;
+pub mod transcript;
+
+// ModInt and Coeff re-exports from existing modules
+pub use modint::{ModInt, Coeff};
+
+// Polynomial re-export
+pub use poly::Polynomial;
+
+// Decomposition functions re-export
+pub use decomp::{decomp_b, signed_decomp_b};
+
+// Extension field utility functions for backward compatibility
+pub fn embed_base_to_ext(base: Fq) -> K {
+    K::new_real(base)
 }
 
-/// Convert extension field element to base field (project to constant term)
-pub fn project_ext_to_base(ext: ExtF) -> Option<F> {
-    if ext.to_array()[1] == F::ZERO {
-        Some(ext.to_array()[0])
+pub fn from_base(base: Fq) -> K {
+    K::new_real(base)
+}
+
+pub fn project_ext_to_base(ext: K) -> Option<Fq> {
+    // Check if imaginary part is zero
+    if ext.imag() == Fq::ZERO {
+        Some(ext.real())
     } else {
         None
     }
 }
 
-/// Convert base field element to extension field using new_real
-pub fn from_base(base: F) -> ExtF {
-    ExtF::new_real(base)
-}
-
-/// Generate a random extension field element
-pub fn random_extf() -> ExtF {
+// Generate a random extension field element for backward compatibility
+pub fn random_extf() -> K {
     use rand::Rng;
-    let mut rng = rand::thread_rng();
-    let a = F::from_u64(rng.gen::<u64>());
-    let b = F::from_u64(rng.gen::<u64>());
-    ExtF::new_complex(a, b)
+    let mut rng = rand::rng();
+    let a = Fq::from_u64(rng.random::<u64>());
+    let b = Fq::from_u64(rng.random::<u64>());
+    K::new_complex(a, b)
 }
 
-/// Extension field norm type for ZK blinding
-pub type ExtFieldNorm = u64;
-
-/// Maximum norm bound for ZK blinding
-pub const MAX_BLIND_NORM: u64 = 1u64 << 40;
-
-/// Trait for computing extension field norms
-pub trait ExtFieldNormTrait {
-    fn abs_norm(&self) -> u64;
-}
-
-impl ExtFieldNormTrait for ExtF {
-    fn abs_norm(&self) -> u64 {
-        let arr = self.to_array();
-        let a = arr[0].as_canonical_u64();
-        let b = arr[1].as_canonical_u64();
-        // Simple L∞ norm (max of components)
-        a.max(b)
-    }
-}
-
-// Spartan2 field conversion utilities
-#[cfg(feature = "spartan2-compat")]
-pub mod spartan2_compat {
-    
-    /// Conversion utilities between Neo's Goldilocks field and Spartan2's Pallas field
-    pub mod field_conversion {
-        use super::super::*;
-        use spartan2::provider::pasta::pallas;
-        use ff::PrimeField;
-        
-        /// Convert Goldilocks field element to Pallas base field element
-        pub fn goldilocks_to_pallas_base(f: &F) -> pallas::Base {
-            // Convert via canonical representation
-            let val = f.as_canonical_u64();
-            pallas::Base::from(val)
-        }
-        
-        /// Convert Goldilocks field element to Pallas scalar field element
-        pub fn goldilocks_to_pallas_scalar(f: &F) -> pallas::Scalar {
-            // Convert via canonical representation
-            let val = f.as_canonical_u64();
-            pallas::Scalar::from(val)
-        }
-        
-        /// Convert Pallas base field element to Goldilocks field element
-        /// Returns Err if truncation would occur (high bits non-zero)
-        pub fn pallas_base_to_goldilocks(f: &pallas::Base) -> Result<F, String> {
-            let repr = f.to_repr();
-            let bytes = repr.as_ref();
-            
-            // Check if high bits are zero - enhanced check as recommended
-            if bytes[8..].iter().any(|&b| b != 0) {
-                return Err("Field truncation: Pallas base value exceeds Goldilocks range".to_string());
-            }
-            
-            // Safe to extract lower 64 bits
-            let mut val = 0u64;
-            for (i, &byte) in bytes.iter().take(8).enumerate() {
-                val |= (byte as u64) << (8 * i);
-            }
-            
-            // Additional safety check: ensure the value is within Goldilocks field
-            let goldilocks_val = F::from_u64(val);
-            if goldilocks_val.as_canonical_u64() != val {
-                return Err("Field conversion: Value not canonical in Goldilocks field".to_string());
-            }
-            
-            Ok(goldilocks_val)
-        }
-        
-        /// Convert Pallas scalar field element to Goldilocks field element
-        /// Returns Err if truncation would occur (high bits non-zero)
-        pub fn pallas_scalar_to_goldilocks(f: &pallas::Scalar) -> Result<F, String> {
-            let repr = f.to_repr();
-            let bytes = repr.as_ref();
-            
-            // Check if high bits are zero - enhanced check as recommended
-            if bytes[8..].iter().any(|&b| b != 0) {
-                return Err("Field truncation: Pallas scalar value exceeds Goldilocks range".to_string());
-            }
-            
-            // Safe to extract lower 64 bits
-            let mut val = 0u64;
-            for (i, &byte) in bytes.iter().take(8).enumerate() {
-                val |= (byte as u64) << (8 * i);
-            }
-            
-            // Additional safety check: ensure the value is within Goldilocks field
-            let goldilocks_val = F::from_u64(val);
-            if goldilocks_val.as_canonical_u64() != val {
-                return Err("Field conversion: Value not canonical in Goldilocks field".to_string());
-            }
-            
-            Ok(goldilocks_val)
-        }
-        
-        /// Legacy unsafe conversion - use pallas_base_to_goldilocks instead
-        #[deprecated(note = "Use pallas_base_to_goldilocks for safe conversion")]
-        pub fn pallas_base_to_goldilocks_unsafe(f: &pallas::Base) -> F {
-            match pallas_base_to_goldilocks(f) {
-                Ok(val) => val,
-                Err(e) => panic!("Unsafe conversion failed: {}", e),
-            }
-        }
-        
-        /// Legacy unsafe conversion - use pallas_scalar_to_goldilocks instead  
-        #[deprecated(note = "Use pallas_scalar_to_goldilocks for safe conversion")]
-        pub fn pallas_scalar_to_goldilocks_unsafe(f: &pallas::Scalar) -> F {
-            match pallas_scalar_to_goldilocks(f) {
-                Ok(val) => val,
-                Err(e) => panic!("Unsafe conversion failed: {}", e),
-            }
-        }
-        
-        /// Convert vector of Goldilocks elements to Pallas base field
-        pub fn goldilocks_vec_to_pallas_base(vec: &[F]) -> Vec<pallas::Base> {
-            vec.iter().map(goldilocks_to_pallas_base).collect()
-        }
-        
-        /// Convert vector of Goldilocks elements to Pallas scalar field
-        pub fn goldilocks_vec_to_pallas_scalar(vec: &[F]) -> Vec<pallas::Scalar> {
-            vec.iter().map(goldilocks_to_pallas_scalar).collect()
-        }
-        
-        /// Convert vector of Pallas base elements to Goldilocks with error handling
-        pub fn pallas_base_vec_to_goldilocks(vec: &[pallas::Base]) -> Result<Vec<F>, String> {
-            vec.iter().map(pallas_base_to_goldilocks).collect()
-        }
-        
-        /// Convert vector of Pallas scalar elements to Goldilocks with error handling
-        pub fn pallas_scalar_vec_to_goldilocks(vec: &[pallas::Scalar]) -> Result<Vec<F>, String> {
-            vec.iter().map(pallas_scalar_to_goldilocks).collect()
-        }
-        
-        /// Legacy unsafe vector conversion - use pallas_base_vec_to_goldilocks instead
-        #[deprecated(note = "Use pallas_base_vec_to_goldilocks for safe conversion")]
-        pub fn pallas_base_vec_to_goldilocks_unsafe(vec: &[pallas::Base]) -> Vec<F> {
-            match pallas_base_vec_to_goldilocks(vec) {
-                Ok(vals) => vals,
-                Err(e) => panic!("Unsafe vector conversion failed: {}", e),
-            }
-        }
-        
-        /// Legacy unsafe vector conversion - use pallas_scalar_vec_to_goldilocks instead
-        #[deprecated(note = "Use pallas_scalar_to_goldilocks for safe conversion")]
-        pub fn pallas_scalar_vec_to_goldilocks_unsafe(vec: &[pallas::Scalar]) -> Vec<F> {
-            match pallas_scalar_vec_to_goldilocks(vec) {
-                Ok(vals) => vals,
-                Err(e) => panic!("Unsafe vector conversion failed: {}", e),
-            }
-        }
-    }
-}
-
-// Modular integer arithmetic (consolidated from neo-modint)
-pub mod modint;
-
-// Polynomial arithmetic (consolidated from neo-poly)  
-pub mod poly;
-
-// Vector decomposition (consolidated from neo-decomp)
-pub mod decomp;
-
-// Ring operations (consolidated from neo-ring)
-pub mod ring;
-
-// Transcript operations (for Fiat-Shamir)
-pub mod transcript;
-
-// Re-export consolidated types
-pub use modint::{Coeff, ModInt};
-pub use poly::Polynomial;
-pub use decomp::{decomp_b, signed_decomp_b};
-pub use ring::RingElement;
-
-// Ring type aliases
-pub type RotationRing = RingElement<ModInt>;
-pub type RotationMatrix = Vec<RingElement<ModInt>>;
+// Ring type aliases for backward compatibility
+pub type RingElement = Rq;
+pub type RotationRing = RingElement;
+pub type RotationMatrix = Vec<RingElement>;

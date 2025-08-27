@@ -1,5 +1,5 @@
 use neo_math::{embed_base_to_ext, ExtF, F};
-use neo_math::ModInt;
+// use neo_math::ModInt;
 use neo_math::RingElement;
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::dense::RowMajorMatrix;
@@ -118,7 +118,7 @@ impl CcsStructure {
 
 #[derive(Clone)]
 pub struct CcsInstance {
-    pub commitment: Vec<RingElement<ModInt>>, // Commitment to witness z
+    pub commitment: Vec<RingElement>, // Commitment to witness z
     pub public_input: Vec<F>,                 // x (public part of instance)
     pub u: F,                                 // Relaxation scalar
     pub e: F,                                 // Relaxation offset

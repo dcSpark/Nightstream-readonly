@@ -7,7 +7,8 @@ use neo_math::F;
 use neo_math::{Coeff, ModInt};
 use neo_math::RingElement;
 use p3_field::PrimeField64;
-use rand::{rngs::StdRng, Rng, SeedableRng};
+use rand::{Rng, SeedableRng};
+use rand_chacha::ChaCha20Rng;
 
 use subtle::{Choice, ConstantTimeLess};
 
@@ -83,7 +84,7 @@ pub const TOY_PARAMS: NeoParams = NeoParams {
 /// Ajtai Matrix Committer with S-module homomorphism
 pub struct AjtaiCommitter {
     /// Public matrix A ∈ R_q^{κ × d}
-    a: Vec<Vec<RingElement<ModInt>>>,
+    a: Vec<Vec<RingElement>>,
     /// Parameters
     params: NeoParams,
     /// Rotation ring for S-module operations
@@ -133,16 +134,16 @@ impl AjtaiCommitter {
 
     /// Setup without security checks (for testing)
     pub fn setup_unchecked(params: NeoParams) -> Self {
-        let mut rng = StdRng::from_entropy();
+        let mut rng = ChaCha20Rng::from_rng(&mut rand::rng());
 
         // Sample random Ā ∈ Z_q^{κ × (d-κ)}
         let m_bar = params.d - params.k;
-        let a_bar: Vec<Vec<RingElement<ModInt>>> = (0..params.k)
+        let a_bar: Vec<Vec<RingElement>> = (0..params.k)
             .map(|_| {
                 (0..m_bar)
                     .map(|_| {
                         let coeffs = (0..params.n)
-                            .map(|_| ModInt::from_u64(rng.gen::<u64>() % params.q))
+                            .map(|_| ModInt::from_u64(rng.random::<u64>() % params.q))
                             .collect();
                         RingElement::from_coeffs(coeffs, params.n)
                     })
@@ -151,7 +152,7 @@ impl AjtaiCommitter {
             .collect();
 
         // Sample short R ∈ Z^{(d-κ) × κ} from discrete Gaussian
-        let r: Vec<Vec<RingElement<ModInt>>> = (0..m_bar)
+        let r: Vec<Vec<RingElement>> = (0..m_bar)
             .map(|_| {
                 (0..params.k)
                     .map(|_| {
@@ -210,7 +211,7 @@ impl AjtaiCommitter {
     }
 
     /// Get reference to public matrix (for testing)
-    pub fn public_matrix(&self) -> &Vec<Vec<RingElement<ModInt>>> {
+    pub fn public_matrix(&self) -> &Vec<Vec<RingElement>> {
         &self.a
     }
 
@@ -224,15 +225,17 @@ impl AjtaiCommitter {
     #[allow(clippy::type_complexity)]
     pub fn commit(
         &self,
-        w: &[RingElement<ModInt>],
+        w: &[RingElement],
         transcript: &mut Vec<u8>,
     ) -> Result<(
-        Vec<RingElement<ModInt>>, // commitment c
-        Vec<RingElement<ModInt>>, // noise e
-        Vec<RingElement<ModInt>>, // blinded witness
-        Vec<RingElement<ModInt>>, // blinding vector r
+        Vec<RingElement>, // commitment c
+        Vec<RingElement>, // noise e
+        Vec<RingElement>, // blinded witness
+        Vec<RingElement>, // blinding vector r
     ), &'static str> {
         // Domain-separated seed for blinding randomness
+        // TODO: Move to neo-fold when transcript is implemented there
+        // use neo_fold::transcript::Transcript;
         use neo_math::transcript::Transcript;
         let mut fs_transcript = Transcript::new("ajtai_commit");
         fs_transcript.absorb_bytes("transcript_state", transcript);
@@ -244,7 +247,7 @@ impl AjtaiCommitter {
             let bytes = challenge.as_canonical_u64().to_le_bytes();
             seed_array[i*8..(i+1)*8].copy_from_slice(&bytes);
         }
-        let mut rng = StdRng::from_seed(seed_array);
+        let mut rng = ChaCha20Rng::from_seed(seed_array);
         self.commit_with_rng(w, &mut rng)
     }
 
@@ -252,13 +255,13 @@ impl AjtaiCommitter {
     #[allow(clippy::type_complexity)]
     pub fn commit_with_rng(
         &self,
-        w: &[RingElement<ModInt>],
+        w: &[RingElement],
         rng: &mut impl Rng,
     ) -> Result<(
-        Vec<RingElement<ModInt>>, // commitment c
-        Vec<RingElement<ModInt>>, // noise e
-        Vec<RingElement<ModInt>>, // blinded witness
-        Vec<RingElement<ModInt>>, // blinding vector r
+        Vec<RingElement>, // commitment c
+        Vec<RingElement>, // noise e
+        Vec<RingElement>, // blinded witness
+        Vec<RingElement>, // blinding vector r
     ), &'static str> {
         if w.len() != self.params.d {
             return Err("Witness length mismatch");
@@ -269,7 +272,7 @@ impl AjtaiCommitter {
         let beta_zk = self.params.beta;
 
         // Generate blinding vector r
-        let r: Vec<RingElement<ModInt>> = (0..w.len())
+        let r: Vec<RingElement> = (0..w.len())
             .map(|_| RingElement::random_small(rng, self.params.n, beta_zk))
             .collect();
 
@@ -282,7 +285,7 @@ impl AjtaiCommitter {
         // Generate commitment noise e for ZK hiding
         let e: Vec<_> = if cfg!(test) {
             // Use zero noise in tests for deterministic behavior
-            (0..self.params.k).map(|_| RingElement::zero(self.params.n)).collect()
+            (0..self.params.k).map(|_| RingElement::zero()).collect()
         } else {
             (0..self.params.k)
                 .map(|_| {
@@ -297,7 +300,7 @@ impl AjtaiCommitter {
         };
 
         // Compute commitment c = A * w' + e
-        let mut c = vec![RingElement::zero(self.params.n); self.params.k];
+        let mut c = vec![RingElement::zero(); self.params.k];
         for i in 0..self.params.k {
             for (j, w_item) in blinded_w.iter().enumerate().take(self.params.d) {
                 c[i] = c[i].clone() + self.a[i][j].clone() * w_item.clone();
@@ -311,9 +314,9 @@ impl AjtaiCommitter {
     /// Verify commitment: check that c = A * w + e and norms are within bounds
     pub fn verify(
         &self,
-        c: &[RingElement<ModInt>],
-        w: &[RingElement<ModInt>],
-        e: &[RingElement<ModInt>],
+        c: &[RingElement],
+        w: &[RingElement],
+        e: &[RingElement],
     ) -> bool {
         if c.len() != self.params.k || w.len() != self.params.d || e.len() != self.params.k {
             return false;
@@ -343,7 +346,7 @@ impl AjtaiCommitter {
 
         // Check commitment equation: c = A * w + e
         for (i, (ai_row, ei)) in self.a.iter().zip(e.iter()).enumerate() {
-            let mut expected = RingElement::zero(self.params.n);
+            let mut expected = RingElement::zero();
             for (aij, w_item) in ai_row.iter().zip(w.iter()) {
                 expected = expected + aij.clone() * w_item.clone();
             }
@@ -360,10 +363,10 @@ impl AjtaiCommitter {
     /// This is the core property that enables folding
     pub fn random_linear_combo(
         &self,
-        c1: &[RingElement<ModInt>],
-        c2: &[RingElement<ModInt>],
+        c1: &[RingElement],
+        c2: &[RingElement],
         rho: F,
-    ) -> Vec<RingElement<ModInt>> {
+    ) -> Vec<RingElement> {
         // Reject if rho ≥ q to avoid wrap-around
         let q = <ModInt as Coeff>::modulus();
         if rho.as_canonical_u64() >= q {
@@ -393,10 +396,10 @@ impl AjtaiCommitter {
     /// This version uses the rotation-matrix ring for small-norm challenges
     pub fn random_linear_combo_rotation(
         &self,
-        c1: &[RingElement<ModInt>],
-        c2: &[RingElement<ModInt>],
-        rho_rot: &RingElement<ModInt>,
-    ) -> Vec<RingElement<ModInt>> {
+        c1: &[RingElement],
+        c2: &[RingElement],
+        rho_rot: &RingElement,
+    ) -> Vec<RingElement> {
         let n = self.params.n;
         let len = c1.len().max(c2.len());
         if len == 0 {
@@ -420,7 +423,7 @@ impl AjtaiCommitter {
         let tail = (6.0 * sigma).ceil() as i128;
         loop {
             // rand_distr::StandardNormal → N(0, 1)
-            let x: f64 = rng.gen::<f64>() * sigma;
+            let x: f64 = rng.random::<f64>() * sigma;
             let z = x.round() as i128;
             if z.abs() <= tail {
                 return ModInt::from(z);
@@ -458,10 +461,10 @@ mod tests {
     #[test]
     fn test_commit_verify_roundtrip() {
         let committer = AjtaiCommitter::setup(TOY_PARAMS);
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = ChaCha20Rng::seed_from_u64(42);
         
         // Generate random witness
-        let w: Vec<RingElement<ModInt>> = (0..committer.params().d)
+        let w: Vec<RingElement> = (0..committer.params().d)
             .map(|_| RingElement::random_small(&mut rng, committer.params().n, 2))
             .collect();
 
@@ -474,13 +477,13 @@ mod tests {
     #[test]
     fn test_s_module_homomorphism() {
         let committer = AjtaiCommitter::setup(TOY_PARAMS);
-        let mut rng = StdRng::seed_from_u64(42);
+        let mut rng = ChaCha20Rng::seed_from_u64(42);
         
         // Generate two commitments
-        let w1: Vec<RingElement<ModInt>> = (0..committer.params().d)
+        let w1: Vec<RingElement> = (0..committer.params().d)
             .map(|_| RingElement::random_small(&mut rng, committer.params().n, 2))
             .collect();
-        let w2: Vec<RingElement<ModInt>> = (0..committer.params().d)
+        let w2: Vec<RingElement> = (0..committer.params().d)
             .map(|_| RingElement::random_small(&mut rng, committer.params().n, 2))
             .collect();
 

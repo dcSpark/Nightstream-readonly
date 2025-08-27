@@ -13,6 +13,7 @@ neo-math = { path = "../neo-math" }
 p3-field = { workspace = true }
 p3-matrix = { workspace = true }
 rand = { workspace = true }
+rand_chacha = { workspace = true }
 rand_distr = { workspace = true }
 subtle = { workspace = true }
 serde = { workspace = true }

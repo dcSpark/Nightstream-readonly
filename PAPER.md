@@ -26,8 +26,8 @@ This document specifies **normative requirements per crate** for implementing *N
 
 | Crate                | What it owns (public surface)                                                                                                                                          | Why its boundary matters                                                                  |
 | -------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------- |
-| `neo-params`         | Typed parameter sets; validates $(k+1)T(b-1)<B$; computes minimal extension degree $s$ and fixes $K=\mathbb F_{q^s}$.                                            | Centralizes reduction params & the sum-check soundness target.                            |
-| `neo-math`           | **field/** $\mathbb F_q$ (Goldilocks / M61) and $K=\mathbb F_{q^s}$ (conjugation, inverse); **ring/** $R_q=\mathbb F_q[X]/(\Phi_\eta)$, `cf/cf^{-1}`, `rot(a)`, $S\subseteq \mathbb F^{d\times d}$. | Keeps arithmetic small‑field‑native; provides the $S$-action used by commitments and RLC. |
+| `neo-params`         | Typed parameter sets; validates $(k+1)T(b-1)<B$; computes minimal extension degree $s$ and fixes $K=\mathbb F_{q^s}$; exports $(q,\eta,d,\kappa,m,b,k,B,T,C,s)$ presets. | Centralizes reduction params & the sum-check soundness target; prevents parameter leakage.                            |
+| `neo-math`           | **field/** $\mathbb F_q$ (Goldilocks primary, M61 optional) and $K=\mathbb F_{q^s}$ (conjugation, inverse); **ring/** $R_q=\mathbb F_q[X]/(\Phi_\eta)$, `cf/cf^{-1}`, `rot(a)`, $S\subseteq \mathbb F^{d\times d}$. | Keeps arithmetic small‑field‑native; provides the $S$-action used by commitments and RLC. |
 | `neo-ajtai`          | Ajtai **matrix commitment** $L:\mathbb F_q^{d\times m}\to\mathcal C$ (S‑homomorphic); `decomp_b`, `split_b`; pay‑per‑bit multiply; verified openings.               | Enforces "Ajtai always‑on" + verified decomposition/range.                                |
 | `neo-challenge`      | Strong sampling set $C=\{\mathrm{rot}(a)\}$; invertibility property; expansion $T$.                                                                                | RLC needs invertible deltas and bounded expansion.                                        |
 | `neo-ccs`            | CCS loader; linearized helpers; **MCS/ME** relation types.                                                                                                             | Shapes the exact claims reductions manipulate.                                            |
@@ -41,11 +41,11 @@ This document specifies **normative requirements per crate** for implementing *N
 
 | Req        | Description                                                                                                                         |
 | ---------- | ----------------------------------------------------------------------------------------------------------------------------------- |
-| **MUST**   | Provide typed presets (Goldilocks, M61) and **enforce** $(k+1)T(b-1)<B$; reject unsafe params at load.                             |
+| **MUST**   | Provide typed presets for Goldilocks and **enforce** $(k+1)T(b-1)<B$; reject unsafe params at load.                             |
 | **MUST**   | Compute the minimal **extension degree $s$** for the target soundness and set $K=\mathbb F_{q^s}$. Expose $s$ and $|K|$.    |
 | **MUST**   | Export $(q,\eta,d,\kappa,m,b,k,B,T,C,s)$ with docstrings tying each to the reductions and the sum‑check.                           |
 | **SHOULD** | Ship profile docs noting typical $T$ from the chosen challenge sampler, and why $B=b^k$ is used.                                 |
-| **NICE**   | `serde` load/save; human‑readable profile IDs.                                                                                       |
+| **NICE**   | `serde` load/save; human‑readable profile IDs; M61 parameter presets.                                                               |
 
 *Tests:* in‑crate unit/property tests validating the inequality and preset integrity; tests that $s$ increases when the target soundness is tightened.
 
@@ -57,9 +57,10 @@ This document specifies **normative requirements per crate** for implementing *N
 
 | Req        | Description                                                                                                                             |
 | ---------- | --------------------------------------------------------------------------------------------------------------------------------------- |
-| **MUST**   | Implement $\mathbb F_q$ (Goldilocks/M61) and $K=\mathbb F_{q^s}$ including conjugation and inversion; document the $s$ interface. |
+| **MUST**   | Implement $\mathbb F_q$ (Goldilocks) and $K=\mathbb F_{q^s}$ including conjugation and inversion; document the $s$ interface. |
 | **MUST**   | Constant‑time basic ops; no secret‑dependent branching.                                                                                 |
 | **SHOULD** | Roots‑of‑unity/NTT hooks sized for ring ops.                                                                                            |
+| **NICE**   | M61 field implementation alongside Goldilocks.                                                                                           |
 
 ### ring/
 
@@ -83,7 +84,8 @@ This document specifies **normative requirements per crate** for implementing *N
 | **MUST**   | **$(d,m,B)$-binding** and **$(d,m,B,C)$-relaxed binding** under MSIS; surface helper checks and verified openings for decomp/range.                                   |
 | **MUST**   | **Pay‑per‑bit embedding** + `decomp_b` and `split_b` with range assertions $(\|Z\|_\infty<b)$.                                                                          |
 | **MUST**   | Ajtai **always enabled**; no alternate backends or feature flags.                                                                                                         |
-| **SHOULD** | Parameter notes (Goldilocks/M61) and a pointer to estimator scripts (see paper App. B).                                                                                   |
+| **SHOULD** | Parameter notes for Goldilocks and a pointer to estimator scripts (see paper App. B).                                                                                   |
+| **NICE**   | M61 field support with appropriate parameter presets.                                                                                                                     |
 | **NICE**   | API to link selected CCS witness coordinates to Ajtai digits (for applications).                                                                                          |
 
 *Tests:* in‑crate (S‑linearity; binding/relaxed‑binding harnesses; decomp/split identities & negative cases; opening verification).
@@ -166,6 +168,22 @@ This document specifies **normative requirements per crate** for implementing *N
 | **MUST**   | Respect restricted/relaxed KS notions and the composition theorem when wiring extractors & transcripts.                              |
 | **MUST**   | Constant‑time arithmetic and hashing; avoid secret‑dependent control flow.                                                           |
 | **SHOULD** | Provide the paper's estimator/Sage scripts or equivalents to justify MSIS hardness for presets; reflect App. B. relationships (e.g., $\propto 8\,T\,B$). |
+
+---
+
+### Extension field policy (v1)
+
+* **MUST** compute the minimal extension degree $s_{\min}$ for sum-check soundness from target $\varepsilon=2^{-\lambda}$:
+  $$s_{\min} = \left\lceil \frac{\lambda + \log_2(\ell\cdot d)}{\log_2 q} \right\rceil$$
+  where $q$ is the base field modulus (Goldilocks), $\ell$ and $d$ come from the CCS polynomial $Q$.
+
+* **MUST** use **$K=\mathbb F_{q^2}$** (i.e., $s=2$) in v1. If $s_{\min}\le 2$, record **slack bits** $= 2\log_2 q - (\lambda+\log_2(\ell d))$.
+
+* **MUST** return a **configuration error** if $s_{\min}>2$: "unsupported extension degree; required $s=s_{\min}$, supported $s=2$."
+
+* **MUST** implement this check in **`neo-fold`** during $Q$ construction (it knows $\ell,d$).
+
+* **MUST** record in transcript header: $(q,s,\lambda,\ell,d,\varepsilon, \text{slack\_bits})$.
 
 ---
 

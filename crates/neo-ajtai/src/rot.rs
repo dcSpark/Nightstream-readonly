@@ -24,13 +24,13 @@ impl RotationRing {
 
     /// Create rotation matrix rot(a) from ring element a
     /// rot(a) represents multiplication by a in the ring R_q[X]/(X^n + 1)
-    pub fn rotation_matrix(&self, a: &RingElement<ModInt>) -> RotationMatrix {
+    pub fn rotation_matrix(&self, a: &RingElement) -> RotationMatrix {
         RotationMatrix::new(a.clone(), self.n)
     }
 
     /// Fast rotation operation: rot(a) · v
     /// Computes multiplication a * v in the ring without constructing full matrix
-    pub fn rotate(&self, a: &RingElement<ModInt>, v: &RingElement<ModInt>) -> RingElement<ModInt> {
+    pub fn rotate(&self, a: &RingElement, v: &RingElement) -> RingElement {
         // Direct ring multiplication is equivalent to matrix-vector product
         a.clone() * v.clone()
     }
@@ -38,15 +38,15 @@ impl RotationRing {
     /// Batch rotation: apply rot(a) to multiple vectors
     pub fn rotate_batch(
         &self,
-        a: &RingElement<ModInt>,
-        vectors: &[RingElement<ModInt>],
-    ) -> Vec<RingElement<ModInt>> {
+        a: &RingElement,
+        vectors: &[RingElement],
+    ) -> Vec<RingElement> {
         vectors.iter().map(|v| self.rotate(a, v)).collect()
     }
 
     /// Check if element a generates an invertible rotation
     /// Required for challenge set: (ρ - ρ')^{-1} must exist in S
-    pub fn is_invertible(&self, a: &RingElement<ModInt>) -> bool {
+    pub fn is_invertible(&self, a: &RingElement) -> bool {
         // Check if gcd(a(X), X^n + 1) = 1
         // For now, use a simple heuristic: element is not zero
         !a.coeffs().iter().all(|&c| c == ModInt::zero())
@@ -61,24 +61,24 @@ impl RotationRing {
 /// Rotation matrix representation (for explicit matrix operations if needed)
 pub struct RotationMatrix {
     /// Generating ring element
-    generator: RingElement<ModInt>,
+    generator: RingElement,
     /// Ring degree
     #[allow(dead_code)]
     n: usize,
 }
 
 impl RotationMatrix {
-    fn new(generator: RingElement<ModInt>, n: usize) -> Self {
+    fn new(generator: RingElement, n: usize) -> Self {
         Self { generator, n }
     }
 
     /// Apply rotation to vector (same as ring multiplication)
-    pub fn apply(&self, v: &RingElement<ModInt>) -> RingElement<ModInt> {
+    pub fn apply(&self, v: &RingElement) -> RingElement {
         self.generator.clone() * v.clone()
     }
 
     /// Get the generating element
-    pub fn generator(&self) -> &RingElement<ModInt> {
+    pub fn generator(&self) -> &RingElement {
         &self.generator
     }
 }
@@ -90,7 +90,7 @@ pub struct ChallengeSet {
     #[allow(dead_code)]
     n: usize,
     /// Challenge elements with small coefficients
-    challenges: Vec<RingElement<ModInt>>,
+    challenges: Vec<RingElement>,
     /// Invertibility bound b_inv
     b_inv: u64,
     /// Expansion factor T (measured)
@@ -124,16 +124,16 @@ impl ChallengeSet {
     }
 
     /// Sample random challenge from C
-    pub fn sample_challenge(&self, rng: &mut impl Rng) -> &RingElement<ModInt> {
+    pub fn sample_challenge(&self, rng: &mut impl Rng) -> &RingElement {
         if self.challenges.is_empty() {
             panic!("No challenges available in challenge set");
         }
-        let idx = rng.gen_range(0..self.challenges.len());
+        let idx = rng.random_range(0..self.challenges.len());
         &self.challenges[idx]
     }
 
     /// Sample multiple distinct challenges
-    pub fn sample_challenges(&self, count: usize, rng: &mut impl Rng) -> Vec<&RingElement<ModInt>> {
+    pub fn sample_challenges(&self, count: usize, rng: &mut impl Rng) -> Vec<&RingElement> {
         if count > self.challenges.len() {
             panic!("Not enough challenges available: requested {}, have {}", count, self.challenges.len());
         }
@@ -142,7 +142,7 @@ impl ChallengeSet {
         
         // Fisher-Yates shuffle
         for i in (1..indices.len()).rev() {
-            let j = rng.gen_range(0..=i);
+            let j = rng.random_range(0..=i);
             indices.swap(i, j);
         }
         
@@ -153,7 +153,7 @@ impl ChallengeSet {
     }
 
     /// Check invertibility bound: ||cf(a - b)||_∞ < b_inv
-    pub fn check_invertibility_bound(&self, a: &RingElement<ModInt>, b: &RingElement<ModInt>) -> bool {
+    pub fn check_invertibility_bound(&self, a: &RingElement, b: &RingElement) -> bool {
         let diff = a.clone() - b.clone();
         diff.norm_inf() < self.b_inv
     }
@@ -178,7 +178,7 @@ impl ChallengeSet {
         n: usize,
         coeffs_bound: u64,
         target_size: usize,
-        challenges: &mut Vec<RingElement<ModInt>>,
+        challenges: &mut Vec<RingElement>,
         seen: &mut HashSet<Vec<u64>>,
     ) {
         let bound = coeffs_bound as i64;
@@ -246,7 +246,7 @@ impl ChallengeSet {
     }
 
     /// Estimate expansion factor T for the challenge set
-    fn estimate_expansion_factor(challenges: &[RingElement<ModInt>], coeffs_bound: u64) -> f64 {
+    fn estimate_expansion_factor(challenges: &[RingElement], coeffs_bound: u64) -> f64 {
         if challenges.is_empty() {
             return 1.0;
         }

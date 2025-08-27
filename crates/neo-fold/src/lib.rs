@@ -8,13 +8,16 @@
 
 use neo_ajtai::NeoParams;
 use neo_ccs::CcsInstance;
+use neo_math::transcript::Transcript;
 
 // Sumcheck functionality (placeholder - TODO: implement)
 pub mod sumcheck {
-    use neo_math::transcript::Transcript;
+    // TODO: Implement transcript in neo-fold where it belongs according to STRUCTURE.md
+    // use neo_fold::transcript::Transcript;
     
     pub mod fiat_shamir {
-        pub use neo_math::transcript::Transcript;
+        // TODO: Implement transcript in neo-fold where it belongs according to STRUCTURE.md
+        // pub use neo_fold::transcript::Transcript;
     }
 }
 
@@ -92,41 +95,34 @@ pub fn verify_fold(
 }
 
 /// Create a fresh Fiat-Shamir transcript for folding
-pub fn create_transcript(protocol_name: &str) -> sumcheck::fiat_shamir::Transcript {
-    sumcheck::fiat_shamir::Transcript::new(protocol_name)
+pub fn create_transcript(protocol_name: &str) -> Transcript {
+    Transcript::new(protocol_name)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use neo_math::F;
-    use neo_ccs::CcsStructure;
+    // use neo_ccs::CcsStructure; // Unused for now
     use p3_field::PrimeCharacteristicRing;
     
     #[test]
     fn test_fold_empty_instances() {
-        let params = NeoParams::default();
+        let params = NeoParams::toy(); // Use toy params for testing
         let result = fold_step(&[], &params);
         assert!(result.is_err());
     }
     
     #[test] 
     fn test_fold_single_instance() {
-        let params = NeoParams::default();
+        let params = NeoParams::toy(); // Use toy params for testing
         
         // Create a minimal CCS instance for testing
         let instance = CcsInstance {
-            structure: std::sync::Arc::new(CcsStructure {
-                m: 1,
-                n: 1, 
-                l: 1,
-                s: 1,
-                s_prime: 1,
-                matrices: vec![],
-                selectors: vec![],
-            }),
-            public_inputs: vec![F::ONE],
-            commitments: vec![],
+            public_input: vec![F::ONE],
+            commitment: vec![],
+            u: F::ZERO,
+            e: F::ONE,
         };
         
         let result = fold_step(&[instance], &params);

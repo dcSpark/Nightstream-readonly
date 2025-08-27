@@ -8,10 +8,7 @@ mod ccs_to_r1cs_tests {
         CcsStructure, CcsInstance, CcsWitness, verifier_ccs,
         converters::{ccs_to_r1cs_format, ccs_instance_to_r1cs_format, ccs_witness_to_r1cs_format, integration}
     };
-    use neo_fields::{embed_base_to_ext, ExtF, F};
-    #[allow(unused_imports)]
-    use neo_modint::ModInt;
-    use neo_ring::RingElement;
+    use neo_math::{embed_base_to_ext, ExtF, F, RingElement};
     use p3_field::PrimeCharacteristicRing;
     use p3_matrix::dense::RowMajorMatrix;
 
@@ -48,7 +45,7 @@ mod ccs_to_r1cs_tests {
 
         // Create instance with dummy commitment
         let instance = CcsInstance {
-            commitment: vec![RingElement::zero(64)],
+            commitment: vec![RingElement::zero()],
             public_input: vec![],
             u: F::ZERO,
             e: F::ONE,

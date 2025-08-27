@@ -1,6 +1,7 @@
 use crate::{CcsInstance, CcsStructure, CcsWitness};
-use neo_math::{embed_base_to_ext, from_base};
-use neo_math::{ExtF, Polynomial, F};
+// These are available for backward compatibility but not needed here
+// use neo_math::{embed_base_to_ext, from_base};
+// use neo_math::{ExtF, Polynomial, F};
 use thiserror::Error;
 
 /// Placeholder CCS sumcheck prover (TODO: implement properly)

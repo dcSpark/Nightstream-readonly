@@ -2,8 +2,7 @@
 
 use crate::{CcsStructure, CcsInstance, CcsWitness};
 use neo_math::{ExtF, F, project_ext_to_base};
-#[allow(unused_imports)]
-use neo_math::spartan2_engine::GoldilocksEngine;
+
 use p3_matrix::Matrix;
 use p3_field::PrimeCharacteristicRing;
 

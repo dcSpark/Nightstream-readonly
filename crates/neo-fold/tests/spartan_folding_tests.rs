@@ -12,11 +12,8 @@ mod neutronnova_folding_tests {
     };
     use neo_ccs::{CcsStructure, CcsInstance, CcsWitness, verifier_ccs, check_satisfiability};
     use neo_commit::{AjtaiCommitter, SECURE_PARAMS};
-    use neo_fields::{embed_base_to_ext, F};
+    use neo_math::{embed_base_to_ext, F, ExtF, ModInt};
     use p3_field::PrimeCharacteristicRing;
-    #[allow(unused_imports)]
-    use neo_fields::ExtF;
-    use neo_modint::ModInt;
     use neo_ring::RingElement;
     use neo_decomp::decomp_b;
     use std::time::Instant;
