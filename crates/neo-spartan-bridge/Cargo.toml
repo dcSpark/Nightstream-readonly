@@ -25,10 +25,14 @@ p3-dft = { workspace = true }
 # For error handling in PCS
 anyhow = { workspace = true }
 
-# For FRI proof serialization  
+# For FRI proof serialization
 bincode = { workspace = true }
 
-# No features needed for now - everything is included by default
+# For deterministic Poseidon2 seeding
+rand_chacha = { workspace = true }
+
+# Neo workspace dependencies for ME types
+neo-ccs = { path = "../neo-ccs" }
 
 [dev-dependencies]
 rand = { workspace = true }

@@ -725,6 +725,7 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "bincode",
+ "neo-ccs",
  "p3-challenger",
  "p3-commit",
  "p3-dft",
@@ -736,6 +737,7 @@ dependencies = [
  "p3-poseidon2",
  "p3-symmetric",
  "rand 0.9.2",
+ "rand_chacha",
  "serde",
  "thiserror 2.0.16",
 ]
