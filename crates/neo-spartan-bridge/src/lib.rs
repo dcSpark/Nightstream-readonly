@@ -24,20 +24,12 @@ mod types;
 pub use types::ProofBundle;
 pub use pcs::{P3FriPCSAdapter, P3FriParams, Val, Challenge};
 
-#[cfg(feature = "mock-fri")]
-mod p3fri_pcs;
-#[cfg(feature = "mock-fri")]
-pub use p3fri_pcs::{NeoPcs, FriConfig, Commitments, OpeningRequest, Proof, SpartanBridge};
-
 use pcs::{PcsMaterials, make_challenger};
 use pcs::mmcs::ChallengeMmcs;
 use p3_fri::FriParameters;
 
 use anyhow::Result;
 use p3_field::PrimeField64;
-
-#[cfg(feature = "mock-fri")]
-use p3_goldilocks::Goldilocks as F;
 
 use neo_ccs::{MEInstance, MEWitness};
 // use neo_params::NeoParams; // if you want to drive FRI params from presets
@@ -124,62 +116,4 @@ pub fn compress_me_to_spartan(
     ))
 }
 
-#[cfg(feature = "mock-fri")]
-/// High-level bridge for compressing ME(b,L) claims to Spartan2(+FRI) proofs
-/// (Legacy API - kept for backwards compatibility, MOCK ONLY)
-pub struct SpartanBridge {
-    pcs: crate::p3fri_pcs::P3FriPCS,
-}
-
-#[cfg(feature = "mock-fri")]
-impl SpartanBridge {
-    pub fn new(fri_cfg: FriConfig) -> Self {
-        Self { pcs: crate::p3fri_pcs::P3FriPCS::new(fri_cfg) }
-    }
-
-    pub fn with_default_config() -> Self {
-        Self { pcs: crate::p3fri_pcs::P3FriPCS::with_default_config() }
-    }
-
-    /// Compress a linearized ME(b,L) claim to a Spartan2(+FRI) proof.
-    /// `polys_over_f` are the multilinear eval tables Spartan expects as polynomials over F.
-    pub fn compress_me(
-        &self,
-        polys_over_f: &[Vec<F>],
-        open_points: &[F],
-    ) -> anyhow::Result<(Commitments, Proof)> {
-        let (com, pd) = self.pcs.commit(polys_over_f);
-        let req = OpeningRequest::<F> { points: open_points.to_vec(), evals_hint: None };
-        let proof = self.pcs.open(&pd, &req);
-        Ok((com, proof))
-    }
-
-    pub fn verify_me(
-        &self,
-        commitments: &Commitments,
-        open_points: &[F],
-        proof: &Proof,
-    ) -> anyhow::Result<()> {
-        let req = OpeningRequest::<F> { points: open_points.to_vec(), evals_hint: None };
-        self.pcs.verify(commitments, &req, proof)
-    }
-}
-
-#[cfg(feature = "mock-fri")]
-/// Legacy compression artifact for compatibility (MOCK ONLY)
-#[derive(Clone, Debug)]
-pub struct SpartanCompressionArtifact {
-    pub commitment_bytes: Vec<u8>,
-    pub proof_bytes: Vec<u8>,
-    /// Timing breakdown
-    pub timings: CompressionTimings,
-}
-
-#[cfg(feature = "mock-fri")]
-#[derive(Clone, Debug, Default)]
-pub struct CompressionTimings {
-    pub commit_ms: u128,
-    pub prove_ms: u128,
-    pub verify_ms: u128,
-    pub total_bytes: usize,
-}
+// Mock PCS removed - use real P3FriPCSAdapter for all testing

@@ -1,5 +1,5 @@
 use p3_challenger::{CanObserve, DuplexChallenger, FieldChallenger, GrindingChallenger};
-use p3_field::{PrimeCharacteristicRing, PrimeField64};
+use p3_field::PrimeCharacteristicRing;
 use super::mmcs::{Perm, Val, Challenge};
 
 pub const DS_BRIDGE_INIT:   &[u8] = b"neo:bridge:init";

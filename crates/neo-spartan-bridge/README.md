@@ -1,22 +1,21 @@
 # neo-spartan-bridge
 
 **Neo → Spartan2 bridge** using **Plonky3-FRI** as the polynomial commitment scheme (PCS).
-This crate provides a production adapter over `p3_fri::TwoAdicFriPcs` and a test-only mock harness (behind `--features mock-fri`).
+This crate provides a production adapter over `p3_fri::TwoAdicFriPcs` for real hash-based FRI.
 
 ## What's in this crate
 
-- `P3FriPCSAdapter` — a real adapter that forwards `commit/open/verify` to p3-FRI.
+- `P3FriPCSAdapter` — a production adapter that forwards `commit/open/verify` to p3-FRI.
 - `make_p3fri_engine_with_defaults(seed)` — builds (adapter, challenger, mmcs materials).
 - Helpers to **observe public IO** and **domain-separate** the transcript.
-- A _test-only_ mock PCS (`SpartanBridge`) under `--features mock-fri`.
 
-> We **do not** ship simulated FRI; this bridge is designed for **real hash-based FRI** as required by the repo policy and the Neo paper (single sum-check over an extension field).
+> We **do not** ship simulated FRI; this bridge uses **real hash-based FRI** as required by the repo policy and the Neo paper (single sum-check over an extension field).
 
 ## Status
 
-- ✅ **P3‑FRI PCS adapter ready** (`P3FriPCSAdapter`).
+- ✅ **P3‑FRI PCS adapter ready** (`P3FriPCSAdapter`) with real `p3_fri::TwoAdicFriPcs`.
 - 🧩 **Spartan2 glue**: wire the adapter via closures or implement Spartan2's engine trait for the adapter (see "Integrating with Spartan2" below).
-- 🧪 Tests: unit tests use the real adapter; the legacy mock harness runs only with `--features mock-fri`.
+- 🧪 **Tests**: comprehensive unit and integration tests using the real adapter.
 
 ## Quick start
 
@@ -44,16 +43,10 @@ You have two options:
 
 ## Running tests
 
-Real adapter tests (default):
+All tests use the real P3FriPCSAdapter:
 
 ```bash
 cargo test -p neo-spartan-bridge -- --nocapture
-```
-
-Mock harness (optional):
-
-```bash
-cargo test -p neo-spartan-bridge --features mock-fri -- --nocapture
 ```
 
 **Security notes**:

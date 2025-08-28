@@ -21,10 +21,6 @@ pub mod traits;
 pub mod utils;
 
 // Legacy compatibility modules (preserved during migration)
-/// CCS sumcheck prover and verifier (legacy).
-#[cfg(feature = "legacy-sumcheck")]
-#[deprecated(note = "Sum-check lives in neo-fold. This stub will be removed.")]
-pub mod ccs_sumcheck;
 /// Format conversion utilities (legacy).
 #[cfg(feature = "legacy-compat")]
 pub mod converters;
@@ -57,9 +53,6 @@ pub use traits::SModuleHomomorphism;
 pub use utils::{tensor_point, mat_vec_mul_fk, mat_vec_mul_ff, validate_power_of_two};
 
 // Re-export legacy compatibility types and functions (gated)
-#[cfg(feature = "legacy-sumcheck")]
-#[allow(deprecated)]
-pub use ccs_sumcheck::{ccs_sumcheck_prover, ccs_sumcheck_verifier};
 
 // Legacy compatibility exports (gated)
 #[cfg(feature = "legacy-compat")]
