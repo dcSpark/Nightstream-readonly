@@ -12,6 +12,7 @@ p3-field = { workspace = true }
 p3-matrix = { workspace = true }
 rayon = { workspace = true }
 thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
 spartan2 = { workspace = true, optional = true }
 
 [features]

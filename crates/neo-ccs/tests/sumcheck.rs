@@ -83,7 +83,7 @@ fn test_ccs_zk_prover_hides() {
     let witness = CcsWitness {
         z: vec![from_base(F::ZERO)],
     };
-    let _prev: Option<Polynomial<ExtF>> = None;
+    let prev: Option<Polynomial<ExtF>> = None;
     let mut diff = false;
     let mut rng = rand::rng();
     for _ in 0..5 {
@@ -99,7 +99,7 @@ fn test_ccs_zk_prover_hides() {
                 break;
             }
         }
-        // prev = Some(p.clone()); // Would store previous polynomial
+        // prev = Some(p.clone()); // Store previous polynomial
     }
     assert!(diff);
 }

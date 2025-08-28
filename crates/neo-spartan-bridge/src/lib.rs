@@ -1,59 +1,77 @@
-//! # Neo Spartan Bridge: Last-Mile Compression Only
+// Temporarily allow unsafe for field construction - will be removed when p3 provides safe API
+// #![forbid(unsafe_code)]
+//! neo-spartan-bridge
 //!
-//! This crate is the **only** place that sees FRI. Enforced invariants:
-//! - **FRI confined to compression**: No FRI code in neo-fold or other crates
-//! - **Real FRI only**: No simulated FRI - only the actual Spartan2+FRI implementation
-//! - **One-way bridge**: Translates final ME(b,L) claims to Spartan2 linearized CCS
+//! Last-mile compression: translate a final ME(b, L) claim into a p3-FRI proof.
+//!
+//! This provides post-quantum security via pure hash-based polynomial commitments,
+//! staying native to small fields (Goldilocks) and avoiding elliptic curve cryptography.
+//!
+//! Architecture:
+//! - NeoPcs trait: Clean p3-native PCS interface
+//! - P3FriPCS: Real hash-based FRI implementation using p3-fri + Poseidon2  
+//! - SpartanBridge: High-level interface for ME(b,L) compression
+//! - No ff::PrimeField wrappers needed - everything stays in p3 ecosystem
 
-use neo_math::F;
+mod p3fri_pcs;
 
-/// Placeholder for matrix evaluation claims (will be properly defined later)
+pub use p3fri_pcs::{P3FriPCS, NeoPcs, FriConfig, Commitments, OpeningRequest, Proof};
+
+// Import from our local p3fri_pcs module
+// use p3_fri::FriConfig;
+use p3_goldilocks::Goldilocks as F;
+
+/// High-level bridge for compressing ME(b,L) claims to Spartan2(+FRI) proofs
+pub struct SpartanBridge {
+    pcs: P3FriPCS,
+}
+
+impl SpartanBridge {
+    pub fn new(fri_cfg: FriConfig) -> Self {
+        Self { pcs: P3FriPCS::new(fri_cfg) }
+    }
+
+    pub fn with_default_config() -> Self {
+        Self { pcs: P3FriPCS::with_default_config() }
+    }
+
+    /// Compress a linearized ME(b,L) claim to a Spartan2(+FRI) proof.
+    /// `polys_over_f` are the multilinear eval tables Spartan expects as polynomials over F.
+    pub fn compress_me(
+        &self,
+        polys_over_f: &[Vec<F>],
+        open_points: &[F],
+    ) -> anyhow::Result<(Commitments, Proof)> {
+        let (com, pd) = self.pcs.commit(polys_over_f);
+        let req = OpeningRequest::<F> { points: open_points.to_vec(), evals_hint: None };
+        let proof = self.pcs.open(&pd, &req);
+        Ok((com, proof))
+    }
+
+    pub fn verify_me(
+        &self,
+        commitments: &Commitments,
+        open_points: &[F],
+        proof: &Proof,
+    ) -> anyhow::Result<()> {
+        let req = OpeningRequest::<F> { points: open_points.to_vec(), evals_hint: None };
+        self.pcs.verify(commitments, &req, proof)
+    }
+}
+
+/// Legacy compression artifact for compatibility
 #[derive(Clone, Debug)]
-pub struct MatrixEvaluation {
-    pub matrix_id: usize,
-    pub evaluation_point: Vec<F>,
-    pub claimed_value: F,
+pub struct SpartanCompressionArtifact {
+    pub commitment_bytes: Vec<u8>,
+    pub proof_bytes: Vec<u8>,
+    /// Timing breakdown 
+    pub timings: CompressionTimings,
 }
 
-#[cfg(feature = "spartan2")]
-mod spartan2_bridge;
-
-/// Compress a final matrix evaluation claim to a succinct proof via Spartan2+FRI
-#[cfg(feature = "spartan2")]
-pub fn compress_to_spartan2(
-    me_claim: &MatrixEvaluation,
-    witness: &[F],
-) -> Result<Vec<u8>, CompressionError> {
-    spartan2_bridge::compress(me_claim, witness)
-}
-
-/// Verify a Spartan2 compressed proof
-#[cfg(feature = "spartan2")]
-pub fn verify_spartan2_proof(
-    me_claim: &MatrixEvaluation,
-    proof: &[u8],
-) -> Result<bool, CompressionError> {
-    spartan2_bridge::verify(me_claim, proof)
-}
-
-/// Placeholder when Spartan2 feature is disabled
-#[cfg(not(feature = "spartan2"))]
-pub fn compress_to_spartan2(
-    _me_claim: &MatrixEvaluation,
-    _witness: &[F],
-) -> Result<Vec<u8>, CompressionError> {
-    Err(CompressionError::FeatureDisabled("spartan2 feature not enabled".to_string()))
-}
-
-/// Error types for compression operations
-#[derive(Debug, thiserror::Error)]
-pub enum CompressionError {
-    #[error("Spartan2 compression failed: {0}")]
-    Spartan2Failed(String),
-    
-    #[error("FRI proof generation failed: {0}")]
-    FriFailed(String),
-    
-    #[error("Feature disabled: {0}")]
-    FeatureDisabled(String),
+#[derive(Clone, Debug, Default)]
+pub struct CompressionTimings {
+    pub commit_ms: u128,
+    pub prove_ms: u128,  
+    pub verify_ms: u128,
+    pub total_bytes: usize,
 }

@@ -1,22 +1,16 @@
-//! Ajtai Matrix Commitment Scheme
-//! 
-//! This module implements Neo's core Ajtai-based lattice commitment scheme
-//! with S-module homomorphism and pay-per-bit embedding as described in
-//! Nguyen & Setty 2025 (ePrint 2025/294).
+//! Ajtai matrix commitment (Neo).
 //!
-//! The module is organized as:
-//! - `commit`: Core commitment operations (Setup, Commit, Verify)
-//! - `embedding`: Pay-per-bit decomposition and bit-sparse operations
-//! - `rot`: Rotation-matrix ring S and fast rot(a)·v operations
+//! MUST: Ajtai L: F_q^{d×m} → C via c = cf(M·cf^{-1}(Z)) (Def. 9, 11, 12, 13). S-homomorphic,
+//! (d,m,B)-binding, with pay-per-bit embedding (Sec. 3.2–3.3). Provides decomp_b/split_b,
+//! verified openings, and range checks used by Π_DEC and Π_RLC pipelines.
+//!
+//! SHOULD: Docs for Goldilocks parameters (Sec. 6.2) + estimator pointers (App. B.12).
 
-pub mod commit;
-pub mod embedding;
-pub mod rot;
+mod types;
+mod util;
+mod decomp;
+mod commit;
 
-// Re-export main types and functions
-pub use commit::{AjtaiCommitter, NeoParams};
-pub use embedding::{decomp_b, split_b, pay_per_bit_cost};
-pub use rot::{RotationRing, ChallengeSet};
-
-// Re-export parameter presets aligned with Neo paper §6
-pub use commit::{GOLDILOCKS_PARAMS, SECURE_PARAMS, TOY_PARAMS};
+pub use types::{Commitment, PP};
+pub use decomp::{decomp_b, split_b, assert_range_b, DecompStyle};
+pub use commit::{setup, commit, verify_open, verify_split_open, s_mul, s_lincomb};
