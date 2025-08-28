@@ -62,5 +62,26 @@ pub enum RelationError {
 
     /// Polynomial arity does not match t.
     #[error("polynomial arity mismatch: poly arity {poly_arity} vs t={t}")]
-    PolyArity { poly_arity: usize, t: usize },
+    PolyArity { 
+        /// Polynomial arity 
+        poly_arity: usize, 
+        /// Expected number of matrices
+        t: usize 
+    },
+
+    /// General string error message
+    #[error("{0}")]
+    Message(String),
+}
+
+impl From<&str> for RelationError {
+    fn from(msg: &str) -> Self {
+        RelationError::Message(msg.to_string())
+    }
+}
+
+impl From<String> for RelationError {
+    fn from(msg: String) -> Self {
+        RelationError::Message(msg)
+    }
 }

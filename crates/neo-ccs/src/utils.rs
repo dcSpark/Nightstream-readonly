@@ -32,7 +32,7 @@ pub fn tensor_point<K: Field>(r: &[K]) -> Vec<K> {
 }
 
 /// Multiply an F-matrix (n×m) by an F-vector (m) → F-vector (n).
-pub fn mat_vec_mul_FF<F: Field>(m: &[F], n_rows: usize, n_cols: usize, v: &[F]) -> Vec<F> {
+pub fn mat_vec_mul_ff<F: Field>(m: &[F], n_rows: usize, n_cols: usize, v: &[F]) -> Vec<F> {
     debug_assert_eq!(n_cols, v.len());
     let mut out = vec![F::ZERO; n_rows];
     for r in 0..n_rows {
@@ -45,7 +45,7 @@ pub fn mat_vec_mul_FF<F: Field>(m: &[F], n_rows: usize, n_cols: usize, v: &[F]) 
 }
 
 /// Multiply an F-matrix (d×m) by a K-vector (m) using the natural embedding F→K.
-pub fn mat_vec_mul_FK<F: Field, K: Field + From<F>>(m: &[F], n_rows: usize, n_cols: usize, v: &[K]) -> Vec<K> {
+pub fn mat_vec_mul_fk<F: Field, K: Field + From<F>>(m: &[F], n_rows: usize, n_cols: usize, v: &[K]) -> Vec<K> {
     debug_assert_eq!(n_cols, v.len());
     let mut out = vec![K::ZERO; n_rows];
     for r in 0..n_rows {

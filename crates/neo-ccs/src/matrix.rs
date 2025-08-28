@@ -62,15 +62,18 @@ impl<T> IndexMut<(usize, usize)> for Mat<T> {
 /// A borrowed view into a row-major matrix.
 #[derive(Clone, Copy)]
 pub struct MatRef<'a, T> {
+    /// Number of rows
     pub rows: usize,
+    /// Number of columns
     pub cols: usize,
+    /// Row-major matrix data
     pub data: &'a [T],
 }
 
 impl<'a, T> MatRef<'a, T> {
     /// Make a `MatRef` from a full matrix.
     pub fn from_mat(m: &'a Mat<T>) -> Self {
-        Self { rows: m.rows(), cols: m.cols(), data: m.as_slice() }
+        Self { rows: m.rows, cols: m.cols, data: &m.data }
     }
 
     /// Get a row slice.
@@ -85,21 +88,24 @@ impl<'a, T> MatRef<'a, T> {
 //
 use p3_matrix::dense::RowMajorMatrix as P3RowMajor;
 
-impl<T: Clone> From<&P3RowMajor<T>> for Mat<T> {
+impl<T: Clone + Send + Sync> From<&P3RowMajor<T>> for Mat<T> {
     fn from(m: &P3RowMajor<T>) -> Self {
+        use p3_matrix::Matrix;
         let rows = m.height();
         let cols = m.width();
         let mut data = Vec::with_capacity(rows * cols);
         for r in 0..rows {
-            data.extend_from_slice(m.row_slice(r));
+            if let Some(row_iter) = m.row(r) {
+                data.extend(row_iter);
+            }
         }
         Self { rows, cols, data }
     }
 }
 
-impl<T: Clone> From<&Mat<T>> for P3RowMajor<T> {
+impl<T: Clone + Send + Sync> From<&Mat<T>> for P3RowMajor<T> {
     fn from(m: &Mat<T>) -> Self {
         // p3_matrix wants a Vec<T> in row-major
-        P3RowMajor::new(m.data.clone(), m.cols())
+        P3RowMajor::new(m.data.clone(), m.cols)
     }
 }

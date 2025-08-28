@@ -1,20 +1,73 @@
+#![deny(missing_docs)]
+//! CCS frontend for Neo: structures, relations (MCS/ME), and row-wise checks.
+//!
+//! Implements the MUST and SHOULD in the Neo spec, matching the paper's §4.1 relations
+//! (MCS & ME), the row-wise CCS check, and the consistency equalities used by Π_CCS/Π_RLC/Π_DEC.
+
+// New audit-ready core modules
+/// Error types for CCS operations.
+pub mod error;
+/// Matrix types and operations.
+pub mod matrix;
+/// Polynomial types and evaluation.
+pub mod poly;
+/// R1CS to CCS conversion utilities.
+pub mod r1cs;
+/// Core CCS relations and consistency checks.
+pub mod relations;
+/// Traits for commitment scheme integration.
+pub mod traits;
+/// Utility functions for tensor products and matrix operations.
+pub mod utils;
+
+// Legacy compatibility modules (preserved during migration)
+/// CCS sumcheck prover and verifier (legacy).
+pub mod ccs_sumcheck;
+/// Format conversion utilities.
+pub mod converters;
+/// Integration utilities for Spartan2 compatibility.
+pub mod integration;
+/// Bridge adapter for neo-spartan-bridge integration.
+pub mod bridge_adapter;
+
+// Re-export new core types
+pub use error::{CcsError, DimMismatch, RelationError};
+pub use matrix::{Mat, MatRef};
+pub use poly::{SparsePoly, Term};
+pub use r1cs::r1cs_to_ccs;
+pub use relations::{
+    CcsStructure as NewCcsStructure, McsInstance, McsWitness, MeInstance, MeWitness,
+    check_mcs_opening, check_me_consistency, check_ccs_rowwise_zero,
+    check_ccs_rowwise_relaxed,
+};
+pub use traits::SModuleHomomorphism;
+pub use utils::{tensor_point, mat_vec_mul_fk, mat_vec_mul_ff, validate_power_of_two};
+
+// Re-export legacy compatibility types and functions
+pub use ccs_sumcheck::{ccs_sumcheck_prover, ccs_sumcheck_verifier};
+pub use converters::{
+    ccs_to_r1cs_format, ccs_instance_to_r1cs_format, ccs_witness_to_r1cs_format,
+};
+#[cfg(feature = "spartan2-compat")]
+pub use converters::field_conversion;
+
+// Legacy types for backward compatibility - import from neo-math for field operations
 use neo_math::{embed_base_to_ext, ExtF, F};
-// use neo_math::ModInt;
 use neo_math::RingElement;
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::dense::RowMajorMatrix;
 use p3_matrix::Matrix;
 use std::sync::Arc;
-// use ark_r1cs_std::fields::fp::FpVar;
-// use ark_relations::r1cs::ConstraintSystemRef;
 
-/// Trait for querying the total degree of a polynomial.
+/// Legacy trait for querying the total degree of a polynomial.
 pub trait Degree {
+    /// Get the total degree.
     fn degree(&self) -> usize;
 }
 
-/// Trait representing a multivariate polynomial over `ExtF`.
+/// Legacy trait representing a multivariate polynomial over `ExtF`.
 pub trait MvPolynomial: Send + Sync + Degree {
+    /// Evaluate at inputs.
     fn evaluate(&self, inputs: &[ExtF]) -> ExtF;
     /// Maximum degree of any individual variable.
     fn max_individual_degree(&self) -> usize {
@@ -22,27 +75,27 @@ pub trait MvPolynomial: Send + Sync + Degree {
     }
 }
 
-/// Convenience wrapper for closures with an associated degree.
-pub struct ClosureMv<F>
+/// Legacy convenience wrapper for closures with an associated degree.
+pub struct ClosureMv<Fn>
 where
-    F: Fn(&[ExtF]) -> ExtF + Send + Sync,
+    Fn: std::ops::Fn(&[ExtF]) -> ExtF + Send + Sync,
 {
-    func: F,
+    func: Fn,
     deg: usize,
 }
 
-impl<F> Degree for ClosureMv<F>
+impl<Fn> Degree for ClosureMv<Fn>
 where
-    F: Fn(&[ExtF]) -> ExtF + Send + Sync,
+    Fn: std::ops::Fn(&[ExtF]) -> ExtF + Send + Sync,
 {
     fn degree(&self) -> usize {
         self.deg
     }
 }
 
-impl<F> MvPolynomial for ClosureMv<F>
+impl<Fn> MvPolynomial for ClosureMv<Fn>
 where
-    F: Fn(&[ExtF]) -> ExtF + Send + Sync,
+    Fn: std::ops::Fn(&[ExtF]) -> ExtF + Send + Sync,
 {
     fn evaluate(&self, inputs: &[ExtF]) -> ExtF {
         (self.func)(inputs)
@@ -53,41 +106,34 @@ where
     }
 }
 
-/// Construct a multivariate polynomial from a closure and its degree.
-pub fn mv_poly<F>(f: F, deg: usize) -> Multivariate
+/// Legacy function to construct a multivariate polynomial from a closure and its degree.
+pub fn mv_poly<Fn>(f: Fn, deg: usize) -> Multivariate
 where
-    F: Fn(&[ExtF]) -> ExtF + Send + Sync + 'static,
+    Fn: std::ops::Fn(&[ExtF]) -> ExtF + Send + Sync + 'static,
 {
     Arc::new(ClosureMv { func: f, deg })
 }
 
-/// Multivariate polynomial handle.
+/// Legacy multivariate polynomial handle.
 pub type Multivariate = Arc<dyn MvPolynomial>;
 
-pub mod ccs_sumcheck;
-pub use ccs_sumcheck::{ccs_sumcheck_prover, ccs_sumcheck_verifier};
-
-pub mod converters;
-pub use converters::{
-    ccs_to_r1cs_format, ccs_instance_to_r1cs_format, ccs_witness_to_r1cs_format,
-};
-#[cfg(feature = "spartan2-compat")]
-pub use converters::field_conversion;
-
-pub mod to_r1cs;
-pub mod integration; // Real CCS → R1CS conversion for Spartan2
-pub mod bridge_adapter; // Adapter for neo-spartan-bridge integration
-
+/// Legacy CCS structure for backward compatibility.
 #[derive(Clone)]
 pub struct CcsStructure {
-    pub mats: Vec<RowMajorMatrix<ExtF>>, // List of constraint matrices M_j (s matrices)
-    pub f: Multivariate,                 // Constraint polynomial f over s vars
-    pub num_constraints: usize,          // Size of matrices (n rows)
-    pub witness_size: usize,             // m columns
-    pub max_deg: usize,                  // Maximum total degree of f
+    /// List of constraint matrices M_j (s matrices)
+    pub mats: Vec<RowMajorMatrix<ExtF>>, 
+    /// Constraint polynomial f over s vars
+    pub f: Multivariate,                 
+    /// Size of matrices (n rows)
+    pub num_constraints: usize,          
+    /// m columns
+    pub witness_size: usize,             
+    /// Maximum total degree of f
+    pub max_deg: usize,                  
 }
 
 impl CcsStructure {
+    /// Legacy constructor
     pub fn new(mats: Vec<RowMajorMatrix<F>>, f: Multivariate) -> Self {
         let lifted_mats: Vec<RowMajorMatrix<ExtF>> = mats
             .into_iter()
@@ -117,24 +163,27 @@ impl CcsStructure {
     }
 }
 
+/// Legacy CCS instance.
 #[derive(Clone)]
 pub struct CcsInstance {
-    pub commitment: Vec<RingElement>, // Commitment to witness z
-    pub public_input: Vec<F>,                 // x (public part of instance)
-    pub u: F,                                 // Relaxation scalar
-    pub e: F,                                 // Relaxation offset
+    /// Commitment to witness z
+    pub commitment: Vec<RingElement>, 
+    /// x (public part of instance)
+    pub public_input: Vec<F>,         
+    /// Relaxation scalar
+    pub u: F,                         
+    /// Relaxation offset
+    pub e: F,                         
 }
 
+/// Legacy CCS witness.
 #[derive(Clone)]
 pub struct CcsWitness {
     /// Private witness vector (does not include public inputs)
     pub z: Vec<ExtF>,
 }
 
-/// Check that a potentially relaxed instance satisfies the CCS relation.
-/// This implements Definition 19 from the paper with relaxation scalars `u`
-/// and `e`.  Setting `u = 0` and `e = 1` recovers the standard (non-relaxed)
-/// satisfiability check.
+/// Legacy relaxed satisfiability check function.
 pub fn check_relaxed_satisfiability(
     structure: &CcsStructure,
     instance: &CcsInstance,
@@ -152,13 +201,11 @@ pub fn check_relaxed_satisfiability(
         return false;
     }
 
-    // --- NEW: shape-aware invariant check for the demo verifier CCS ---
-    // Detect the 4-matrix, 2-row selector layout that feeds [a,b,ab,a+b]
+    // Special handling for 4-matrix, 2-row selector layout (preserved for compatibility)
     if structure.mats.len() == 4
         && structure.witness_size == 4
         && structure.num_constraints == 2
     {
-        // verify each matrix j selects column j in both rows (simple selector)
         let mut selectors_ok = true;
         'outer: for j in 0..4 {
             for row in 0..2 {
@@ -179,12 +226,10 @@ pub fn check_relaxed_satisfiability(
             let ab = full_z[2];
             let a_plus_b = full_z[3];
 
-            // Enforce both semantic relations up front.
             if a + b != a_plus_b { return false; }
             if a * b != ab { return false; }
         }
     }
-    // --- END NEW ---
 
     let s = structure.mats.len();
     let right = embed_base_to_ext(u) * embed_base_to_ext(e) * embed_base_to_ext(e);
@@ -204,7 +249,7 @@ pub fn check_relaxed_satisfiability(
     true
 }
 
-/// Check if (instance, witness) satisfies the standard CCS relation (Def. 17).
+/// Legacy standard satisfiability check (Def. 17).
 pub fn check_satisfiability(
     structure: &CcsStructure,
     instance: &CcsInstance,
@@ -213,36 +258,27 @@ pub fn check_satisfiability(
     check_relaxed_satisfiability(structure, instance, witness, instance.u, instance.e)
 }
 
-/// Create the verifier CCS structure that models the Neo verifier logic as a CCS.
-/// This includes arithmetic gates for sum-check and openings.
+/// Legacy verifier CCS structure.
 pub fn verifier_ccs() -> CcsStructure {
-    // 4 matrices for demo (expand for full verifier)
-    // Each matrix is 2x4 to accommodate 4-element witness [a, b, a*b, a+b]
     let mats = vec![
-        RowMajorMatrix::new(vec![F::ONE, F::ZERO, F::ZERO, F::ZERO, F::ONE, F::ZERO, F::ZERO, F::ZERO], 4),  // X0 selector (a)
-        RowMajorMatrix::new(vec![F::ZERO, F::ONE, F::ZERO, F::ZERO, F::ZERO, F::ONE, F::ZERO, F::ZERO], 4),  // X1 selector (b)
-        RowMajorMatrix::new(vec![F::ZERO, F::ZERO, F::ONE, F::ZERO, F::ZERO, F::ZERO, F::ONE, F::ZERO], 4),  // X2 selector (a*b)
-        RowMajorMatrix::new(vec![F::ZERO, F::ZERO, F::ZERO, F::ONE, F::ZERO, F::ZERO, F::ZERO, F::ONE], 4),  // X3 selector (a+b)
+        RowMajorMatrix::new(vec![F::ONE, F::ZERO, F::ZERO, F::ZERO, F::ONE, F::ZERO, F::ZERO, F::ZERO], 4),
+        RowMajorMatrix::new(vec![F::ZERO, F::ONE, F::ZERO, F::ZERO, F::ZERO, F::ONE, F::ZERO, F::ZERO], 4),
+        RowMajorMatrix::new(vec![F::ZERO, F::ZERO, F::ONE, F::ZERO, F::ZERO, F::ZERO, F::ONE, F::ZERO], 4),
+        RowMajorMatrix::new(vec![F::ZERO, F::ZERO, F::ZERO, F::ONE, F::ZERO, F::ZERO, F::ZERO, F::ONE], 4),
     ];
 
-    // Constraint: X0 + X1 == X3 (multilinear addition check only)
-    // Note: We skip the multiplication check X0*X1==X2 to maintain multilinearity
     let f: Multivariate = mv_poly(move |inputs: &[ExtF]| {
         if inputs.len() != 4 {
             ExtF::ZERO
         } else {
-            inputs[0] + inputs[1] - inputs[3] // Only check addition: a + b = a+b
+            inputs[0] + inputs[1] - inputs[3]
         }
     }, 1);
 
     CcsStructure::new(mats, f)
 }
 
-/// Stub for adding lookup tables to a CCS structure. This simply appends a
-/// matrix representing the lookup table and augments the constraint polynomial
-/// with a dummy predicate that checks equality between the first and last
-/// inputs. It is not a complete lookup implementation but illustrates how such
-/// tables could be wired in.
+/// Legacy function to add lookups.
 pub fn add_lookups(structure: &mut CcsStructure, table: Vec<F>) {
     let data: Vec<ExtF> = table.into_iter().map(|v| embed_base_to_ext(v)).collect();
     let lookup_mat = RowMajorMatrix::new(data, 1);
@@ -270,34 +306,31 @@ pub fn add_lookups(structure: &mut CcsStructure, table: Vec<F>) {
     structure.max_deg = structure.f.degree();
 }
 
-// Matrix Evaluation (ME) types for the final folding outputs
-// These represent the final claims after folding: ME(b,L) 
-
-/// Matrix Evaluation instance - the final claim after folding
+// Legacy ME types for final folding outputs (preserved)
+/// Legacy Matrix Evaluation instance - the final claim after folding
 #[derive(Clone, Debug)]
 pub struct MEInstance {
     /// Ajtai commitment coordinates c ∈ F_q^{d×κ}
-    pub c_coords: Vec<F>, // Flattened commitment coordinates
+    pub c_coords: Vec<F>, 
     /// ME outputs y_j = ⟨M_j^T r^b, Z⟩ for each matrix j
-    pub y_outputs: Vec<F>, // Evaluation results
+    pub y_outputs: Vec<F>, 
     /// Public random point r^b from sum-check 
-    pub r_point: Vec<F>, // Random evaluation point (length = witness dimension)
+    pub r_point: Vec<F>, 
     /// Base parameter for range constraints
     pub base_b: u64,
     /// Transcript header digest for binding to neo-fold
     pub header_digest: [u8; 32],
 }
 
-/// Matrix Evaluation witness - the final witness after folding  
+/// Legacy Matrix Evaluation witness - the final witness after folding  
 #[derive(Clone, Debug)]
 pub struct MEWitness {
     /// Witness digits Z in base b: |Z|_∞ < b
-    /// These are the actual digits, signed integers in [-b+1, b-1]
-    pub z_digits: Vec<i64>, // Base-b digits of the witness
+    pub z_digits: Vec<i64>, 
     /// Weight vectors v_j = M_j^T r^b for computing ⟨v_j, Z⟩ = y_j
-    pub weight_vectors: Vec<Vec<F>>, // One weight vector per output
+    pub weight_vectors: Vec<Vec<F>>, 
     /// Optional Ajtai linear map rows L for c = L(Z) verification
-    pub ajtai_rows: Option<Vec<Vec<F>>>, // Linear map coefficients
+    pub ajtai_rows: Option<Vec<Vec<F>>>, 
 }
 
 impl MEInstance {
@@ -347,12 +380,10 @@ impl MEWitness {
     pub fn check_consistency(&self) -> bool {
         let z_len = self.z_digits.len();
         
-        // Check weight vectors
         if !self.weight_vectors.iter().all(|w| w.len() == z_len) {
             return false;
         }
         
-        // Check Ajtai rows if present
         if let Some(ref rows) = self.ajtai_rows {
             if !rows.iter().all(|row| row.len() == z_len) {
                 return false;
@@ -375,10 +406,8 @@ impl MEWitness {
                 return false;
             }
             
-            // Compute ⟨v_j, Z⟩
             let mut actual_y = F::ZERO;
             for (&w, &z) in weights.iter().zip(self.z_digits.iter()) {
-                // Convert signed digit to field element
                 let z_field = if z >= 0 { 
                     F::from_u64(z as u64) 
                 } else { 
@@ -409,7 +438,6 @@ impl MEWitness {
                     return false;
                 }
                 
-                // Compute ⟨L_row[t], Z⟩
                 let mut actual_c = F::ZERO;
                 for (&l, &z) in row.iter().zip(self.z_digits.iter()) {
                     let z_field = if z >= 0 { 
@@ -429,6 +457,3 @@ impl MEWitness {
         true
     }
 }
-
-// Spartan2-specific R1CS conversion functions removed
-// Plonky3 handles R1CS conversion natively with field operations

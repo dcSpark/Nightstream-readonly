@@ -27,9 +27,11 @@ pub fn ccs_sumcheck_verifier(
 /// Error type for CCS sumcheck operations
 #[derive(Debug, Error)]
 pub enum CcsSumcheckError {
+    /// Sumcheck verification failed
     #[error("Sumcheck verification failed: {0}")]
     VerificationFailed(String),
     
+    /// Invalid proof format
     #[error("Invalid proof format: {0}")]
     InvalidProof(String),
 }

@@ -5,7 +5,7 @@ use crate::{
     matrix::{Mat, MatRef},
     poly::SparsePoly,
     traits::SModuleHomomorphism,
-    utils::{validate_power_of_two, tensor_point, mat_vec_mul_FF, mat_vec_mul_FK},
+    utils::{validate_power_of_two, tensor_point, mat_vec_mul_ff, mat_vec_mul_fk},
 };
 
 /// CCS structure: matrices {M_j} and a sparse polynomial `f` in `t` variables.
@@ -15,8 +15,9 @@ pub struct CcsStructure<F> {
     pub matrices: Vec<Mat<F>>,
     /// Degree-`<u` polynomial in t variables.
     pub f: SparsePoly<F>,
-    /// n (rows), m (cols)
+    /// n (rows)
     pub n: usize,
+    /// m (cols)
     pub m: usize,
 }
 
@@ -58,6 +59,7 @@ pub struct McsInstance<C, F> {
 
 /// MCS witness: w and its decomposition Z = Decomp_b(z) (we need Z for consistency checks).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[allow(non_snake_case)]
 pub struct McsWitness<F> {
     /// Private witness w ∈ F^{m - m_in}.
     pub w: Vec<F>,
@@ -71,6 +73,7 @@ pub struct MeInstance<C, F, K> {
     /// Commitment to Z.
     pub c: C,
     /// X = L_x(Z) ∈ F^{d×m_in}
+    #[allow(non_snake_case)]
     pub X: Mat<F>,
     /// r ∈ K^{log n}
     pub r: Vec<K>,
@@ -84,6 +87,7 @@ pub struct MeInstance<C, F, K> {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct MeWitness<F> {
     /// Z ∈ F^{d×m}
+    #[allow(non_snake_case)]
     pub Z: Mat<F>,
 }
 
@@ -173,7 +177,7 @@ where C: PartialEq
         };
         // y*_j = Z v_k_m
         let z_ref = MatRef::from_mat(&wit.Z);
-        let y_star = mat_vec_mul_FK::<F, K>(z_ref.data, z_ref.rows, z_ref.cols, &v_k_m);
+        let y_star = mat_vec_mul_fk::<F, K>(z_ref.data, z_ref.rows, z_ref.cols, &v_k_m);
         if y_star != inst.y[j] {
             return Err(CcsError::Relation("y_j != Z M_j^T r^b".into()));
         }
@@ -198,7 +202,7 @@ pub fn check_ccs_rowwise_zero<F: Field>(
     // Compute M_j z for every j
     let mut mz: Vec<Vec<F>> = Vec::with_capacity(s.t());
     for mj in &s.matrices {
-        let v = mat_vec_mul_FF::<F>(mj.as_slice(), s.n, s.m, &z);
+        let v = mat_vec_mul_ff::<F>(mj.as_slice(), s.n, s.m, &z);
         mz.push(v);
     }
 
@@ -242,7 +246,7 @@ pub fn check_ccs_rowwise_relaxed<F: Field>(
     // M_j z for every j
     let mut mz: Vec<Vec<F>> = Vec::with_capacity(s.t());
     for mj in &s.matrices {
-        let v = mat_vec_mul_FF::<F>(mj.as_slice(), s.n, s.m, &z);
+        let v = mat_vec_mul_ff::<F>(mj.as_slice(), s.n, s.m, &z);
         mz.push(v);
     }
 

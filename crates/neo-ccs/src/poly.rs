@@ -23,7 +23,9 @@ impl<F> SparsePoly<F> {
 /// A single term: `coeff * ∏_j x_j^{exps[j]}`.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Term<F> {
+    /// Coefficient
     pub coeff: F,
+    /// Exponents for each variable
     pub exps: Vec<u32>,
 }
 
