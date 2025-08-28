@@ -36,6 +36,7 @@ rand_chacha = { workspace = true }
 
 # Neo workspace dependencies for ME types
 neo-ccs = { path = "../neo-ccs" }
+neo-math = { version = "0.1.0", path = "../neo-math" }
 
 [dev-dependencies]
 rand = { workspace = true }

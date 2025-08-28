@@ -9,7 +9,7 @@ mod tests {
         poly::{SparsePoly, Term},
         matrix::Mat,
         utils::{tensor_point, validate_power_of_two},
-        // integration::convert_ccs_for_spartan2,  // legacy-compat only
+        // integration::convert_ccs_for_spartan2,  // moved to neo-spartan-bridge
         r1cs::r1cs_to_ccs,
         CcsStructure,
     };

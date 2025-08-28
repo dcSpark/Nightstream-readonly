@@ -1,5 +1,6 @@
 // neo-ccs/tests/ccs_to_r1cs_linear.rs
-use neo_ccs::{CcsInstance, CcsStructure, CcsWitness, mv_poly};
+#![cfg(feature = "legacy-compat")]
+use neo_ccs::legacy::{CcsStructure, CcsInstance, CcsWitness, mv_poly};
 use neo_ccs::integration::convert_ccs_for_spartan2;
 use neo_math::{from_base, ExtF, F};
 use p3_field::{PrimeField64, PrimeCharacteristicRing};

@@ -27,8 +27,6 @@ pub mod converters;
 /// Integration utilities for Spartan2 compatibility (legacy).
 #[cfg(feature = "legacy-compat")]
 pub mod integration;
-/// Bridge adapter for neo-spartan-bridge integration.
-pub mod bridge_adapter;
 
 // Tests module
 #[cfg(test)]
@@ -69,6 +67,7 @@ pub use converters::field_conversion;
 #[cfg(feature = "legacy-compat")] 
 pub mod legacy {
     use neo_math::{embed_base_to_ext, ExtF, F};
+    pub use neo_math::{embed_base_to_ext, ExtF}; // Re-export for legacy compatibility
     use neo_math::RingElement;
     use p3_field::PrimeCharacteristicRing;
     use p3_matrix::dense::RowMajorMatrix;
@@ -209,6 +208,7 @@ pub fn check_relaxed_satisfiability(
     u: F,
     e: F,
 ) -> bool {
+    use neo_math::{ExtF, embed_base_to_ext};
     let mut full_z: Vec<ExtF> = instance
         .public_input
         .iter()

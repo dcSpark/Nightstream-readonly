@@ -1,7 +1,5 @@
-use neo_ccs::ccs_sumcheck::CcsSumcheckError;
-use neo_ccs::{
-    ccs_sumcheck_prover, check_satisfiability, mv_poly, CcsInstance, CcsStructure, CcsWitness,
-};
+#![cfg(feature = "legacy-compat")]
+use neo_ccs::legacy::{CcsStructure, CcsInstance, CcsWitness, mv_poly};
 use neo_math::{from_base, ExtF, F};
 use p3_field::PrimeCharacteristicRing;
 // Oracle removed in NARK mode

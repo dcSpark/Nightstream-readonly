@@ -1,6 +1,5 @@
-use neo_ccs::{
-    ccs_sumcheck_prover, check_satisfiability, mv_poly, CcsInstance, CcsStructure, CcsWitness,
-};
+#![cfg(feature = "legacy-compat")]
+use neo_ccs::legacy::{CcsStructure, CcsInstance, CcsWitness, mv_poly};
 use neo_math::{embed_base_to_ext, project_ext_to_base, ExtF, F};
 // Oracle removed in NARK mode
 use p3_field::PrimeCharacteristicRing;

@@ -726,6 +726,7 @@ dependencies = [
  "anyhow",
  "bincode",
  "neo-ccs",
+ "neo-math",
  "p3-challenger",
  "p3-commit",
  "p3-dft",

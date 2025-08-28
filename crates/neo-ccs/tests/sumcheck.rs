@@ -1,4 +1,5 @@
-use neo_ccs::{ccs_sumcheck_prover, mv_poly, CcsInstance, CcsStructure, CcsWitness};
+#![cfg(feature = "legacy-compat")]
+use neo_ccs::{legacy::{CcsStructure, CcsInstance, CcsWitness, mv_poly}};
 use neo_math::{from_base, ExtF, F, Polynomial};
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::dense::RowMajorMatrix;

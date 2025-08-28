@@ -20,6 +20,8 @@
 
 pub mod pcs;
 mod types;
+/// NEO CCS adapter for bridge integration
+pub mod neo_ccs_adapter;
 
 pub use types::ProofBundle;
 pub use pcs::{P3FriPCSAdapter, P3FriParams, Val, Challenge};

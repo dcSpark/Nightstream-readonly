@@ -1,4 +1,5 @@
-use neo_ccs::*;
+#![cfg(feature = "legacy-compat")]
+use neo_ccs::{legacy::{CcsStructure, CcsInstance, CcsWitness, mv_poly}, check_satisfiability};
 use neo_math::{from_base, ExtF, F};
 use p3_field::PrimeCharacteristicRing;
 // Note: fiat_shamir_challenge is not needed for placeholder implementation

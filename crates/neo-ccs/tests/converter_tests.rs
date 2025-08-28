@@ -3,9 +3,10 @@
 //! These tests validate the correctness of converting CCS (Customizable Constraint Systems)
 //! to R1CS (Rank-1 Constraint Systems) for Spartan2 integration.
 
+#![cfg(feature = "legacy-compat")]
 mod ccs_to_r1cs_tests {
     use neo_ccs::{
-        CcsStructure, CcsInstance, CcsWitness, verifier_ccs,
+        legacy::{CcsStructure, CcsInstance, CcsWitness}, verifier_ccs,
         converters::{ccs_to_r1cs_format, ccs_instance_to_r1cs_format, ccs_witness_to_r1cs_format, integration}
     };
     use neo_math::{embed_base_to_ext, ExtF, F, RingElement};
