@@ -718,6 +718,11 @@ dependencies = [
 [[package]]
 name = "neo-params"
 version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "thiserror 2.0.16",
+]
 
 [[package]]
 name = "neo-spartan-bridge"
