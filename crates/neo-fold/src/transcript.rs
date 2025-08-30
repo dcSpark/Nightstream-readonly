@@ -77,7 +77,10 @@ pub struct FoldTranscript {
 impl FoldTranscript {
     pub fn new() -> Self {
         // Poseidon2 with default parameters for Goldilocks.
-        let perm = Poseidon2Goldilocks::<POSEIDON2_WIDTH>::new_from_rng_128(&mut rand::rng());
+        // Use a fixed seed for deterministic transcript initialization
+        use rand::SeedableRng;
+        let mut rng = rand_chacha::ChaCha20Rng::from_seed([0u8; 32]);
+        let perm = Poseidon2Goldilocks::<POSEIDON2_WIDTH>::new_from_rng_128(&mut rng);
         let mut ch = NeoChallenger::new(perm);
         // Seal the transcript version.
         // Convert bytes to field elements and observe them individually

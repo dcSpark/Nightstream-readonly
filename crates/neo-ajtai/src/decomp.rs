@@ -14,7 +14,7 @@ pub fn decomp_b(z: &[Fq], b: u32, d: usize, style: DecompStyle) -> Vec<Fq> {
     for (j, &zij) in z.iter().enumerate() {
         let mut a = to_balanced_i128(zij);
         for i in 0..d {
-            if a == 0 { break; }
+            // Constant-time: always compute digit even if a == 0 to prevent timing side-channel
             let (digit, new_a) = match style {
                 DecompStyle::NonNegative => {
                     let b_i128 = b as i128;
@@ -34,7 +34,7 @@ pub fn decomp_b(z: &[Fq], b: u32, d: usize, style: DecompStyle) -> Vec<Fq> {
             } else {
                 Fq::ZERO - Fq::from_u64((-digit) as u64)
             };
-            a = new_a;
+            a = new_a; // if a was 0 this just propagates zeros
         }
         // remaining digits already zero
     }
@@ -51,7 +51,7 @@ pub fn split_b(Z: &[Fq], b: u32, d: usize, m: usize, k: usize, style: DecompStyl
             let mut a = to_balanced_i128(Z[idx]);
             #[allow(clippy::needless_range_loop)]
             for i in 0..k {
-                if a == 0 { break; }
+                // Constant-time: always compute digit even if a == 0 to prevent timing side-channel
                 let (digit, new_a) = match style {
                     DecompStyle::NonNegative => {
                         let b_i128 = b as i128;
@@ -70,7 +70,7 @@ pub fn split_b(Z: &[Fq], b: u32, d: usize, m: usize, k: usize, style: DecompStyl
                 } else {
                     Fq::ZERO - Fq::from_u64((-digit) as u64)
                 };
-                a = new_a;
+                a = new_a; // if a was 0 this just propagates zeros
             }
         }
     }

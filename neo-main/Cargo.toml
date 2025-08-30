@@ -5,21 +5,22 @@ version = { workspace = true }
 authors = { workspace = true }
 
 [dependencies]
-neo-ring = { path = "../crates/neo-ring-legacy" }
+# Modern Neo crates
+neo-params = { path = "../crates/neo-params" }
 neo-math = { path = "../crates/neo-math" }
-neo-poly = { path = "../neo-poly" }
-neo-decomp = { path = "../neo-decomp" }
-neo-commit = { path = "../crates/neo-commit-legacy" }
+neo-ajtai = { path = "../crates/neo-ajtai" }
 neo-ccs = { path = "../crates/neo-ccs" }
 neo-fold = { path = "../crates/neo-fold" }
-neo-modint = { path = "../neo-modint" }
-neo-sumcheck = { path = "../crates/neo-sumcheck-legacy", default-features = false }
-neo-arithmetize = { path = "../neo-arithmetize" }
+neo-challenge = { path = "../crates/neo-challenge" }
+neo-spartan-bridge = { path = "../crates/neo-spartan-bridge" }
 neo-orchestrator = { path = "../neo-orchestrator" }
-rand = { workspace = true }
-p3-field = "0.3"
-p3-matrix = { workspace = true }
-spartan2 = { git = "https://github.com/microsoft/Spartan2.git", rev = "cc21201d0d0293794ccc8ddd24903a9e570afb6e", default-features = false, optional = true }
+
+# External dependencies
+rand.workspace = true
+p3-field.workspace = true
+p3-matrix.workspace = true
+anyhow.workspace = true
+bincode.workspace = true
 
 [features]
 default = []

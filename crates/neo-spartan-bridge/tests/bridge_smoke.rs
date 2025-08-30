@@ -1,11 +1,11 @@
 #![allow(deprecated)] // Tests use legacy MEInstance/MEWitness for backward compatibility
 
-//! Production smoke tests for the neo-spartan-bridge with p3-FRI architecture
+//! Smoke tests for the neo-spartan-bridge with Hash-MLE PCS (Poseidon2-only)
 //!
 //! These tests verify the complete architectural foundation and API structure
-//! that will support the real ME(b,L) -> Spartan2 + p3-FRI compression pipeline.
+//! for ME(b,L) -> Spartan2 + Hash-MLE compression pipeline.
 
-use neo_spartan_bridge::{compress_me_to_spartan, P3FriParams, pcs::PCSEngineTrait};
+use neo_spartan_bridge::compress_me_to_spartan;
 use neo_ccs::{MEInstance, MEWitness};
 use p3_goldilocks::Goldilocks as F;
 use p3_field::{PrimeCharacteristicRing, integers::QuotientMap};
@@ -32,8 +32,8 @@ fn tiny_me_instance() -> (MEInstance, MEWitness) {
 }
 
 #[test]
-fn bridge_smoke_me() {
-    println!("🧪 Testing complete ME(b,L) -> Spartan2 + p3-FRI pipeline");
+fn bridge_smoke_me_hash_mle() {
+    println!("🧪 Testing complete ME(b,L) -> Spartan2 + Hash-MLE pipeline");
     
     let (me, wit) = tiny_me_instance();
     
@@ -41,128 +41,100 @@ fn bridge_smoke_me() {
     println!("   Output values: {}", me.y_outputs.len());
     println!("   Challenge point dimension: {}", me.r_point.len());
     
-    // Compress with default FRI parameters (safe for testing)
-    let proof = compress_me_to_spartan(&me, &wit, None)
-        .expect("compress_me_to_spartan should succeed");
+    // Compress using Hash-MLE PCS (no FRI parameters needed)
+    let proof = match compress_me_to_spartan(&me, &wit) {
+        Ok(proof) => proof,
+        Err(e) => {
+            println!("🚨 Spartan2 API diagnostic:");
+            println!("{:?}", e);
+            println!("Full error chain:");
+            let mut current_error: &dyn std::error::Error = &*e;
+            loop {
+                println!("  {}", current_error);
+                match current_error.source() {
+                    Some(source) => current_error = source,
+                    None => break,
+                }
+            }
+            panic!("compress_me_to_spartan failed - see diagnostic above");
+        }
+    };
 
-    println!("   FRI queries: {}", proof.fri_num_queries);
-    println!("   FRI log blowup: {}", proof.fri_log_blowup);
     println!("   Total proof size: {} bytes", proof.total_size());
     
-    // Verify structural correctness
-    assert!(!proof.proof.is_empty());
-    assert!(!proof.public_io_bytes.is_empty());
-    assert_eq!(proof.fri_num_queries, P3FriParams::default().num_queries);
+    // Verify proof structure
+    assert!(!proof.proof.is_empty(), "Proof bytes should not be empty");
+    assert!(!proof.vk.is_empty(), "Verifier key should not be empty");
+    assert!(!proof.public_io_bytes.is_empty(), "Public IO should not be empty");
     
-    println!("✅ Bridge smoke test: PASS");
-    println!("   Ready for real Spartan2 integration");
+    // Real verification
+    let ok = neo_spartan_bridge::verify_me_spartan(&proof).expect("verify should run");
+    assert!(ok);
+    
+    println!("✅ ME(b,L) -> Spartan2 compression succeeded");
 }
 
 #[test]
 fn determinism_check() {
-    println!("🧪 Testing transcript determinism (same ME -> same proof)");
+    println!("🧪 Testing real SNARK proof generation");
     
     let (me, wit) = tiny_me_instance();
     
-    // Generate proof twice with same inputs
-    let proof1 = compress_me_to_spartan(&me, &wit, None).expect("proof 1");
-    let proof2 = compress_me_to_spartan(&me, &wit, None).expect("proof 2");
+    // Generate two proofs with identical inputs – proofs are randomized
+    let proof1 = compress_me_to_spartan(&me, &wit).expect("first proof");
+    let proof2 = compress_me_to_spartan(&me, &wit).expect("second proof");
     
-    // Same inputs should produce identical proofs (deterministic transcript)
-    assert_eq!(proof1.proof, proof2.proof, "Proofs should be deterministic");
-    assert_eq!(proof1.public_io_bytes, proof2.public_io_bytes, "Public IO should be deterministic");
-    assert_eq!(proof1.total_size(), proof2.total_size(), "Sizes should match");
+    // Real SNARKs are randomized: proofs usually differ, VKs match, IO matches
+    assert_ne!(proof1.proof, proof2.proof, "Proofs need not be bit-equal");
+    assert_eq!(proof1.vk, proof2.vk, "VK should be deterministic");
+    assert_eq!(proof1.public_io_bytes, proof2.public_io_bytes, "Public IO should be stable");
+    assert!(neo_spartan_bridge::verify_me_spartan(&proof1).unwrap());
+    assert!(neo_spartan_bridge::verify_me_spartan(&proof2).unwrap());
     
-    println!("✅ Determinism check: PASS");
-    println!("   Both proofs: {} bytes", proof1.total_size());
+    println!("✅ Real SNARK proof generation and verification succeeded");
 }
 
-#[test] 
-fn different_fri_params() {
-    println!("🧪 Testing different FRI parameter configurations");
+#[test]
+fn header_binding_consistency() {
+    println!("🧪 Testing header digest binding");
+    
+    let (mut me, wit) = tiny_me_instance();
+    
+    // Generate proof with original header
+    let proof1 = compress_me_to_spartan(&me, &wit).expect("original proof");
+    
+    // Change header digest
+    me.header_digest[0] ^= 1; // flip one bit
+    let proof2 = compress_me_to_spartan(&me, &wit).expect("modified proof");
+    
+    // Header digest change should affect public IO
+    assert_ne!(
+        proof1.public_io_bytes, 
+        proof2.public_io_bytes,
+        "Header digest must bind transcript"
+    );
+    
+    println!("✅ Header digest properly binds to transcript");
+}
+
+#[test]
+fn proof_bundle_structure() {
+    println!("🧪 Testing ProofBundle structure");
     
     let (me, wit) = tiny_me_instance();
+    let bundle = compress_me_to_spartan(&me, &wit).expect("proof bundle");
     
-    // Test with custom FRI parameters
-    let custom_params = P3FriParams {
-        log_blowup: 1,        // smaller blowup for testing
-        log_final_poly_len: 0,
-        num_queries: 20,      // fewer queries for testing
-        proof_of_work_bits: 4, // less PoW for testing  
-    };
+    // Verify bundle contains expected components
+    assert!(bundle.proof.len() > 0, "Proof component should have content");
+    assert!(bundle.vk.len() > 0, "Verifier key should have content");
+    assert!(bundle.public_io_bytes.len() > 0, "Public IO should have content");
     
-    let proof = compress_me_to_spartan(&me, &wit, Some(custom_params.clone()))
-        .expect("custom params should work");
+    // Verify size calculation
+    let expected_size = bundle.proof.len() + bundle.vk.len() + bundle.public_io_bytes.len();
+    assert_eq!(bundle.total_size(), expected_size, "Size calculation should be correct");
     
-    assert_eq!(proof.fri_num_queries, custom_params.num_queries);
-    assert_eq!(proof.fri_log_blowup, custom_params.log_blowup);
-    
-    println!("✅ Custom FRI params test: PASS");
-    println!("   Custom queries: {}", proof.fri_num_queries);
-    println!("   Custom blowup: 2^{}", proof.fri_log_blowup);
-}
-
-#[test]
-fn p3fri_pcs_direct() {
-    println!("🧪 Testing direct P3FriPCS creation and domain handling");
-    
-    let params = P3FriParams::default();
-    let pcs = neo_spartan_bridge::P3FriPCSAdapter::new_with_params(params);
-    
-    // Test domain creation for various polynomial degrees
-    let degrees = [4, 8, 16, 64, 256];
-    
-    for &degree in &degrees {
-        let domain = pcs.natural_domain_for_degree(degree);
-        println!("   Degree {}: stub domain = {}", degree, domain);
-    }
-    
-    println!("✅ P3FriPCS direct test: PASS");
-}
-
-#[test] 
-fn transcript_io_encoding() {
-    println!("🧪 Testing transcript IO encoding consistency");
-    
-    let (me1, _) = tiny_me_instance();
-    let (mut me2, _) = tiny_me_instance();
-    
-    // Encode same ME twice
-    let io1 = neo_spartan_bridge::encode_bridge_io_header(&me1);
-    let io2 = neo_spartan_bridge::encode_bridge_io_header(&me1);
-    
-    assert_eq!(io1, io2, "Same ME should encode to same IO bytes");
-    
-    // Different ME should encode differently  
-    me2.c_coords[0] = F::from_canonical_checked(99).unwrap(); // change commitment
-    let io3 = neo_spartan_bridge::encode_bridge_io_header(&me2);
-    
-    assert_ne!(io1, io3, "Different ME should encode to different IO bytes");
-    
-    println!("✅ Transcript IO encoding: PASS");
-    println!("   Standard ME: {} bytes", io1.len());
-    println!("   Modified ME: {} bytes", io3.len());
-}
-
-#[test]
-fn architectural_foundation() {
-    println!("🧪 Testing architectural foundation readiness");
-    
-    // Test that all the key components compile and work
-    use neo_spartan_bridge::make_p3fri_engine_with_defaults;
-    
-    let (pcs_adapter, _ch, _mats) = make_p3fri_engine_with_defaults(42);
-    
-    // Test that the P3FriPCSAdapter was created successfully
-    let domain = pcs_adapter.natural_domain_for_degree(64);
-    // Stub implementation returns 0, so we just check it compiles
-    assert_eq!(domain, 0); // Stub always returns 0
-    
-    println!("✅ Architectural foundation: PASS");
-    println!("   P3FriPCSAdapter: operational (stub)");
-    println!("   Domain creation: working (stub domain = {})", domain);
-    println!("   Transcript encoding: working");
-    println!("   ME types: compatible");
-    println!("   ME types: compatible");
-    println!("   Ready for real p3-FRI integration!");
+    println!("   Proof size: {} bytes", bundle.proof.len());
+    println!("   VK size: {} bytes", bundle.vk.len());
+    println!("   Public IO size: {} bytes", bundle.public_io_bytes.len());
+    println!("✅ ProofBundle structure is valid");
 }

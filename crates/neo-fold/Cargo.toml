@@ -4,6 +4,10 @@ edition = { workspace = true }
 version = { workspace = true }
 authors = { workspace = true }
 
+[features]
+default = []
+# Note: dev feature removed - neo-spartan-bridge now uses Poseidon2-only (no dev mode)
+
 [dependencies]
 neo-math = { path = "../neo-math" }
 neo-ajtai = { path = "../neo-ajtai" }

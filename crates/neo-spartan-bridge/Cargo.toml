@@ -13,22 +13,17 @@ thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 rand = { workspace = true }
 
-# p3 ecosystem for post-quantum FRI PCS
+# p3 ecosystem used ONLY for Poseidon2 FS transcript over Goldilocks
 p3-field = { workspace = true }
 p3-goldilocks = { workspace = true }
 p3-challenger = { workspace = true }
 p3-poseidon2 = { workspace = true }
-p3-fri = { workspace = true }
-p3-commit = { workspace = true }
-p3-merkle-tree = { workspace = true }
 p3-symmetric = { workspace = true }
-p3-matrix = { workspace = true }
-p3-dft = { workspace = true }
 
 # For error handling in PCS
 anyhow = { workspace = true }
 
-# For FRI proof serialization
+# For proof serialization
 bincode = { workspace = true }
 
 # For deterministic Poseidon2 seeding

@@ -1,6 +1,6 @@
 # STRUCTURE.md (minimal workspace, **Goldilocks-only**)
 
-> Goal: the smallest Rust workspace that implements **Neo-style folding** with **Ajtai matrix commitments (pay-per-bit)**, **one sum-check over** $K=\mathbb F_{q^2}$, **Π\_{\text{CCS}} → Π\_{\text{RLC}} → Π\_{\text{DEC}}** under a single FS transcript, **strong-sampler challenges**, and **Spartan2(+real FRI) compression**. This repo fixes the base field to **Goldilocks** $q=2^{64}-2^{32}+1$; no feature flags or alternate fields.&#x20;
+> Goal: the smallest Rust workspace that implements **Neo-style folding** with **Ajtai matrix commitments (pay-per-bit)**, **one sum-check over** $K=\mathbb F_{q^2}$, **Π\_{\text{CCS}} → Π\_{\text{RLC}} → Π\_{\text{DEC}}** under a single FS transcript, **strong-sampler challenges**, and **Spartan2 (Hash‑MLE PCS) compression**. This repo fixes the base field to **Goldilocks** $q=2^{64}-2^{32}+1$; no feature flags or alternate fields.&#x20;
 
 ---
 
@@ -16,7 +16,7 @@ neo/
    ├─ neo-challenge/        # strong sampling set C ⊂ S; invertibility & expansion checks
    ├─ neo-ccs/              # CCS frontend; linearized relations MCS/ME types
    ├─ neo-fold/             # single transcript + sum-check; Π_CCS, Π_RLC, Π_DEC
-   ├─ neo-spartan-bridge/   # final compression: ME → Spartan2(+real FRI)
+   ├─ neo-spartan-bridge/   # final compression: ME → Spartan2 (Hash‑MLE PCS, Poseidon2 FS)
    └─ neo-tests/            # (tests only) cross-crate & e2e tests
 ```
 
@@ -39,7 +39,7 @@ neo-ajtai, neo-challenge, neo-ccs
 (simplified view: neo-params → neo-math → {ajtai,challenge,ccs} → neo-fold → spartan-bridge → tests)
 ```
 
-Why this is enough: it mirrors Neo's constructions—Ajtai with **pay-per-bit** embedding and S-homomorphism (§3), one sum-check over an **extension of a small prime field** (§2.1, §1.3), CCS→ME relations (§4.1), RLC with **small-norm challenges** (§3.4, §4.5), DEC for norm control (§4.6), and a final **Spartan(+FRI)** compression (§1.5).&#x20;
+Why this is enough: it mirrors Neo's constructions—Ajtai with **pay-per-bit** embedding and S-homomorphism (§3), one sum-check over an **extension of a small prime field** (§2.1, §1.3), CCS→ME relations (§4.1), RLC with **small-norm challenges** (§3.4, §4.5), DEC for norm control (§4.6), and a final **Spartan2 (Hash‑MLE PCS)** compression (§1.5).&#x20;
 
 ---
 
@@ -85,7 +85,7 @@ Why this is enough: it mirrors Neo's constructions—Ajtai with **pay-per-bit** 
 
 ### `neo-spartan-bridge/`
 
-* **Only** translates the final linearized **ME(b,L)** claim to **Spartan2(+real FRI)** over the same small field; folding stays hash-free and small-field native.&#x20;
+* **Only** translates the final linearized **ME(b,L)** claim to **Spartan2 (Hash‑MLE PCS)** over the same small field; folding stays hash-free and small-field native.&#x20;
 
 ### `neo-integration/` (tests-only crate)
 
@@ -131,7 +131,7 @@ Why this is enough: it mirrors Neo's constructions—Ajtai with **pay-per-bit** 
   ```
   e2e_fold_then_dec.rs        # Π_CCS → Π_RLC → Π_DEC roundtrip on small CCS
   composition_ks.rs           # composition theorem shape (restricted/relaxed KS)
-  spartan_bridge_smoke.rs     # ME → Spartan2(+FRI) smoke test
+  spartan_bridge_smoke.rs     # ME → Spartan2 (Hash‑MLE PCS) smoke test
   ```
 
 > **Testing structure:** Each crate has its own `tests/` directory with `#[cfg(test)]` annotated test modules, keeping tests separate from implementation code. Only cross-crate integration tests live in `neo-integration`.
@@ -215,7 +215,7 @@ use neo_spartan_bridge::compress_me_to_spartan;
 1. **Embed & commit:** $z=x||w$ → $Z=\text{Decomp}_b(z)$ → $c=L(Z)$. (**MCS**)&#x20;
 2. **Π\_{\text{CCS}} (one sum-check over $K$):** build $Q$ batching CCS $F$, range polynomials, eval ties; rerandomize to $(\alpha',r')$; output $k$ **ME(b,L)**.&#x20;
 3. **Π\_{\text{RLC}}:** sample $\rho_i\in C$; fold $k{+}1\to 1$ to **ME(B,L)**; norm bound uses $T$.&#x20;
-4. **Π\_{\text{DEC}}:** split base-$b$, verify recomposition; return $k$ **ME(b,L)**. Iterate; compress once via Spartan2(+FRI).&#x20;
+4. **Π\_{\text{DEC}}:** split base-$b$, verify recomposition; return $k$ **ME(b,L)**. Iterate; compress once via Spartan2 (Hash‑MLE PCS).&#x20;
 
 ---
 
@@ -224,4 +224,4 @@ use neo_spartan_bridge::compress_me_to_spartan;
 * Exactly **one** sum-check over $K=\mathbb F_{q^2}$ (lives only in `neo-fold`); never over a ring.&#x20;
 * **Ajtai always on**; **decomposition/range checks are mandatory** and live inside the same transcript as CCS.&#x20;
 * **Strong sampler $C$** with invertible differences and bounded expansion $T$ must be used for Π\_{\text{RLC}}.&#x20;
-* **Compression only at the end** via Spartan2(+FRI) over the same small field; no simulated components anywhere.&#x20;
+* **Compression only at the end** via Spartan2 (Hash‑MLE PCS) over the same small field; no simulated components anywhere.&#x20;

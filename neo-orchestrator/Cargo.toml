@@ -4,21 +4,21 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-thiserror       = "1"
-neo-ccs         = { path = "../neo-ccs" }
-neo-commit      = { path = "../neo-commit" }
-neo-math      = { path = "../crates/neo-math" }
-neo-fold        = { path = "../neo-fold" }
-neo-sumcheck    = { path = "../neo-sumcheck" }
-neo-arithmetize = { path = "../neo-arithmetize" }
-neo-modint      = { path = "../neo-modint" }
-neo-ring        = { path = "../neo-ring" }
-neo-decomp      = { path = "../neo-decomp" }
-p3-field        = "0.3"
-p3-matrix       = "0.3"
-spartan2        = { git = "https://github.com/microsoft/Spartan2.git", rev = "cc21201d0d0293794ccc8ddd24903a9e570afb6e", default-features = false }
-memchr          = "2.0"
-bincode         = "1.0"
+# Modern Neo crates
+neo-params = { path = "../crates/neo-params" }
+neo-math = { path = "../crates/neo-math" }
+neo-ajtai = { path = "../crates/neo-ajtai" }
+neo-ccs = { path = "../crates/neo-ccs" }
+neo-fold = { path = "../crates/neo-fold" }
+neo-challenge = { path = "../crates/neo-challenge" }
+neo-spartan-bridge = { path = "../crates/neo-spartan-bridge" }
+
+# External dependencies
+thiserror.workspace = true
+p3-field.workspace = true
+p3-matrix.workspace = true
+anyhow.workspace = true
+bincode.workspace = true
 
 [features]
 default = []

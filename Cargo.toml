@@ -8,10 +8,11 @@ members = [
   "crates/neo-fold",
   "crates/neo-challenge",
   "crates/neo-spartan-bridge",
+  # Main applications
+  "neo-main",
+  "neo-orchestrator",
   # Other existing crates (temporarily disabled)
-  # "neo-main",
   # "neo-arithmetize",
-  # "neo-orchestrator",
   # "neo-bench",
 ]
 resolver = "2"
@@ -26,23 +27,19 @@ thiserror = "2"
 subtle = "2.6"
 rayon = "1.10"
 
-# Plonky3 field and crypto operations (core only)
+# Plonky3 core (Poseidon2 transcript only)
 p3-field = "0.3.0"
 p3-goldilocks = { version = "0.3.0", default-features = false }
-p3-matrix = "0.3.0"
-p3-symmetric = "0.3.0"   # Poseidon2 hashing for Fiat-Shamir
+p3-matrix = "0.3.0"    # Still needed by some crates, will remove in separate cleanup
+p3-symmetric = "0.3.0"    # Poseidon2 for FS transcript
 p3-poseidon2 = "0.3.0"
 p3-challenger = "0.3.0"
-p3-fri = "0.3.0"
-p3-commit = "0.3.0"
-p3-merkle-tree = "0.3.0"
-p3-dft = "0.3.0"
 byteorder = "1.5"
 anyhow = "1.0"
 bincode = "1.3"
 
 # Spartan2 and circuit dependencies
-spartan2 = { git = "https://github.com/nicarq/Spartan2.git", rev = "8ce585450ca37289cb043a4f36d5b76ddf30e49c", default-features = false, features = ["p3_backend"] }
+spartan2 = { git = "https://github.com/nicarq/Spartan2.git", rev = "3842a8fda5cc9237d409e14a00b9eba5bb4fe1bb", default-features = false, features = ["p3_backend"] }
 bellpepper-core = { version = "0.4" }
 ff = { version = "0.13" }
 
@@ -66,4 +63,5 @@ edition = "2021"
 version = "0.1.0"
 authors = ["Nico Arqueros <nico.arquerosr@gmail.com>"]
 rust-version = "1.88"
+
 

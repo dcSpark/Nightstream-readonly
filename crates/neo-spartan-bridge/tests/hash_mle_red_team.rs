@@ -147,11 +147,10 @@ fn test_bridge_api_security() {
     if tampered_proof.len() > 5 {
         tampered_proof[5] ^= 1; // Flip a bit
         
-        let tampered_bundle = ProofBundle::new(
+        let tampered_bundle = ProofBundle::new_with_vk(
             tampered_proof,
+            bundle.vk.clone(),
             bundle.public_io_bytes.clone(),
-            bundle.fri_num_queries,
-            bundle.fri_log_blowup,
         );
         
         // This should fail verification
@@ -169,11 +168,10 @@ fn test_bridge_api_security() {
     if tampered_io.len() > 3 {
         tampered_io[3] ^= 1; // Flip a bit
         
-        let tampered_bundle2 = ProofBundle::new(
+        let tampered_bundle2 = ProofBundle::new_with_vk(
             bundle.proof.clone(),
+            bundle.vk.clone(),
             tampered_io,
-            bundle.fri_num_queries,
-            bundle.fri_log_blowup,
         );
         
         let result = verify_mle_hash_mle(&tampered_bundle2);

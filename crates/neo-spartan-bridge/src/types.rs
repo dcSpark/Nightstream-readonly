@@ -2,36 +2,44 @@ use serde::{Serialize, Deserialize};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct ProofBundle {
-    /// Spartan2 proof bytes (already include the FRI/PCS proof inside Spartan2's structure).
+    /// Spartan2 proof bytes (includes the Hash‑MLE PCS proof inside Spartan2's structure).
     pub proof: Vec<u8>,
+    /// Verifier key (serialized)
+    pub vk: Vec<u8>,
     /// Public IO you expect verifiers to re-encode identically (bridge header + public inputs).
     pub public_io_bytes: Vec<u8>,
-    /// Optional metrics
-    pub fri_num_queries: usize,
-    pub fri_log_blowup: usize,
-    pub size_bytes: usize,
 }
 
 impl ProofBundle {
+    pub fn new_with_vk(proof: Vec<u8>, vk: Vec<u8>, public_io_bytes: Vec<u8>) -> Self {
+        Self { proof, vk, public_io_bytes }
+    }
+
+    /// Legacy constructor for compatibility - FRI params are ignored (always 0)
+    #[deprecated(note = "FRI is no longer used. Use new_with_vk instead.")]
     pub fn new(
         proof: Vec<u8>,
         public_io_bytes: Vec<u8>, 
-        fri_num_queries: usize,
-        fri_log_blowup: usize,
+        _fri_num_queries: usize,  // Deprecated: retained for compatibility; always 0 (FRI is not used)
+        _fri_log_blowup: usize,   // Deprecated: retained for compatibility; always 0 (FRI is not used)
     ) -> Self {
-        let size_bytes = proof.len() + public_io_bytes.len();
         Self {
             proof,
+            vk: Vec::new(), // Empty VK for legacy compatibility
             public_io_bytes,
-            fri_num_queries,
-            fri_log_blowup,
-            size_bytes,
         }
     }
 
     pub fn total_size(&self) -> usize {
-        self.size_bytes
+        self.proof.len() + self.vk.len() + self.public_io_bytes.len()
     }
+
+    // Legacy accessors for compatibility
+    #[deprecated(note = "FRI is no longer used, returns 0")]
+    pub fn fri_num_queries(&self) -> usize { 0 }
+    
+    #[deprecated(note = "FRI is no longer used, returns 0")]
+    pub fn fri_log_blowup(&self) -> usize { 0 }
 }
 
 #[cfg(test)]
@@ -39,20 +47,18 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_proof_bundle_creation() {
-        let proof = vec![1, 2, 3, 4];
-        let io = vec![5, 6, 7];
-        
-        let bundle = ProofBundle::new(proof.clone(), io.clone(), 60, 2);
-        
-        assert_eq!(bundle.proof, proof);
-        assert_eq!(bundle.public_io_bytes, io);
-        assert_eq!(bundle.fri_num_queries, 60);
-        assert_eq!(bundle.fri_log_blowup, 2);
-        assert_eq!(bundle.size_bytes, 7); // 4 + 3
-        assert_eq!(bundle.total_size(), 7);
-        
-        println!("✅ ProofBundle serialization structure works");
+    fn bundle_sizes() {
+        let b = ProofBundle::new_with_vk(vec![1,2], vec![3], vec![4,5,6]);
+        assert_eq!(b.total_size(), 2+1+3);
+    }
+
+    #[test]
+    #[allow(deprecated)]
+    fn legacy_constructor() {
+        let b = ProofBundle::new(vec![1,2], vec![4,5,6], 100, 2);
+        assert_eq!(b.proof.len(), 2);
+        assert_eq!(b.public_io_bytes.len(), 3);
+        assert_eq!(b.fri_num_queries(), 0);
+        assert_eq!(b.fri_log_blowup(), 0);
     }
 }
-

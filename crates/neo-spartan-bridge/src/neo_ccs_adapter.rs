@@ -15,12 +15,12 @@ pub fn field_to_u64(f: F) -> u64 {
 }
 
 /// Convert signed i64 to field element (handling negatives correctly) 
-/// TODO: Find proper Goldilocks construction method
 pub fn i64_to_field(x: i64) -> F {
-    // Stub implementation - the actual conversion will be implemented
-    // once the proper Goldilocks field construction methods are identified
-    let _ = x; // Avoid unused variable warning
-    F::ZERO + F::ONE // Placeholder that compiles
+    if x >= 0 { 
+        F::from_u64(x as u64) 
+    } else { 
+        -F::from_u64((-x) as u64) 
+    }
 }
 
 /// Adapter for neo-spartan-bridge BridgePublicIO
@@ -117,8 +117,11 @@ mod tests {
         assert_eq!(u, 1);
 
         let back = i64_to_field(42);
-        // Stub implementation always returns F::ONE, so this test just validates compilation
-        assert_eq!(back, F::ONE);
+        assert_eq!(back, F::from_u64(42));
+        
+        // Test negative numbers
+        let neg = i64_to_field(-42);
+        assert_eq!(neg, -F::from_u64(42));
     }
 
     #[test]

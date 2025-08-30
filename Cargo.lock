@@ -702,6 +702,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "neo-main"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "neo-ajtai",
+ "neo-ccs",
+ "neo-challenge",
+ "neo-fold",
+ "neo-math",
+ "neo-orchestrator",
+ "neo-params",
+ "neo-spartan-bridge",
+ "p3-field",
+ "p3-matrix",
+ "rand 0.9.2",
+]
+
+[[package]]
 name = "neo-math"
 version = "0.1.0"
 dependencies = [
@@ -714,6 +733,24 @@ dependencies = [
  "rayon",
  "serde",
  "subtle",
+ "thiserror 2.0.16",
+]
+
+[[package]]
+name = "neo-orchestrator"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "bincode",
+ "neo-ajtai",
+ "neo-ccs",
+ "neo-challenge",
+ "neo-fold",
+ "neo-math",
+ "neo-params",
+ "neo-spartan-bridge",
+ "p3-field",
+ "p3-matrix",
  "thiserror 2.0.16",
 ]
 
@@ -738,13 +775,8 @@ dependencies = [
  "neo-ccs",
  "neo-math",
  "p3-challenger",
- "p3-commit",
- "p3-dft",
  "p3-field",
- "p3-fri",
  "p3-goldilocks",
- "p3-matrix",
- "p3-merkle-tree",
  "p3-poseidon2",
  "p3-symmetric",
  "rand 0.9.2",
@@ -843,21 +875,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "p3-commit"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "11369db94eeedae4cbcd6627685ded13d2b1eef87fa4f111bca7df2ddfef75c8"
-dependencies = [
- "itertools 0.14.0",
- "p3-challenger",
- "p3-dft",
- "p3-field",
- "p3-matrix",
- "p3-util",
- "serde",
-]
-
-[[package]]
 name = "p3-dft"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -888,26 +905,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "p3-fri"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "8c4e95bfdd1bf5a798152b65a54c02e04dec23c4b276ef5eb1a808c61b14cf63"
-dependencies = [
- "itertools 0.14.0",
- "p3-challenger",
- "p3-commit",
- "p3-dft",
- "p3-field",
- "p3-interpolation",
- "p3-matrix",
- "p3-maybe-rayon",
- "p3-util",
- "rand 0.9.2",
- "serde",
- "tracing",
-]
-
-[[package]]
 name = "p3-goldilocks"
 version = "0.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -923,18 +920,6 @@ dependencies = [
  "paste",
  "rand 0.9.2",
  "serde",
-]
-
-[[package]]
-name = "p3-interpolation"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "001c8017284709b5cbb1c78ffa6423db2e45c58ae3b97a7ce73cd273626ab3f4"
-dependencies = [
- "p3-field",
- "p3-matrix",
- "p3-maybe-rayon",
- "p3-util",
 ]
 
 [[package]]
@@ -970,24 +955,6 @@ dependencies = [
  "p3-symmetric",
  "p3-util",
  "rand 0.9.2",
-]
-
-[[package]]
-name = "p3-merkle-tree"
-version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f632c6bc686cc25b145ca6382b4ed3926003dbf66f4d7171ae5cdcf4d3d02a67"
-dependencies = [
- "itertools 0.14.0",
- "p3-commit",
- "p3-field",
- "p3-matrix",
- "p3-maybe-rayon",
- "p3-symmetric",
- "p3-util",
- "rand 0.9.2",
- "serde",
- "tracing",
 ]
 
 [[package]]
@@ -1398,7 +1365,7 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "spartan2"
 version = "0.4.0"
-source = "git+https://github.com/nicarq/Spartan2.git?rev=8ce585450ca37289cb043a4f36d5b76ddf30e49c#8ce585450ca37289cb043a4f36d5b76ddf30e49c"
+source = "git+https://github.com/nicarq/Spartan2.git?rev=3842a8fda5cc9237d409e14a00b9eba5bb4fe1bb#3842a8fda5cc9237d409e14a00b9eba5bb4fe1bb"
 dependencies = [
  "bellpepper",
  "bellpepper-core",

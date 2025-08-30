@@ -1,109 +1,73 @@
+// crates/neo-spartan-bridge/src/hash_mle.rs
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use ff::PrimeField;
-
-// ⚠️ SECURITY WARNING: This module uses Keccak256 transcript which is INCONSISTENT
-// with Neo's unified Poseidon2 transcript design. This is a temporary workaround
-// until Spartan2 provides Poseidon2 transcript support.
-//
-// For production use, this should be feature-gated under #[cfg(feature = "dev")]
-// or replaced with a Poseidon2-compatible transcript.
-
-// Hash-MLE backend with Goldilocks engine (p3_backend feature enabled)
+use spartan2::traits::{Engine, pcs::PCSEngineTrait, transcript::TranscriptEngineTrait};
 use spartan2::provider::{
-    keccak::Keccak256Transcript,     // ⚠️ INCONSISTENT: Should be Poseidon2 for Neo compliance
-    GoldilocksP3MerkleMleEngine as E,  // Use Goldilocks engine from p3_backend  
-    pcs::merkle_mle_pc::HashMlePCS as PCSImpl,
+    GoldilocksP3MerkleMleEngine as E,
+    pcs::merkle_mle_pc_p3::HashMlePcsP3 as PCSImpl,
 };
 
-use spartan2::traits::{
-    Engine,
-    pcs::PCSEngineTrait as SpartanPcs,
-    transcript::TranscriptEngineTrait,
-};
-
-/// Field and PCS aliases for ergonomics.
-pub type F   = <E as Engine>::Scalar;
-pub type GE  = <E as Engine>::GE;
+pub type F = <E as Engine>::Scalar;
 pub type PCS = PCSImpl<E>;
 
-/// The fork's types for Hash-MLE.
 use spartan2::provider::pcs::merkle_mle_pc::{
-    HashMleCommitment as Commitment,
-    HashMleEvaluationArgument as EvaluationArgument,
+  HashMleCommitment as Commitment, 
+  HashMleEvaluationArgument as EvaluationArgument,
 };
 
-/// Portable proof object you can bincode and ship around.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct HashMleProof {
-    /// Base commitment (Merkle root + mode baked in).
-    pub commitment: Commitment<E>,
-    /// Evaluation point r = (r_0, ..., r_{m-1})
-    pub point: Vec<F>,
-    /// Claimed value v(r)
-    pub eval: F,
-    /// Merkle membership + fold witnesses per round
-    pub arg: EvaluationArgument<E>,
+pub struct HashMleProof { 
+    pub commitment: Commitment<E>, 
+    pub point: Vec<F>, 
+    pub eval: F, 
+    pub arg: EvaluationArgument<E> 
 }
 
 impl HashMleProof {
-    pub fn to_bytes(&self) -> Result<Vec<u8>> { Ok(bincode::serialize(self)?) }
-    pub fn from_bytes(bytes: &[u8]) -> Result<Self> { Ok(bincode::deserialize(bytes)?) }
+    pub fn to_bytes(&self) -> Result<Vec<u8>> { 
+        Ok(bincode::serialize(self)?) 
+    }
+    
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self> { 
+        Ok(bincode::deserialize(bytes)?) 
+    }
 }
 
-/// Prove: commit to `poly` (|poly|=2^m), then prove v(r)=eval at `point` (|point|=m).
-/// 
-/// ⚠️ SECURITY WARNING: This function uses Keccak256 transcript, which breaks Neo's
-/// unified Poseidon2 transcript security model. Use only for development/testing.
 pub fn prove_hash_mle(poly: &[F], point: &[F]) -> Result<HashMleProof> {
-    if !poly.len().is_power_of_two() {
-        anyhow::bail!("Hash-MLE: poly length must be a power of two; got {}", poly.len());
+    if !poly.len().is_power_of_two() { 
+        anyhow::bail!("poly len must be power of two"); 
     }
-    if poly.len() != (1usize << point.len()) {
-        anyhow::bail!("Hash-MLE: poly length {} != 2^m with m={}", poly.len(), point.len());
+    if poly.len() != (1usize << point.len()) { 
+        anyhow::bail!("poly len {} != 2^{}", poly.len(), point.len()); 
     }
-
-    // Setup → blind → commit (width is effectively "infinite"; one Merkle layer)
-    let (ck, _vk) = PCS::setup(b"neo-bridge/hash-mle", poly.len());
-    let blind     = PCS::blind(&ck, poly.len());
-    let commit    = PCS::commit(&ck, poly, &blind, false)?;
-
-    // Prove with Keccak transcript (TODO: unify to Poseidon2 when available)
-    let mut tp = Keccak256Transcript::<E>::new(b"neo-bridge/hash-mle");
-    let (eval, arg) = PCS::prove(&ck, &mut tp, &commit, poly, &blind, point)?;
-
-    Ok(HashMleProof { commitment: commit, point: point.to_vec(), eval, arg })
+    
+    let (ck, _vk) = PCS::setup(b"neo/hash-mle/poseidon2", poly.len());
+    let r = PCS::blind(&ck, poly.len());
+    let c = PCS::commit(&ck, poly, &r, true)?;
+    
+    let mut t = <E as Engine>::TE::new(b"neo/hash-mle/poseidon2");
+    let (eval, arg) = PCS::prove(&ck, &mut t, &c, poly, &r, point)?;
+    
+    Ok(HashMleProof { commitment: c, point: point.to_vec(), eval, arg })
 }
 
-/// Verify a Hash‑MLE proof (public: commitment root, point, eval, arg).
-/// 
-/// ⚠️ SECURITY WARNING: This function uses Keccak256 transcript, which breaks Neo's
-/// unified Poseidon2 transcript security model. Use only for development/testing.
 pub fn verify_hash_mle(prf: &HashMleProof) -> Result<()> {
-    // Setup a fresh VK (parameters are fixed by the PCS; no SRS)
-    let (_ck, vk) = PCS::setup(b"neo-bridge/hash-mle", 0);
-
-    let mut tv = Keccak256Transcript::<E>::new(b"neo-bridge/hash-mle");
-    PCS::verify(&vk, &mut tv, &prf.commitment, &prf.point, &prf.eval, &prf.arg)?;
-    Ok(())
+    let (_ck, vk) = PCS::setup(b"neo/hash-mle/poseidon2", 0);
+    let mut t = <E as Engine>::TE::new(b"neo/hash-mle/poseidon2");
+    PCS::verify(&vk, &mut t, &prf.commitment, &prf.point, &prf.eval, &prf.arg)
+        .map_err(|e| anyhow::anyhow!("Hash-MLE verification failed: {:?}", e))
 }
 
-/// Tiny helper if you want a public-IO header for verification caching/logging.
 pub fn encode_public_io(prf: &HashMleProof) -> Vec<u8> {
     let mut out = Vec::new();
-    
-    // Serialize the commitment (contains the Merkle root)
-    if let Ok(commitment_bytes) = bincode::serialize(&prf.commitment) {
-        out.extend_from_slice(&commitment_bytes);
-    }
-    
-    // m = point length
+    let cb = bincode::serialize(&prf.commitment).expect("serialize");
+    out.extend_from_slice(&(cb.len() as u64).to_le_bytes()); 
+    out.extend_from_slice(&cb);
     out.extend_from_slice(&(prf.point.len() as u64).to_le_bytes());
-    // point limbs
-    for x in &prf.point {
-        out.extend_from_slice(&x.to_repr().as_ref());
+    for x in &prf.point { 
+        out.extend_from_slice(&x.to_repr().as_ref()); 
     }
-    // eval
     out.extend_from_slice(&prf.eval.to_repr().as_ref());
     out
 }
@@ -139,24 +103,9 @@ mod tests {
         let prf = prove_hash_mle(&poly, &point).expect("prove");
         verify_hash_mle(&prf).expect("verify original");
         
-        // Try serialization - if this fails we'll handle it
-        match prf.to_bytes() {
-            Ok(bytes) => {
-                match HashMleProof::from_bytes(&bytes) {
-                    Ok(prf2) => {
-                        verify_hash_mle(&prf2).expect("verify deserialized");
-                    }
-                    Err(e) => {
-                        println!("Deserialization failed: {}", e);
-                        // This is acceptable for now - the core prove/verify works
-                    }
-                }
-            }
-            Err(e) => {
-                println!("Serialization failed: {}", e);
-                // This is acceptable for now - the core prove/verify works
-            }
-        }
+        let bytes = prf.to_bytes().expect("serialize");
+        let prf2 = HashMleProof::from_bytes(&bytes).expect("deserialize");
+        verify_hash_mle(&prf2).expect("verify deserialized");
     }
 
     #[test]

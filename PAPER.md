@@ -32,7 +32,7 @@ This document specifies **normative requirements per crate** for implementing *N
 | `neo-challenge`      | Strong sampling set $C=\{\mathrm{rot}(a)\}$; invertibility property; expansion $T$.                                                                                | RLC needs invertible deltas and bounded expansion.                                        |
 | `neo-ccs`            | CCS loader; linearized helpers; **MCS/ME** relation types.                                                                                                             | Shapes the exact claims reductions manipulate.                                            |
 | `neo-fold`           | **One** FS transcript; **one** sum-check over $K$; reductions $\Pi_{\mathrm{CCS}},\Pi_{\mathrm{RLC}},\Pi_{\mathrm{DEC}}$ + composition.                           | Single sum‑check + three‑reduction pipeline (paper §§4–5).                                |
-| `neo-spartan-bridge` | Translate final $ME(b,L)$ to Spartan2 (real FRI backend only).                                                                                                       | Confines succinct compression to last mile.                                               |
+| `neo-spartan-bridge` | Translate final $ME(b,L)$ to Spartan2 (Hash‑MLE PCS, Poseidon2 transcript).                                                                                         | Confines succinct compression to last mile.                                               |
 | `neo-tests`          | **Integration** tests & cross‑crate benches only.                                                                                                                      | Ensures end‑to‑end correctness across crate boundaries.                                   |
 
 ---
@@ -140,7 +140,7 @@ This document specifies **normative requirements per crate** for implementing *N
 | ---------- | --------------------------------------------------------------------------------------------------------------------------- |
 | **MUST**   | Translate final $ME(b,L)$ into a **Spartan2** proof (setup/prove/verify) over small fields; maintain binding to public IO. |
 | **MUST**   | Keep transcript/IO linkage compatible with `neo-fold`.                                                                      |
-| **MUST**   | Use **real** FRI only (as required by Spartan2's PCS); no simulated paths.                                                  |
+| **MUST**   | Use **Hash-MLE PCS** with Poseidon2 transcript (as provided by Spartan2); no FRI components.                                |
 | **SHOULD** | Report proof size/time.                                                                                                     |
 
 *Tests:* in‑crate (round‑trip on tiny ME instances; IO binding).
@@ -189,4 +189,4 @@ This document specifies **normative requirements per crate** for implementing *N
 
 ### Reference
 
-All terminology and reductions follow *Neo: Lattice-based folding scheme for CCS over small fields and pay-per-bit commitments* (Nguyen & Setty, ePrint 2025/294). In particular: one sum‑check over an **extension of a small prime field** (single transcript), Ajtai matrix commitments with pay‑per‑bit decomposition and verified openings, the strong‑sampler/expansion analysis and the guard $(k{+}1)T(b{-}1)<B$, and last‑mile succinctness via a real FRI PCS.
+All terminology and reductions follow *Neo: Lattice-based folding scheme for CCS over small fields and pay-per-bit commitments* (Nguyen & Setty, ePrint 2025/294). In particular: one sum‑check over an **extension of a small prime field** (single transcript), Ajtai matrix commitments with pay‑per‑bit decomposition and verified openings, the strong‑sampler/expansion analysis and the guard $(k{+}1)T(b{-}1)<B$, and last‑mile succinctness via Hash-MLE PCS with Poseidon2 transcripts.

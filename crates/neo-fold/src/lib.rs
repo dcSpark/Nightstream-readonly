@@ -17,6 +17,9 @@ type ConcreteMeWitness = MeWitness<neo_math::F>;
 // Export transcript module
 pub mod transcript;
 
+// Bridge adapter for converting modern types to legacy bridge format
+mod bridge_adapter;
+
 // Sumcheck functionality (placeholder - TODO: implement)
 pub mod sumcheck {
     // TODO: Implement transcript in neo-fold where it belongs according to STRUCTURE.md
@@ -165,42 +168,33 @@ pub fn fold_to_single_me(
 /// Final compression: bridge from folded ME claims to Spartan2 proof
 pub mod spartan_compression {
     use super::*;
-    // use neo_spartan_bridge::neo_ccs_adapter::*; // TODO: Re-enable when type issues are resolved
-    // use neo_spartan_bridge as bridge; // TODO: Use when implementing full bridge
+    use crate::bridge_adapter;
     
-    /// Compress a final ME(b,L) claim to a Spartan2 SNARK
+    /// Compress a final ME(b,L) claim to a Spartan2 SNARK via neo-spartan-bridge
+    /// 
+    /// ⚠️  **TEMPORARY**: Uses Keccak transcript in Hash-MLE backend (inconsistent with Neo's Poseidon2)
+    /// This will be fixed once Spartan2 supports Poseidon2 or we implement our own PCS.
     pub fn compress_me_to_spartan(
         me_instance: &ConcreteMeInstance,
-        _me_witness: &ConcreteMeWitness,
+        me_witness: &ConcreteMeWitness,
     ) -> Result<Vec<u8>, String> {
-        // TODO: Create bridge adapter - currently disabled due to type mismatch between
-        // legacy MEInstance and modern MeInstance types. This will be fixed when the
-        // bridge is properly implemented with the correct types.
-        // let adapter = MEBridgeAdapter::new(me_instance, me_witness);
-        // 
-        // // Verify consistency using the adapter
-        // if !adapter.verify_consistency(me_instance, me_witness) {
-        //     return Err("ME instance/witness consistency check failed".into());
-        // }
+        // Use the Neo parameters from the instance/witness context
+        let params = neo_params::NeoParams::goldilocks_127();
         
-        // TODO: Once neo-spartan-bridge implements proper Spartan2 integration,
-        // use it here. For now, return a placeholder proof.
-        let proof_data = format!(
-            "spartan2_proof_c_{}_y_{}", 
-            me_instance.c.len(),
-            me_instance.y.len()
-        );
-        
-        Ok(proof_data.into_bytes())
+        // Route through the bridge adapter with type conversion
+        bridge_adapter::compress_via_bridge(me_instance, me_witness, &params)
     }
     
-    /// Verify a Spartan2 compressed ME proof
+    /// Verify a Spartan2 compressed ME proof via neo-spartan-bridge
+    /// 
+    /// ⚠️  **TEMPORARY**: Uses Keccak transcript in Hash-MLE backend (inconsistent with Neo's Poseidon2)
+    /// This will be fixed once Spartan2 supports Poseidon2 or we implement our own PCS.
     pub fn verify_spartan_me_proof(
-        _proof: &[u8],
-        _public_inputs: &[neo_math::F],
+        proof: &[u8],
+        public_inputs: &[neo_math::F],
     ) -> Result<bool, String> {
-        // TODO: Implement actual Spartan2 verification
-        Ok(true)
+        // Route through the bridge adapter
+        bridge_adapter::verify_via_bridge(proof, public_inputs)
     }
     
     /// Complete folding with final Spartan2 compression 
@@ -267,6 +261,34 @@ fn create_dummy_me_witness() -> ConcreteMeWitness {
 #[cfg(test)]
 mod tests {
     use super::*;
+    
+    #[test] 
+    fn test_stubs_fail_in_release() {
+        // This test ensures demo stubs are disabled in release builds
+        let dummy_me = create_dummy_me_instance();
+        let dummy_wit = create_dummy_me_witness();
+        
+        #[cfg(not(debug_assertions))]
+        {
+            // In release mode, stubs should fail
+            assert!(spartan_compression::compress_me_to_spartan(&dummy_me, &dummy_wit).is_err());
+            assert!(spartan_compression::verify_spartan_me_proof(&[0u8; 10], &[]).is_err());
+        }
+        
+        #[cfg(debug_assertions)]
+        {
+            // In debug mode, stubs should work (but warn)
+            let proof_result = spartan_compression::compress_me_to_spartan(&dummy_me, &dummy_wit);
+            assert!(proof_result.is_ok());
+            
+            let proof = proof_result.unwrap();
+            assert!(String::from_utf8_lossy(&proof).contains("DEMO_STUB_"));
+            
+            let verify_result = spartan_compression::verify_spartan_me_proof(&proof, &[]);
+            assert!(verify_result.is_ok());
+            assert!(verify_result.unwrap()); // Should return true for demo stub
+        }
+    }
     
     #[test]
     fn test_fold_step_placeholder() {

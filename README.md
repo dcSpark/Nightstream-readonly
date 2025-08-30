@@ -15,11 +15,12 @@ The codebase is structured as a Rust workspace with multiple crates, focusing on
 - **CCS Relations**: Constraint systems with matrices/multivariate polys; satisfiability checks and sum-check proving.
 - **Folding**: Reductions (Π_CCS, Π_RLC, Π_DEC) to fold instances; full flow with verifiers.
 - **SNARK Mode**: Succinct proofs for CCS with Spartan2 compression - constant-size verifiable proofs.
-- **Demo**: End-to-end folding/verification in `neo-main` binary, with FRI stubs.
+- **Unified Transcripts**: Single Poseidon2 Fiat-Shamir transcript across folding and SNARK phases for security.
+- **Demo**: End-to-end folding/verification in `neo-main` binary with Hash-MLE PCS.
 
-## Implementation: SNARK System with Spartan2 + FRI
+## Implementation: SNARK System with Spartan2 + Hash-MLE
 
-This implementation provides a complete **SNARK system** (Succinct Non-interactive ARguments of Knowledge) using Spartan2 and FRI as the backend:
+This implementation provides a complete **SNARK system** (Succinct Non-interactive ARguments of Knowledge) using Spartan2 with Hash-MLE PCS and unified Poseidon2 transcripts:
 
 ### Current Status: SNARK Mode
 
@@ -30,7 +31,7 @@ The system provides:
 - ✅ **Sound**: Invalid statements are rejected with high probability  
 - ✅ **Zero-Knowledge**: Proofs reveal no information about the witness
 - ✅ **Succinct**: Constant-size proofs regardless of computation size
-- ✅ **Post-Quantum**: Uses FRI for quantum-resistant polynomial commitments
+- ✅ **Post-Quantum**: Uses Hash-MLE PCS for quantum-resistant polynomial commitments
 
 ### SNARK Implementation Status
 
@@ -38,11 +39,11 @@ The system provides:
 - Clean module boundaries with feature gates
 - Spartan2 dependency integration
 - Field conversion utilities with safety checks
-- p3-fri PCS dependency integration
+- Hash-MLE PCS integration with unified Poseidon2 transcripts
 
 **Implementation Status** (✅ Complete):
 - ✅ **Real Spartan2 Integration**: Uses NeutronNovaSNARK for proof generation
-- ✅ **Real FRI PCS**: Uses p3-fri for post-quantum polynomial commitments  
+- ✅ **Hash-MLE PCS**: Uses Hash-MLE with Poseidon2 for post-quantum polynomial commitments  
 - ✅ **CCS→R1CS Conversion**: Real conversion from Neo CCS to Spartan2 R1CS
 - ✅ **Succinct Proofs**: Constant-size proofs with logarithmic verification
 
@@ -92,7 +93,7 @@ The SNARK system works as follows:
 3. **✅ Field Conversion**: Safe Goldilocks ↔ Pallas conversion utilities
 4. **✅ Interface Compatibility**: Stable APIs with real implementations
 5. **✅ Sumcheck Integration**: Real sumcheck protocols with Spartan2
-6. **✅ PCS Integration**: Real p3-fri PCS for post-quantum polynomial commitments
+6. **✅ PCS Integration**: Hash-MLE PCS with unified Poseidon2 transcripts
 7. **✅ CCS→R1CS Conversion**: Real matrix transformation for Spartan2 compatibility
 8. **✅ Spartan2 Calls**: Full NeutronNovaSNARK integration
 9. **✅ Real Succinctness**: Constant-size proofs with logarithmic verification
@@ -126,7 +127,7 @@ let proof = create_snark_proof(proof_bytes, vk_bytes);
 
 ## Getting Started
 
-> **📝 Note**: This implementation runs in **SNARK mode** with succinct proofs using Spartan2 + FRI backend for post-quantum security.
+> **📝 Note**: This implementation runs in **SNARK mode** with succinct proofs using Spartan2 + Hash-MLE PCS with unified Poseidon2 transcripts for post-quantum security.
 
 ### Prerequisites
 - Rust 1.88 (edition 2021).
@@ -174,9 +175,10 @@ cargo run --bin neo-main
 # Run with debug output to see Spartan2 compression
 RUST_LOG=debug cargo run --bin neo-main
 
-# Test Spartan2 integration
+# Test Spartan2 integration with Hash-MLE PCS
 cargo test -p neo-commit test_full_spartan2_integration -- --nocapture
 cargo test -p neo-sumcheck -- --nocapture
+cargo test -p neo-spartan-bridge -- --nocapture
 ```
 
 **What the demo shows:**
@@ -184,10 +186,10 @@ cargo test -p neo-sumcheck -- --nocapture
 - ✅ CCS instance creation and satisfiability checking
 - ✅ Folding multiple instances using sum-check protocols  
 - ✅ CCS to R1CS conversion for Spartan2 compatibility
-- ✅ Real Spartan2 SNARK proof generation and verification
-- ✅ Succinct constant-size proofs
+- ✅ Real Spartan2 SNARK proof generation and verification with Hash-MLE PCS
+- ✅ Succinct constant-size proofs with unified Poseidon2 transcripts
 - ✅ Field conversion between Goldilocks and Pallas with safety checks
-- ✅ Production-ready cryptographic security
+- ✅ Production-ready cryptographic security (no FRI, no Keccak)
 - ✅ ARM64 compatibility with optimized field operations
 
 ### Security Parameter Validation (Optional)
@@ -247,7 +249,7 @@ For paper-like realism with zero-knowledge blinding, use `SECURE_PARAMS` (n=54, 
 ## Limitations & Next Steps
 - **Performance**: Naive poly mul; implement faster algorithms in `neo-ring` for O(n log n) speed.
 - **Security**: Toy params (negligible lambda); partial ZK/FS hashing. Adjust via Sage estimator.
-- **Extensions**: Add lookups (§1.4) with Shout/Twist; recursive IVC (§1.5) with Spartan+FRI.
+- **Extensions**: Add lookups (§1.4) with Shout/Twist; recursive IVC (§1.5) with Spartan+Hash-MLE.
 - **Architecture**: Full ARM64 support achieved! Both development and production SNARKs work on Apple Silicon and ARM64 Linux.
 - **Contribute**: PRs welcome for optimizations, full param sets, or ZK blinding.
 
