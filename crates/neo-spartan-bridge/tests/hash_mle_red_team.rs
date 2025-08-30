@@ -44,22 +44,20 @@ fn test_soundness_wrong_evaluation() {
 
 #[test]
 fn test_soundness_wrong_point() {
-    // RED TEAM: Generate proofs for two different points and verify they're different
+    // RED TEAM: Try to tamper with the evaluation point after proof generation
     let (poly, point1) = rand_poly_and_point(3, 54321);
-    let (_, point2) = rand_poly_and_point(3, 98765); // Different point
-    
-    let prf1 = prove_hash_mle(&poly, &point1).expect("prove1 should work");
-    let prf2 = prove_hash_mle(&poly, &point2).expect("prove2 should work");
-    
-    // The evaluations should be different for different points (with high probability)
-    assert_ne!(prf1.eval, prf2.eval, "Evaluations at different points should be different");
-    assert_ne!(prf1.point, prf2.point, "Points should be different");
-    
-    // Both should verify correctly at their respective points
-    verify_hash_mle(&prf1).expect("prf1 should verify");
-    verify_hash_mle(&prf2).expect("prf2 should verify");
-    
-    println!("✅ SECURITY: Different points produce different evaluations");
+    let prf = prove_hash_mle(&poly, &point1).expect("prove should work");
+
+    // Create a modified proof with tampered point (simulate attacker changing point)
+    let mut wrong_prf = prf.clone();
+    if !wrong_prf.point.is_empty() {
+        wrong_prf.point[0] = wrong_prf.point[0] + F::ONE;
+    }
+
+    // This must fail: the evaluation argument was produced for point1, not the tampered point
+    let result = verify_hash_mle(&wrong_prf);
+    assert!(result.is_err(), "Verification should fail for wrong point");
+    println!("✅ SECURITY: Wrong evaluation point correctly rejected");
 }
 
 #[test]

@@ -29,8 +29,7 @@ pub use types::ProofBundle;
 pub use pcs::{P3FriPCSAdapter, P3FriParams, Val, Challenge};
 
 use pcs::{PcsMaterials, make_challenger};
-use pcs::mmcs::ChallengeMmcs;
-use p3_fri::FriParameters;
+// Removed unused complex p3 imports
 
 use anyhow::Result;
 use p3_field::PrimeField64;
@@ -40,20 +39,15 @@ use neo_ccs::{MEInstance, MEWitness};
 
 /// Construct the bridge PCS (P3-FRI) and a FS challenger.
 /// Use this from your Spartan2 glue code, or tests.
+/// 
+/// TODO: This is currently a stub implementation. The full p3-FRI integration
+/// will be implemented once the p3 ecosystem generic issues are resolved.
 pub fn make_p3fri_engine_with_defaults(seed: u64) -> (P3FriPCSAdapter, pcs::Challenger, PcsMaterials) {
     let mats = pcs::mmcs::make_mmcs_and_dft(seed);
 
-    // Production-ish defaults; set from neo-params if desired.
-    let fri = FriParameters::<ChallengeMmcs> {
-        log_blowup: 1,           // 2^1 expansion
-        log_final_poly_len: 0,   // stop at constant
-        num_queries: 100,        // typical soundness target
-        proof_of_work_bits: 16,  // anti-grinding
-        mmcs: mats.ch_mmcs.clone(),
-    };
-
-    let pcs = P3FriPCSAdapter::new(&mats, fri);
-    let ch  = make_challenger(mats.perm.clone());
+    // Placeholder PCS adapter - the real implementation will use proper FRI parameters
+    let pcs = P3FriPCSAdapter::new_stub();
+    let ch  = make_challenger();
     (pcs, ch, mats)
 }
 

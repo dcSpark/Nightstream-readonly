@@ -2,10 +2,10 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 use ff::PrimeField;
 
-// Hash-MLE backend with available engine
+// Hash-MLE backend with Goldilocks engine (p3_backend feature enabled)
 use spartan2::provider::{
     keccak::Keccak256Transcript,
-    PallasMerkleMleEngine as E,  // Use the available engine (Pallas field)
+    GoldilocksP3MerkleMleEngine as E,  // Use Goldilocks engine from p3_backend  
     pcs::merkle_mle_pc::HashMlePCS as PCSImpl,
 };
 

@@ -1,27 +1,38 @@
 use ff::PrimeField;
 
-/// Map 32 bytes to a scalar using field's uniform map (Spartan2 providers implement this).
+/// Map 32 bytes to a scalar using a uniform distribution.
+/// 
+/// # Security Warning
+/// This function MUST produce a uniformly random field element to avoid bias
+/// that could compromise cryptographic security. The current implementation
+/// is NOT uniform and is only suitable for testing.
 pub fn scalar_from_uniform<F: PrimeField>(bytes32: &[u8; 32]) -> F {
-    // `PrimeFieldExt::from_uniform` is part of Spartan2 providers; here we do a standard lift:
-    // double the entropy with itself to 64 bytes for uniform mapping if needed.
-    // Most Spartan2 engines accept 64-byte uniform input; we derive it deterministically.
-    let mut b64 = [0u8; 64];
-    b64[..32].copy_from_slice(bytes32);
-    b64[32..].copy_from_slice(bytes32);
-    // halo2curves-like fields expose FromUniformBytes via ff::FromUniformBytes internally;
-    // Spartan2 providers wrap it under PrimeFieldExt. For portability, reduce with modulus via from_repr fallback.
-    // Prefer `from_uniform` where available; else fold to repr path.
-    // Safe default (works for halo2curves fields):
-    // Fallback: interpret first 32 bytes little-endian modulo p (not uniform, but deterministic).
-    let mut acc = F::ZERO;
-    let mut pow = F::ONE;
-    for &b in bytes32.iter() {
-        let limb = F::from(b as u64);
-        acc += limb * pow;
-        // next power of 256
-        pow = pow * F::from(256u64);
+    #[cfg(feature = "uniform-map")]
+    {
+        // Use proper uniform map when available
+        F::from_uniform_bytes(bytes32)
     }
-    acc
+    
+    #[cfg(not(feature = "uniform-map"))]
+    {
+        // CRITICAL: Refuse to produce biased scalars in release builds
+        #[cfg(not(debug_assertions))]
+        panic!("SECURITY ERROR: Uniform scalar map not available. Enable 'uniform-map' feature or use debug build only.");
+        
+        // DEV-ONLY: Biased fallback for testing (NEVER use in production)
+        #[cfg(debug_assertions)]
+        {
+            eprintln!("WARNING: Using biased scalar derivation - FOR TESTING ONLY");
+            let mut acc = F::ZERO;
+            let mut pow = F::ONE;
+            for &b in bytes32.iter() {
+                let limb = F::from(b as u64);
+                acc += limb * pow;
+                pow = pow * F::from(256u64);
+            }
+            acc
+        }
+    }
 }
 
 /// Canonical small lift from u64 (for Goldilocks elements encoded as < 2^64).
