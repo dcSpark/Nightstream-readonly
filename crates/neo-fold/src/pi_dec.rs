@@ -62,6 +62,11 @@ pub fn verify_recomposition_f(
         return parent.is_empty();
     }
     
+    // If parent is empty but child_limbs is not, this should fail
+    if parent.is_empty() {
+        return false;
+    }
+    
     let k = child_limbs.len();
     parent.iter().enumerate().all(|(i, &parent_i)| {
         let limbs: Vec<F> = (0..k).map(|j| 
@@ -79,6 +84,11 @@ pub fn verify_recomposition_k(
 ) -> bool {
     if child_limbs.is_empty() {
         return parent.is_empty();
+    }
+    
+    // If parent is empty but child_limbs is not, this should fail
+    if parent.is_empty() {
+        return false;
     }
     
     let k = child_limbs.len();

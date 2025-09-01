@@ -39,10 +39,12 @@ proptest! {
         k in 2usize..=5, // Number of digits
         seed in any::<u64>()
     ) {
-        // Generate random parent vector
+        // Generate random parent vector - expand seed to 32 bytes for ChaCha
+        let mut seed_bytes = [0u8; 32];
+        seed_bytes[..8].copy_from_slice(&seed.to_le_bytes());
         let mut rng = proptest::test_runner::TestRng::from_seed(
             proptest::test_runner::RngAlgorithm::ChaCha, 
-            &seed.to_le_bytes()
+            &seed_bytes
         );
         let parent: Vec<F> = (0..parent_len).map(|_| F::from_u64(rng.random())).collect();
         
@@ -78,10 +80,12 @@ proptest! {
         k in 2usize..=5,
         seed in any::<u64>()
     ) {
-        // Generate random parent vector
+        // Generate random parent vector - expand seed to 32 bytes for ChaCha
+        let mut seed_bytes = [0u8; 32];
+        seed_bytes[..8].copy_from_slice(&seed.to_le_bytes());
         let mut rng = proptest::test_runner::TestRng::from_seed(
             proptest::test_runner::RngAlgorithm::ChaCha,
-            &seed.to_le_bytes()
+            &seed_bytes
         );
         let parent: Vec<K> = (0..parent_len).map(|_| {
             K::new_complex(F::from_u64(rng.random()), F::from_u64(rng.random()))
