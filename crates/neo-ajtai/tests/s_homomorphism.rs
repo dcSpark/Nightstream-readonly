@@ -17,7 +17,7 @@ fn sample_Z(d: usize, m: usize, b: u32) -> Vec<Fq> {
 fn s_module_homomorphism() {
     let d = 54usize; let m = 64usize; let kappa = 8usize;
     let mut rng = ChaCha20Rng::seed_from_u64(1);
-    let pp = setup(&mut rng, d, kappa, m);
+    let pp = setup(&mut rng, d, kappa, m).expect("Setup should succeed");
     let Z1 = sample_Z(d, m, 2);
     let Z2 = sample_Z(d, m, 2);
     let c1 = commit(&pp, &Z1);

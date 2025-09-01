@@ -86,7 +86,8 @@ pub fn pi_rlc_prove(
     
     // === Apply S-homomorphism to combine commitments ===
     let cs: Vec<Cmt> = me_list.iter().map(|me| me.c.clone()).collect();
-    let c_prime = s_lincomb(&rho_ring_elems, &cs);
+    let c_prime = s_lincomb(&rho_ring_elems, &cs)
+        .map_err(|e| PiRlcError::SActionError(format!("S-action linear combination failed: {}", e)))?;
     
     // === Combine X matrices via S-action ===
     let mut X_prime = Mat::zero(d, m_in, F::ZERO);
@@ -191,8 +192,93 @@ pub fn pi_rlc_verify(
         return Ok(false);
     }
     
-    // All verifications passed
+    // === CRITICAL: Recompute and verify (c', X', y') ===
+    // Convert expected_rhos to ring elements for computation
+    let rho_ring: Vec<Rq> = expected_rhos.iter()
+        .map(|rho| cf_inv(rho.coeffs.as_slice().try_into().unwrap()))
+        .collect();
+
+    // Verify c' == Σ rot(ρ_i) · c_i
+    let input_cs: Vec<Cmt> = input_me_list.iter().map(|me| me.c.clone()).collect();
+    let recomputed_c = s_lincomb(&rho_ring, &input_cs)
+        .map_err(|e| PiRlcError::SActionError(format!("Commitment verification failed: {}", e)))?;
+    if recomputed_c != _output_me.c {
+        return Ok(false);
+    }
+
+    // Verify X' column by column: X'_{r,c} == Σ rot(ρ_i) · X_{i,r,c}
+    if !input_me_list.is_empty() {
+        let (d, m_in) = (input_me_list[0].X.rows(), input_me_list[0].X.cols());
+        if _output_me.X.rows() != d || _output_me.X.cols() != m_in {
+            return Ok(false); // Dimension mismatch
+        }
+        
+        for c in 0..m_in {
+            let mut expected_col = [F::ZERO; neo_math::D];
+            for (rho, me) in rho_ring.iter().zip(input_me_list.iter()) {
+                let s_action = SAction::from_ring(*rho);
+                
+                // Extract column c from input matrix
+                let mut input_col = [F::ZERO; neo_math::D];
+                for r in 0..d.min(neo_math::D) {
+                    input_col[r] = me.X[(r, c)];
+                }
+                
+                // Apply S-action and accumulate
+                let rotated_col = s_action.apply_vec(&input_col);
+                for r in 0..neo_math::D {
+                    expected_col[r] += rotated_col[r];
+                }
+            }
+            
+            // Check that output matrix matches expected values
+            for r in 0..d.min(neo_math::D) {
+                if _output_me.X[(r, c)] != expected_col[r] {
+                    return Ok(false);
+                }
+            }
+        }
+    }
+
+    // Verify y' for each j: y'_{j,t} == Σ rot(ρ_i) · y_{i,j,t}
+    if !input_me_list.is_empty() {
+        let t = input_me_list[0].y.len();
+        if _output_me.y.len() != t {
+            return Ok(false); // Mismatched number of y vectors
+        }
+        
+        for j in 0..t {
+            if input_me_list[0].y[j].is_empty() {
+                continue; // Skip empty vectors
+            }
+            let y_dim = input_me_list[0].y[j].len();
+            if _output_me.y[j].len() != y_dim {
+                return Ok(false); // Mismatched y vector dimensions
+            }
+            
+            let mut expected_y_j = vec![K::ZERO; y_dim];
+            for (rho, me) in rho_ring.iter().zip(input_me_list.iter()) {
+                let s_action = SAction::from_ring(*rho);
+                if j >= me.y.len() || me.y[j].len() != y_dim {
+                    return Ok(false); // Inconsistent input structure
+                }
+                
+                let y_rotated = s_action.apply_k_vec(&me.y[j]);
+                for t in 0..y_dim {
+                    expected_y_j[t] += y_rotated[t];
+                }
+            }
+            
+            // Check that output y vector matches expected values
+            for t in 0..y_dim {
+                if _output_me.y[j][t] != expected_y_j[t] {
+                    return Ok(false);
+                }
+            }
+        }
+    }
     
+    // All verifications passed: guard, c', X', and y' are all correct
     Ok(true)
 }
 

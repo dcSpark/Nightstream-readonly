@@ -2,6 +2,7 @@ use p3_goldilocks::Goldilocks as Fq;
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use rand::{RngCore, CryptoRng};
 use crate::types::{PP, Commitment};
+use crate::error::{AjtaiError, AjtaiResult};
 
 
 /// Bring in ring & S-action APIs from neo-math.
@@ -20,24 +21,27 @@ fn sample_uniform_fq<R: RngCore + CryptoRng>(rng: &mut R) -> Fq {
 }
 
 /// MUST: Setup(κ,m) → sample M ← R_q^{κ×m} uniformly (Def. 9).
-pub fn setup<R: RngCore + CryptoRng>(rng: &mut R, d: usize, kappa: usize, m: usize) -> PP<RqEl> {
+pub fn setup<R: RngCore + CryptoRng>(rng: &mut R, d: usize, kappa: usize, m: usize) -> AjtaiResult<PP<RqEl>> {
     // Ensure d matches the fixed ring dimension from neo-math
-    assert_eq!(d, neo_math::ring::D, "d parameter must match ring dimension D = {}", neo_math::ring::D);
+    if d != neo_math::ring::D {
+        return Err(AjtaiError::InvalidDimensions("d parameter must match ring dimension D"));
+    }
     let mut rows = Vec::with_capacity(kappa);
     for _ in 0..kappa {
         let mut row = Vec::with_capacity(m);
         for _ in 0..m {
             // sample ring element uniformly by sampling d random coefficients in F_q and mapping via cf^{-1}
-            let coeffs: [Fq; neo_math::ring::D] = (0..neo_math::ring::D)
+            let coeffs_vec: Vec<Fq> = (0..neo_math::ring::D)
                 .map(|_| sample_uniform_fq(rng))
-                .collect::<Vec<_>>()
+                .collect();
+            let coeffs: [Fq; neo_math::ring::D] = coeffs_vec
                 .try_into()
-                .unwrap();
+                .map_err(|_| AjtaiError::InvalidDimensions("Failed to create coefficient array"))?;
             row.push(cf_unmap(coeffs));
         }
         rows.push(row);
     }
-    PP { kappa, m, d, m_rows: rows }
+    Ok(PP { kappa, m, d, m_rows: rows })
 }
 
 /// MUST: Commit(pp, Z) = cf(M · cf^{-1}(Z)) as c ∈ F_q^{d×κ}.  S-homomorphic over S by construction.
@@ -124,12 +128,24 @@ pub fn s_mul(rho_ring: &RqEl, c: &Commitment) -> Commitment {
     out
 }
 
-pub fn s_lincomb(rhos: &[RqEl], cs: &[Commitment]) -> Commitment {
-    assert!(!rhos.is_empty() && rhos.len() == cs.len());
+pub fn s_lincomb(rhos: &[RqEl], cs: &[Commitment]) -> AjtaiResult<Commitment> {
+    if rhos.is_empty() {
+        return Err(AjtaiError::EmptyInput);
+    }
+    if rhos.len() != cs.len() {
+        return Err(AjtaiError::SizeMismatch { 
+            expected: rhos.len(), 
+            actual: cs.len() 
+        });
+    }
+    if cs.is_empty() {
+        return Err(AjtaiError::EmptyInput);
+    }
+    
     let mut acc = Commitment::zeros(cs[0].d, cs[0].kappa);
     for (rho, c) in rhos.iter().zip(cs) {
         let term = s_mul(rho, c);
         acc.add_inplace(&term);
     }
-    acc
+    Ok(acc)
 }

@@ -12,6 +12,12 @@ pub struct SAction { a: Rq }
 impl SAction {
     /// Create S-action from ring element a: rot(a) matrix via column-wise definition
     pub fn from_ring(a: Rq) -> Self { Self { a } }
+    
+    /// Scalar multiple (ρ = f·I) as an S-action.
+    /// This creates the S-action corresponding to multiplication by the scalar f in the base field.
+    pub fn scalar(f: Fq) -> Self { 
+        Self::from_ring(Rq::from_field_scalar(f)) 
+    }
 
     /// Build the full d×d rotation matrix definitionally: column j = cf(a * X^j mod Phi)
     pub fn to_matrix(&self) -> DenseMatrix<Fq> {
@@ -48,6 +54,10 @@ impl SAction {
 
     /// Left action on a K-vector by applying the S-action independently to real and imaginary parts.
     /// This extends the Fq-linear S-action to the extension field K = Fq[u]/(u^2 - 7).
+    /// 
+    /// **Semantics**: Only the first min(y.len(), D) elements are transformed via S-action.
+    /// Elements beyond index D-1 are copied unchanged. For full S-action semantics,
+    /// ensure y.len() <= D.
     pub fn apply_k_vec(&self, y: &[K]) -> Vec<K> {
         if y.is_empty() {
             return Vec::new();

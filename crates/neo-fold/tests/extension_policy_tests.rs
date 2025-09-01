@@ -32,7 +32,7 @@ fn test_extension_policy_validation_in_protocol() {
     
     // Create test MCS instance and witness
     let mut rng = rng();
-    let pp = setup(&mut rng, neo_math::D, 4, 8);
+    let pp = setup(&mut rng, neo_math::D, 4, 8).expect("Setup should succeed");
     let witness_data = vec![F::ONE; neo_math::D * 8];
     let commitment = commit(&pp, &witness_data);
     
@@ -109,7 +109,7 @@ fn test_extension_policy_rejects_high_degree() {
     
     // Create test MCS instance
     let mut rng = rng();
-    let pp = setup(&mut rng, neo_math::D, 4, 8);
+    let pp = setup(&mut rng, neo_math::D, 4, 8).expect("Setup should succeed");
     let witness_data = vec![F::ONE; neo_math::D * 8];
     let commitment = commit(&pp, &witness_data);
     

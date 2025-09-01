@@ -10,7 +10,7 @@ fn decomp_and_split_inverse() {
     // Random small vector z in range [-b^d .. b^d)
     let z: Vec<Fq> = (0..m).map(|i| Fq::from_u64((i%2) as u64)).collect();
     let Z = decomp_b(&z, b, d, DecompStyle::NonNegative);
-    assert_range_b(&Z, b);
+    assert_range_b(&Z, b).expect("Range check should pass");
 
     // Recompose to z and check
     let mut z_back = vec![Fq::ZERO; m];
@@ -26,7 +26,7 @@ fn decomp_and_split_inverse() {
 
     // Split then recombine
     let Zs = split_b(&Z, b, d, m, k, DecompStyle::NonNegative);
-    for Zi in &Zs { assert_range_b(Zi, b); }
+    for Zi in &Zs { assert_range_b(Zi, b).expect("Range check should pass"); }
 
     let mut Z_back = vec![Fq::ZERO; d*m];
     let mut pow = Fq::ONE;

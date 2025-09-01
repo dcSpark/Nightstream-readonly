@@ -16,7 +16,7 @@ fn random_Z(rng: &mut ChaCha20Rng, d: usize, m: usize, b: u32) -> Vec<Fq> {
 fn binding_harness_no_collision() {
     let d = 54usize; let m = 64usize; let kappa = 16usize; let b = 2u32;
     let mut rng = ChaCha20Rng::seed_from_u64(99);
-    let pp = setup(&mut rng, d, kappa, m);
+    let pp = setup(&mut rng, d, kappa, m).expect("Setup should succeed");
 
     // small trial budget; collisions would imply MSIS break or luck
     for _ in 0..64 {

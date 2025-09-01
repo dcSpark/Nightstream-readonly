@@ -37,7 +37,7 @@ fn create_test_ccs() -> CcsStructure<F> {
 /// Create a test ME instance for decomposition
 fn create_test_me_instance(base: u32) -> (MeInstance<Commitment, F, K>, MeWitness<F>) {
     let mut rng = rng();
-    let pp = setup(&mut rng, neo_math::D, 4, 8); // d=D, κ=4, m=8
+    let pp = setup(&mut rng, neo_math::D, 4, 8).expect("Setup should succeed"); // d=D, κ=4, m=8
     
     // Create witness matrix with values that decompose nicely in the given base
     let mut witness_data = vec![F::ZERO; neo_math::D * 8];

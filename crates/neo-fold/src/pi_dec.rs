@@ -162,7 +162,7 @@ pub fn pi_dec<L: SModuleHomomorphism<F, Cmt>>(
     let mut digit_commitments = Vec::with_capacity(k);
     let mut range_proof_data = Vec::with_capacity(k);
     
-    for (_i, digit_slice) in z_digits.into_iter().enumerate() {
+    for (digit_idx, digit_slice) in z_digits.into_iter().enumerate() {
         // Convert column-major slice back to matrix
         let mut z_digit = Mat::zero(d, m, F::ZERO);
         for col in 0..m {
@@ -173,7 +173,8 @@ pub fn pi_dec<L: SModuleHomomorphism<F, Cmt>>(
         
         // CRITICAL: Verify range constraint ||Z_i||_∞ < b using neo-ajtai assert_range_b
         // This is essential for soundness - digits MUST be within base-b bounds
-        assert_range_b(&digit_slice, b);
+        assert_range_b(&digit_slice, b)
+            .map_err(|e| PiDecError::RangeCheckFailed(format!("Digit {}: {}", digit_idx, e)))?;
         
         // Generate range proof for this digit (includes bound verification)
         let proof_data = generate_range_proof(&digit_slice, b)?;
@@ -386,7 +387,8 @@ fn verify_split_open<L: SModuleHomomorphism<F, Cmt>>(
     }
     
     // Recompose: c' = Σ b^i · c_i
-    let recomposed = s_lincomb(&coeffs, digit_cs);
+    let recomposed = s_lincomb(&coeffs, digit_cs)
+        .map_err(|e| format!("S-lincomb recomposition failed: {}", e))?;
     
     // Verify c == c'
     if &recomposed != combined_c {
@@ -405,23 +407,17 @@ fn verify_split_open<L: SModuleHomomorphism<F, Cmt>>(
 /// Generate range proof for a digit slice ensuring ||Z_i||_∞ < b
 fn generate_range_proof(digit_slice: &[F], b: u32) -> Result<Vec<u8>, PiDecError> {
     // Verify the range constraint using neo-ajtai's assert_range_b
-    // This function panics if constraint is violated, so we need to catch it
-    match std::panic::catch_unwind(|| assert_range_b(digit_slice, b)) {
-        Ok(()) => {
-            // Range constraint satisfied - generate proof data
-            // For now, we encode the bounds as a simple proof structure
-            let mut proof_data = Vec::new();
-            proof_data.extend_from_slice(&b.to_le_bytes()); // Base b
-            proof_data.extend_from_slice(&(digit_slice.len() as u32).to_le_bytes()); // Length
-            // In a production system, this would include zero-knowledge range proofs
-            // For audit purposes, the deterministic check is sufficient
-            Ok(proof_data)
-        }
-        Err(_) => Err(PiDecError::RangeCheckFailed(format!(
-            "Range constraint violated: digit has ||.||_∞ >= {}",
-            b
-        ))),
-    }
+    assert_range_b(digit_slice, b)
+        .map_err(|e| PiDecError::RangeCheckFailed(format!("Range constraint failed: {}", e)))?;
+    
+    // Range constraint satisfied - generate proof data
+    // For now, we encode the bounds as a simple proof structure
+    let mut proof_data = Vec::new();
+    proof_data.extend_from_slice(&b.to_le_bytes()); // Base b
+    proof_data.extend_from_slice(&(digit_slice.len() as u32).to_le_bytes()); // Length
+    // In a production system, this would include zero-knowledge range proofs
+    // For audit purposes, the deterministic check is sufficient
+    Ok(proof_data)
 }
 
 /// Verify range proofs for all digits  

@@ -40,7 +40,7 @@ fn create_test_ccs() -> CcsStructure<F> {
 /// Create test ME instances for RLC testing
 fn create_test_me_instances(count: usize) -> Vec<MeInstance<Commitment, F, K>> {
     let mut rng = rng();
-    let pp = setup(&mut rng, neo_math::D, 4, 8); // d=D (54), κ=4, m=8 (smaller for testing)
+    let pp = setup(&mut rng, neo_math::D, 4, 8).expect("Setup should succeed"); // d=D (54), κ=4, m=8 (smaller for testing)
     
     (0..count).map(|i| {
         // Create placeholder commitment
@@ -229,7 +229,7 @@ fn test_transcript_binding_consistency() {
     
     // Create dummy MCS instances and witnesses (not used, just for completeness)
     let mut rng = rng();
-    let pp = setup(&mut rng, neo_math::D, 4, 8); // Smaller dimensions for testing
+    let pp = setup(&mut rng, neo_math::D, 4, 8).expect("Setup should succeed"); // Smaller dimensions for testing
     let witness_data = vec![F::ONE; neo_math::D * 8];
     let commitment = commit(&pp, &witness_data);
     
@@ -287,7 +287,7 @@ fn test_extension_policy_binding() {
     
     // Create test instance
     let mut rng = rng();
-    let pp = setup(&mut rng, neo_math::D, 4, 8); // Smaller dimensions for testing
+    let pp = setup(&mut rng, neo_math::D, 4, 8).expect("Setup should succeed"); // Smaller dimensions for testing
     let witness_data = vec![F::ONE; neo_math::D * 8];
     let commitment = commit(&pp, &witness_data);
     

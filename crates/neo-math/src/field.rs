@@ -35,9 +35,12 @@ pub trait KExtensions {
     fn conj(self) -> Self;
     /// Multiplicative inverse; panics if zero (same as Field::inverse().unwrap()).
     fn inv(self) -> Self;
+    /// Extract coefficients as [real, imag] for K = F_{q^2}.
+    fn as_coeffs(&self) -> [Fq; 2];
 }
 
 impl KExtensions for K {
     #[inline] fn conj(self) -> Self { self.conjugate() }
     #[inline] fn inv(self) -> Self { self.inverse() }
+    #[inline] fn as_coeffs(&self) -> [Fq; 2] { [self.real(), self.imag()] }
 }

@@ -116,7 +116,8 @@ fn main() -> Result<()> {
     let ajtai_pp = ajtai_setup(&mut rng,
                                neo_math::ring::D, // d = ring dimension
                                16,                 // κ = security parameter
-                               z.len());          // m = witness length
+                               z.len())          // m = witness length
+                               .expect("Ajtai setup should succeed");
     
     println!("   Ajtai PP: d={}, κ={}, m={}", ajtai_pp.d, ajtai_pp.kappa, ajtai_pp.m);
     

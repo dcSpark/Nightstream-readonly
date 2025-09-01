@@ -6,7 +6,7 @@
 
 #![allow(deprecated)] // We need to use legacy types for the bridge
 
-use neo_math::{F, K};
+use neo_math::{F, K, KExtensions};
 use p3_field::{PrimeField64, PrimeCharacteristicRing};
 use crate::{ConcreteMeInstance, ConcreteMeWitness}; // Modern types
 
@@ -21,17 +21,8 @@ trait KFieldConversion {
 
 impl KFieldConversion for K {
     fn to_base_field_array(&self) -> [F; 2] {
-        // For K = F_{q^2}, extract the two F_q coefficients
-        // This assumes K is implemented as a complex extension
-        // In practice, this should call methods from neo_math
-        
-        // TEMPORARY: Return zero components until proper K implementation is available
-        // This should be replaced with actual coefficient extraction
-        [F::ZERO, F::ZERO]
-        
-        // TODO: Replace with actual implementation like:
-        // let coeffs = self.as_coefficients();
-        // [coeffs[0], coeffs[1]]
+        // Extract real and imaginary coefficients from K = F_{q^2}
+        self.as_coeffs()
     }
 }
 

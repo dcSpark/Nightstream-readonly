@@ -1,6 +1,7 @@
 use p3_goldilocks::Goldilocks as Fq;
 use p3_field::PrimeCharacteristicRing;
 use crate::util::to_balanced_i128;
+use crate::error::{AjtaiError, AjtaiResult};
 
 /// Decomposition style: `Balanced` digits in [-(b-1)..(b-1)] or `NonNegative` digits in [0..b-1].
 #[derive(Copy, Clone, Debug, Eq, PartialEq)]
@@ -79,10 +80,13 @@ pub fn split_b(Z: &[Fq], b: u32, d: usize, m: usize, k: usize, style: DecompStyl
 
 /// Range assertion (MUST): checks max ∞-norm of coefficients is < b on Z ∈ F_q^{d×m}.
 #[allow(non_snake_case)]
-pub fn assert_range_b(Z: &[Fq], b: u32) {
+pub fn assert_range_b(Z: &[Fq], b: u32) -> AjtaiResult<()> {
     let b_i = b as i128;
     for &x in Z {
         let v = crate::util::to_balanced_i128(x);
-        assert!(v.abs() < b_i, "range assertion failed: |{v}| >= {b}");
+        if v.abs() >= b_i {
+            return Err(AjtaiError::RangeViolation { value: v, bound: b });
+        }
     }
+    Ok(())
 }

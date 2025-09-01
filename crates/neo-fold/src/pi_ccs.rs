@@ -7,6 +7,7 @@
 
 use crate::transcript::{FoldTranscript, Domain};
 use crate::error::PiCcsError;
+// Note: sumcheck implementation will be added later
 use neo_ccs::{CcsStructure, McsInstance, McsWitness, MeInstance, Mat};
 use neo_ajtai::Commitment as Cmt;
 use neo_math::{F, K, ExtF};
@@ -31,16 +32,8 @@ pub fn pi_ccs_prove(
     mcs_list: &[McsInstance<Cmt, F>],
     witnesses: &[McsWitness<F>],
 ) -> Result<(Vec<MeInstance<Cmt, F, K>>, PiCcsProof), PiCcsError> {
-    // === Domain separation & extension policy binding ===
+    // === Domain separation ===
     tr.domain(Domain::CCS);
-    
-    // Bind extension policy parameters to transcript header
-    tr.absorb_bytes(b"neo/params/v1");
-    tr.absorb_u64(&[
-        params.q, params.lambda as u64,
-        s.n as u64, s.m as u64, s.t() as u64,
-        params.s as u64,
-    ]);
     
     // === Validate inputs ===
     if mcs_list.len() != witnesses.len() {
@@ -51,15 +44,15 @@ pub fn pi_ccs_prove(
     }
     
     // === Extension Policy Validation ===
-    // CRITICAL FIX: ell must be log2(n), not n itself
+    // CRITICAL: ell must be log2(n), not n itself
     if !s.n.is_power_of_two() {
         return Err(PiCcsError::InvalidInput(format!("CCS size n={} must be power of 2", s.n)));
     }
-    let ell = s.n.trailing_zeros() as usize; // ell = log2(n)
+    let ell = s.n.trailing_zeros() as u32; // ell = log2(n)  
     let d_sc = s.max_degree() as u32; // Max degree of CCS polynomial
     
-    // Validate that extension policy s=2 can handle this circuit
-    let extension_summary = params.extension_check(ell as u32, d_sc)
+    // Validate extension policy: compute s_min, enforce s=2 limit
+    let extension_summary = params.extension_check(ell, d_sc)
         .map_err(|e| PiCcsError::ExtensionPolicyFailed(format!("Extension policy validation failed: {}", e)))?;
     
     if extension_summary.slack_bits < 0 {
@@ -68,11 +61,24 @@ pub fn pi_ccs_prove(
         )));
     }
     
-    // Record slack_bits in transcript as required by paper
-    tr.absorb_u64(&[extension_summary.slack_bits as u64]);
+    eprintln!("✅ Extension policy validated:");
+    eprintln!("  Circuit: n={}, ell={}, degree={}", s.n, ell, d_sc);
+    eprintln!("  Policy: s_min={}, s_supported={}, slack_bits={}", 
+              extension_summary.s_min, extension_summary.s_supported, extension_summary.slack_bits);
+    
+    // CRITICAL: Bind extension policy to transcript for FS soundness
+    let q_bits = 64; // Goldilocks q ≈ 2^64
+    tr.absorb_ccs_header(
+        q_bits,
+        extension_summary.s_supported,
+        params.lambda,
+        ell,
+        d_sc,
+        extension_summary.slack_bits,
+    );
     
     // === Sample challenge vectors ===
-    let r: Vec<K> = tr.challenges_k(ell);  
+    let r: Vec<K> = tr.challenges_k(ell as usize);  
     // CRITICAL FIX: Use proper tensor product r^⊗ ∈ K^n
     let rb: Vec<K> = neo_ccs::utils::tensor_point::<K>(&r);
     
@@ -101,8 +107,7 @@ pub fn pi_ccs_prove(
     let sumcheck_rounds = execute_sumcheck_protocol(tr, s, &r, combined_claim)?;
     
     // === Generate header digest using transcript state ===
-    let header_digest = tr.state_digest().try_into()
-        .map_err(|_| PiCcsError::TranscriptError("Invalid digest length".into()))?;
+    let header_digest = tr.state_digest();
     
     // === Build ME instances (placeholder) ===
     let me_instances = build_me_instances_from_ccs(mcs_list, &r, &rb)?;
@@ -126,32 +131,34 @@ pub fn pi_ccs_verify(
     _me_list: &[MeInstance<Cmt, F, K>],
     proof: &PiCcsProof,
 ) -> Result<bool, PiCcsError> {
-    // Bind same extension policy parameters
+    // === Domain separation ===
     tr.domain(Domain::CCS);
-    tr.absorb_bytes(b"neo/params/v1");
-    tr.absorb_u64(&[
-        params.q, params.lambda as u64,
-        s.n as u64, s.m as u64, s.t() as u64,
-        params.s as u64,
-    ]);
     
     // === Extension Policy Validation (same as prover) ===
-    // CRITICAL FIX: ell must be log2(n), not n itself
+    // CRITICAL: ell must be log2(n), not n itself
     if !s.n.is_power_of_two() {
         return Err(PiCcsError::InvalidInput(format!("CCS size n={} must be power of 2", s.n)));
     }
-    let ell = s.n.trailing_zeros() as usize; // ell = log2(n)
+    let ell = s.n.trailing_zeros() as u32; // ell = log2(n)
     let d_sc = s.max_degree() as u32; // Max degree of CCS polynomial
     
-    // Validate that extension policy s=2 can handle this circuit
-    let extension_summary = params.extension_check(ell as u32, d_sc)
+    // Validate extension policy: compute s_min, enforce s=2 limit (same as prover)
+    let extension_summary = params.extension_check(ell, d_sc)
         .map_err(|e| PiCcsError::ExtensionPolicyFailed(format!("Extension policy validation failed: {}", e)))?;
     
-    // Record same slack_bits as prover
-    tr.absorb_u64(&[extension_summary.slack_bits as u64]);
+    // CRITICAL: Bind extension policy to transcript (must match prover exactly)
+    let q_bits = 64; // Goldilocks q ≈ 2^64
+    tr.absorb_ccs_header(
+        q_bits,
+        extension_summary.s_supported,
+        params.lambda,
+        ell,
+        d_sc,
+        extension_summary.slack_bits,
+    );
     
     // Re-derive challenges
-    let _r: Vec<K> = tr.challenges_k(ell);
+    let _r: Vec<K> = tr.challenges_k(ell as usize);
     
     // Sample same batching coefficients
     tr.absorb_bytes(b"ccs.batch");

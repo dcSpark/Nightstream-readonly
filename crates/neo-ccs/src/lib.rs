@@ -38,10 +38,14 @@ pub use relations::{
 pub use traits::SModuleHomomorphism;
 pub use utils::{tensor_point, mat_vec_mul_fk, mat_vec_mul_ff, validate_power_of_two};
 
-// Legacy ME types for bridge compatibility (will be modernized)
+// ===== DEPRECATED LEGACY BRIDGE TYPES =====
+// These are kept temporarily for bridge compatibility but are NOT audit-ready.
+// They will be removed in a future version once the bridge is modernized.
+
 /// Legacy Matrix Evaluation instance - for bridge compatibility only
 /// 
-/// ⚠️ DEPRECATED: Use `relations::MeInstance<C, F, K>` instead for the modern generic implementation.
+/// ⚠️ **DEPRECATED & NOT AUDIT-READY**: Use `relations::MeInstance<C, F, K>` instead.
+/// This type exists only to keep the spartan-bridge compiling during modernization.
 #[deprecated(since = "0.1.0", note = "Use relations::MeInstance<C, F, K> instead")]
 #[derive(Clone, Debug)]
 pub struct MEInstance {
@@ -59,7 +63,8 @@ pub struct MEInstance {
 
 /// Legacy Matrix Evaluation witness - for bridge compatibility only
 /// 
-/// ⚠️ DEPRECATED: Use `relations::MeWitness<F>` instead for the modern generic implementation.
+/// ⚠️ **DEPRECATED & NOT AUDIT-READY**: Use `relations::MeWitness<F>` instead.
+/// This type exists only to keep the spartan-bridge compiling during modernization.
 #[deprecated(since = "0.1.0", note = "Use relations::MeWitness<F> instead")]
 #[derive(Clone, Debug)]
 pub struct MEWitness {
@@ -70,3 +75,4 @@ pub struct MEWitness {
     /// Optional Ajtai linear map rows L for c = L(Z) verification
     pub ajtai_rows: Option<Vec<Vec<neo_math::F>>>, 
 }
+

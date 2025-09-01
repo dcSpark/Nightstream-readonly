@@ -154,10 +154,43 @@ impl FoldTranscript {
     }
     
     /// Get current state digest for transcript binding
-    pub fn state_digest(&self) -> Vec<u8> {
-        // This is a simplified implementation - in practice we'd export the permutation state
-        // For now, return a placeholder digest
-        vec![0u8; 32]
+    pub fn state_digest(&mut self) -> [u8; 32] {
+        // Sample 4 field elements and pack as 32 bytes
+        let mut out = [0u8; 32];
+        for i in 0..4 {
+            let x: F = self.ch.sample(); // F
+            let limb = x.as_canonical_u64().to_le_bytes();
+            out[i*8..(i+1)*8].copy_from_slice(&limb);
+        }
+        out
+    }
+    
+    /// Absorb Π_CCS header parameters for extension policy binding
+    /// This ensures FS challenges bind to the circuit parameters and security policy
+    pub fn absorb_ccs_header(
+        &mut self,
+        q_bits: u32,        // log2(q) for the base field  
+        s: u32,             // extension degree (v1: always 2)
+        lambda: u32,        // target security bits
+        ell: u32,           // number of sumcheck rounds (log2 n)
+        d_sc: u32,          // max degree of composed polynomial  
+        slack_bits: i32,    // security slack from extension policy
+    ) {
+        // Domain separation for header absorption
+        self.absorb_bytes(b"neo/ccs/header/v1");
+        
+        // Absorb all policy parameters that affect soundness
+        self.absorb_u64(&[
+            q_bits as u64,
+            s as u64, 
+            lambda as u64,
+            ell as u64,
+            d_sc as u64,
+            slack_bits.unsigned_abs() as u64,  // absorb absolute value
+        ]);
+        
+        // Absorb sign of slack_bits separately
+        self.absorb_bytes(&[if slack_bits >= 0 { 1u8 } else { 0u8 }]);
     }
 }
 
