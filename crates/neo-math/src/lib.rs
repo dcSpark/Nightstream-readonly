@@ -24,20 +24,10 @@ use p3_field::PrimeCharacteristicRing;
 pub use Fq as F;  // Field type alias
 pub type ExtF = K; // Extension field type alias
 
-// Legacy module compatibility - keeping the old modules for now but they won't be actively used
-pub mod modint;
-pub mod poly;
-pub mod decomp;
-// transcript module removed - use neo_fold::transcript::FoldTranscript instead
-
-// ModInt and Coeff re-exports from existing modules
-pub use modint::{ModInt, Coeff};
-
-// Polynomial re-export
-pub use poly::Polynomial;
-
-// Decomposition functions re-export
-pub use decomp::{decomp_b, signed_decomp_b};
+// Legacy modules removed as part of codebase cleanup
+// Use neo_fold::transcript::FoldTranscript for transcript functionality
+// Use neo-ajtai for decomposition functions
+// For ModInt/polynomial functionality, use the main field/ring types
 
 // Extension field utility functions for backward compatibility
 pub fn embed_base_to_ext(base: Fq) -> K {
@@ -66,7 +56,7 @@ pub fn random_extf() -> K {
     K::new_complex(a, b)
 }
 
-// Ring type aliases for backward compatibility
+// Ring type aliases 
 pub type RingElement = Rq;
 pub type RotationRing = RingElement;
 pub type RotationMatrix = Vec<RingElement>;

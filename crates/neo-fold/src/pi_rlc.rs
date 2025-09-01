@@ -116,7 +116,7 @@ pub fn pi_rlc_prove(
     for j in 0..t {
         for (rho, me) in rho_ring_elems.iter().zip(me_list.iter()) {
             let s_action = SAction::from_ring(*rho);
-            let y_rotated = apply_s_action_to_k_vector(&s_action, &me.y[j]);
+            let y_rotated = s_action.apply_k_vec(&me.y[j]);
             for elem_idx in 0..y_dim {
                 y_prime[j][elem_idx] += y_rotated[elem_idx];
             }
@@ -196,34 +196,3 @@ pub fn pi_rlc_verify(
     Ok(true)
 }
 
-/// Helper: Apply S-action to K vector using proper coordinate transformation
-fn apply_s_action_to_k_vector(s_action: &SAction, y: &[K]) -> Vec<K> {
-    use neo_math::{D, Fq};
-    
-    // Split each K element into real/imaginary parts
-    let mut y_re = [Fq::ZERO; D];
-    let mut y_im = [Fq::ZERO; D];
-    
-    // Extract coordinates (assuming y has length D to match ring dimension)
-    for (i, &yk) in y.iter().enumerate().take(D) {
-        y_re[i] = yk.real();
-        y_im[i] = yk.imag();
-    }
-    
-    // Apply S-action to each coordinate array separately
-    let rotated_re = s_action.apply_vec(&y_re);
-    let rotated_im = s_action.apply_vec(&y_im);
-    
-    // Recombine into K elements
-    let mut result = Vec::with_capacity(y.len());
-    for i in 0..y.len().min(D) {
-        result.push(K::new_complex(rotated_re[i], rotated_im[i]));
-    }
-    
-    // Handle case where y is longer than D by just copying remaining elements
-    for &yk in y.iter().skip(D) {
-        result.push(yk);
-    }
-    
-    result
-}

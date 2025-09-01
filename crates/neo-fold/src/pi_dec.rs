@@ -13,7 +13,7 @@ use neo_ajtai::{split_b, s_lincomb, assert_range_b, Commitment as Cmt, DecompSty
 use neo_ccs::{CcsStructure, MeInstance, MeWitness, Mat, utils::{tensor_point, mat_vec_mul_fk}};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_math::{F, K};
-use p3_field::PrimeCharacteristicRing;
+use p3_field::{PrimeCharacteristicRing, Field};
 
 #[derive(Debug, Clone)]
 pub struct PiDecProof {
@@ -38,6 +38,58 @@ pub enum PiDecError {
     InvalidInput(String),
     #[error("S-homomorphism error: {0}")]
     SHomomorphismError(String),
+}
+
+/// Recombine base-b digits: Σ b^i · limbs[i]
+/// This is the core recomposition operation used in DEC verification
+fn recombine_base_b<T: Field + Clone>(base: T, limbs: &[T]) -> T {
+    let mut acc = T::ONE;
+    let mut result = T::ZERO;
+    for limb in limbs {
+        result += (*limb) * acc;
+        acc *= base;
+    }
+    result
+}
+
+/// Verify recomposition for both base field F and extension field K elements
+pub fn verify_recomposition_f(
+    base: F,
+    parent: &[F], 
+    child_limbs: &[Vec<F>]
+) -> bool {
+    if child_limbs.is_empty() {
+        return parent.is_empty();
+    }
+    
+    let k = child_limbs.len();
+    parent.iter().enumerate().all(|(i, &parent_i)| {
+        let limbs: Vec<F> = (0..k).map(|j| 
+            child_limbs[j].get(i).copied().unwrap_or(F::ZERO)
+        ).collect();
+        parent_i == recombine_base_b(base, &limbs)
+    })
+}
+
+/// Verify recomposition for extension field K elements
+pub fn verify_recomposition_k(
+    base: F, 
+    parent: &[K],
+    child_limbs: &[Vec<K>]
+) -> bool {
+    if child_limbs.is_empty() {
+        return parent.is_empty();
+    }
+    
+    let k = child_limbs.len();
+    let base_k = K::from(base); // Embed F element into K
+    
+    parent.iter().enumerate().all(|(i, &parent_i)| {
+        let limbs: Vec<K> = (0..k).map(|j| 
+            child_limbs[j].get(i).copied().unwrap_or(K::ZERO)
+        ).collect();
+        parent_i == recombine_base_b(base_k, &limbs)
+    })
 }
 
 /// Π_DEC reduction: 1 ME(B,L) instance → k ME(b,L) instances
@@ -225,33 +277,25 @@ pub fn pi_dec_verify<L: SModuleHomomorphism<F, Cmt>>(
     }
     
     // === CRITICAL: Verify y vector recomposition (public check) ===
-    // This ensures Σ b^i y_{i,j} = y'_j for each matrix j
+    // This ensures Σ b^i y_{i,j} = y'_j for each matrix j using clean utility
     let num_matrices = input_me.y.len();
-    let d = input_me.y.get(0).map(|v| v.len()).unwrap_or(0);
     
+    // Collect y vectors from each digit by matrix index
+    let mut child_y_by_matrix = Vec::with_capacity(num_matrices);
     for j in 0..num_matrices {
-        if j >= input_me.y.len() {
-            return Ok(false);
-        }
-        
-        let mut recomposed_y_j = vec![K::ZERO; d];
-        let mut pow = K::ONE; // b^0 = 1
-        
+        let mut child_y_j = Vec::with_capacity(output_me_list.len());
         for me_digit in output_me_list.iter() {
-            if j >= me_digit.y.len() || me_digit.y[j].len() != d {
+            if j >= me_digit.y.len() {
                 return Ok(false); // Inconsistent y vector structure
             }
-            
-            // Add b^i * y_{i,j} to recomposition
-            for coord in 0..d {
-                recomposed_y_j[coord] += me_digit.y[j][coord] * pow;
-            }
-            
-            pow *= K::from(F::from_u64(b as u64));
+            child_y_j.push(me_digit.y[j].clone());
         }
-        
-        // Verify recomposed vector equals input y_j
-        if recomposed_y_j != input_me.y[j] {
+        child_y_by_matrix.push(child_y_j);
+    }
+    
+    // Verify recomposition for each matrix: y'_j = Σ b^i · y_{i,j}
+    for (j, parent_y_j) in input_me.y.iter().enumerate() {
+        if !verify_recomposition_k(F::from_u64(b as u64), parent_y_j, &child_y_by_matrix[j]) {
             return Ok(false); // y recomposition failed - SOUNDNESS CRITICAL
         }
     }

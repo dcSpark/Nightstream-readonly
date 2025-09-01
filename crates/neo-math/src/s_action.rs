@@ -1,7 +1,7 @@
 //! S-action implementation: "left multiplication by a in R_q" as rot(a).
 //! Definitionally correct: j-th column is cf(a * X^j mod Phi_81).
 
-use crate::{Rq, Fq, D};
+use crate::{Rq, Fq, K, D};
 use crate::ring::{cf, cf_inv};
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::dense::DenseMatrix;
@@ -44,5 +44,77 @@ impl SAction {
     /// Compose S-actions (rot(a) ∘ rot(b) = rot(a*b)).
     #[inline] pub fn compose(&self, other: &SAction) -> SAction {
         SAction { a: self.a.mul(&other.a) }
+    }
+
+    /// Left action on a K-vector by applying the S-action independently to real and imaginary parts.
+    /// This extends the Fq-linear S-action to the extension field K = Fq[u]/(u^2 - 7).
+    pub fn apply_k_vec(&self, y: &[K]) -> Vec<K> {
+        if y.is_empty() {
+            return Vec::new();
+        }
+
+        // For vectors longer than D, we apply S-action to the first D elements
+        // and leave the rest unchanged (this handles the case where y has more coordinates)
+        let process_len = y.len().min(D);
+        
+        // Split each K element into real/imaginary parts
+        let mut y_re = [Fq::ZERO; D];
+        let mut y_im = [Fq::ZERO; D];
+        
+        for (i, &yk) in y.iter().enumerate().take(process_len) {
+            y_re[i] = yk.real();
+            y_im[i] = yk.imag();
+        }
+        
+        // Apply S-action to each coordinate array separately
+        let rotated_re = self.apply_vec(&y_re);
+        let rotated_im = self.apply_vec(&y_im);
+        
+        // Recombine into K elements
+        let mut result = Vec::with_capacity(y.len());
+        for i in 0..process_len {
+            result.push(K::new_complex(rotated_re[i], rotated_im[i]));
+        }
+        
+        // Copy any remaining elements unchanged
+        for &yk in y.iter().skip(process_len) {
+            result.push(yk);
+        }
+        
+        result
+    }
+
+    /// Left action on a slice of K elements (fixed-size version for performance)
+    pub fn apply_k_slice(&self, y: &[K], result: &mut [K]) {
+        assert_eq!(y.len(), result.len(), "Input and output slices must have same length");
+        
+        let process_len = y.len().min(D);
+        
+        if process_len == 0 {
+            return;
+        }
+
+        // Split into real/imaginary parts
+        let mut y_re = [Fq::ZERO; D];
+        let mut y_im = [Fq::ZERO; D];
+        
+        for (i, &yk) in y.iter().enumerate().take(process_len) {
+            y_re[i] = yk.real();
+            y_im[i] = yk.imag();
+        }
+        
+        // Apply S-action
+        let rotated_re = self.apply_vec(&y_re);
+        let rotated_im = self.apply_vec(&y_im);
+        
+        // Write results
+        for i in 0..process_len {
+            result[i] = K::new_complex(rotated_re[i], rotated_im[i]);
+        }
+        
+        // Copy remaining elements unchanged
+        if process_len < y.len() {
+            result[process_len..].copy_from_slice(&y[process_len..]);
+        }
     }
 }

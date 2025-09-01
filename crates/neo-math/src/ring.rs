@@ -97,31 +97,31 @@ impl Rq {
     /// SHOULD: placeholder "fast" multiply; currently calls `mul`.
     #[inline] pub fn mul_fast(&self, rhs: &Self) -> Self { self.mul(rhs) }
 
-    // Backward compatibility methods for existing neo-ajtai code
+    // Direct field-based methods (replacing ModInt backward compatibility)
     
-    /// Create ring element from coefficients (backward compatibility)
-    pub fn from_coeffs(coeffs: Vec<crate::ModInt>, _n: usize) -> Self {
+    /// Create ring element from field coefficients
+    pub fn from_field_coeffs(coeffs: Vec<Fq>) -> Self {
         let mut ring_coeffs = [Fq::ZERO; D];
         for (i, c) in coeffs.into_iter().enumerate().take(D) {
-            ring_coeffs[i] = Fq::from_u64(c.as_u64());
+            ring_coeffs[i] = c;
         }
         Self(ring_coeffs)
     }
 
-    /// Create ring element from scalar (backward compatibility)  
-    pub fn from_scalar(scalar: crate::ModInt, _n: usize) -> Self {
+    /// Create ring element from scalar field element
+    pub fn from_field_scalar(scalar: Fq) -> Self {
         let mut ring_coeffs = [Fq::ZERO; D];
-        ring_coeffs[0] = Fq::from_u64(scalar.as_u64());
+        ring_coeffs[0] = scalar;
         Self(ring_coeffs)
     }
 
-    /// Get coefficients as ModInt vector (backward compatibility)
-    pub fn coeffs(&self) -> Vec<crate::ModInt> {
-        self.0.iter().map(|&f| crate::ModInt::from_u64(f.as_canonical_u64())).collect()
+    /// Get coefficients as field element vector
+    pub fn field_coeffs(&self) -> Vec<Fq> {
+        self.0.to_vec()
     }
 
-    /// Random small ring element (backward compatibility)
-    pub fn random_small(rng: &mut impl rand::Rng, _n: usize, bound: u64) -> Self {
+    /// Random ring element with small coefficients
+    pub fn random_small(rng: &mut impl rand::Rng, bound: u64) -> Self {
         let mut coeffs = [Fq::ZERO; D];
         coeffs.iter_mut().for_each(|c| {
             let val = rng.random_range(0..=bound);
@@ -130,9 +130,8 @@ impl Rq {
         Self(coeffs)
     }
 
-    /// Random Gaussian ring element (backward compatibility) 
-    pub fn random_gaussian(rng: &mut impl rand::Rng, _n: usize, _sigma: f64) -> Self {
-        // Simple uniform random for now - proper Gaussian sampling would be more complex
+    /// Random ring element (uniform over field elements)
+    pub fn random_uniform(rng: &mut impl rand::Rng) -> Self {
         let mut coeffs = [Fq::ZERO; D];
         coeffs.iter_mut().for_each(|c| {
             *c = Fq::from_u64(rng.random::<u64>());

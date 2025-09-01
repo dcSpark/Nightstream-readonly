@@ -203,22 +203,21 @@ fn test_s_action_correctness_on_k_vectors() {
     let ring_elem = cf_inv(coeffs);
     let s_action = SAction::from_ring(ring_elem);
     
-    // Apply S-action (currently a placeholder implementation)
-    let result_vector = apply_s_action_to_k_vector_test(&s_action, &k_vector);
+    // Apply the real S-action implementation to K vector
+    let result_vector = s_action.apply_k_vec(&k_vector);
     
     println!("  After S-action: {:?}", result_vector.iter().map(|k| format!("{:?}", k)).collect::<Vec<_>>());
     
-    // For identity S-action, vectors should be equal (when properly implemented)
-    // For now, this validates the interface exists and doesn't panic
+    // For identity S-action (ring element = 1), vectors should be equal
+    // This is a proper test of the K-vector S-action linearity
     assert_eq!(k_vector.len(), result_vector.len());
-    println!("  ✅ S-action K vector interface test passed");
-}
-
-/// Helper function that mirrors the one in pi_rlc.rs for testing
-fn apply_s_action_to_k_vector_test(_s_action: &SAction, y: &[K]) -> Vec<K> {
-    // TODO: Real S-action on extension field vectors
-    // For now, return identity (this needs proper K-field coordinate handling)  
-    y.to_vec()
+    
+    // Identity S-action should preserve the vector (1 * v = v)
+    for (original, rotated) in k_vector.iter().zip(result_vector.iter()) {
+        assert_eq!(*original, *rotated, "Identity S-action should preserve K elements");
+    }
+    
+    println!("  ✅ S-action K vector correctness test passed");
 }
 
 #[test]
