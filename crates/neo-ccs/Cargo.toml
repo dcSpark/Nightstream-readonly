@@ -1,0 +1,27 @@
+[package]
+name = "neo-ccs"
+edition = { workspace = true }
+version = { workspace = true }
+authors = { workspace = true }
+
+[dependencies]
+neo-math = { path = "../neo-math" }
+# neo-ring functionality now in neo-math
+# Sumcheck functionality integrated locally
+p3-field = { workspace = true }
+p3-matrix = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+spartan2 = { workspace = true, optional = true }
+
+[features]
+default = []
+legacy-compat = []    # Temporary feature for legacy CCS types
+spartan2-compat = ["spartan2", "neo-math/spartan2-compat", "legacy-compat"]
+
+[dev-dependencies]
+criterion = { workspace = true }
+rand = { workspace = true }
+p3-goldilocks = { workspace = true }
+neo-ajtai = { path = "../neo-ajtai" }

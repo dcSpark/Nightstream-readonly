@@ -1,0 +1,24 @@
+[package]
+name = "neo-ajtai"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[dependencies]
+# Workspace deps
+neo-math = { path = "../neo-math" }
+neo-params = { path = "../neo-params" }
+rand = "0.9"
+rand_chacha = "0.9"
+serde = { version = "1.0", features = ["derive"] }
+thiserror = "2"
+subtle = "2.6"
+rayon = "1.10"
+
+# Plonky3 (field + small dense matrix)
+p3-field = "0.3.0"
+p3-goldilocks = { version = "0.3.0", default-features = false }
+p3-matrix = "0.3.0"
+
+[dev-dependencies]
+proptest = "1.7"

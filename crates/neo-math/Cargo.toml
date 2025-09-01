@@ -1,0 +1,37 @@
+[package]
+name = "neo-math"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = "MIT OR Apache-2.0"
+description = "Neo math primitives: Fq, F_{q^2}, cyclotomic ring R_q, S-action"
+
+[dependencies]
+# Plonky3 field + Goldilocks + Matrix (no NTT/FFT in folding layer per Neo design)
+p3-field = { workspace = true }
+p3-goldilocks = { workspace = true }
+p3-matrix = { workspace = true }
+
+# Core  
+thiserror = { workspace = true }
+subtle = { workspace = true }
+rayon = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+serde = { workspace = true, optional = true, features = ["derive"] }
+
+[dev-dependencies]
+# Dev and property testing
+proptest = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+
+[features]
+default = []
+serde = ["dep:serde"]
+spartan2-compat = []
+quickcheck = []
+
+[package.metadata.docs.rs]
+rustdoc-args = ["--cfg", "docsrs"]

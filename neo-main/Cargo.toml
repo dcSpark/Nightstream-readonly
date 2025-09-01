@@ -5,20 +5,22 @@ version = { workspace = true }
 authors = { workspace = true }
 
 [dependencies]
-neo-ring = { path = "../neo-ring" }
-neo-fields = { path = "../neo-fields" }
-neo-poly = { path = "../neo-poly" }
-neo-decomp = { path = "../neo-decomp" }
-neo-commit = { path = "../neo-commit" }
-neo-ccs = { path = "../neo-ccs" }
-neo-fold = { path = "../neo-fold" }
-neo-modint = { path = "../neo-modint" }
-neo-sumcheck = { path = "../neo-sumcheck", default-features = false }
-neo-arithmetize = { path = "../neo-arithmetize" }
+# Modern Neo crates
+neo-params = { path = "../crates/neo-params" }
+neo-math = { path = "../crates/neo-math" }
+neo-ajtai = { path = "../crates/neo-ajtai" }
+neo-ccs = { path = "../crates/neo-ccs" }
+neo-fold = { path = "../crates/neo-fold" }
+neo-challenge = { path = "../crates/neo-challenge" }
+neo-spartan-bridge = { path = "../crates/neo-spartan-bridge" }
 neo-orchestrator = { path = "../neo-orchestrator" }
-rand = { workspace = true }
-p3-field = "0.3"
-p3-matrix = { workspace = true }
+
+# External dependencies
+rand.workspace = true
+p3-field.workspace = true
+p3-matrix.workspace = true
+anyhow.workspace = true
+bincode.workspace = true
 
 [features]
 default = []

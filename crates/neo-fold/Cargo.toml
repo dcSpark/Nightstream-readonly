@@ -1,0 +1,38 @@
+[package]
+name = "neo-fold"
+edition = { workspace = true }
+version = { workspace = true }
+authors = { workspace = true }
+
+[features]
+default = []
+# Note: dev feature removed - neo-spartan-bridge now uses Poseidon2-only (no dev mode)
+
+[dependencies]
+neo-math = { path = "../neo-math" }
+neo-ajtai = { path = "../neo-ajtai" }
+neo-ccs = { path = "../neo-ccs" }
+neo-params = { path = "../neo-params" }
+neo-spartan-bridge = { path = "../neo-spartan-bridge" }
+# Sumcheck functionality now integrated into this crate
+p3-field = { workspace = true }
+p3-matrix = { workspace = true }
+p3-challenger = { workspace = true }
+p3-poseidon2 = { workspace = true }
+p3-goldilocks = { workspace = true }
+p3-symmetric = { workspace = true }
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+thiserror = { workspace = true }
+bincode = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+rand = { workspace = true }
+# Additional dev dependencies for tests
+p3-goldilocks = { workspace = true }
+p3-field = { workspace = true }
+
+[[bench]]
+name = "folding"
+harness = false

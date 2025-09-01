@@ -1,0 +1,22 @@
+[package]
+name = "neo-challenge"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0 OR MIT"
+description = "Strong-sampler challenge set C for Neo (rot(a) with invertible differences) + expansion metrics"
+
+[dependencies]
+serde = { version = "1.0.219", features = ["derive"] }
+thiserror = "2"
+rand = "0.9"
+
+# Plonky3 stack we already use elsewhere
+p3-field = "0.3.0"
+p3-goldilocks = { version = "0.3.0", default-features = false }
+p3-matrix = "0.3.0"
+p3-challenger = "0.3.0"
+p3-poseidon2 = "0.3.0"
+p3-symmetric = "0.3.0"
+
+# Local arithmetic (Fq, ring, rotations)
+neo-math = { path = "../neo-math" }
