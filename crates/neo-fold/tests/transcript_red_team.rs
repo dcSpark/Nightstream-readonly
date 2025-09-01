@@ -3,8 +3,8 @@ use neo_fold::transcript::{FoldTranscript, Domain};
 
 #[test]
 fn domain_separation_is_binding() {
-    let mut t1 = FoldTranscript::new();
-    let mut t2 = FoldTranscript::new();
+    let mut t1 = FoldTranscript::new(b"test1");
+    let mut t2 = FoldTranscript::new(b"test2");
 
     t1.domain(Domain::CCS);
     t1.absorb_u64(&[1,2,3]);
@@ -19,8 +19,8 @@ fn domain_separation_is_binding() {
 
 #[test]
 fn order_matters_in_transcript() {
-    let mut t1 = FoldTranscript::new();
-    let mut t2 = FoldTranscript::new();
+    let mut t1 = FoldTranscript::new(b"order_test1");
+    let mut t2 = FoldTranscript::new(b"order_test2");
 
     t1.domain(Domain::CCS);
     t1.absorb_u64(&[42]);

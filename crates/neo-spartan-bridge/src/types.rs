@@ -1,6 +1,7 @@
 use serde::{Serialize, Deserialize};
+use std::fmt;
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Serialize, Deserialize)]
 pub struct ProofBundle {
     /// Spartan2 proof bytes (includes the Hash‑MLE PCS proof inside Spartan2's structure).
     pub proof: Vec<u8>,
@@ -8,6 +9,17 @@ pub struct ProofBundle {
     pub vk: Vec<u8>,
     /// Public IO you expect verifiers to re-encode identically (bridge header + public inputs).
     pub public_io_bytes: Vec<u8>,
+}
+
+// Custom Debug implementation to avoid dumping massive binary data
+impl fmt::Debug for ProofBundle {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("ProofBundle")
+            .field("proof", &format!("[{} bytes]", self.proof.len()))
+            .field("vk", &format!("[{} bytes]", self.vk.len()))
+            .field("public_io_bytes", &format!("[{} bytes]", self.public_io_bytes.len()))
+            .finish()
+    }
 }
 
 impl ProofBundle {

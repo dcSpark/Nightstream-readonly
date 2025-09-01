@@ -16,26 +16,7 @@ use p3_field::{Field, PrimeCharacteristicRing, ExtensionField, PrimeField64};
 use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
 
 // ---------- Field aliases ----------
-pub type F = Goldilocks; // q = 2^64 - 2^32 + 1
-
-// TODO: Import from neo-math when available
-// For now, we'll define a simple extension field K = F_{q^2}
-// This should match neo-math's K type exactly
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct K {
-    pub c0: F, // constant term
-    pub c1: F, // coefficient of the extension element
-}
-
-impl K {
-    pub fn from_base_slice(slice: &[F]) -> Option<Self> {
-        if slice.len() >= 2 {
-            Some(K { c0: slice[0], c1: slice[1] })
-        } else {
-            None
-        }
-    }
-}
+pub use neo_math::{F, K}; // Use proper neo-math types
 
 // ---------- Poseidon2 config ----------
 pub const POSEIDON2_WIDTH: usize = 16;
@@ -70,24 +51,36 @@ impl Domain {
 }
 
 /// Transcript facade providing domain-separated challenges
+#[derive(Clone)]
 pub struct FoldTranscript {
     ch: NeoChallenger,
 }
 
 impl FoldTranscript {
-    pub fn new() -> Self {
+    pub fn new(initial_data: &[u8]) -> Self {
         // Poseidon2 with default parameters for Goldilocks.
         // Use a fixed seed for deterministic transcript initialization
         use rand::SeedableRng;
         let mut rng = rand_chacha::ChaCha20Rng::from_seed([0u8; 32]);
         let perm = Poseidon2Goldilocks::<POSEIDON2_WIDTH>::new_from_rng_128(&mut rng);
         let mut ch = NeoChallenger::new(perm);
+        
         // Seal the transcript version.
         // Convert bytes to field elements and observe them individually
         for &byte in b"neo/transcript/v1" {
             ch.observe(F::from_u32(byte as u32));
         }
+        
+        // Absorb initial data
+        for &byte in initial_data {
+            ch.observe(F::from_u32(byte as u32));
+        }
+        
         Self { ch }
+    }
+    
+    pub fn default() -> Self {
+        Self::new(b"")
     }
 
     pub fn domain(&mut self, d: Domain) {
@@ -136,7 +129,7 @@ impl FoldTranscript {
     pub fn challenge_k(&mut self) -> K {
         let a0 = self.challenge_f();
         let a1 = self.challenge_f();
-        K { c0: a0, c1: a1 }
+        K::new_complex(a0, a1)
     }
 
     /// Draw multiple extension field challenges
@@ -147,7 +140,7 @@ impl FoldTranscript {
 
 impl Default for FoldTranscript {
     fn default() -> Self {
-        Self::new()
+        Self::new(b"")
     }
 }
 
@@ -157,7 +150,7 @@ mod tests {
 
     #[test]
     fn test_transcript_basic() {
-        let mut tr = FoldTranscript::new();
+        let mut tr = FoldTranscript::new(b"test");
         
         // Test domain separation
         tr.domain(Domain::CCS);
@@ -179,8 +172,8 @@ mod tests {
 
     #[test]
     fn test_domain_separation() {
-        let mut tr1 = FoldTranscript::new();
-        let mut tr2 = FoldTranscript::new();
+        let mut tr1 = FoldTranscript::new(b"test");
+        let mut tr2 = FoldTranscript::new(b"test");
         
         // Same input, different domains
         tr1.domain(Domain::CCS);

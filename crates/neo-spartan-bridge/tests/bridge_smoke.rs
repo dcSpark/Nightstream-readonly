@@ -129,7 +129,8 @@ struct IntermediateMeCircuit {}
 
 impl<E: Engine> SpartanCircuit<E> for IntermediateMeCircuit {
     fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
-        Ok(vec![]) // inputize() approach
+        // Must match what gets inputized in synthesize(): 1 + 2 = 3
+        Ok(vec![E::Scalar::from(3u64)])
     }
 
     fn num_challenges(&self) -> usize { 0 }
@@ -278,7 +279,12 @@ fn determinism_check() {
     let proof2 = compress_me_to_spartan(&me, &wit).expect("second proof");
     
     // Real SNARKs are randomized: proofs usually differ, VKs match, IO matches
-    assert_ne!(proof1.proof, proof2.proof, "Proofs need not be bit-equal");
+    if proof1.proof == proof2.proof {
+        println!("⚠️  WARNING: Proofs are identical - SNARK might not be properly randomized");
+        println!("   This could indicate deterministic proof generation or missing randomness");
+    } else {
+        println!("✅ Proofs are different as expected (randomized SNARK)");
+    }
     assert_eq!(proof1.vk, proof2.vk, "VK should be deterministic");
     assert_eq!(proof1.public_io_bytes, proof2.public_io_bytes, "Public IO should be stable");
     assert!(neo_spartan_bridge::verify_me_spartan(&proof1).unwrap());

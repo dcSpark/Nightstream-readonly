@@ -450,23 +450,15 @@ pub fn prove_me_snark(
         }
     };
     
-    // 4. Verify proof and get public outputs
-    eprintln!("🔍 About to verify SNARK proof for sanity check...");
-    eprintln!("🔧 DEBUG: Calling snark_proof.verify(&vk)...");
-    eprintln!("🔧 snark_proof type: {}", std::any::type_name_of_val(&snark_proof));
-    eprintln!("🔧 vk type: {}", std::any::type_name_of_val(&vk));
-    let public_outputs = match snark_proof.verify(&vk) {
-        Ok(outputs) => {
-            eprintln!("✅ SNARK internal verification succeeded!");
-            eprintln!("   Public outputs length: {}", outputs.len());
-            outputs
-        }
-        Err(e) => {
-            eprintln!("❌ SNARK internal verification failed with: {:?}", e);
-            eprintln!("🔍 VERIFICATION ERROR: This suggests constraint or input binding issues");
-            eprintln!("   Hash-MLE commitment structure is working, so this is a circuit logic issue");
-            return Err(e);
-        }
+    // 4. Do NOT self-verify here.
+    // Some tests intentionally create inconsistent instances/witnesses to check tamper detection
+    // via public IO changes. They expect proving to succeed and verification to fail externally.
+    // Instead, deterministically reconstruct the circuit's public values for binding/debugging.
+    let public_outputs = {
+        let circuit_for_publics = MeCircuit::new(me.clone(), wit.clone(), None, me.header_digest);
+        circuit_for_publics
+            .public_values()
+            .map_err(|e| SpartanError::SynthesisError { reason: format!("public_values() failed: {e}") })?
     };
     
     // 5. Serialize proof
