@@ -29,7 +29,7 @@ use bellpepper_core::{num::AllocatedNum, ConstraintSystem, SynthesisError};
 use ff::Field;
 use p3_field::{PrimeField64, PrimeCharacteristicRing};
 use spartan2::errors::SpartanError;
-use spartan2::provider::GoldilocksP3MerkleMleEngine as E;
+use spartan2::provider::GoldilocksMerkleMleEngine as E;
 use spartan2::spartan::{R1CSSNARK, SpartanProverKey, SpartanVerifierKey};
 use spartan2::traits::{circuit::SpartanCircuit, Engine, pcs::PCSEngineTrait, snark::R1CSSNARKTrait};
 
@@ -87,9 +87,11 @@ impl MeCircuit {
 /// (c_coords) || (y limbs) || (r_point) || (base_b) || (fold_digest limbs)
 impl SpartanCircuit<E> for MeCircuit {
     fn public_values(&self) -> Result<Vec<<E as Engine>::Scalar>, SynthesisError> {
+        // TRANSCRIPT CONSISTENCY FIX: Return the SAME values that inputize() creates
+        // Both prover (via this method) and verifier (via U.validate) must absorb identical data
         let mut pv = Vec::new();
 
-        // 1) Ajtai commitment coords (Fq)
+        // 1) Ajtai commitment coords (Fq) - SAME ORDER as inputize() calls
         for &c in &self.me.c_coords {
             pv.push(<E as Engine>::Scalar::from(c.as_canonical_u64()));
         }
@@ -108,17 +110,18 @@ impl SpartanCircuit<E> for MeCircuit {
         // 5) fold digest limbs
         pv.extend(self.digest_to_scalars());
 
-        // Hash-MLE PCS requires public inputs to be power-of-2 length
-        let original_len = pv.len();
-        let next_power_of_2 = pv.len().next_power_of_two();
+        // 6) Pad to power-of-2 EXACTLY like inputize() does - CRITICAL for transcript consistency
+        let current_public_count = self.me.c_coords.len() + (self.me.y_outputs.len() * 2) + 
+                                   self.me.r_point.len() + 1 + self.digest_to_scalars().len();
+        let target_count = current_public_count.next_power_of_two();
         
-        // Pad with zeros to make it power of 2
-        while pv.len() < next_power_of_2 {
+        // Pad with zeros to match inputize() exactly
+        while pv.len() < target_count {
             pv.push(<E as Engine>::Scalar::ZERO);
         }
 
-        if original_len != next_power_of_2 {
-            eprintln!("🔍 public_values() padded from {} to {} (power of 2)", original_len, pv.len());
+        if current_public_count != target_count {
+            eprintln!("🔧 TRANSCRIPT FIX: public_values() padded from {} to {} (matches inputize)", current_public_count, pv.len());
         }
         Ok(pv)
     }
@@ -164,19 +167,7 @@ impl SpartanCircuit<E> for MeCircuit {
             z_vars.push(AllocatedNum::alloc(cs.namespace(|| format!("REST_Z[{i}]")), || Ok(val))?);
         }
         
-        // 2) APPEND "one" as another REST variable at the END (preserves z_digits indexing)
-        let one = AllocatedNum::alloc(cs.namespace(|| "REST_ONE"), || Ok(<E as Engine>::Scalar::ONE))?;
-        cs.enforce(
-            || "enforce_rest_one_is_1",
-            |lc| lc + one.get_variable(),
-            |lc| lc + CS::one(),
-            |lc| lc + CS::one(),
-        );
-        let one_idx = z_vars.len();  // Index where "one" is appended
-        z_vars.push(one.clone());
-        eprintln!("🔍 Appended 'one' variable at REST[{}] (preserves z_digits indexing)", one_idx);
-        
-        // 3) Pad REST (only REST) to a power-of-two for Hash-MLE
+        // 2) Pad REST (only REST) to a power-of-two for Hash-MLE
         let orig_rest = z_vars.len();
         let target_rest = if orig_rest <= 1 { 1 } else { orig_rest.next_power_of_two() };
         for i in orig_rest..target_rest {
@@ -217,13 +208,13 @@ impl SpartanCircuit<E> for MeCircuit {
                     || format!("ajtai_bind_{i}"),
                     |lc| {
                         let mut lc = lc;
-                        for j in 0..upto.min(one_idx) { // Don't include 'one' in dot product
+                        for j in 0..upto {
                             lc = lc + (to_s(row[j]), z_vars[j].get_variable());
                         }
                         lc
                     },
-                    |lc| lc + z_vars[one_idx].get_variable(), // Use appended 'one'
-                    |lc| lc + (c_scalar, z_vars[one_idx].get_variable()), // Use appended 'one'
+                    |lc| lc + CS::one(),            // multiply by constant 1 (X side)
+                    |lc| lc + (c_scalar, CS::one()),// right side also uses constant 1
                 );
                 n_constraints += 1;
             }
@@ -256,13 +247,13 @@ impl SpartanCircuit<E> for MeCircuit {
                 || format!("me_eval_{j}"),
                 |lc| {
                     let mut lc = lc;
-                    for k in 0..upto.min(one_idx) { // Don't include 'one' in dot product
+                    for k in 0..upto {
                         lc = lc + (to_s(wj[k]), z_vars[k].get_variable());
                     }
                     lc
                 },
-                |lc| lc + z_vars[one_idx].get_variable(), // Use appended 'one'
-                |lc| lc + (y_scalar, z_vars[one_idx].get_variable()), // Use appended 'one'
+                |lc| lc + CS::one(),               // multiply by constant 1
+                |lc| lc + (y_scalar, CS::one()),   // RHS uses constant 1
             );
             n_constraints += 1;
         }
@@ -271,12 +262,13 @@ impl SpartanCircuit<E> for MeCircuit {
         if self.wit.ajtai_rows.as_ref().map_or(true, |r| r.is_empty())
             && self.wit.weight_vectors.is_empty()
         {
-            for i in 0..core::cmp::min(2, one_idx) { // Don't use 'one' itself in tautologies
+            // 1 * 1 = 1 
+            for i in 0..2 {
                 cs.enforce(
                     || format!("tautology_{i}"),
-                    |lc| lc + z_vars[i].get_variable(),
-                    |lc| lc + z_vars[one_idx].get_variable(), // Use appended 'one'
-                    |lc| lc + z_vars[i].get_variable(),
+                    |lc| lc + CS::one(),
+                    |lc| lc + CS::one(),
+                    |lc| lc + CS::one(),
                 );
                 n_constraints += 1;
             }
@@ -285,18 +277,17 @@ impl SpartanCircuit<E> for MeCircuit {
         // All witness variables are now allocated as REST with power-of-2 length
 
         // --- Ensure TOTAL number of constraints is a power of two (Hash‑MLE requirement)
-        // Account for the "one == 1" constraint added above
-        let total_constraints_so_far = n_constraints + 1; // +1 for "one == 1" constraint
+        let total_constraints_so_far = n_constraints;
         let want_constraints = if total_constraints_so_far <= 1 { 1 } else { total_constraints_so_far.next_power_of_two() };
         let need_to_add = want_constraints - total_constraints_so_far;
         if need_to_add > 0 {
-            // Add 1*1 = 1 tautologies; uses only the constant "one" so it's harmless  
+            // Add 1*1 = 1 tautologies using CS::one()
             for i in 0..need_to_add {
                 cs.enforce(
                     || format!("pad_const_tautology_{i}"),
-                    |lc| lc + z_vars[one_idx].get_variable(), // Use appended 'one'
-                    |lc| lc + z_vars[one_idx].get_variable(), // Use appended 'one'
-                    |lc| lc + z_vars[one_idx].get_variable(), // Use appended 'one'
+                    |lc| lc + CS::one(),
+                    |lc| lc + CS::one(),
+                    |lc| lc + CS::one(),
                 );
             }
             eprintln!("🔧 synthesize(): padded constraints {} → {} (total with shared = {})", total_constraints_so_far, want_constraints, want_constraints);
@@ -304,9 +295,61 @@ impl SpartanCircuit<E> for MeCircuit {
             eprintln!("ℹ️  synthesize(): constraints = {} (total with shared = {} - power-of-two OK)", n_constraints, total_constraints_so_far);
         }
 
-        // === SIMPLIFIED: No R1CS inputs for now (X will be empty) ===
-        // Both prover and verifier will use empty X vector: X = [1, 0, 0, ...]
-        eprintln!("🔧 synthesize(): using empty X vector - both prover and verifier will use X = [1]");
+        // CRITICAL FIX: Create public inputs via inputize() for transcript fork compatibility
+        // This replaces the old public_values() method approach
+        
+        // 1) Ajtai commitment coords (Fq)
+        for (i, &c) in self.me.c_coords.iter().enumerate() {
+            let c_val = <E as Engine>::Scalar::from(c.as_canonical_u64());
+            let c_alloc = AllocatedNum::alloc(cs.namespace(|| format!("c_coord_{}", i)), || Ok(c_val))?;
+            let _ = c_alloc.inputize(cs.namespace(|| format!("public_c_{}", i)));
+        }
+        
+        // 2) y outputs — 2 limbs when y ∈ K  
+        for (i, &y) in self.me.y_outputs.iter().enumerate() {
+            let (y0, y1) = self.k_to_limbs(y);
+            let y0_val = <E as Engine>::Scalar::from(y0.as_canonical_u64());
+            let y1_val = <E as Engine>::Scalar::from(y1.as_canonical_u64());
+            
+            let y0_alloc = AllocatedNum::alloc(cs.namespace(|| format!("y_output_{}_{}", i, 0)), || Ok(y0_val))?;
+            let y1_alloc = AllocatedNum::alloc(cs.namespace(|| format!("y_output_{}_{}", i, 1)), || Ok(y1_val))?;
+            
+            let _ = y0_alloc.inputize(cs.namespace(|| format!("public_y_{}_{}", i, 0)));
+            let _ = y1_alloc.inputize(cs.namespace(|| format!("public_y_{}_{}", i, 1)));
+        }
+        
+        // 3) challenge r (Fq^m)
+        for (i, &r) in self.me.r_point.iter().enumerate() {
+            let r_val = <E as Engine>::Scalar::from(r.as_canonical_u64());
+            let r_alloc = AllocatedNum::alloc(cs.namespace(|| format!("r_point_{}", i)), || Ok(r_val))?;
+            let _ = r_alloc.inputize(cs.namespace(|| format!("public_r_{}", i)));
+        }
+        
+        // 4) base dimension b
+        let b_val = <E as Engine>::Scalar::from(self.me.base_b as u64);
+        let b_alloc = AllocatedNum::alloc(cs.namespace(|| "base_b"), || Ok(b_val))?;
+        let _ = b_alloc.inputize(cs.namespace(|| "public_base_b"));
+        
+        // 5) fold digest limbs
+        let digest_scalars = self.digest_to_scalars();
+        for (i, &digest_val) in digest_scalars.iter().enumerate() {
+            let digest_alloc = AllocatedNum::alloc(cs.namespace(|| format!("digest_{}", i)), || Ok(digest_val))?;
+            let _ = digest_alloc.inputize(cs.namespace(|| format!("public_digest_{}", i)));
+        }
+        
+        // 6) Pad to power-of-2 for Hash-MLE compatibility  
+        let current_public_count = self.me.c_coords.len() + (self.me.y_outputs.len() * 2) + 
+                                   self.me.r_point.len() + 1 + digest_scalars.len();
+        let target_count = current_public_count.next_power_of_two();
+        
+        for i in current_public_count..target_count {
+            let zero_alloc = AllocatedNum::alloc(cs.namespace(|| format!("padding_{}", i)), || Ok(<E as Engine>::Scalar::ZERO))?;
+            let _ = zero_alloc.inputize(cs.namespace(|| format!("public_padding_{}", i)));
+        }
+        
+        if current_public_count != target_count {
+            eprintln!("🔍 inputize() padded from {} to {} public inputs (power of 2)", current_public_count, target_count);
+        }
 
         Ok(())
     }
@@ -409,6 +452,9 @@ pub fn prove_me_snark(
     
     // 4. Verify proof and get public outputs
     eprintln!("🔍 About to verify SNARK proof for sanity check...");
+    eprintln!("🔧 DEBUG: Calling snark_proof.verify(&vk)...");
+    eprintln!("🔧 snark_proof type: {}", std::any::type_name_of_val(&snark_proof));
+    eprintln!("🔧 vk type: {}", std::any::type_name_of_val(&vk));
     let public_outputs = match snark_proof.verify(&vk) {
         Ok(outputs) => {
             eprintln!("✅ SNARK internal verification succeeded!");

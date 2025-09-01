@@ -32,7 +32,7 @@ use neo_ccs::{MEInstance, MEWitness};
 use spartan2::spartan::{R1CSSNARK, SpartanVerifierKey};
 use spartan2::traits::snark::R1CSSNARKTrait;
 
-type E = spartan2::provider::GoldilocksP3MerkleMleEngine;
+type E = spartan2::provider::GoldilocksMerkleMleEngine;
 
 /// Encode the transcript header and public IO with **exact** match to MeCircuit::public_values().
 /// This encoding MUST match the order/format of MeCircuit::public_values() exactly.
@@ -133,8 +133,10 @@ pub fn verify_me_spartan(bundle: &ProofBundle) -> Result<bool> {
     }
     
     // 3) Compare with bundle's public IO bytes - CRITICAL security check
+    // FIXED: Now that transcript consistency is working, re-enable public IO verification
     anyhow::ensure!(bytes == bundle.public_io_bytes, 
         "Public IO mismatch: SNARK public inputs don't match bundle.public_io_bytes");
+    eprintln!("✅ Public IO verification passed: {} bytes match exactly", bytes.len());
     
     Ok(true)
 }

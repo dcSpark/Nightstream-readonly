@@ -9,6 +9,11 @@ use neo_spartan_bridge::compress_me_to_spartan;
 use neo_ccs::{MEInstance, MEWitness};
 use p3_goldilocks::Goldilocks as F;
 use p3_field::PrimeCharacteristicRing;
+use spartan2::traits::{Engine, circuit::SpartanCircuit, snark::R1CSSNARKTrait};
+use spartan2::spartan::R1CSSNARK;
+use bellpepper_core::{ConstraintSystem, SynthesisError, num::AllocatedNum};
+
+type E = spartan2::provider::GoldilocksMerkleMleEngine;
 
 /// Helper to compute dot product of field vector and i64 witness
 fn dot_f_z(row: &[F], z: &[i64]) -> F {
@@ -55,6 +60,168 @@ fn tiny_me_instance() -> (MEInstance, MEWitness) {
     };
 
     (me, wit)
+}
+
+#[derive(Clone, Debug, Default)]
+struct MinimalMeCircuit {}
+
+impl<E: Engine> SpartanCircuit<E> for MinimalMeCircuit {
+    fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
+        // Match the inputize() result: a * b = 2 * 3 = 6
+        Ok(vec![E::Scalar::from(6u64)])
+    }
+
+    fn num_challenges(&self) -> usize {
+        0 // No challenges needed for this simple circuit
+    }
+
+    fn shared<CS: ConstraintSystem<E::Scalar>>(
+        &self,
+        _: &mut CS,
+    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+        Ok(vec![])
+    }
+
+    fn precommitted<CS: ConstraintSystem<E::Scalar>>(
+        &self,
+        _: &mut CS,
+        _: &[AllocatedNum<E::Scalar>],
+    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+        Ok(vec![])
+    }
+
+    fn synthesize<CS: ConstraintSystem<E::Scalar>>(
+        &self,
+        cs: &mut CS,
+        _shared: &[AllocatedNum<E::Scalar>],
+        _precommitted: &[AllocatedNum<E::Scalar>],
+        _challenges: Option<&[E::Scalar]>,
+    ) -> Result<(), SynthesisError> {
+        // TEST: Add more witness variables (like intermediate circuit) but keep 1 constraint + 1 public
+        let mut extra_witnesses = Vec::new();
+        for i in 0..8 {  // Add 8 extra witness variables
+            let val = E::Scalar::from((i + 10) as u64);
+            let var = AllocatedNum::alloc(cs.namespace(|| format!("extra_{}", i)), || Ok(val))?;
+            extra_witnesses.push(var);
+        }
+        
+        // Keep the same simple constraint as the working version
+        let a = AllocatedNum::alloc(cs.namespace(|| "a"), || Ok(E::Scalar::from(2u64)))?;
+        let b = AllocatedNum::alloc(cs.namespace(|| "b"), || Ok(E::Scalar::from(3u64)))?;
+        let result = AllocatedNum::alloc(cs.namespace(|| "result"), || Ok(E::Scalar::from(6u64)))?;
+        
+        cs.enforce(
+            || "a * b = result",
+            |lc| lc + a.get_variable(),
+            |lc| lc + b.get_variable(),
+            |lc| lc + result.get_variable(),
+        );
+        
+        // Keep the same single public input
+        let _ = result.inputize(cs.namespace(|| "output"));
+        
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct IntermediateMeCircuit {}
+
+impl<E: Engine> SpartanCircuit<E> for IntermediateMeCircuit {
+    fn public_values(&self) -> Result<Vec<E::Scalar>, SynthesisError> {
+        Ok(vec![]) // inputize() approach
+    }
+
+    fn num_challenges(&self) -> usize { 0 }
+
+    fn shared<CS: ConstraintSystem<E::Scalar>>(
+        &self,
+        _: &mut CS,
+    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+        Ok(vec![])
+    }
+
+    fn precommitted<CS: ConstraintSystem<E::Scalar>>(
+        &self,
+        _: &mut CS,
+        _: &[AllocatedNum<E::Scalar>],
+    ) -> Result<Vec<AllocatedNum<E::Scalar>>, SynthesisError> {
+        Ok(vec![])
+    }
+
+    fn synthesize<CS: ConstraintSystem<E::Scalar>>(
+        &self,
+        cs: &mut CS,
+        _shared: &[AllocatedNum<E::Scalar>],
+        _precommitted: &[AllocatedNum<E::Scalar>],
+        _challenges: Option<&[E::Scalar]>,
+    ) -> Result<(), SynthesisError> {
+        // Test with ~10 witness variables and 4 public inputs (power of 2)
+        let mut witness_vars = Vec::new();
+        
+        // Create some witness variables
+        for i in 0..10 {
+            let val = E::Scalar::from((i + 1) as u64);
+            let var = AllocatedNum::alloc(cs.namespace(|| format!("w_{}", i)), || Ok(val))?;
+            witness_vars.push(var);
+        }
+        
+        // Add some constraints like our ME circuit
+        cs.enforce(
+            || "constraint_0",
+            |lc| lc + witness_vars[0].get_variable(),
+            |lc| lc + witness_vars[1].get_variable(),
+            |lc| lc + (E::Scalar::from(2u64), CS::one()),
+        );
+        
+        cs.enforce(
+            || "constraint_1", 
+            |lc| lc + witness_vars[2].get_variable(),
+            |lc| lc + witness_vars[3].get_variable(),
+            |lc| lc + (E::Scalar::from(12u64), CS::one()),
+        );
+        
+        // TEST: Only 1 public input like the working minimal circuit
+        let result = E::Scalar::from(1u64) + E::Scalar::from(2u64); // 1 + 2 = 3
+        let pub_var = AllocatedNum::alloc(cs.namespace(|| "result"), || Ok(result))?;
+        let _ = pub_var.inputize(cs.namespace(|| "public_result"));
+        
+        Ok(())
+    }
+}
+
+#[test]
+fn test_intermediate_transcript_fork() {
+    println!("🔬 Testing intermediate ME circuit (10 witness + 4 public) with transcript fork...");
+    
+    let circuit = IntermediateMeCircuit::default();
+    let (pk, vk) = R1CSSNARK::<E>::setup(circuit.clone()).unwrap();
+    let prep_snark = R1CSSNARK::<E>::prep_prove(&pk, circuit.clone(), false).unwrap();
+    let proof = R1CSSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark, false).unwrap();
+    
+    let res = proof.verify(&vk);
+    match &res {
+        Ok(_) => println!("✅ Intermediate ME circuit works with transcript fork!"),
+        Err(e) => println!("❌ Intermediate ME circuit fails: {:?}", e),
+    }
+    assert!(res.is_ok(), "Intermediate circuit should work with transcript fork: {:?}", res.err());
+}
+
+#[test]
+fn test_minimal_transcript_fork() {
+    println!("🔬 Testing minimal ME circuit with transcript fork...");
+    
+    let circuit = MinimalMeCircuit::default();
+    let (pk, vk) = R1CSSNARK::<E>::setup(circuit.clone()).unwrap();
+    let prep_snark = R1CSSNARK::<E>::prep_prove(&pk, circuit.clone(), false).unwrap();
+    let proof = R1CSSNARK::<E>::prove(&pk, circuit.clone(), &prep_snark, false).unwrap();
+    
+    let res = proof.verify(&vk);
+    match &res {
+        Ok(_) => println!("✅ Minimal ME circuit works with transcript fork!"),
+        Err(e) => println!("❌ Minimal ME circuit fails: {:?}", e),
+    }
+    assert!(res.is_ok(), "Minimal circuit should work with transcript fork: {:?}", res.err());
 }
 
 #[test]
