@@ -120,8 +120,21 @@ pub fn compress_via_bridge(
         Ok(proof_bundle) => {
             eprintln!("   ✅ Bridge compression completed successfully");
             eprintln!("   - Proof bundle size: {} bytes", proof_bundle.proof.len());
+            eprintln!("   - VK size: {} bytes", proof_bundle.vk.len());
+            eprintln!("   - Public IO size: {} bytes", proof_bundle.public_io_bytes.len());
             eprintln!("   - This is a real cryptographic artifact (not a demo stub)");
-            Ok(proof_bundle.proof)
+            
+            // Serialize the full ProofBundle for verification
+            match bincode::serialize(&proof_bundle) {
+                Ok(serialized) => {
+                    eprintln!("   - Total serialized bundle: {} bytes", serialized.len());
+                    Ok(serialized)
+                }
+                Err(e) => {
+                    eprintln!("   ❌ Failed to serialize ProofBundle: {}", e);
+                    Err(format!("ProofBundle serialization error: {}", e))
+                }
+            }
         }
         Err(e) => {
             eprintln!("   ❌ Bridge compression failed: {}", e);
@@ -138,14 +151,38 @@ pub fn verify_via_bridge(
     eprintln!("🔍 Using neo-spartan-bridge verification (Hash-MLE backend)");
     eprintln!("   ⚠️  WARNING: This uses Keccak transcript (temporary inconsistency)");
     
-    // For now, the bridge verification is not fully implemented
-    // We'll do a basic sanity check on the proof format
-    if proof.starts_with(b"NEO-SPARTAN-PROOF:") && proof.len() > 64 {
-        eprintln!("   ✅ Bridge proof format validation passed");
-        eprintln!("   📝 Full cryptographic verification pending bridge completion");
-        Ok(true)
-    } else {
-        eprintln!("   ❌ Invalid bridge proof format");
-        Ok(false)
+    // Deserialize the ProofBundle
+    match bincode::deserialize::<neo_spartan_bridge::ProofBundle>(proof) {
+        Ok(proof_bundle) => {
+            eprintln!("   ✅ ProofBundle deserialized successfully");
+            eprintln!("   - Proof size: {} bytes", proof_bundle.proof.len());
+            eprintln!("   - VK size: {} bytes", proof_bundle.vk.len());
+            eprintln!("   - Public IO size: {} bytes", proof_bundle.public_io_bytes.len());
+            
+            // Call the actual bridge verification
+            match neo_spartan_bridge::verify_me_spartan(&proof_bundle) {
+                Ok(verification_result) => {
+                    if verification_result {
+                        eprintln!("   ✅ Cryptographic verification PASSED!");
+                        eprintln!("   - Full Hash-MLE SNARK verification completed");
+                    } else {
+                        eprintln!("   ❌ Cryptographic verification FAILED!");
+                        eprintln!("   - SNARK proof does not verify");
+                    }
+                    Ok(verification_result)
+                }
+                Err(e) => {
+                    eprintln!("   ❌ Bridge verification error: {}", e);
+                    eprintln!("   - This could indicate proof corruption or incompatible formats");
+                    Err(format!("Bridge verification failed: {}", e))
+                }
+            }
+        }
+        Err(e) => {
+            eprintln!("   ❌ Failed to deserialize ProofBundle: {}", e);
+            eprintln!("   - Proof size: {} bytes", proof.len());
+            eprintln!("   - This indicates the proof format is incompatible");
+            Err(format!("ProofBundle deserialization failed: {}", e))
+        }
     }
 }

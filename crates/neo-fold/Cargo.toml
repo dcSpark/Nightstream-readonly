@@ -24,6 +24,7 @@ p3-symmetric = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
 thiserror = { workspace = true }
+bincode = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }
