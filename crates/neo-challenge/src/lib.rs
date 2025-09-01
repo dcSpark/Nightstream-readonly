@@ -73,7 +73,9 @@ where
     C: FieldChallenger<Fq> + CanObserve<u8> + CanSampleBits<usize>,
 {
     // Domain separation.
-    chal.observe_slice(cfg.domain_sep);
+    for &b in cfg.domain_sep {
+        chal.observe(b);
+    }
 
     // Sample coefficients a_i ∈ [-H..H] mapped into F_q.
     let mut a = Vec::with_capacity(cfg.d);
@@ -125,7 +127,9 @@ where
         }
 
         // Re-seed domain to avoid cycles; light domain bump.
-        chal.observe_slice(b"neo.challenge.reroll");
+        for &b in b"neo.challenge.reroll" {
+            chal.observe(b);
+        }
     }
 }
 

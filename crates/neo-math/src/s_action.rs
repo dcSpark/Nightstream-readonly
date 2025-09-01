@@ -1,7 +1,7 @@
 //! S-action implementation: "left multiplication by a in R_q" as rot(a).
 //! Definitionally correct: j-th column is cf(a * X^j mod Phi_81).
 
-use crate::{Rq, Fq, K, D};
+use crate::{Rq, Fq, K, D, SActionError};
 use crate::ring::{cf, cf_inv};
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::dense::DenseMatrix;
@@ -57,15 +57,15 @@ impl SAction {
     /// 
     /// **Security**: For ME claims (y_j ∈ K^d should be length D), vectors longer than D
     /// are rejected to prevent dimension mismatches that could break soundness.
-    pub fn apply_k_vec(&self, y: &[K]) -> Vec<K> {
+    pub fn apply_k_vec(&self, y: &[K]) -> Result<Vec<K>, SActionError> {
         // Security check: reject vectors longer than D to prevent silent truncation
         // that could hide dimension mismatches in ME claims
         if y.len() > D {
-            panic!("SAction::apply_k_vec: input length {} exceeds maximum dimension D={}", y.len(), D);
+            return Err(SActionError::DimMismatch { expected: D, got: y.len() });
         }
         
         if y.is_empty() {
-            return Vec::new();
+            return Ok(Vec::new());
         }
 
         // Process up to min(y.len(), D) elements - this handles both short vectors (tests) 
@@ -91,22 +91,24 @@ impl SAction {
             result.push(K::new_complex(rotated_re[i], rotated_im[i]));
         }
         
-        result
+        Ok(result)
     }
 
     /// Left action on a slice of K elements (fixed-size version for performance)
-    pub fn apply_k_slice(&self, y: &[K], result: &mut [K]) {
-        assert_eq!(y.len(), result.len(), "Input and output slices must have same length");
+    pub fn apply_k_slice(&self, y: &[K], result: &mut [K]) -> Result<(), SActionError> {
+        if y.len() != result.len() {
+            return Err(SActionError::DimMismatch { expected: result.len(), got: y.len() });
+        }
         
         // Security check: reject vectors longer than D
         if y.len() > D {
-            panic!("SAction::apply_k_slice: input length {} exceeds maximum dimension D={}", y.len(), D);
+            return Err(SActionError::DimMismatch { expected: D, got: y.len() });
         }
         
         let process_len = y.len().min(D);
         
         if process_len == 0 {
-            return;
+            return Ok(());
         }
 
         // Split into real/imaginary parts
@@ -131,5 +133,7 @@ impl SAction {
         if process_len < result.len() {
             result[process_len..].copy_from_slice(&y[process_len..]);
         }
+
+        Ok(())
     }
 }

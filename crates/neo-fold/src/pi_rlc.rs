@@ -117,7 +117,8 @@ pub fn pi_rlc_prove(
     for j in 0..t {
         for (rho, me) in rho_ring_elems.iter().zip(me_list.iter()) {
             let s_action = SAction::from_ring(*rho);
-            let y_rotated = s_action.apply_k_vec(&me.y[j]);
+            let y_rotated = s_action.apply_k_vec(&me.y[j])
+                .map_err(|e| PiRlcError::SActionError(format!("S-action failed: {}", e)))?;
             for elem_idx in 0..y_dim {
                 y_prime[j][elem_idx] += y_rotated[elem_idx];
             }
@@ -263,7 +264,10 @@ pub fn pi_rlc_verify(
                     return Ok(false); // Inconsistent input structure
                 }
                 
-                let y_rotated = s_action.apply_k_vec(&me.y[j]);
+                let y_rotated = match s_action.apply_k_vec(&me.y[j]) {
+                    Ok(rotated) => rotated,
+                    Err(_) => return Ok(false), // Invalid dimension = verification failure
+                };
                 for t in 0..y_dim {
                     expected_y_j[t] += y_rotated[t];
                 }

@@ -12,6 +12,13 @@ pub mod field;
 pub mod ring;
 pub mod s_action;
 
+/// Errors from S-action operations
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SActionError {
+    #[error("Dimension mismatch: expected at most {expected}, got {got}")]
+    DimMismatch { expected: usize, got: usize },
+}
+
 pub use field::{Fq, K, GOLDILOCKS_MODULUS, TWO_ADICITY, nonresidue, two_adic_generator, KExtensions};
 pub use ring::{ETA, D, Rq, cf, cf_inv, inf_norm};
 pub use s_action::SAction;

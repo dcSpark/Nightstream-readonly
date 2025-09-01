@@ -379,7 +379,7 @@ fn verify_split_open<L: SModuleHomomorphism<F, Cmt>>(
     
     for _i in 0..digit_cs.len() {
         // Convert scalar to ring element: [pow, 0, 0, ..., 0] represents pow * 1
-        let mut coeff_array = [neo_math::F::ZERO; 54]; // D = 54 from neo-math
+        let mut coeff_array = [neo_math::F::ZERO; neo_math::D];
         coeff_array[0] = pow; // pow * X^0
         let ring_elem = neo_math::cf_inv(coeff_array);
         coeffs.push(ring_elem);

@@ -67,7 +67,7 @@ mod production_tests {
             let y_vec = create_production_k_vector(dim);
             let s_action = create_production_s_action(2);  // Simple doubling
             
-            let result = s_action.apply_k_vec(&y_vec);
+            let result = s_action.apply_k_vec(&y_vec).expect("Valid dimensions should succeed");
             
             assert_eq!(result.len(), y_vec.len(), "S-action should preserve vector length for dim={}", dim);
             println!("✅ Successfully processed {}-dimensional ME vector", dim);
@@ -95,7 +95,7 @@ mod production_tests {
         // Combine vectors like in pi_rlc_prove()
         let mut combined = vec![K::ZERO; dim];
         for (s_action, y_vec) in s_actions.iter().zip(me_y_vectors.iter()) {
-            let rotated = s_action.apply_k_vec(y_vec);
+            let rotated = s_action.apply_k_vec(y_vec).expect("Valid dimensions should succeed");
             for (i, &val) in rotated.iter().enumerate() {
                 combined[i] += val;
             }
@@ -124,10 +124,10 @@ mod production_tests {
             ay_plus_bz.push(a * y[i] + b * z[i]);
         }
         
-        let s_combination = s.apply_k_vec(&ay_plus_bz);
+        let s_combination = s.apply_k_vec(&ay_plus_bz).expect("Valid dimensions should succeed");
         
-        let s_y = s.apply_k_vec(&y);
-        let s_z = s.apply_k_vec(&z);
+        let s_y = s.apply_k_vec(&y).expect("Valid dimensions should succeed");
+        let s_z = s.apply_k_vec(&z).expect("Valid dimensions should succeed");
         let mut expected = Vec::with_capacity(dim);
         for i in 0..dim {
             expected.push(a * s_y[i] + b * s_z[i]);
@@ -153,7 +153,7 @@ mod production_tests {
         coeffs[0] = Fq::ONE;
         let identity_s = SAction::from_ring(cf_inv(coeffs));
         
-        let result = identity_s.apply_k_vec(&y);
+        let result = identity_s.apply_k_vec(&y).expect("Valid dimensions should succeed");
         
         assert_eq!(result.len(), y.len());
         for (original, preserved) in y.iter().zip(result.iter()) {
@@ -171,25 +171,24 @@ mod production_tests {
         let max_dim_vector = create_production_k_vector(D);
         let s = create_production_s_action(2);
         
-        let result = s.apply_k_vec(&max_dim_vector);
+        let result = s.apply_k_vec(&max_dim_vector).expect("Maximum dimension should succeed");
         assert_eq!(result.len(), D);
         println!("✅ Maximum dimension D={} handled correctly", D);
         
         // Test that vectors longer than D are rejected (security fix)
-        // This should panic, demonstrating the security fix works
-        std::panic::set_hook(Box::new(|_| {})); // Suppress panic output
-        
-        let result = std::panic::catch_unwind(|| {
-            let mut oversized = create_production_k_vector(D);
-            oversized.push(K::ZERO); // Make it D+1 elements
-            s.apply_k_vec(&oversized)
-        });
+        // This should return an error, demonstrating the security fix works
+        let mut oversized = create_production_k_vector(D);
+        oversized.push(K::ZERO); // Make it D+1 elements
+        let result = s.apply_k_vec(&oversized);
         
         assert!(result.is_err(), "Oversized vectors should be rejected for security");
+        if let Err(neo_math::SActionError::DimMismatch { expected, got }) = result {
+            assert_eq!(expected, D);
+            assert_eq!(got, D + 1);
+        } else {
+            panic!("Expected DimMismatch error");
+        }
         println!("✅ Security check correctly rejects oversized vectors");
-        
-        // Restore normal panic behavior
-        let _ = std::panic::take_hook();
     }
 
     #[test] 
@@ -200,13 +199,13 @@ mod production_tests {
         
         // Empty vector
         let empty: Vec<K> = Vec::new();
-        let result = s.apply_k_vec(&empty);
+        let result = s.apply_k_vec(&empty).expect("Empty vector should succeed");
         assert_eq!(result.len(), 0);
         println!("✅ Empty vector handled correctly");
         
         // Single element vector
         let single = vec![K::new_complex(Fq::from_u64(42), Fq::from_u64(7))];
-        let result = s.apply_k_vec(&single);
+        let result = s.apply_k_vec(&single).expect("Single element should succeed");
         assert_eq!(result.len(), 1);
         println!("✅ Single-element vector handled correctly");
     }
@@ -226,7 +225,7 @@ mod production_tests {
         y.push(K::new_complex(Fq::ZERO, Fq::ZERO));
         
         let s = create_production_s_action(1); // Simple rotation
-        let result = s.apply_k_vec(&y);
+        let result = s.apply_k_vec(&y).expect("Valid dimensions should succeed");
         
         assert_eq!(result.len(), 4);
         println!("✅ Bridge-style scenario processed correctly");
