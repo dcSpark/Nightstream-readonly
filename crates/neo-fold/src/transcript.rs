@@ -165,6 +165,18 @@ impl FoldTranscript {
         out
     }
     
+
+    
+    /// Absorb extension field element as base field components for transcript binding
+    pub fn absorb_ext_as_base_fields_k(&mut self, label: &[u8], ext_elem: neo_math::K) {
+        use neo_math::KExtensions;
+        self.absorb_bytes(label);
+        let coeffs = ext_elem.as_coeffs();
+        for &coeff in &coeffs {
+            self.ch.observe(coeff);
+        }
+    }
+    
     /// Absorb Π_CCS header parameters for extension policy binding
     /// This ensures FS challenges bind to the circuit parameters and security policy
     pub fn absorb_ccs_header(

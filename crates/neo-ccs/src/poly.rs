@@ -60,4 +60,21 @@ impl<F: Field> SparsePoly<F> {
         }
         acc
     }
+    
+    /// Evaluate with inputs in an extension field K (coeffs in base F).
+    pub fn eval_in_ext<K: Field + From<F>>(&self, x: &[K]) -> K {
+        assert_eq!(x.len(), self.t);
+        let mut acc = K::ZERO;
+        for term in &self.terms {
+            let mut m = K::from(term.coeff);
+            for (xi, &pow) in x.iter().zip(term.exps.iter()) {
+                if pow == 0 { continue; }
+                let mut p = *xi;
+                for _ in 1..pow { p *= *xi; } // small exponents in CCS polynomials
+                m *= p;
+            }
+            acc += m;
+        }
+        acc
+    }
 }

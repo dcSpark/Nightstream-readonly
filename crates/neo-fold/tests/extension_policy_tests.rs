@@ -11,7 +11,7 @@ use neo_fold::{
     error::PiCcsError,
 };
 use neo_ccs::{CcsStructure, McsInstance, McsWitness, Mat, SparsePoly, Term};
-use neo_ajtai::{setup, commit};
+use neo_ajtai::{setup, commit, Commitment};
 use neo_math::F;
 use neo_params::NeoParams;
 use p3_field::PrimeCharacteristicRing;
@@ -22,7 +22,9 @@ fn test_extension_policy_validation_in_protocol() {
     println!("🔍 Testing extension policy validation in folding protocol...");
     
     // Create a small test CCS that should pass extension check
-    let mat = Mat::from_row_major(2, 2, vec![F::ONE, F::ZERO, F::ZERO, F::ONE]);
+    let m = 8; // witness length to match setup
+    let n = 4; // constraint count (power of 2)
+    let mat = Mat::from_row_major(n, m, vec![F::ONE; n * m]);
     let terms = vec![Term { coeff: F::ONE, exps: vec![1] }]; // Linear polynomial
     let poly = SparsePoly::new(1, terms);
     let ccs = CcsStructure::new(vec![mat], poly).unwrap();
@@ -32,9 +34,28 @@ fn test_extension_policy_validation_in_protocol() {
     
     // Create test MCS instance and witness
     let mut rng = rng();
-    let pp = setup(&mut rng, neo_math::D, 4, 8).expect("Setup should succeed");
-    let witness_data = vec![F::ONE; neo_math::D * 8];
+    let pp = setup(&mut rng, neo_math::D, 4, m).expect("Setup should succeed");
+    let witness_data = vec![F::ONE; neo_math::D * m];
     let commitment = commit(&pp, &witness_data);
+    
+    // Create Ajtai L for SModuleHomomorphism
+    struct AjtaiL { pp: neo_ajtai::PP<neo_math::Rq> }
+    impl neo_ccs::traits::SModuleHomomorphism<F, Commitment> for AjtaiL {
+        fn commit(&self, Z: &neo_ccs::Mat<F>) -> Commitment {
+            let z_flat: Vec<F> = Z.as_slice().to_vec();
+            neo_ajtai::commit(&self.pp, &z_flat)
+        }
+        fn project_x(&self, Z: &neo_ccs::Mat<F>, m_in: usize) -> neo_ccs::Mat<F> {
+            let mut X = neo_ccs::Mat::zero(Z.rows(), m_in, F::ZERO);
+            for r in 0..Z.rows() {
+                for c in 0..m_in {
+                    X[(r, c)] = Z[(r, c)];
+                }
+            }
+            X
+        }
+    }
+    let l = AjtaiL { pp };
     
     let mcs_instance = McsInstance {
         c: commitment.clone(),
@@ -42,9 +63,9 @@ fn test_extension_policy_validation_in_protocol() {
         m_in: 1,
     };
     
-    let witness_matrix = Mat::from_row_major(neo_math::D, 8, vec![F::ONE; neo_math::D * 8]);
+    let witness_matrix = Mat::from_row_major(neo_math::D, m, vec![F::ONE; neo_math::D * m]);
     let mcs_witness = McsWitness {
-        w: vec![F::ZERO; 7], // m - m_in = 8 - 1 = 7 private elements
+        w: vec![F::ZERO; m - 1], // m - m_in = m - 1 private elements
         Z: witness_matrix,
     };
     
@@ -57,6 +78,7 @@ fn test_extension_policy_validation_in_protocol() {
         &ccs,
         &[mcs_instance.clone()],
         &[mcs_witness],
+        &l,
     );
     
     match result {
@@ -109,9 +131,28 @@ fn test_extension_policy_rejects_high_degree() {
     
     // Create test MCS instance
     let mut rng = rng();
-    let pp = setup(&mut rng, neo_math::D, 4, 8).expect("Setup should succeed");
+    let pp2 = setup(&mut rng, neo_math::D, 4, 8).expect("Setup should succeed");
     let witness_data = vec![F::ONE; neo_math::D * 8];
-    let commitment = commit(&pp, &witness_data);
+    let commitment = commit(&pp2, &witness_data);
+    
+    // Create Ajtai L for SModuleHomomorphism
+    struct AjtaiL2 { pp: neo_ajtai::PP<neo_math::Rq> }
+    impl neo_ccs::traits::SModuleHomomorphism<F, Commitment> for AjtaiL2 {
+        fn commit(&self, Z: &neo_ccs::Mat<F>) -> Commitment {
+            let z_flat: Vec<F> = Z.as_slice().to_vec();
+            neo_ajtai::commit(&self.pp, &z_flat)
+        }
+        fn project_x(&self, Z: &neo_ccs::Mat<F>, m_in: usize) -> neo_ccs::Mat<F> {
+            let mut X = neo_ccs::Mat::zero(Z.rows(), m_in, F::ZERO);
+            for r in 0..Z.rows() {
+                for c in 0..m_in {
+                    X[(r, c)] = Z[(r, c)];
+                }
+            }
+            X
+        }
+    }
+    let l2 = AjtaiL2 { pp: pp2 };
     
     let mcs_instance = McsInstance {
         c: commitment,
@@ -133,6 +174,7 @@ fn test_extension_policy_rejects_high_degree() {
         &high_degree_ccs,
         &[mcs_instance],
         &[mcs_witness],
+        &l2,
     );
     
     match result {
