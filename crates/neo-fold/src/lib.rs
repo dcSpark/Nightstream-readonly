@@ -153,7 +153,8 @@ pub fn verify_folding_proof(
     _output_instances: &[MeInstance<Cmt, F, K>], 
     _proof: &FoldingProof,
 ) -> Result<bool, FoldingError> {
-    // TODO: Replace with real verification pipeline
-    eprintln!("⚠️  verify_folding_proof: using placeholder - full implementation needed");
-    Ok(true)
+    Err(FoldingError::InvalidInput(
+        "verify_folding_proof not implemented; use Spartan2 verification of the final ME claim"
+            .into(),
+    ))
 }

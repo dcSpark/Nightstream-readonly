@@ -1,13 +1,13 @@
 //! Poseidon2-backed Fiat-Shamir transcript for neo-fold
 //!
 //! This provides domain-separated challenges using Poseidon2 over Goldilocks,
-//! ensuring consistency across the entire pipeline (folding + FRI).
+//! ensuring consistency across the entire pipeline (folding + Spartan2).
 //!
 //! Key features:
 //! - Single transcript used across all protocols (Π_CCS, Π_RLC, Π_DEC, sum-check)
 //! - Domain separation for security
 //! - Support for both base field F and extension field K = F_{q^2} challenges
-//! - Compatible with p3-FRI's challenger interface
+//! - Compatible with Spartan2's Hash-MLE PCS challenger interface
 
 #![allow(unused_imports)]
 
@@ -33,8 +33,6 @@ pub enum Domain {
     Rlc,
     Dec,
     Sumcheck,
-    FriCommit,
-    FriQuery,
 }
 
 impl Domain {
@@ -44,8 +42,6 @@ impl Domain {
             Domain::Rlc       => b"neo/v1/pi_rlc", 
             Domain::Dec       => b"neo/v1/pi_dec",
             Domain::Sumcheck  => b"neo/v1/sumcheck",
-            Domain::FriCommit => b"neo/v1/fri/commit",
-            Domain::FriQuery  => b"neo/v1/fri/query",
         }
     }
 }
