@@ -158,7 +158,22 @@ fn main() -> Result<()> {
     
     // Step 6: Create MCS instance for folding
     println!("\n📦 Step 6: Creating MCS instance...");
-    // Convert commitment to bytes (simple representation for MCS)
+    
+    // Create Z matrix for MCS witness - convert from column-major (decomp_b) to row-major (Mat)
+    let d = neo_math::ring::D;
+    let m = decomp_z.len() / d;
+    let mut z_matrix_data = vec![neo_math::F::ZERO; d * m];
+    
+    // Convert from column-major (decomp_b format) to row-major (Mat format)
+    for col in 0..m {
+        for row in 0..d {
+            let col_major_idx = col * d + row;  // decomp_b uses this indexing
+            let row_major_idx = row * m + col;  // Mat::from_row_major expects this
+            z_matrix_data[row_major_idx] = decomp_z[col_major_idx];
+        }
+    }
+    let z_matrix = Mat::from_row_major(d, m, z_matrix_data);
+    
     // Use the proper Ajtai commitment directly (no more byte conversion)
     let mcs_instance = ConcreteMcsInstance {
         c: commitment,
@@ -167,7 +182,7 @@ fn main() -> Result<()> {
     };
     let mcs_witness = ConcreteMcsWitness {
         w: z,
-        Z: Mat::from_row_major(neo_math::ring::D, decomp_z.len() / neo_math::ring::D, decomp_z),
+        Z: z_matrix, // Now correctly constructed from column-major decomp_z
     };
     
     println!("   MCS instance created with commitment d={} κ={}", mcs_instance.c.d, mcs_instance.c.kappa);
