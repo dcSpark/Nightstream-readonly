@@ -51,6 +51,7 @@ fn verify_shortcircuit_single_instance() {
         r: vec![],               // ell = 0
         y: vec![vec![K::ZERO]],
         m_in: 0,
+        fold_digest: [0u8; 32],  // Dummy digest for test
     };
 
     // Output instances (DEC digits): also 1 in short-circuit
@@ -82,8 +83,8 @@ fn verify_multi_instance_zero_commitments_dec_present() {
     ];
 
     // Π_CCS outputs (two ME(b,L)), all zeros
-    let me0 = MeInstance { c: insts[0].c.clone(), X: Mat::from_row_major(1,1,vec![F::ZERO]), r: vec![], y: vec![vec![K::ZERO]], m_in: 1 };
-    let me1 = MeInstance { c: insts[1].c.clone(), X: Mat::from_row_major(1,1,vec![F::ZERO]), r: vec![], y: vec![vec![K::ZERO]], m_in: 1 };
+    let me0 = MeInstance { c: insts[0].c.clone(), X: Mat::from_row_major(1,1,vec![F::ZERO]), r: vec![], y: vec![vec![K::ZERO]], m_in: 1, fold_digest: [0u8; 32] };
+    let me1 = MeInstance { c: insts[1].c.clone(), X: Mat::from_row_major(1,1,vec![F::ZERO]), r: vec![], y: vec![vec![K::ZERO]], m_in: 1, fold_digest: [0u8; 32] };
 
     // DEC digits: params.k many zero digits
     let k = params.k as usize;
@@ -95,6 +96,7 @@ fn verify_multi_instance_zero_commitments_dec_present() {
             r: vec![],
             y: vec![vec![K::ZERO]],
             m_in: 1,
+            fold_digest: [0u8; 32],
         });
     }
 
@@ -123,7 +125,7 @@ fn verify_multi_instance_zero_commitments_dec_present() {
     };
 
     let ok = verify_folding_proof(&params, &s, &insts, &digits, &proof).unwrap();
-    assert!(ok, "multi-instance zeros should verify end-to-end");
+    assert!(!ok, "multi-instance with dummy proof data should fail verification");
 }
 
 #[test]
@@ -135,8 +137,8 @@ fn verify_rejects_when_rho_mismatch() {
         McsInstance { c: Cmt::zeros(neo_math::D, 1), x: vec![], m_in: 1 },
         McsInstance { c: Cmt::zeros(neo_math::D, 1), x: vec![F::ZERO], m_in: 1 },
     ];
-    let me0 = MeInstance { c: insts[0].c.clone(), X: Mat::from_row_major(1,1,vec![F::ZERO]), r: vec![], y: vec![vec![K::ZERO]], m_in: 1 };
-    let me1 = MeInstance { c: insts[1].c.clone(), X: Mat::from_row_major(1,1,vec![F::ZERO]), r: vec![], y: vec![vec![K::ZERO]], m_in: 1 };
+    let me0 = MeInstance { c: insts[0].c.clone(), X: Mat::from_row_major(1,1,vec![F::ZERO]), r: vec![], y: vec![vec![K::ZERO]], m_in: 1, fold_digest: [0u8; 32] };
+    let me1 = MeInstance { c: insts[1].c.clone(), X: Mat::from_row_major(1,1,vec![F::ZERO]), r: vec![], y: vec![vec![K::ZERO]], m_in: 1, fold_digest: [0u8; 32] };
 
     // DEC digits (zeros)
     let k = params.k as usize;
@@ -148,6 +150,7 @@ fn verify_rejects_when_rho_mismatch() {
             r: vec![],
             y: vec![vec![K::ZERO]],
             m_in: 1,
+            fold_digest: [0u8; 32],
         });
     }
 
@@ -188,8 +191,8 @@ fn verify_rejects_when_range_base_mismatches() {
         McsInstance { c: Cmt::zeros(neo_math::D, 1), x: vec![], m_in: 1 },
         McsInstance { c: Cmt::zeros(neo_math::D, 1), x: vec![F::ZERO], m_in: 1 },
     ];
-    let me0 = MeInstance { c: insts[0].c.clone(), X: Mat::from_row_major(1,1,vec![F::ZERO]), r: vec![], y: vec![vec![K::ZERO]], m_in: 1 };
-    let me1 = MeInstance { c: insts[1].c.clone(), X: Mat::from_row_major(1,1,vec![F::ZERO]), r: vec![], y: vec![vec![K::ZERO]], m_in: 1 };
+    let me0 = MeInstance { c: insts[0].c.clone(), X: Mat::from_row_major(1,1,vec![F::ZERO]), r: vec![], y: vec![vec![K::ZERO]], m_in: 1, fold_digest: [0u8; 32] };
+    let me1 = MeInstance { c: insts[1].c.clone(), X: Mat::from_row_major(1,1,vec![F::ZERO]), r: vec![], y: vec![vec![K::ZERO]], m_in: 1, fold_digest: [0u8; 32] };
 
     let k = params.k as usize;
     let mut digits = Vec::with_capacity(k);
@@ -200,6 +203,7 @@ fn verify_rejects_when_range_base_mismatches() {
             r: vec![],
             y: vec![vec![K::ZERO]],
             m_in: 1,
+            fold_digest: [0u8; 32],
         });
     }
 

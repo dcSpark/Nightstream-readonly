@@ -294,5 +294,6 @@ fn recombine_me_digits_to_parent(
         r: r_ref.clone(),
         y: y_parent,
         m_in,
+        fold_digest: digits[0].fold_digest, // All digits should have same fold_digest
     })
 }
