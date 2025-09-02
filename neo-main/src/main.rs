@@ -19,7 +19,7 @@ use std::time::Instant;
 use neo_ccs::{Mat, r1cs_to_ccs, check_ccs_rowwise_zero};
 
 // Concrete types from orchestrator 
-type ConcreteMcsInstance = neo_ccs::McsInstance<Vec<u8>, neo_math::F>;
+type ConcreteMcsInstance = neo_ccs::McsInstance<neo_ajtai::Commitment, neo_math::F>;
 type ConcreteMcsWitness = neo_ccs::McsWitness<neo_math::F>;
 use neo_math::F;
 use neo_ajtai::{setup as ajtai_setup, commit, decomp_b, DecompStyle, verify_open};
@@ -110,13 +110,36 @@ fn main() -> Result<()> {
     
     // Step 4: Setup Ajtai commitment scheme
     println!("\n🔐 Step 4: Setting up Ajtai commitment...");
-    let params = NeoParams::goldilocks_127(); // Use 127-bit security for s=2 compatibility
+    
+    // Show lambda options for s=2
+    println!("\n📊 Lambda Analysis for Neo v1 (s=2 only):");
+    println!("============================================");
+    println!("Your current circuit: ell=3, d_sc=2, ell*d_sc=6");
+    let max_lambda_for_this_circuit = NeoParams::max_lambda_for_s2(3, 2);
+    println!("Max lambda for your circuit: {} bits", max_lambda_for_this_circuit);
+    println!("Required lambda for s=2: ≤ {} bits", max_lambda_for_this_circuit);
+    println!("Your previous lambda=127: TOO HIGH (requires s=3)");
+    
+    // Show general table
+    NeoParams::show_s2_lambda_limits();
+    
+    // Use auto-tuned parameters for this specific circuit
+    let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2); // ell=3, d_sc=2, 2-bit safety
+    println!("\n🔧 Using auto-tuned parameters:");
+    println!("   Lambda: {} bits (was 127, now works with s=2)", params.lambda);
+    println!("   Security: {} bits sum-check soundness", params.lambda);
+    println!("   Extension: s=2 (compatible with Neo v1)");
+    
     let mut rng = rand::rngs::StdRng::from_seed([42u8; 32]); // Deterministic for demo
     
     let ajtai_pp = ajtai_setup(&mut rng,
                                neo_math::ring::D, // d = ring dimension
                                16,                 // κ = security parameter
-                               z.len());          // m = witness length
+                               z.len())          // m = witness length
+                               .expect("Ajtai setup should succeed");
+    
+    // Publish PP globally so folding protocols can access it
+    neo_ajtai::set_global_pp(ajtai_pp.clone()).expect("publish Ajtai PP for folding");
     
     println!("   Ajtai PP: d={}, κ={}, m={}", ajtai_pp.d, ajtai_pp.kappa, ajtai_pp.m);
     
@@ -135,24 +158,34 @@ fn main() -> Result<()> {
     
     // Step 6: Create MCS instance for folding
     println!("\n📦 Step 6: Creating MCS instance...");
-    // Convert commitment to bytes (simple representation for MCS)
-    let mut c_bytes = Vec::new();
-    c_bytes.extend_from_slice(&commitment.d.to_le_bytes());
-    c_bytes.extend_from_slice(&commitment.kappa.to_le_bytes());
-    for &field_elem in &commitment.data {
-        c_bytes.extend_from_slice(&field_elem.as_canonical_u64().to_le_bytes());
+    
+    // Create Z matrix for MCS witness - convert from column-major (decomp_b) to row-major (Mat)
+    let d = neo_math::ring::D;
+    let m = decomp_z.len() / d;
+    let mut z_matrix_data = vec![neo_math::F::ZERO; d * m];
+    
+    // Convert from column-major (decomp_b format) to row-major (Mat format)
+    for col in 0..m {
+        for row in 0..d {
+            let col_major_idx = col * d + row;  // decomp_b uses this indexing
+            let row_major_idx = row * m + col;  // Mat::from_row_major expects this
+            z_matrix_data[row_major_idx] = decomp_z[col_major_idx];
+        }
     }
+    let z_matrix = Mat::from_row_major(d, m, z_matrix_data);
+    
+    // Use the proper Ajtai commitment directly (no more byte conversion)
     let mcs_instance = ConcreteMcsInstance {
-        c: c_bytes,
+        c: commitment,
         x: public_inputs, // Empty for this example
         m_in: 0,
     };
     let mcs_witness = ConcreteMcsWitness {
         w: z,
-        Z: Mat::from_row_major(neo_math::ring::D, decomp_z.len() / neo_math::ring::D, decomp_z),
+        Z: z_matrix, // Now correctly constructed from column-major decomp_z
     };
     
-    println!("   MCS instance created with commitment size {} bytes", mcs_instance.c.len());
+    println!("   MCS instance created with commitment d={} κ={}", mcs_instance.c.d, mcs_instance.c.kappa);
     
     // Step 7: Generate complete Neo SNARK proof using orchestrator
     println!("\n🔀 Step 7: Generating Neo SNARK proof...");

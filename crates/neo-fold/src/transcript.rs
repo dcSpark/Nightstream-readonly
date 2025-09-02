@@ -1,13 +1,13 @@
 //! Poseidon2-backed Fiat-Shamir transcript for neo-fold
 //!
 //! This provides domain-separated challenges using Poseidon2 over Goldilocks,
-//! ensuring consistency across the entire pipeline (folding + FRI).
+//! ensuring consistency across the entire pipeline (folding + Spartan2).
 //!
 //! Key features:
 //! - Single transcript used across all protocols (Π_CCS, Π_RLC, Π_DEC, sum-check)
 //! - Domain separation for security
 //! - Support for both base field F and extension field K = F_{q^2} challenges
-//! - Compatible with p3-FRI's challenger interface
+//! - Compatible with Spartan2's Hash-MLE PCS challenger interface
 
 #![allow(unused_imports)]
 
@@ -16,7 +16,7 @@ use p3_field::{Field, PrimeCharacteristicRing, ExtensionField, PrimeField64};
 use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
 
 // ---------- Field aliases ----------
-pub use neo_math::{F, K}; // Use proper neo-math types
+pub use neo_math::{F, K, ExtF}; // Use proper neo-math types
 
 // ---------- Poseidon2 config ----------
 pub const POSEIDON2_WIDTH: usize = 16;
@@ -33,8 +33,6 @@ pub enum Domain {
     Rlc,
     Dec,
     Sumcheck,
-    FriCommit,
-    FriQuery,
 }
 
 impl Domain {
@@ -44,8 +42,6 @@ impl Domain {
             Domain::Rlc       => b"neo/v1/pi_rlc", 
             Domain::Dec       => b"neo/v1/pi_dec",
             Domain::Sumcheck  => b"neo/v1/sumcheck",
-            Domain::FriCommit => b"neo/v1/fri/commit",
-            Domain::FriQuery  => b"neo/v1/fri/query",
         }
     }
 }
@@ -136,7 +132,107 @@ impl FoldTranscript {
     pub fn challenges_k(&mut self, m: usize) -> Vec<K> {
         (0..m).map(|_| self.challenge_k()).collect()
     }
+    
+    /// Use the underlying Poseidon2 challenger directly (supports CanSampleBits)
+    /// Returns a wrapper that adds the missing CanObserve<u8> trait
+    pub fn challenger(&mut self) -> ChallengerWrapper {
+        ChallengerWrapper { tr: self }
+    }
+    
+    /// Absorb extension field element as base field elements
+    pub fn absorb_ext_as_base_fields(&mut self, label: &[u8], value: ExtF) {
+        self.absorb_bytes(label);
+        // Split ExtF into base field coordinates and absorb each
+        let a0 = value.real();
+        let a1 = value.imag();
+        self.ch.observe(a0);
+        self.ch.observe(a1);
+    }
+    
+    /// Get current state digest for transcript binding
+    pub fn state_digest(&mut self) -> [u8; 32] {
+        // Sample 4 field elements and pack as 32 bytes
+        let mut out = [0u8; 32];
+        for i in 0..4 {
+            let x: F = self.ch.sample(); // F
+            let limb = x.as_canonical_u64().to_le_bytes();
+            out[i*8..(i+1)*8].copy_from_slice(&limb);
+        }
+        out
+    }
+    
+
+    
+    /// Absorb extension field element as base field components for transcript binding
+    pub fn absorb_ext_as_base_fields_k(&mut self, label: &[u8], ext_elem: neo_math::K) {
+        use neo_math::KExtensions;
+        self.absorb_bytes(label);
+        let coeffs = ext_elem.as_coeffs();
+        for &coeff in &coeffs {
+            self.ch.observe(coeff);
+        }
+    }
+    
+    /// Absorb Π_CCS header parameters for extension policy binding
+    /// This ensures FS challenges bind to the circuit parameters and security policy
+    pub fn absorb_ccs_header(
+        &mut self,
+        q_bits: u32,        // log2(q) for the base field  
+        s: u32,             // extension degree (v1: always 2)
+        lambda: u32,        // target security bits
+        ell: u32,           // number of sumcheck rounds (log2 n)
+        d_sc: u32,          // max degree of composed polynomial  
+        slack_bits: i32,    // security slack from extension policy
+    ) {
+        // Domain separation for header absorption
+        self.absorb_bytes(b"neo/ccs/header/v1");
+        
+        // Absorb all policy parameters that affect soundness
+        self.absorb_u64(&[
+            q_bits as u64,
+            s as u64, 
+            lambda as u64,
+            ell as u64,
+            d_sc as u64,
+            slack_bits.unsigned_abs() as u64,  // absorb absolute value
+        ]);
+        
+        // Absorb sign of slack_bits separately
+        self.absorb_bytes(&[if slack_bits >= 0 { 1u8 } else { 0u8 }]);
+    }
 }
+
+/// Minimal wrapper to add CanObserve<u8> to NeoChallenger while preserving uniform sampling
+pub struct ChallengerWrapper<'a> {
+    tr: &'a mut FoldTranscript,
+}
+
+impl<'a> CanSample<F> for ChallengerWrapper<'a> {
+    fn sample(&mut self) -> F {
+        self.tr.ch.sample()
+    }
+}
+
+impl<'a> CanObserve<F> for ChallengerWrapper<'a> {
+    fn observe(&mut self, value: F) {
+        self.tr.ch.observe(value);
+    }
+}
+
+impl<'a> CanObserve<u8> for ChallengerWrapper<'a> {
+    fn observe(&mut self, value: u8) {
+        self.tr.absorb_bytes(&[value]);
+    }
+}
+
+impl<'a> CanSampleBits<usize> for ChallengerWrapper<'a> {
+    fn sample_bits(&mut self, bits: usize) -> usize {
+        // Use the underlying challenger's uniform sampling
+        self.tr.ch.sample_bits(bits)
+    }
+}
+
+impl<'a> FieldChallenger<F> for ChallengerWrapper<'a> {}
 
 impl Default for FoldTranscript {
     fn default() -> Self {

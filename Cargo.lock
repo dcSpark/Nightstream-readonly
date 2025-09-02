@@ -635,6 +635,7 @@ dependencies = [
 name = "neo-ajtai"
 version = "0.1.0"
 dependencies = [
+ "neo-ccs",
  "neo-math",
  "neo-params",
  "p3-field",
@@ -690,6 +691,7 @@ dependencies = [
  "criterion",
  "neo-ajtai",
  "neo-ccs",
+ "neo-challenge",
  "neo-math",
  "neo-params",
  "neo-spartan-bridge",
@@ -699,6 +701,7 @@ dependencies = [
  "p3-matrix",
  "p3-poseidon2",
  "p3-symmetric",
+ "proptest",
  "rand 0.9.2",
  "rand_chacha",
  "thiserror 2.0.16",

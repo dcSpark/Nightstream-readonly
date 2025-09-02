@@ -11,7 +11,7 @@ use std::convert::TryInto;
 fn ajtai_opening_rejects_one_digit_flip() {
     let mut rng = rand::rngs::StdRng::from_seed([7u8; 32]);
     let m = 8usize;
-    let pp: PP<neo_math::ring::Rq> = setup(&mut rng, D, 8, m);
+    let pp: PP<neo_math::ring::Rq> = setup(&mut rng, D, 8, m).expect("Setup should succeed");
 
     // make a small "witness" z (base-field entries)
     let mut z = vec![Fq::ZERO; m];
@@ -32,7 +32,7 @@ fn ajtai_opening_rejects_one_digit_flip() {
 fn ajtai_verify_split_open_rejects_tampered_ci() {
     let mut rng = rand::rngs::StdRng::from_seed([8u8; 32]);
     let m = 6usize;
-    let pp: PP<neo_math::ring::Rq> = setup(&mut rng, D, 8, m);
+    let pp: PP<neo_math::ring::Rq> = setup(&mut rng, D, 8, m).expect("Setup should succeed");
 
     // random z, decompose at base b=2, split into k slices
     let z = (0..m).map(|_| Fq::from_u64(rng.random::<u16>() as u64)).collect::<Vec<_>>();
@@ -59,7 +59,7 @@ fn ajtai_s_linearity_positive_control() {
 
     let mut rng = rand::rngs::StdRng::from_seed([9u8; 32]);
     let m = 4usize;
-    let pp: PP<Rq> = setup(&mut rng, D, 8, m);
+    let pp: PP<Rq> = setup(&mut rng, D, 8, m).expect("Setup should succeed");
 
     let Z1 = decomp_b(&vec![Fq::from_u64(3); m], 2, D, DecompStyle::Balanced);
     let Z2 = decomp_b(&vec![Fq::from_u64(5); m], 2, D, DecompStyle::Balanced);
@@ -75,7 +75,7 @@ fn ajtai_s_linearity_positive_control() {
     // compute both sides
     let lhs = {
         // ρ1 Z1 + ρ2 Z2 in the commitment domain: act column-wise on commitments then add
-        s_lincomb(&[rho1, rho2], &[c1.clone(), c2.clone()])
+        s_lincomb(&[rho1, rho2], &[c1.clone(), c2.clone()]).expect("S-lincomb should succeed")
     };
     // For a ground-truth check, recompute via linearity on Z then commit
     // Z' = ρ1·Z1 + ρ2·Z2 (apply S-action to each column of Z col-major)

@@ -12,6 +12,13 @@ pub mod field;
 pub mod ring;
 pub mod s_action;
 
+/// Errors from S-action operations
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum SActionError {
+    #[error("Dimension mismatch: expected at most {expected}, got {got}")]
+    DimMismatch { expected: usize, got: usize },
+}
+
 pub use field::{Fq, K, GOLDILOCKS_MODULUS, TWO_ADICITY, nonresidue, two_adic_generator, KExtensions};
 pub use ring::{ETA, D, Rq, cf, cf_inv, inf_norm};
 pub use s_action::SAction;
@@ -24,20 +31,10 @@ use p3_field::PrimeCharacteristicRing;
 pub use Fq as F;  // Field type alias
 pub type ExtF = K; // Extension field type alias
 
-// Legacy module compatibility - keeping the old modules for now but they won't be actively used
-pub mod modint;
-pub mod poly;
-pub mod decomp;
-pub mod transcript;
-
-// ModInt and Coeff re-exports from existing modules
-pub use modint::{ModInt, Coeff};
-
-// Polynomial re-export
-pub use poly::Polynomial;
-
-// Decomposition functions re-export
-pub use decomp::{decomp_b, signed_decomp_b};
+// Legacy modules removed as part of codebase cleanup
+// Use neo_fold::transcript::FoldTranscript for transcript functionality
+// Use neo-ajtai for decomposition functions
+// For ModInt/polynomial functionality, use the main field/ring types
 
 // Extension field utility functions for backward compatibility
 pub fn embed_base_to_ext(base: Fq) -> K {
@@ -66,7 +63,7 @@ pub fn random_extf() -> K {
     K::new_complex(a, b)
 }
 
-// Ring type aliases for backward compatibility
+// Ring type aliases 
 pub type RingElement = Rq;
 pub type RotationRing = RingElement;
 pub type RotationMatrix = Vec<RingElement>;

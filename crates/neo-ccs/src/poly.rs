@@ -18,6 +18,14 @@ impl<F> SparsePoly<F> {
 
     /// Terms.
     pub fn terms(&self) -> &[Term<F>] { &self.terms }
+    
+    /// Maximum degree of the polynomial (highest sum of exponents in any term).
+    pub fn max_degree(&self) -> u32 {
+        self.terms.iter()
+            .map(|term| term.exps.iter().sum::<u32>())
+            .max()
+            .unwrap_or(0)
+    }
 }
 
 /// A single term: `coeff * ∏_j x_j^{exps[j]}`.
@@ -46,6 +54,23 @@ impl<F: Field> SparsePoly<F> {
                     p *= *xi;
                     e -= 1;
                 }
+                m *= p;
+            }
+            acc += m;
+        }
+        acc
+    }
+    
+    /// Evaluate with inputs in an extension field K (coeffs in base F).
+    pub fn eval_in_ext<K: Field + From<F>>(&self, x: &[K]) -> K {
+        assert_eq!(x.len(), self.t);
+        let mut acc = K::ZERO;
+        for term in &self.terms {
+            let mut m = K::from(term.coeff);
+            for (xi, &pow) in x.iter().zip(term.exps.iter()) {
+                if pow == 0 { continue; }
+                let mut p = *xi;
+                for _ in 1..pow { p *= *xi; } // small exponents in CCS polynomials
                 m *= p;
             }
             acc += m;

@@ -50,7 +50,7 @@ fn me_consistency_rejects_tamper() {
 
     // Ajtai map
     let pp = ajtai_setup(&mut rand::rngs::StdRng::from_seed([11u8;32]), d, 8, m);
-    let L = AjtaiL { pp };
+    let L = AjtaiL { pp: pp.expect("Setup should succeed") };
 
     // Instance: c, X (first m_in columns), r, y
     let m_in = 1usize;

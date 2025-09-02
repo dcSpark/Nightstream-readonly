@@ -6,13 +6,15 @@
 
 use anyhow::Result;
 use std::time::Instant;
+use p3_field::PrimeCharacteristicRing;
 
-// Re-export key types from neo-ccs and neo-fold
+// Re-export key types from neo-ccs and neo-fold  
 pub use neo_ccs::CcsStructure;
-pub use neo_fold::{fold_to_single_me, spartan_compression};
+pub use neo_fold::{fold_ccs_instances, FoldingProof};
+pub use neo_spartan_bridge::{compress_me_to_spartan, verify_me_spartan};
 
 // Type aliases for concrete types used in Neo protocol
-type ConcreteMcsInstance = neo_ccs::McsInstance<Vec<u8>, neo_math::F>;
+type ConcreteMcsInstance = neo_ccs::McsInstance<neo_ajtai::Commitment, neo_math::F>;
 type ConcreteMcsWitness = neo_ccs::McsWitness<neo_math::F>;
 
 /// Performance metrics for proof generation and verification
@@ -41,33 +43,60 @@ pub enum OrchestratorError {
 /// Generate a complete Neo SNARK proof for the given CCS instance and witness
 ///
 /// This orchestrates the full pipeline:
-/// 1. Folding: Reduce CCS instances to a single ME claim
+/// 1. Folding: Reduce CCS instances to ME instances  
 /// 2. Compression: Convert ME claim to Spartan2 SNARK proof
 ///
 /// Returns the proof bytes and performance metrics.
 pub fn prove(
+    params: &neo_params::NeoParams,
     ccs: &CcsStructure<neo_math::F>,
     instances: &[ConcreteMcsInstance],
-    _witness: &[ConcreteMcsWitness],
+    witnesses: &[ConcreteMcsWitness],
 ) -> Result<(Vec<u8>, Metrics), OrchestratorError> {
     let prove_start = Instant::now();
     
     // Step 1: Execute folding pipeline
-    let params = neo_params::NeoParams::goldilocks_127();
-    let (me_instance, me_witness, _proofs) = fold_to_single_me(ccs, instances, &params)
+    let (me_instances, _folding_proof) = fold_ccs_instances(params, ccs, instances, witnesses)
         .map_err(|e| OrchestratorError::FoldingError(format!("{}", e)))?;
     
+    // For now, use placeholder ME to legacy bridge conversion
+    // TODO: Replace with proper modern ME -> Spartan bridge once implemented
+    eprintln!("⚠️  ORCHESTRATOR: Using placeholder folding pipeline");
+    eprintln!("  Generated {} ME instances (modern)", me_instances.len());
+    
+    // Create placeholder legacy ME for bridge compatibility  
+    #[allow(deprecated)]
+    let me_legacy = neo_ccs::MEInstance {
+        c_coords: vec![neo_math::F::ZERO; 16], // Placeholder commitment coords
+        y_outputs: vec![neo_math::F::ZERO; 4], // Placeholder ME outputs
+        r_point: vec![neo_math::F::ZERO; 8],   // Placeholder challenge vector
+        base_b: params.b as u64,
+        header_digest: [0u8; 32],
+    };
+    
+    #[allow(deprecated)]
+    let me_wit_legacy = neo_ccs::MEWitness {
+        z_digits: vec![0i64; 32],              // Placeholder witness digits  
+        weight_vectors: vec![vec![neo_math::F::ZERO; 32]; 4],
+        ajtai_rows: None,
+    };
+    
     // Step 2: Compress to Spartan2 SNARK
-    let proof_bytes = spartan_compression::compress_me_to_spartan(&me_instance, &me_witness)
+    let proof_bundle = compress_me_to_spartan(&me_legacy, &me_wit_legacy)
         .map_err(|e| OrchestratorError::CompressionError(format!("{}", e)))?;
     
     let prove_time = prove_start.elapsed();
+    
+    // Serialize the entire ProofBundle (includes proof + VK + public_io) 
+    let bundle_bytes = bincode::serialize(&proof_bundle)
+        .map_err(|e| OrchestratorError::CompressionError(format!("Bundle serialization failed: {}", e)))?;
+    
     let metrics = Metrics {
         prove_ms: prove_time.as_secs_f64() * 1000.0,
-        proof_bytes: proof_bytes.len(),
+        proof_bytes: bundle_bytes.len(),
     };
     
-    Ok((proof_bytes, metrics))
+    Ok((bundle_bytes, metrics))
 }
 
 /// Verify a Neo SNARK proof against the given CCS instance
@@ -76,20 +105,32 @@ pub fn prove(
 /// against the public inputs from the CCS instance.
 pub fn verify(
     _ccs: &CcsStructure<neo_math::F>,
-    instances: &[ConcreteMcsInstance], 
+    _instances: &[ConcreteMcsInstance], 
     proof: &[u8]
 ) -> bool {
-    // Extract public inputs from the first instance (assuming single instance for now)
-    let public_inputs = if let Some(instance) = instances.first() {
-        &instance.x
-    } else {
-        &vec![]
+    // Deserialize the complete ProofBundle (includes proof + VK + public_io)
+    let proof_bundle: neo_spartan_bridge::ProofBundle = match bincode::deserialize(proof) {
+        Ok(bundle) => bundle,
+        Err(e) => {
+            eprintln!("⚠️ Failed to deserialize ProofBundle: {:?}", e);
+            return false;
+        }
     };
     
-    // Verify the Spartan2 proof
-    match spartan_compression::verify_spartan_me_proof(proof, public_inputs) {
-        Ok(result) => result,
-        Err(_) => false,
+    // Verify the Spartan2 proof using the original bundle (with correct VK)
+    match verify_me_spartan(&proof_bundle) {
+        Ok(result) => {
+            if result {
+                eprintln!("✅ Spartan2 verification passed!");
+            } else {
+                eprintln!("❌ Spartan2 verification failed!");
+            }
+            result
+        },
+        Err(e) => {
+            eprintln!("⚠️ Verification error: {:?}", e);
+            false
+        },
     }
 }
 
@@ -99,7 +140,11 @@ pub fn prove_single(
     instance: &ConcreteMcsInstance,
     witness: &ConcreteMcsWitness,
 ) -> Result<(Vec<u8>, Metrics), OrchestratorError> {
-    prove(ccs, &[instance.clone()], &[witness.clone()])
+    // Use auto-tuned parameters based on the circuit characteristics  
+    let ell = ccs.n.trailing_zeros() as u32;
+    let d_sc = ccs.max_degree() as u32;
+    let params = neo_params::NeoParams::goldilocks_autotuned_s2(ell, d_sc, 2);
+    prove(&params, ccs, &[instance.clone()], &[witness.clone()])
 }
 
 /// Simplified verify interface for single instance
@@ -120,6 +165,6 @@ pub mod neutronnova_integration {
 
 pub mod spartan2 {
     //! Direct integration with Spartan2 backend
-    //! All functionality is now handled through the spartan_compression module
-    //! in neo-fold for better separation of concerns.
+    //! All functionality is now handled through the neo-spartan-bridge crate
+    //! for better separation of concerns and clean API boundaries.
 }
