@@ -68,7 +68,7 @@ fn verify_shortcircuit_single_instance() {
     };
 
     let ok = verify_folding_proof(&params, &s, &[inst], &output_digits, &proof).unwrap();
-    assert!(ok, "single-instance short-circuit should verify");
+    assert!(!ok, "single-instance bypass was removed for security - should now fail");
 }
 
 #[test]

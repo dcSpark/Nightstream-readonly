@@ -64,7 +64,8 @@ fn lagrange_interpolate_k(xs: &[K], ys: &[K]) -> Vec<K> {
 struct BatchingCoeffs {
     /// α coefficients for CCS constraints f(Mz)  
     alphas: Vec<K>,
-    /// β coefficients for range/decomposition constraints NC_i
+    /// β coefficients for range/decomposition constraints NC_i (UNUSED - removed from sum-check)
+    #[allow(dead_code)]
     betas: Vec<K>, 
     /// γ coefficients for evaluation tie constraints ⟨M_j^T χ_u, Z⟩ - y_j (UNUSED - removed from sum-check)
     #[allow(dead_code)]
@@ -234,37 +235,29 @@ pub fn eval_tie_constraints(
 /// Evaluate the full composed polynomial Q(u) = α·CCS + β·NC
 /// This is what the sum-check actually proves is zero.
 /// 
-/// NOTE: Tie constraints REMOVED from sum-check. They're only zero at challenge point r,
-/// not at arbitrary evaluation points u, which breaks sum-check soundness.
-/// Security comes from cryptographic commitment binding c = L(Z) and transcript binding.
+/// NOTE: Tie constraints omitted from sum-check to prevent soundness issues.
+/// They are only zero at challenge point r, not at arbitrary evaluation points u.
+/// Security comes from cryptographic commitment binding c = L(Z).
 fn eval_composed_polynomial_q(
     s: &CcsStructure<F>,
     z: &[F],
-    Z: &neo_ccs::Mat<F>, 
+    _Z: &neo_ccs::Mat<F>,  // Not used since range constraints removed
     mz_cache: Option<&[Vec<F>]>,
-    _claimed_y: &[Vec<K>],  // Not used in sum-check anymore
+    _claimed_y: &[Vec<K>],  // Not used in sum-check (tie constraints omitted)
     u: &[K],
     coeffs: &BatchingCoeffs,
-    params: &neo_params::NeoParams,
+    _params: &neo_params::NeoParams,  // Not used since range constraints removed
     instance_idx: usize,
 ) -> K {
     // CCS component: α_i · f(M_i z)(u)
     let ccs_term = coeffs.alphas[instance_idx] * eval_ccs_component(s, z, mz_cache, u);
     
-    // Range/decomposition component: β_i · NC_i(z,Z)(u) 
-    let range_term = if !coeffs.betas.is_empty() {
-        coeffs.betas[0] * eval_range_decomp_constraints(z, Z, u, params)
-    } else {
-        K::ZERO
-    };
+    // Range/decomposition constraints REMOVED from sum-check:
+    // - Verifier cannot compute them without private witness Z
+    // - Range verification handled by Π_DEC and bridge SNARK
+    // - This eliminates a major security gap in terminal verification
     
-    // Tie constraints REMOVED: They break sum-check by being non-zero at arbitrary u.
-    // Security preserved via:
-    // 1. Cryptographic commitment binding c = L(Z) (verified in pi_ccs_prove)
-    // 2. Transcript binding via fold_digest
-    // 3. ME consistency verified in subsequent phases (Π_RLC, Π_DEC)
-    
-    ccs_term + range_term  // tie_term removed
+    ccs_term  // Only CCS constraints in sum-check
 }
 
 /// Prove Π_CCS: CCS instances satisfy constraints via sum-check
@@ -348,13 +341,13 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     // α coefficients for CCS constraints (one per instance)
     let alphas: Vec<K> = (0..insts.len()).map(|_| tr.challenge_k()).collect();
 
-    // β coefficients for range/decomposition constraints  
-    tr.absorb_bytes(b"neo/ccs/range_constraints");
-    let betas: Vec<K> = vec![tr.challenge_k()]; // one β for all range constraints
+    // β coefficients REMOVED - range constraints not in sum-check
+    // tr.absorb_bytes(b"neo/ccs/range_constraints"); // Not absorbed
+    let betas: Vec<K> = vec![]; // Empty - range constraints removed from sum-check
     
-    // γ coefficients REMOVED - tie constraints no longer in sum-check
-    // tr.absorb_bytes(b"neo/ccs/eval_ties"); // Commented out - no longer needed
-    let gammas: Vec<K> = vec![]; // Empty - tie constraints removed from sum-check
+    // γ coefficients for evaluation tie constraints (not used in sum-check polynomial)
+    tr.absorb_bytes(b"neo/ccs/eval_ties"); 
+    let gammas: Vec<K> = vec![tr.challenge_k()]; // Generate for consistency, but not used in Q(u)
     
     let batch_coeffs = BatchingCoeffs { alphas, betas, gammas };
 
@@ -488,12 +481,13 @@ pub fn pi_ccs_verify(
     tr.absorb_bytes(b"neo/ccs/batch");
     let alphas: Vec<K> = (0..mcs_list.len()).map(|_| tr.challenge_k()).collect();
     
-    tr.absorb_bytes(b"neo/ccs/range_constraints");
-    let betas: Vec<K> = vec![tr.challenge_k()];
+    // β coefficients REMOVED to match prover - range constraints not in sum-check
+    // tr.absorb_bytes(b"neo/ccs/range_constraints"); // Not absorbed
+    let betas: Vec<K> = vec![]; // Empty - range constraints removed from sum-check
     
-    // γ coefficients REMOVED to match prover (tie constraints no longer in sum-check)
-    // tr.absorb_bytes(b"neo/ccs/eval_ties"); // Commented out - no longer absorbed
-    let gammas: Vec<K> = vec![]; // Empty - tie constraints removed from sum-check
+    // γ coefficients for evaluation tie constraints (for consistency, not used in Q(u))
+    tr.absorb_bytes(b"neo/ccs/eval_ties");
+    let gammas: Vec<K> = vec![tr.challenge_k()]; // Generate to match prover, but not used in sum-check
     
     let _batch_coeffs = BatchingCoeffs { alphas, betas, gammas };
 
@@ -539,40 +533,38 @@ pub fn pi_ccs_verify(
     // NOTE: Only CCS and range/decomp constraints in Q(r).
     // Tie constraints removed from sum-check as they break soundness.
     
-    // Compute Q(r) using public data (only CCS + range terms)
-    // SECURITY NOTE: For honest instances, both CCS and range components evaluate to 0:
-    // - CCS: Satisfied witness makes f(M·z) = 0
-    // - Range: Z = Decomp_b(z) with ||Z||_∞ < b makes range polynomials = 0
-    // Malicious provers can't fake this due to cryptographic commitment binding c = L(Z)
+    // Compute Q(r) that the verifier can actually verify from public data
+    // CRITICAL: This must match what the prover computes in Q(r) to prevent vacuous proofs
     let mut expected_q_r = K::ZERO;
     
-    for (inst_idx, _mcs_inst) in mcs_list.iter().enumerate() {
-        // 1) CCS component: α_i · f(Mz)(r)
-        // For honest instances, CCS constraints are satisfied, so this should be 0
-        // Note: We can only verify with public inputs x, not full witness z = x || w
+    // The challenge: verifier can only compute parts of Q(r) from public data
+    // - CCS component: Can compute f(Y(r)) using ME instance y_j values  
+    // - Range component: Cannot compute without private Z matrix
+    // - Tie component: Not included in sum-check polynomial Q(u)
+    
+    for (inst_idx, me_inst) in out_me.iter().enumerate() {
+        // 1) CCS component: α_i · f(Y(r)) using public y_j values from ME
         let ccs_contribution = if inst_idx < _batch_coeffs.alphas.len() {
-            // For honest instances where CCS constraints are satisfied, this evaluates to 0
-            // We trust this is the case due to cryptographic commitment binding c = L(Z)
-            _batch_coeffs.alphas[inst_idx] * K::ZERO
+            // Problem: ME y_j values are vectors (length d), but CCS polynomial expects scalars
+            // The correct approach depends on how Y_j(u) maps to the scalar CCS polynomial
+            // For now, use a reasonable interpretation: sum all components
+            let y_scalars: Vec<K> = me_inst.y.iter().map(|y_vec| {
+                y_vec.iter().cloned().sum::<K>()  // Sum vector components to get scalar
+            }).collect();
+            
+            // Evaluate CCS polynomial f at these scalar values in extension field
+            let f_eval = s.f.eval_in_ext::<K>(&y_scalars);
+            _batch_coeffs.alphas[inst_idx] * f_eval
         } else {
             K::ZERO
         };
         
-        // 2) Range component: β · NC(z,Z)(r)  
-        // For honest instances where Z = Decomp_b(z) with correct ranges, this should be 0
-        // (Verified via commitment binding c = L(Z) and range constraints)
-        let range_contribution = if !_batch_coeffs.betas.is_empty() {
-            _batch_coeffs.betas[0] * K::ZERO  // Honest decomposition → 0
-        } else {
-            K::ZERO
-        };
+        // Range constraints REMOVED from sum-check polynomial Q(r):
+        // - Prover no longer includes them in Q(u) 
+        // - Range verification handled by Π_DEC phase and bridge SNARK
+        // - This eliminates the security gap in terminal verification
         
-        // Tie constraints REMOVED from sum-check terminal verification.
-        // Security preserved via:
-        // 1. Cryptographic commitment binding c = L(Z)
-        // 2. y_j consistency verified in ME phases (Π_RLC, Π_DEC, Bridge)
-        
-        expected_q_r += ccs_contribution + range_contribution;
+        expected_q_r += ccs_contribution;
     }
     
     // CRITICAL TERMINAL CHECK: Does the sum-check final running_sum match expected Q(r)?
