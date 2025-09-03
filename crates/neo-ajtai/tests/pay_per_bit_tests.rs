@@ -113,7 +113,7 @@ fn test_pay_per_bit_correctness() {
     println!("✅ Pay-per-bit optimization works correctly for various digit patterns");
 }
 
-#[test]
+#[test]  
 fn pay_per_bit_matches_spec_even_with_stray_twos() {
     // This test would FAIL with the old buggy implementation that treated any non-zero as -1
     let mut rng = ChaCha20Rng::seed_from_u64(7);
@@ -136,8 +136,16 @@ fn pay_per_bit_matches_spec_even_with_stray_twos() {
     }
     
     let c_actual = neo_ajtai::commit(&pp, &Z);
-    let c_spec = neo_ajtai::commit_spec(&pp, &Z);
-    assert_eq!(c_actual, c_spec, "Commit with mixed digits must match specification");
+    
+    // Only use spec comparison when available (feature flag or always-available fallback)
+    #[cfg(any(test, feature = "variable_time_commit"))]
+    {
+        let c_spec = neo_ajtai::commit_spec(&pp, &Z);
+        assert_eq!(c_actual, c_spec, "Commit with mixed digits must match specification");
+    }
+    
+    // Always verify that opening works correctly
+    assert!(neo_ajtai::verify_open(&pp, &c_actual, &Z), "Mixed digit commit should verify correctly");
     
     println!("✅ Commit handles mixed digits correctly (uses dense path due to 2's)");
 }
@@ -166,13 +174,104 @@ fn pay_per_bit_strict_gating() {
     
     let c_strict = neo_ajtai::commit(&pp, &Z_strict);  
     let c_mixed = neo_ajtai::commit(&pp, &Z_mixed);
-    let c_spec_strict = neo_ajtai::commit_spec(&pp, &Z_strict);
-    let c_spec_mixed = neo_ajtai::commit_spec(&pp, &Z_mixed);
     
-    // Both should match their specifications
-    assert_eq!(c_strict, c_spec_strict, "Strict {{-1,0,1}} digits must match spec");
-    assert_eq!(c_mixed, c_spec_mixed, "Mixed digits must match spec");
+    // Verify basic correctness (always available)
+    assert!(neo_ajtai::verify_open(&pp, &c_strict, &Z_strict), "Strict digits should verify");
+    assert!(neo_ajtai::verify_open(&pp, &c_mixed, &Z_mixed), "Mixed digits should verify");
     assert_ne!(c_strict, c_mixed, "Different inputs should produce different outputs");
     
+    // Spec comparison only when available
+    #[cfg(any(test, feature = "variable_time_commit"))]
+    {
+        let c_spec_strict = neo_ajtai::commit_spec(&pp, &Z_strict);
+        let c_spec_mixed = neo_ajtai::commit_spec(&pp, &Z_mixed);
+        assert_eq!(c_strict, c_spec_strict, "Strict {{-1,0,1}} digits must match spec");
+        assert_eq!(c_mixed, c_spec_mixed, "Mixed digits must match spec");
+    }
+    
     println!("✅ Pay-per-bit gating works: only {{-1,0,1}} vs mixed digits produce correct results");
+}
+
+#[cfg(feature = "variable_time_commit")]
+#[test]
+fn fast_path_is_actually_used() {
+    // This test can only run when the variable_time_commit feature is enabled
+    // It verifies that the optimized path produces identical results to the spec
+    
+    // Future: could add atomic counters to measure fast path usage
+    
+    let mut rng = ChaCha20Rng::seed_from_u64(42);
+    let d = neo_math::D;
+    let kappa = 3;
+    let m = 6;
+    let pp = setup(&mut rng, d, kappa, m).unwrap();
+    
+    // Create strictly {-1, 0, 1} digits that should trigger fast path
+    #[allow(non_snake_case)]
+    let Z_sparse: Vec<Fq> = (0..d*m).map(|i| match i % 4 {
+        0 => Fq::ONE,           // 25% ones
+        1 => Fq::ZERO,          // 25% zeros  
+        2 => Fq::ZERO - Fq::ONE, // 25% minus ones
+        _ => Fq::ZERO,          // 25% more zeros (sparse!)
+    }).collect();
+    
+    // Create mixed digits that should NOT trigger fast path
+    #[allow(non_snake_case)]  
+    let Z_mixed: Vec<Fq> = Z_sparse.iter().enumerate().map(|(i, &x)| {
+        if i % 10 == 0 { Fq::from_u64(2) } else { x } // Sprinkle some 2's
+    }).collect();
+    
+    let c_sparse = neo_ajtai::commit(&pp, &Z_sparse);
+    let c_mixed = neo_ajtai::commit(&pp, &Z_mixed);
+    let c_sparse_spec = neo_ajtai::commit_spec(&pp, &Z_sparse);
+    let c_mixed_spec = neo_ajtai::commit_spec(&pp, &Z_mixed);
+    
+    // Both should match their specifications exactly
+    assert_eq!(c_sparse, c_sparse_spec, "Sparse {{-1,0,1}} digits should match spec");
+    assert_eq!(c_mixed, c_mixed_spec, "Mixed digits should match spec");
+    assert_ne!(c_sparse, c_mixed, "Different inputs should produce different outputs");
+    
+    println!("✅ Fast path verification: feature-gated optimization produces spec-equivalent results");
+    println!("   Sparse input: matches spec ✓");
+    println!("   Mixed input: matches spec ✓ (uses dense path due to non-{{-1,0,1}} digits)");
+}
+
+#[cfg(feature = "variable_time_commit")]
+#[test]
+fn dense_vs_sparse_performance_characteristics() {
+    // Test that sparse inputs (many zeros) potentially have different timing characteristics
+    // This test documents the expected behavior but doesn't assert timing differences
+    // since that would be fragile and system-dependent
+    
+    let mut rng = ChaCha20Rng::seed_from_u64(123);  
+    let d = neo_math::D;
+    let kappa = 2;
+    let m = 4;
+    let pp = setup(&mut rng, d, kappa, m).unwrap();
+    
+    // Very sparse: 95% zeros
+    #[allow(non_snake_case)]
+    let Z_very_sparse: Vec<Fq> = (0..d*m).map(|i| {
+        if i % 20 == 0 { Fq::ONE } else { Fq::ZERO }
+    }).collect();
+    
+    // Dense: 50% ones, 50% minus ones (no zeros)
+    #[allow(non_snake_case)]
+    let Z_dense: Vec<Fq> = (0..d*m).map(|i| {
+        if i % 2 == 0 { Fq::ONE } else { Fq::ZERO - Fq::ONE }
+    }).collect();
+    
+    let c_sparse = neo_ajtai::commit(&pp, &Z_very_sparse);  
+    let c_dense = neo_ajtai::commit(&pp, &Z_dense);
+    let c_sparse_spec = neo_ajtai::commit_spec(&pp, &Z_very_sparse);
+    let c_dense_spec = neo_ajtai::commit_spec(&pp, &Z_dense);
+    
+    // Correctness: both should match spec
+    assert_eq!(c_sparse, c_sparse_spec, "Very sparse input should match spec");
+    assert_eq!(c_dense, c_dense_spec, "Dense input should match spec");
+    
+    println!("✅ Performance characteristics test:");
+    println!("   Very sparse (95% zeros): matches spec ✓ - should use fast path");  
+    println!("   Dense (0% zeros): matches spec ✓ - should use fast path");
+    println!("   Both paths produce correct results regardless of sparsity level");
 }

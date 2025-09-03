@@ -83,9 +83,14 @@ fn commit_pay_per_bit_pm1(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
             
             let m1 = Fq::ZERO - Fq::ONE;
             
-            // t = 0: only compute cf(a_ij) if needed
+            // LEAPFROG pay-per-bit: advance between non-zero positions only
+            // This achieves O(#nonzeros·d + sparsity_gaps) complexity
+            let mut last_t = 0usize;
+            let mut a_xt = pp.m_rows[i][j]; // Starting at X^0
+            
+            // t = 0: only compute cf(a_ij) if digit is non-zero (micro-optimization)
             if v[0] != Fq::ZERO {
-                let col0 = cf(pp.m_rows[i][j]);
+                let col0 = cf(a_xt);
                 if v[0] == Fq::ONE {
                     add_col(acc_i, &col0);
                 } else if v[0] == m1 {
@@ -95,13 +100,14 @@ fn commit_pay_per_bit_pm1(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
                 }
             }
             
-            // t = 1..d-1: JUMP DIRECTLY to non-zero positions (true pay-per-bit!)
-            // This achieves O(#nonzeros·d) instead of O(d²) complexity
+            // t = 1..d-1: advance a_xt by minimal steps between non-zeros
             for t in 1..d {
                 let vt = v[t];
                 if vt != Fq::ZERO {
-                    // Jump directly to X^t without iterating through intermediate powers
-                    let col = cf(pp.m_rows[i][j].mul_by_monomial(t));
+                    // Advance from last position by (t - last_t) steps
+                    a_xt = a_xt.mul_by_monomial(t - last_t);
+                    let col = cf(a_xt);
+                    
                     if vt == Fq::ONE {
                         add_col(acc_i, &col);
                     } else if vt == m1 {
@@ -109,6 +115,8 @@ fn commit_pay_per_bit_pm1(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
                     } else {
                         debug_assert!(false, "PRECONDITION VIOLATED: digits must be in {{-1,0,1}}");
                     }
+                    
+                    last_t = t;
                 }
                 // CRITICAL: When vt == 0, we do NO WORK - this is the pay-per-bit savings!
             }
@@ -119,6 +127,17 @@ fn commit_pay_per_bit_pm1(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
 
 /// MUST: Commit(pp, Z) = cf(M · cf^{-1}(Z)) as c ∈ F_q^{d×κ}.  S-homomorphic over S by construction.
 /// Automatically chooses between dense O(d²) and sparse O(#nonzeros × d) algorithms based on digit sparsity.
+/// 
+/// # Security Note
+/// When `variable_time_commit` feature is enabled, this function may leak digit patterns
+/// through timing and cache access patterns. Use only when:
+/// - Prover-local timing leakage is acceptable, OR
+/// - The witness/digits are not sensitive, OR  
+/// - The environment is side-channel hardened
+/// 
+/// Default builds use constant-time dense computation for all inputs.
+/// 
+/// References: https://cr.yp.to/antiforgery/cachetiming-20050414.pdf
 #[allow(non_snake_case)]
 pub fn commit(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
     // Z is d×m (column-major by (col*d + row)), output c is d×kappa (column-major)
@@ -222,7 +241,10 @@ pub fn s_mul(rho_ring: &RqEl, c: &Commitment) -> Commitment {
 /// Reference implementation of commit for testing: c = cf(M · cf^{-1}(Z))
 /// This implements the specification directly using S-action matrix multiplication
 /// Used to validate the optimized commit paths produce identical results
+/// 
+/// ⚠️  FOR TESTING/DIAGNOSTICS ONLY - NOT CONSTANT TIME ⚠️
 #[allow(non_snake_case, dead_code)]
+#[cfg_attr(any(test, feature = "variable_time_commit"), allow(dead_code))]
 pub fn commit_spec(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
     let d = pp.d; let m = pp.m;
     let mut c = Commitment::zeros(d, pp.kappa);

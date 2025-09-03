@@ -6,9 +6,11 @@ license = "Apache-2.0"
 
 [features]
 default = []
-# Enable variable-time pay-per-bit optimization (potential side-channel leakage)  
-# This feature allows timing-dependent optimizations that may leak digit patterns
-# through timing/memory access patterns. Only enable if prover-local leakage is acceptable.
+# Enable variable-time pay-per-bit optimization (⚠️  SIDE-CHANNEL RISK ⚠️ )
+# This feature allows timing-dependent optimizations that leak digit sparsity patterns
+# through timing/cache access patterns. Only enable when prover-local leakage is acceptable.
+# Default builds use constant-time dense computation for audit-ready deployments.
+# See: https://cr.yp.to/antiforgery/cachetiming-20050414.pdf  
 variable_time_commit = []
 
 [dependencies]

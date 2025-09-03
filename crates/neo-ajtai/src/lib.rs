@@ -17,5 +17,10 @@ pub mod s_module;
 pub use error::{AjtaiError, AjtaiResult};
 pub use types::{Commitment, PP};
 pub use decomp::{decomp_b, split_b, assert_range_b, DecompStyle};
-pub use commit::{setup, commit, verify_open, verify_split_open, s_mul, s_lincomb, commit_spec};
+pub use commit::{setup, commit, verify_open, verify_split_open, s_mul, s_lincomb};
+
+// Test utilities - not part of public API but needed for integration tests
+// Always available to ensure tests can access spec implementation
+#[doc(hidden)] // Hide from public docs since it's for testing only
+pub use commit::commit_spec;
 pub use s_module::{AjtaiSModule, set_global_pp, get_global_pp};
