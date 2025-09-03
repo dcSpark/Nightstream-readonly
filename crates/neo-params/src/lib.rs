@@ -61,6 +61,7 @@ pub enum ParamsError {
     #[error("guard violated: (k+1)·T·(b−1) < B fails")]
     GuardInequality,
     #[error("unsupported extension degree; required s={required}, supported s=2")]
+    /// This includes cases where 2^λ * (ℓ·d_sc) overflows u128, implying s_min ≥ 3.
     UnsupportedExtension { required: u32 },
 }
 
@@ -191,33 +192,85 @@ impl NeoParams {
         for &ell_d_product in &[1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 128, 256] {
             let max_lambda = Self::max_lambda_for_s2(ell_d_product, 1); // Use ell_d_product directly
             let suggested = max_lambda.saturating_sub(2); // 2-bit safety margin
-            println!(" {:>8} | {:>10} | {:>16}", ell_d_product, max_lambda, suggested);
+            println!(" {ell_d_product:>8} | {max_lambda:>10} | {suggested:>16}");
         }
         println!("\n💡 Rule of thumb: Each doubling of ell*d_sc costs ~1 bit of lambda");
         println!("🔒 Suggested lambda = max_lambda - 2 (safety margin)");
     }
 
-    /// Compute the minimal extension degree for given (ℓ, d_sc) under target λ.
-    /// s_min = ceil( (λ + log2(ℓ·d_sc)) / log2(q) )
+    #[inline]
+    fn bitlen_u128(x: u128) -> u32 {
+        if x == 0 { 0 } else { 128 - x.leading_zeros() }
+    }
+
+    /// Exact check for s=2: q^2 ≥ 2^λ · (ell·d_sc).
+    /// Returns None if overflow prevents the check.
+    fn s2_feasible(&self, ell: u32, d_sc: u32) -> Option<bool> {
+        let q2 = (self.q as u128).checked_mul(self.q as u128)?; // q^2 fits for 64-bit q
+        let ld = (ell as u128).checked_mul(d_sc as u128)?;
+        let pow2 = 1u128.checked_shl(self.lambda)?; // None if λ ≥ 128
+        let rhs = pow2.checked_mul(ld)?; // None if overflow
+        Some(q2 >= rhs)
+    }
+
+    /// Compute the minimal extension degree using EXACT integer comparisons for s ∈ {1, 2}.
+    /// This eliminates boundary-case optimism from bit-length ceiling approximations.
+    /// Critical for soundness: bit-length methods can accept cases that actually need s=3!
     pub fn s_min(&self, ell: u32, d_sc: u32) -> u32 {
         let ld = (ell as u128) * (d_sc as u128);
-        let num = (self.lambda as f64) + log2_u128(ld);
-        let den = (self.q as f64).log2();
-        (num / den).ceil() as u32
+        
+        // Check s=1 exactly: q ≥ 2^λ · (ℓ·d_sc)
+        if let Some(pow2) = 1u128.checked_shl(self.lambda) {
+            if let Some(rhs) = pow2.checked_mul(ld) {
+                if (self.q as u128) >= rhs {
+                    return 1;
+                }
+            }
+        }
+        
+        // Check s=2 exactly: q^2 ≥ 2^λ · (ℓ·d_sc)  
+        match self.s2_feasible(ell, d_sc) {
+            Some(true) => 2,   // s=2 is sufficient
+            Some(false) => 3,  // s=2 insufficient, need s≥3
+            None => 3,         // overflow on RHS ⇒ requires s ≥ 3
+        }
     }
 
     /// Extension policy v1: support s=2 only. If s_min>2, return UnsupportedExtension{required=s_min}.
-    /// When s_min ≤ 2, return slack_bits = floor( 2·log2(q) − (λ + log2(ℓ·d_sc)) ).
+    /// When s_min=2, compute exact slack_bits by comparing q^2 against 2^λ·(ℓ·d_sc) directly.
     pub fn extension_check(&self, ell: u32, d_sc: u32) -> Result<ExtensionSummary, ParamsError> {
         let s_min = self.s_min(ell, d_sc);
         if s_min > 2 {
             return Err(ParamsError::UnsupportedExtension { required: s_min });
         }
-        let slack = (2.0 * (self.q as f64).log2()) - ((self.lambda as f64) + log2_u128((ell as u128) * (d_sc as u128)));
+        
+        // Exact slack for s=2: compute floor(log₂(q²/(2^λ·ℓd))) without floating point
+        let q2 = (self.q as u128).checked_mul(self.q as u128).unwrap(); // q^2 fits for 64-bit q
+        let ld = (ell as u128).checked_mul(d_sc as u128).unwrap();
+        
+        let rhs = 1u128.checked_shl(self.lambda)
+            .and_then(|p| p.checked_mul(ld))
+            .ok_or(ParamsError::UnsupportedExtension { required: 3 })?;
+        
+        let slack_bits = if q2 < rhs {
+            // This case should not happen if s_min=2, but handle gracefully
+            -1
+        } else {
+            // Compute floor(log₂(q²/rhs)) using bit lengths
+            let mut slack = Self::bitlen_u128(q2) as i32 - Self::bitlen_u128(rhs) as i32;
+            // Adjust if the division has no fractional part
+            if let Some(shifted) = rhs.checked_shl(slack as u32) {
+                if q2 < shifted { 
+                    slack -= 1; 
+                }
+            }
+            slack
+        };
+        
         Ok(ExtensionSummary {
             s_min,
             s_supported: 2,
-            slack_bits: slack.floor() as i32,
+            slack_bits,
         })
     }
 }

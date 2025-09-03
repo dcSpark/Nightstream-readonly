@@ -4,6 +4,11 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[features]
+default = []
+# Expose testing utilities (like commit_spec) without making them part of the stable API
+testing = []
+
 [dependencies]
 # Workspace deps
 neo-math = { path = "../neo-math" }
