@@ -1,13 +1,22 @@
-//! Tests for pay-per-bit optimization in neo-ajtai commit function
+//! Differential testing for neo-ajtai constant-time commit implementation
+//! 
+//! Tests verify that the optimized constant-time dense commit matches the reference
+//! specification across various input patterns and sparsity levels.
+//! 
+//! These tests require the 'testing' feature to access commit_spec for differential testing.
+//! Run with: cargo test -p neo-ajtai --features testing
 
-use neo_ajtai::{setup, commit};
+#![cfg(feature = "testing")]
+
+#[allow(unused_imports)]
+use neo_ajtai::{setup, commit, commit_spec};
 use neo_math::Fq;
 use p3_field::PrimeCharacteristicRing;
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
 
 #[test]
-fn test_commit_sparse_vs_dense_equivalence() {
-    // Test that sparse and dense commit paths produce identical results
+fn dense_commit_handles_various_patterns() {
+    // Test that the constant-time dense commit handles various input patterns correctly
     let mut rng = ChaCha20Rng::seed_from_u64(42);
     let d = neo_math::D;
     let kappa = 4;
@@ -35,15 +44,15 @@ fn test_commit_sparse_vs_dense_equivalence() {
     // Verify the commitment is valid
     assert!(neo_ajtai::verify_open(&pp, &commitment, &Z), "Commitment should verify correctly");
     
-    println!("✅ Pay-per-bit optimization produces valid commitments");
+    println!("✅ Constant-time dense commit handles various input patterns correctly");
 }
 
 #[test]
-fn test_sparse_digit_detection() {
-    // Test the internal logic for detecting when to use pay-per-bit optimization
+fn sparse_digit_classification_works() {
+    // Test the internal logic for classifying digit sparsity patterns
     
     let d = neo_math::D;
-    // All sparse: should use optimization
+    // All sparse: {-1, 0, 1} pattern
     let all_sparse = vec![Fq::ZERO; d].into_iter().enumerate().map(|(i, _)| {
         match i % 3 {
             0 => Fq::ZERO,
@@ -52,7 +61,7 @@ fn test_sparse_digit_detection() {
         }
     }).collect::<Vec<_>>();
     
-    // All dense: should not use optimization  
+    // All dense: values outside {-1, 0, 1}  
     let all_dense = vec![Fq::from_u64(42); d].into_iter().enumerate().map(|(i, _)| {
         Fq::from_u64(42 + (i % 100) as u64) // Different values to avoid optimization
     }).collect::<Vec<_>>();
@@ -74,10 +83,10 @@ fn test_sparse_digit_detection() {
     println!("✅ Both sparse and dense digit patterns produce valid commitments");
 }
 
-#[test] 
-fn test_pay_per_bit_correctness() {
-    // Comprehensive test that the pay-per-bit optimization gives the same result
-    // as if we computed it using the full S-action matrix
+#[test]
+fn constant_time_commit_correctness() {
+    // Comprehensive test that the constant-time dense commit gives correct results
+    // verified against the reference specification
     
     let mut rng = ChaCha20Rng::seed_from_u64(42);
     let d = neo_math::D;
@@ -110,12 +119,12 @@ fn test_pay_per_bit_correctness() {
                 "Test case {} should verify correctly", i);
     }
     
-    println!("✅ Pay-per-bit optimization works correctly for various digit patterns");
+    println!("✅ Constant-time dense commit works correctly for various digit patterns");
 }
 
-#[test]  
-fn pay_per_bit_matches_spec_even_with_stray_twos() {
-    // This test would FAIL with the old buggy implementation that treated any non-zero as -1
+#[test]
+fn dense_commit_matches_spec_with_mixed_digits() {
+    // Test that the constant-time dense commit handles mixed digit patterns correctly
     let mut rng = ChaCha20Rng::seed_from_u64(7);
     let d = neo_math::D; 
     let kappa = 4; 
@@ -123,7 +132,7 @@ fn pay_per_bit_matches_spec_even_with_stray_twos() {
     let pp = setup(&mut rng, d, kappa, m).unwrap();
     
     // Create data with mostly {-1,0,1} but a few 2's sprinkled in
-    // This should NOT use the pay-per-bit path due to the 2's
+    // The constant-time implementation handles all patterns uniformly
     #[allow(non_snake_case)]
     let mut Z = vec![Fq::ZERO; d * m];
     for i in 0..Z.len() {
@@ -137,12 +146,9 @@ fn pay_per_bit_matches_spec_even_with_stray_twos() {
     
     let c_actual = neo_ajtai::commit(&pp, &Z);
     
-    // Only use spec comparison when available (feature flag or always-available fallback)
-    #[cfg(any(test, feature = "variable_time_commit"))]
-    {
-        let c_spec = neo_ajtai::commit_spec(&pp, &Z);
-        assert_eq!(c_actual, c_spec, "Commit with mixed digits must match specification");
-    }
+    // Differential testing in test builds only
+    let c_spec = neo_ajtai::commit_spec(&pp, &Z);
+    assert_eq!(c_actual, c_spec, "Commit with mixed digits must match specification");
     
     // Always verify that opening works correctly
     assert!(neo_ajtai::verify_open(&pp, &c_actual, &Z), "Mixed digit commit should verify correctly");
@@ -150,9 +156,9 @@ fn pay_per_bit_matches_spec_even_with_stray_twos() {
     println!("✅ Commit handles mixed digits correctly (uses dense path due to 2's)");
 }
 
-#[test] 
-fn pay_per_bit_strict_gating() {
-    // Test that pay-per-bit is only used when ALL digits are in {-1, 0, 1}
+#[test]
+fn dense_commit_matches_spec_all_patterns() {
+    // Test that constant-time dense commit matches spec for various digit patterns
     let mut rng = ChaCha20Rng::seed_from_u64(13);
     let d = neo_math::D;
     let kappa = 2;
@@ -180,25 +186,19 @@ fn pay_per_bit_strict_gating() {
     assert!(neo_ajtai::verify_open(&pp, &c_mixed, &Z_mixed), "Mixed digits should verify");
     assert_ne!(c_strict, c_mixed, "Different inputs should produce different outputs");
     
-    // Spec comparison only when available
-    #[cfg(any(test, feature = "variable_time_commit"))]
-    {
-        let c_spec_strict = neo_ajtai::commit_spec(&pp, &Z_strict);
-        let c_spec_mixed = neo_ajtai::commit_spec(&pp, &Z_mixed);
-        assert_eq!(c_strict, c_spec_strict, "Strict {{-1,0,1}} digits must match spec");
-        assert_eq!(c_mixed, c_spec_mixed, "Mixed digits must match spec");
-    }
+    // Differential testing in test builds only
+    let c_spec_strict = neo_ajtai::commit_spec(&pp, &Z_strict);
+    let c_spec_mixed = neo_ajtai::commit_spec(&pp, &Z_mixed);
+    assert_eq!(c_strict, c_spec_strict, "Strict {{-1,0,1}} digits must match spec");
+    assert_eq!(c_mixed, c_spec_mixed, "Mixed digits must match spec");
     
-    println!("✅ Pay-per-bit gating works: only {{-1,0,1}} vs mixed digits produce correct results");
+    println!("✅ Constant-time dense commit matches spec for {{-1,0,1}} vs mixed digit patterns");
 }
 
-#[cfg(feature = "variable_time_commit")]
 #[test]
-fn fast_path_is_actually_used() {
-    // This test can only run when the variable_time_commit feature is enabled
-    // It verifies that the optimized path produces identical results to the spec
-    
-    // Future: could add atomic counters to measure fast path usage
+fn dense_commit_differential_testing() {
+    // Differential testing: verify the constant-time dense commit matches spec
+    // Tests the optimized implementation against the reference specification
     
     let mut rng = ChaCha20Rng::seed_from_u64(42);
     let d = neo_math::D;
@@ -206,7 +206,7 @@ fn fast_path_is_actually_used() {
     let m = 6;
     let pp = setup(&mut rng, d, kappa, m).unwrap();
     
-    // Create strictly {-1, 0, 1} digits that should trigger fast path
+    // Create {-1, 0, 1} digit pattern for differential testing
     #[allow(non_snake_case)]
     let Z_sparse: Vec<Fq> = (0..d*m).map(|i| match i % 4 {
         0 => Fq::ONE,           // 25% ones
@@ -231,17 +231,16 @@ fn fast_path_is_actually_used() {
     assert_eq!(c_mixed, c_mixed_spec, "Mixed digits should match spec");
     assert_ne!(c_sparse, c_mixed, "Different inputs should produce different outputs");
     
-    println!("✅ Fast path verification: feature-gated optimization produces spec-equivalent results");
-    println!("   Sparse input: matches spec ✓");
-    println!("   Mixed input: matches spec ✓ (uses dense path due to non-{{-1,0,1}} digits)");
+    println!("✅ Differential testing verification: constant-time implementation matches spec");
+    println!("   Sparse {{-1,0,1}} input: matches spec ✓");
+    println!("   Mixed input with 2's: matches spec ✓");
 }
 
-#[cfg(feature = "variable_time_commit")]
 #[test]
-fn dense_vs_sparse_performance_characteristics() {
-    // Test that sparse inputs (many zeros) potentially have different timing characteristics
-    // This test documents the expected behavior but doesn't assert timing differences
-    // since that would be fragile and system-dependent
+fn sparsity_invariant_testing() {
+    // Differential testing with different sparsity levels
+    // Tests that the constant-time implementation produces identical results 
+    // regardless of input sparsity patterns
     
     let mut rng = ChaCha20Rng::seed_from_u64(123);  
     let d = neo_math::D;
@@ -270,8 +269,8 @@ fn dense_vs_sparse_performance_characteristics() {
     assert_eq!(c_sparse, c_sparse_spec, "Very sparse input should match spec");
     assert_eq!(c_dense, c_dense_spec, "Dense input should match spec");
     
-    println!("✅ Performance characteristics test:");
-    println!("   Very sparse (95% zeros): matches spec ✓ - should use fast path");  
-    println!("   Dense (0% zeros): matches spec ✓ - should use fast path");
-    println!("   Both paths produce correct results regardless of sparsity level");
+    println!("✅ Sparsity invariance test:");
+    println!("   Very sparse (95% zeros): matches spec ✓");  
+    println!("   Dense (0% zeros): matches spec ✓");
+    println!("   Constant-time implementation produces correct results regardless of sparsity");
 }

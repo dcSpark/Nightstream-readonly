@@ -30,6 +30,14 @@ pub fn two_adic_generator(bits: usize) -> Fq {
     <Fq as TwoAdicField>::two_adic_generator(bits)
 }
 
+/// Constructor compatibility shim to handle potential upstream API changes
+#[inline]
+fn new_k_from_coeffs(coefs: [Fq; 2]) -> K {
+    // If `new_complex` ever changes upstream, swap in the correct constructor here.
+    // This provides a single point of maintenance for field construction compatibility.
+    BinomialExtensionField::new_complex(coefs[0], coefs[1])
+}
+
 // Convenience shims for K - using extension trait instead of inherent impl
 pub trait KExtensions {
     /// Conjugation in K (a + b * u) ↦ (a - b * u).
@@ -51,11 +59,13 @@ impl KExtensions for K {
     #[inline] fn inv(self) -> Self { self.inverse() }
     #[inline] fn as_coeffs(&self) -> [Fq; 2] { [self.real(), self.imag()] }
     #[inline] fn from_coeffs(coefs: [Fq; 2]) -> Self {
-        BinomialExtensionField::new_complex(coefs[0], coefs[1])
+        new_k_from_coeffs(coefs)
     }
 }
 
-/// Random K generator for testing
+/// Random K generator for testing only
+/// Gated to avoid accidentally introducing a hard dependency on rand in neo-math
+#[cfg(any(test, feature = "testing"))]
 pub fn random_extf() -> K {
     use rand::Rng;
     let mut rng = rand::rng();
@@ -65,7 +75,7 @@ pub fn random_extf() -> K {
 }
 
 /// Embed base field element into extension field
-#[inline] pub fn from_base(x: Fq) -> K { K::new_real(x) }
+#[inline] pub fn from_base(x: Fq) -> K { K::from_coeffs([x, Fq::ZERO]) }
 
 /// Create extension field element from real/imaginary parts  
 #[inline] pub fn from_complex(real: Fq, imag: Fq) -> K { K::from_coeffs([real, imag]) }
@@ -73,5 +83,18 @@ pub fn random_extf() -> K {
 /// Embed base field into extension (alias for clarity)
 #[inline] pub fn embed_base_to_ext(x: Fq) -> K { from_base(x) }
 
-/// Project extension field element to base field (real part only)
-#[inline] pub fn project_ext_to_base(x: K) -> Fq { x.real() }
+/// Returns Some(real part) iff imaginary part == 0; otherwise None.
+/// **Preferred for correctness-critical paths** - prevents silent loss of imaginary components.
+#[inline] pub fn try_project_ext_to_base(x: K) -> Option<Fq> {
+    let [re, im] = x.as_coeffs();
+    if im == Fq::ZERO { Some(re) } else { None }
+}
+
+/// Always returns the real part, even if imaginary part != 0.
+/// **Use with caution** - silently discards imaginary components.
+/// Prefer `try_project_ext_to_base` in correctness-critical paths.
+#[must_use = "discarding the result defeats the purpose of this lossy projection"]
+#[inline] pub fn project_ext_to_base_lossy(x: K) -> Fq { x.real() }
+
+/// Backward compatibility alias - routes to the SAFE version
+#[inline] pub fn project_ext_to_base(x: K) -> Option<Fq> { try_project_ext_to_base(x) }

@@ -19,8 +19,8 @@ pub enum SActionError {
     DimMismatch { expected: usize, got: usize },
 }
 
-pub use field::{Fq, K, GOLDILOCKS_MODULUS, TWO_ADICITY, nonresidue, two_adic_generator, KExtensions, from_base, from_complex, embed_base_to_ext, project_ext_to_base};
-pub use ring::{ETA, D, Rq, cf, cf_inv, inf_norm, reduce_mod_phi_81};
+pub use field::{Fq, K, GOLDILOCKS_MODULUS, TWO_ADICITY, nonresidue, two_adic_generator, KExtensions, from_base, from_complex, embed_base_to_ext, project_ext_to_base, try_project_ext_to_base, project_ext_to_base_lossy};
+pub use ring::{ETA, D, Rq, cf, cf_inv, inf_norm};
 pub use s_action::SAction;
 pub use norms::{NeoMathError, Norms};
 

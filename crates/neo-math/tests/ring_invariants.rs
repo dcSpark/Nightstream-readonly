@@ -1,8 +1,8 @@
 //! Critical property tests for ring arithmetic and S-action correctness.
 //! These tests anchor the algebra to the paper's specification and catch regressions.
 
-use neo_math::{Rq, Fq, D, cf, cf_inv, SAction, reduce_mod_phi_81};
-use neo_math::ring::rot_apply_vec;
+use neo_math::{Rq, Fq, D, cf, cf_inv, SAction};
+use neo_math::ring::{rot_apply_vec, test_reduce_mod_phi_81};
 use p3_field::PrimeCharacteristicRing;
 use p3_matrix::Matrix;
 use rand::Rng;
@@ -106,7 +106,7 @@ fn cyclotomic_phi_81_relation() {
         let x54 = {
             let mut tmp = [Fq::ZERO; 2*D - 1];
             tmp[54] = Fq::ONE; // X^54 coefficient
-            reduce_mod_phi_81(&mut tmp);
+            test_reduce_mod_phi_81(&mut tmp);
             let mut out = [Fq::ZERO; D];
             out.copy_from_slice(&tmp[..D]);
             Rq::from_field_coeffs(out.to_vec())

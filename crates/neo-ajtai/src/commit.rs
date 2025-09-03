@@ -6,7 +6,7 @@ use crate::error::{AjtaiError, AjtaiResult};
 
 
 /// Bring in ring & S-action APIs from neo-math.
-use neo_math::ring::{Rq as RqEl, cf_inv as cf_unmap, cf};
+use neo_math::ring::{Rq as RqEl, cf_inv as cf_unmap, cf, D, ETA};
 use neo_math::s_action::SAction;
 
 /// Sample a uniform element from F_q using rejection sampling to avoid bias.
@@ -18,6 +18,40 @@ fn sample_uniform_fq<R: RngCore + CryptoRng>(rng: &mut R) -> Fq {
         let x = rng.next_u64();
         if x < Q { return Fq::from_u64(x); }
     }
+}
+
+/// Rotation "one-step" for Φ₈₁(X) = X^54 + X^27 + 1
+/// 
+/// Turns column t into column t+1 in O(d) (no ring multiply).
+/// For Φ₈₁, the step is: next[0] = -v_{d-1}, next[27] = v_{26} - v_{d-1},
+/// next[k] = v_{k-1} for k ∈ {1,...,d-1}\{27}.
+#[inline]
+fn rot_step_phi_81(cur: &[Fq; D], next: &mut [Fq; D]) {
+    let last = cur[D - 1];
+    // shift: next[k] = cur[k-1] for k>=1; next[0] = 0
+    next[0] = Fq::ZERO;
+    for k in 1..D { next[k] = cur[k - 1]; }
+    // cyclotomic corrections for X^54 ≡ -X^27 - 1
+    next[0] -= last;        // -1 * last
+    next[27] -= last;       // -X^27 * last
+}
+
+/// Optional: if you ever support X^D + 1 rings (AGL/Mersenne), use this fallback
+#[allow(dead_code)]
+#[inline]
+fn rot_step_xd_plus_1(cur: &[Fq; D], next: &mut [Fq; D]) {
+    let last = cur[D - 1];
+    next[0] = Fq::ZERO;
+    for k in 1..D { next[k] = cur[k - 1]; }
+    next[0] -= last; // X^D ≡ -1
+}
+
+/// Rotation step dispatcher - compile-time constant for η=81 ⇒ D=54
+#[inline]
+fn rot_step(cur: &[Fq; D], next: &mut [Fq; D]) {
+    // Compile-time constant in this repo (η=81 ⇒ D=54); keep a readable switch.
+    if ETA == 81 { rot_step_phi_81(cur, next) }
+    else { rot_step_xd_plus_1(cur, next) } // safe fallback if you later add AGL
 }
 
 /// MUST: Setup(κ,m) → sample M ← R_q^{κ×m} uniformly (Def. 9).
@@ -44,119 +78,33 @@ pub fn setup<R: RngCore + CryptoRng>(rng: &mut R, d: usize, kappa: usize, m: usi
     Ok(PP { kappa, m, d, m_rows: rows })
 }
 
-/// Check if ALL digits are exactly in {-1, 0, 1} for safe pay-per-bit optimization
-/// This is a strict precondition to avoid the correctness bug where non-{-1,0,1} digits
-/// would be incorrectly treated as -1.
-#[allow(non_snake_case, dead_code)]
-fn all_digits_pm1_or_zero(Z: &[Fq]) -> bool {
-    let m1 = Fq::ZERO - Fq::ONE;
-    Z.iter().all(|&d| d == Fq::ZERO || d == Fq::ONE || d == m1)
-}
-
-// Helper functions for pay-per-bit optimization
-#[inline]
-#[allow(dead_code)]
-fn add_col(acc: &mut [Fq], col: &[Fq]) {
-    for (a, &x) in acc.iter_mut().zip(col) { *a += x; }
-}
-
-#[inline] 
-#[allow(dead_code)]
-fn sub_col(acc: &mut [Fq], col: &[Fq]) {
-    for (a, &x) in acc.iter_mut().zip(col) { *a -= x; }
-}
-
-/// Pay-per-bit optimized commit for digits strictly in {-1, 0, 1}
-/// Uses the rotation matrix identity: cf(a⋅b) = rot(a)⋅cf(b) = ∑_t z_t ⋅ (column t of rot(a))
-/// Only adds/subtracts pre-rotated columns when z_t ≠ 0
-/// PRECONDITION: ALL digits in Z must be in {-1, 0, 1}
-#[allow(non_snake_case, dead_code)]
-fn commit_pay_per_bit_pm1(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
-    let d = pp.d; let m = pp.m; let kappa = pp.kappa;
-    let mut c = Commitment::zeros(d, kappa);
-
-    // For each Ajtai row i and message column j
-    for i in 0..kappa {
-        let acc_i = c.col_mut(i);
-        for j in 0..m {
-            let v = &Z[j*d..(j+1)*d];  // digits for column j
-            
-            let m1 = Fq::ZERO - Fq::ONE;
-            
-            // LEAPFROG pay-per-bit: advance between non-zero positions only
-            // This achieves O(#nonzeros·d + sparsity_gaps) complexity
-            let mut last_t = 0usize;
-            let mut a_xt = pp.m_rows[i][j]; // Starting at X^0
-            
-            // t = 0: only compute cf(a_ij) if digit is non-zero (micro-optimization)
-            if v[0] != Fq::ZERO {
-                let col0 = cf(a_xt);
-                if v[0] == Fq::ONE {
-                    add_col(acc_i, &col0);
-                } else if v[0] == m1 {
-                    sub_col(acc_i, &col0);  
-                } else {
-                    debug_assert!(false, "PRECONDITION VIOLATED: digits must be in {{-1,0,1}}");
-                }
-            }
-            
-            // t = 1..d-1: advance a_xt by minimal steps between non-zeros
-            for t in 1..d {
-                let vt = v[t];
-                if vt != Fq::ZERO {
-                    // Advance from last position by (t - last_t) steps
-                    a_xt = a_xt.mul_by_monomial(t - last_t);
-                    let col = cf(a_xt);
-                    
-                    if vt == Fq::ONE {
-                        add_col(acc_i, &col);
-                    } else if vt == m1 {
-                        sub_col(acc_i, &col);
-                    } else {
-                        debug_assert!(false, "PRECONDITION VIOLATED: digits must be in {{-1,0,1}}");
-                    }
-                    
-                    last_t = t;
-                }
-                // CRITICAL: When vt == 0, we do NO WORK - this is the pay-per-bit savings!
-            }
-        }
-    }
-    c
-}
+// Variable-time optimization removed for security and simplicity
 
 /// MUST: Commit(pp, Z) = cf(M · cf^{-1}(Z)) as c ∈ F_q^{d×κ}.  S-homomorphic over S by construction.
-/// Automatically chooses between dense O(d²) and sparse O(#nonzeros × d) algorithms based on digit sparsity.
-/// 
-/// # Security Note
-/// When `variable_time_commit` feature is enabled, this function may leak digit patterns
-/// through timing and cache access patterns. Use only when:
-/// - Prover-local timing leakage is acceptable, OR
-/// - The witness/digits are not sensitive, OR  
-/// - The environment is side-channel hardened
-/// 
-/// Default builds use constant-time dense computation for all inputs.
-/// 
-/// References: https://cr.yp.to/antiforgery/cachetiming-20050414.pdf
+/// Uses constant-time dense computation for all inputs (audit-ready).
+/// Returns error if Z dimensions don't match expected d×m.
 #[allow(non_snake_case)]
-pub fn commit(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
+pub fn try_commit(pp: &PP<RqEl>, Z: &[Fq]) -> AjtaiResult<Commitment> {
     // Z is d×m (column-major by (col*d + row)), output c is d×kappa (column-major)
-    let d = pp.d; let m = pp.m; let _kappa = pp.kappa;
-    assert_eq!(Z.len(), d*m, "Z must be d×m");
-
-    // Choose algorithm: sparse path ONLY if ALL digits are in {-1, 0, 1}
-    // This prevents the correctness bug where digits like 2, 3, etc. would be treated as -1
-    #[cfg(feature = "variable_time_commit")]
-    {
-        if all_digits_pm1_or_zero(Z) {
-            return commit_pay_per_bit_pm1(pp, Z);
-        }
+    let d = pp.d; let m = pp.m;
+    if Z.len() != d*m {
+        return Err(AjtaiError::SizeMismatch { 
+            expected: d*m, 
+            actual: Z.len() 
+        });
     }
-    commit_dense(pp, Z)
+    
+    Ok(commit_dense(pp, Z))
 }
 
-/// Dense commit implementation (original algorithm)
-/// Kept as fallback when digits are not sparse
+/// Convenience wrapper that panics on dimension mismatch (for tests and controlled environments).
+#[allow(non_snake_case)]
+pub fn commit(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
+    try_commit(pp, Z).expect("commit: Z dimensions must match d×m")
+}
+
+/// Constant-time dense commit implementation  
+/// Computes c = cf(M · cf^{-1}(Z)) using S-action matrix multiplication
 #[allow(non_snake_case)]
 fn commit_dense(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
     let d = pp.d; let m = pp.m; let kappa = pp.kappa;
@@ -238,13 +186,16 @@ pub fn s_mul(rho_ring: &RqEl, c: &Commitment) -> Commitment {
     out
 }
 
-/// Reference implementation of commit for testing: c = cf(M · cf^{-1}(Z))
-/// This implements the specification directly using S-action matrix multiplication
-/// Used to validate the optimized commit paths produce identical results
+/// Reference implementation for differential testing against the optimized commit
 /// 
-/// ⚠️  FOR TESTING/DIAGNOSTICS ONLY - NOT CONSTANT TIME ⚠️
-#[allow(non_snake_case, dead_code)]
-#[cfg_attr(any(test, feature = "variable_time_commit"), allow(dead_code))]
+/// Implements the specification directly: c = cf(M · cf^{-1}(Z))
+/// This verifies the fundamental S-action isomorphism cf(a·b) = rot(a)·cf(b) 
+/// at the commitment level - exactly the algebra the construction relies on.
+/// 
+/// ⚠️  FOR TESTING ONLY - NOT CONSTANT TIME ⚠️
+/// Available for unit tests and with the 'testing' feature for integration tests
+#[cfg(any(test, feature = "testing"))]
+#[allow(non_snake_case)]
 pub fn commit_spec(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
     let d = pp.d; let m = pp.m;
     let mut c = Commitment::zeros(d, pp.kappa);
@@ -252,8 +203,7 @@ pub fn commit_spec(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
     for i in 0..pp.kappa {
         let acc_i = c.col_mut(i);
         for j in 0..m {
-            let a_ij = pp.m_rows[i][j];
-            let s = SAction::from_ring(a_ij);
+            let s = SAction::from_ring(pp.m_rows[i][j]);
             let v: [Fq; neo_math::ring::D] = Z[j*d..(j+1)*d].try_into().unwrap();
             let w = s.apply_vec(&v);
             for (a, &x) in acc_i.iter_mut().zip(&w) { *a += x; }
@@ -282,4 +232,109 @@ pub fn s_lincomb(rhos: &[RqEl], cs: &[Commitment]) -> AjtaiResult<Commitment> {
         acc.add_inplace(&term);
     }
     Ok(acc)
+}
+
+/// Constant-time masked columns accumulation (streaming).
+///
+/// c = cf(M · cf^{-1}(Z)) computed as:
+///   for i in 0..kappa, j in 0..m:
+///     col <- cf(a_ij)       // column 0 of rot(a_ij)
+///     for t in 0..d-1:
+///       acc += Z[j*d + t] * col
+///       col <- next column via rot_step()
+///
+/// **Constant-Time Guarantees:**
+/// - Fixed iteration counts (no secret-dependent branching)
+/// - No secret-dependent memory accesses
+/// - Identical execution flow regardless of Z values (sparsity, magnitude)
+/// - Assumes underlying field arithmetic is constant-time (true for Goldilocks)
+/// 
+/// This implements the identity cf(a·b) = rot(a)·cf(b) = Σ(t=0 to d-1) b_t · col_t(rot(a))
+#[allow(non_snake_case)]
+pub fn commit_masked_ct(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
+    let d = pp.d; let m = pp.m; let kappa = pp.kappa;
+    debug_assert_eq!(d, D);
+    assert_eq!(Z.len(), d * m, "Z must be d×m");
+
+    let mut C = Commitment::zeros(d, kappa);
+
+    // For each Ajtai row i and message column j
+    for i in 0..kappa {
+        let acc_i = C.col_mut(i);
+        for j in 0..m {
+            // Start from col_0 = cf(a_ij)
+            let mut col = cf(pp.m_rows[i][j]);
+            let mut nxt = [Fq::ZERO; D];
+
+            // Loop over all base-digits t (constant-time)
+            let base = j * d;
+            for t in 0..d {
+                let mask = Z[base + t];        // any Fq digit (0, ±1, small, or general)
+                // acc += mask * col   (branch-free masked add)
+                for r in 0..d {
+                    // single FMA-like op on the field
+                    acc_i[r] += col[r] * mask;
+                }
+                // Advance to the next rotation column in O(d)
+                rot_step(&col, &mut nxt);
+                core::mem::swap(&mut col, &mut nxt); // Cheaper than copying [Fq; D]
+            }
+        }
+    }
+    C
+}
+
+/// Fill `cols` with the d rotation columns of rot(a): cols[t] = cf(a * X^t).
+#[inline]
+fn precompute_rot_columns(a: RqEl, cols: &mut [[Fq; D]]) {
+    let mut col = cf(a);
+    let mut nxt = [Fq::ZERO; D];
+    for t in 0..D {
+        cols[t] = col;
+        rot_step(&col, &mut nxt);
+        col = nxt;
+    }
+}
+
+/// Constant-time commit using precomputed rotation columns per (i,j).
+///
+/// Space/time trade: uses a stack-allocated `[[Fq; D]; D]` scratch per (i,j) to
+/// remove per-step rot_step(), keeping the same constant-time masked adds.
+/// 
+/// **Constant-Time Guarantees:**
+/// - Fixed iteration counts (no secret-dependent branching)  
+/// - No secret-dependent memory accesses
+/// - Identical execution flow regardless of Z values (sparsity, magnitude)
+/// - Assumes underlying field arithmetic is constant-time (true for Goldilocks)
+/// 
+/// This implements the same identity cf(a·b) = rot(a)·cf(b) = Σ(t=0 to d-1) b_t · col_t(rot(a))
+/// but precomputes all rotation columns once per (i,j) pair for better cache locality.
+#[allow(non_snake_case)]
+pub fn commit_precomp_ct(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
+    let d = pp.d; let m = pp.m; let kappa = pp.kappa;
+    debug_assert_eq!(d, D);
+    assert_eq!(Z.len(), d * m, "Z must be d×m");
+
+    let mut C = Commitment::zeros(d, kappa);
+
+    // Stack-allocated scratch for columns of rot(a_ij) 
+    // 54×54×8 ≈ 23 KiB fits comfortably on most target stacks
+    let mut cols = [[Fq::ZERO; D]; D]; // d columns, each length d
+
+    for i in 0..kappa {
+        let acc_i = C.col_mut(i);
+        for j in 0..m {
+            precompute_rot_columns(pp.m_rows[i][j], &mut cols);
+            let base = j * d;
+            // Constant schedule: always loop over all t
+            for t in 0..d {
+                let mask = Z[base + t];
+                let col_t = &cols[t];
+                for r in 0..d {
+                    acc_i[r] += col_t[r] * mask;
+                }
+            }
+        }
+    }
+    C
 }

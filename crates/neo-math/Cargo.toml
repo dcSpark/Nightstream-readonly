@@ -32,6 +32,8 @@ default = []
 serde = ["dep:serde"]
 spartan2-compat = []
 quickcheck = []
+# Expose testing utilities (like random_extf) without making them part of the stable API
+testing = []
 
 [package.metadata.docs.rs]
 rustdoc-args = ["--cfg", "docsrs"]
