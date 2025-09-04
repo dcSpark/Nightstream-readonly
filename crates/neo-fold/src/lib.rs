@@ -138,6 +138,7 @@ pub fn fold_ccs_instances(
 /// 1) Π_CCS rounds & r-binding against proof.pi_ccs_outputs
 /// 2) Π_RLC complete verification: ρ derivation, guard, and S-action on (c, X, y)
 /// 3) Π_DEC: recomposition & range checks from parent to digits
+/// 4) Spartan2 verification: MANDATORY verification of ties y_j = Z M_j^T χ_r and range ||Z||_∞ < b
 ///
 /// This enables complete verification of all transformations across the pipeline.
 pub fn verify_folding_proof(
@@ -146,6 +147,8 @@ pub fn verify_folding_proof(
     input_instances: &[neo_ccs::McsInstance<Cmt, F>],
     output_instances: &[MeInstance<Cmt, F, K>],  // k digits from Π_DEC
     proof: &FoldingProof,
+    // NEW: require the succinct proof bundle emitted by your bridge:
+    spartan_bundle: &neo_spartan_bridge::ProofBundle,
 ) -> Result<bool, FoldingError> {
     if input_instances.is_empty() { 
         return Err(FoldingError::InvalidInput("no inputs".into())); 
@@ -180,25 +183,34 @@ pub fn verify_folding_proof(
     if !ok_rlc { return Ok(false); }
 
     // 4) Π_DEC: recomposition & range checks from parent → digits
-    if let Ok(l_real) = neo_ajtai::AjtaiSModule::from_global() {
-        let ok_dec = pi_dec::pi_dec_verify(&mut tr, params, &me_parent, output_instances, &proof.pi_dec_proof, &l_real)
-            .map_err(|e| FoldingError::InvalidInput(format!("pi_dec_verify failed: {e}")))?;
-        return Ok(ok_dec);
-    } else {
-        // verify_split_open doesn't use `l` in current code; fallback stub suffices
-        struct NoOp; 
-        impl neo_ccs::traits::SModuleHomomorphism<F, Cmt> for NoOp {
-            fn commit(&self, _z: &neo_ccs::Mat<F>) -> Cmt { Cmt::zeros(neo_math::D, 1) }
-            fn project_x(&self, z: &neo_ccs::Mat<F>, min: usize) -> neo_ccs::Mat<F> {
-                let rows=z.rows(); let cols=min.min(z.cols());
-                let mut out=neo_ccs::Mat::zero(rows, cols, F::ZERO);
-                for r in 0..rows { for c in 0..cols { out[(r,c)]=z[(r,c)]; } } 
-                out
-            }
-        }
-        let ok_dec = pi_dec::pi_dec_verify(&mut tr, params, &me_parent, output_instances, &proof.pi_dec_proof, &NoOp)
-            .map_err(|e| FoldingError::InvalidInput(format!("pi_dec_verify failed: {e}")))?;
-        return Ok(ok_dec);
+    // SECURITY: Fail closed if AjtaiSModule isn't properly initialized
+    let l_real = neo_ajtai::AjtaiSModule::from_global()
+        .map_err(|_| FoldingError::InvalidInput(
+            "AjtaiSModule unavailable; cannot verify DEC securely".to_string()
+        ))?;
+    
+    let ok_dec = pi_dec::pi_dec_verify(&mut tr, params, &me_parent, output_instances, &proof.pi_dec_proof, &l_real)
+        .map_err(|e| FoldingError::InvalidInput(format!("pi_dec_verify failed: {e}")))?;
+    if !ok_dec { return Ok(false); }
+
+    // 5) Succinct last-mile (MANDATORY):
+    //    This enforces y_j = Z M_j^T χ_r and range ||Z||_∞ < b for the terminal ME(b,L).
+    
+    // CRITICAL SECURITY: Bind Spartan bundle's public IO to THIS call's (c,X,r,y) values
+    // A malicious prover could replay a valid Spartan proof for different data without this check
+    let legacy_me_parent = crate::bridge_adapter::modern_to_legacy_instance(&me_parent, params);
+    let expected_public_io = neo_spartan_bridge::encode_bridge_io_header(&legacy_me_parent);
+    
+    // If the bundle's bound public IO doesn't match this call's (c, X, r, y), treat as verify-fail.
+    if expected_public_io != spartan_bundle.public_io_bytes {
+        return Ok(false);
+    }
+
+    // Verify the Spartan proof. Any verification error is a verify-fail (not an input error).
+    match neo_spartan_bridge::verify_me_spartan(spartan_bundle) {
+        Ok(true) => Ok(true),
+        Ok(false) => Ok(false),
+        Err(_e) => Ok(false), // Internal errors also treated as verification failure
     }
 }
 
