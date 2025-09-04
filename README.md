@@ -145,12 +145,12 @@ This demonstrates proving correctness of a Fibonacci computation (`z[i+2] = z[i+
 
 ## Performance Profile
 
-| Metric | Small Circuits | Current Status |
-|--------|---------------|----------------|
-| **Proof Size** | ~1-10KB | Unoptimized (verbose public IO) |
-| **Prover Time** | ~10-100ms | Prototype performance |
-| **Verifier Time** | ~1-10ms | Constant (SNARK property) |
-| **Memory Usage** | ~100MB | Materializes one-hot vectors |
+| Metric | Current Implementation | Target (Post-Optimization) |
+|--------|----------------------|---------------------------|
+| **Proof Size** | ~1MB | Unoptimized |
+| **Prover Time** | ~50ms | ~10-100ms |
+| **Verifier Time** | ~7ms | ~1-10ms |
+| **Memory Usage** | TBD | TBD |
 
 ### Optimization Roadmap
 - [ ] **Sparse weight vectors** in bridge (currently quadratic in `d·m`)
