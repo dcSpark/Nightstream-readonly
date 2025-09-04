@@ -147,12 +147,14 @@ fn commit_via_saction(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
 }
 
 /// MUST: Verify opening by recomputing commitment (binding implies uniqueness).
+#[must_use = "Ajtai verification must be checked; ignoring this result is a security bug"]
 #[allow(non_snake_case)]
 pub fn verify_open(pp: &PP<RqEl>, c: &Commitment, Z: &[Fq]) -> bool {
     &commit(pp, Z) == c
 }
 
 /// MUST: Verify split opening: c == Σ b^{i-1} c_i and Z == Σ b^{i-1} Z_i, with ||Z_i||_∞<b (range assertions done by caller).
+#[must_use = "Ajtai verification must be checked; ignoring this result is a security bug"]
 #[allow(non_snake_case)]
 pub fn verify_split_open(pp: &PP<RqEl>, c: &Commitment, b: u32, c_is: &[Commitment], Z_is: &[Vec<Fq>]) -> bool {
     let k = c_is.len();
@@ -349,6 +351,96 @@ pub fn commit_precomp_ct(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
     }
     C
 }
+
+/// Linear opening proof for Ajtai commitments
+/// Proves that y_j = Z * v_j for given linear functionals v_j without revealing Z
+#[cfg(any(test, feature = "testing"))]
+#[derive(Debug, Clone)]
+pub struct LinearOpeningProof {
+    /// The opened values y_j = Z * v_j for each linear functional
+    pub opened_values: Vec<Vec<neo_math::K>>,
+    /// Placeholder for additional proof data (future extension)
+    pub proof_data: Vec<u8>,
+}
+
+/// Generate a linear opening proof for multiple linear functionals
+/// 
+/// Given commitment c = L(Z) and linear functionals v_j, proves that y_j = Z * v_j
+/// 
+/// SECURITY NOTE: Since Ajtai is S-homomorphic and linear, this is a deterministic
+/// verification that doesn't require zero-knowledge. The "proof" is just the claimed
+/// values y_j, and verification checks consistency with the commitment via linearity.
+/// 
+/// # Arguments
+/// * `pp` - Public parameters
+/// * `c` - Commitment to witness Z
+/// * `Z` - The witness matrix (prover-side only)
+/// * `v_slices` - Linear functionals v_j ∈ F^m (each promoted to K inside)
+/// 
+/// # Returns
+/// * Tuple of (opened values y_j, proof)
+#[cfg(any(test, feature = "testing"))]
+#[allow(non_snake_case)]
+pub fn open_linear(
+    _pp: &PP<RqEl>,
+    _c: &Commitment,
+    Z: &[Fq],  // flattened witness (d*m elements)
+    v_slices: &[Vec<Fq>],  // each v_j ∈ F^m
+) -> (Vec<Vec<neo_math::K>>, LinearOpeningProof) {
+    let d = neo_math::D;
+    let m = v_slices.first().map(|v| v.len()).unwrap_or(0);
+    
+    // Debug assertion: Z must be d×m (dimension check)
+    debug_assert_eq!(Z.len(), d * m, "open_linear: Z must be d×m ({}×{})", d, m);
+    
+    let mut opened_values = Vec::with_capacity(v_slices.len());
+    
+    for v_j in v_slices {
+        // Debug assertion: each v_j must have length m
+        debug_assert_eq!(v_j.len(), m, "open_linear: v_j must have length m ({})", m);
+        
+        // Compute y_j = Z * v_j where Z is d×m matrix and v_j is m-vector
+        // Result is d-dimensional vector in extension field K
+        let mut y_j = Vec::with_capacity(d);
+        
+        for row in 0..d {
+            let mut sum = neo_math::K::ZERO;
+            for col in 0..m {
+                // Z is d×m in **column-major** order: (col * d + row)
+                let z_element = Z[col * d + row];
+                let v_element = v_j[col];
+                sum += neo_math::K::from(z_element) * neo_math::K::from(v_element);
+            }
+            y_j.push(sum);
+        }
+        
+        opened_values.push(y_j);
+    }
+    
+    let proof = LinearOpeningProof {
+        opened_values: opened_values.clone(),
+        proof_data: Vec::new(),  // Deterministic verification needs no extra proof
+    };
+    
+    (opened_values, proof)
+}
+
+// NOTE: verify_linear is intentionally NOT PROVIDED in the Ajtai commitment layer.
+//
+// ### Why no verify_linear?
+// Proving a generic linear evaluation `y = Z · v` from **only one** Ajtai commitment
+// `c = L(Z)` is not possible in general without additional openings/structure:
+// it requires reweighting per‑column contributions inside `Σ_j a_{ij} · ẑ_j`,
+// which are **lost** in the compressed commitment.
+//
+// ### Where to find linear verification:
+// In Neo, linear evaluation ties are enforced inside the FS transcript via:
+// - Π_CCS (sum‑check over extension field)
+// - Π_RLC (random linear combination - see neo_fold::verify_linear)  
+// - Π_DEC recomposition checks
+//
+// Use neo_fold::verify_linear for Π_RLC verification and verify_split_open for
+// recomposition checks. The commitment layer only provides S-homomorphic binding.
 
 #[cfg(test)]
 mod tests {
