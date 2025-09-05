@@ -41,7 +41,7 @@ use anyhow::Result;
 use neo_ajtai::{setup as ajtai_setup, commit, decomp_b, DecompStyle};
 #[cfg(debug_assertions)]
 use rand::SeedableRng;
-use p3_field::{PrimeCharacteristicRing, PrimeField64, Field};
+use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use subtle::ConstantTimeEq;
 
 // Race-safe Ajtai PP initialization helper
@@ -457,9 +457,8 @@ fn adapt_from_modern(
     let rows = neo_ajtai::rows_for_coords(&pp, z_len, me_legacy.c_coords.len())
         .map_err(|e| anyhow::anyhow!("Failed to derive Ajtai binding rows: {}", e))?;
 
-    // Fail-closed sanity: verify <row_i, z_digits> == c_coords[i] on a prefix
-    // (defensive only; circuit enforces it cryptographically)
-    let mut use_synthetic = false;
+    // SECURITY CRITICAL: Strict validation of ALL rows from authentic PP
+    // If any row fails validation, we fail closed - no synthetic fallbacks allowed
     {
         use neo_math::F;
         let dot = |row: &[F]| -> F {
@@ -468,40 +467,23 @@ fn adapt_from_modern(
                 acc + *a * zf
             })
         };
-        let check = core::cmp::min(rows.len(), me_legacy.c_coords.len());
-        for i in 0..check {
-            if dot(&rows[i]) != me_legacy.c_coords[i] {
-                use_synthetic = true;
-                break;
-            }
+        
+        // Validate ALL rows, not just a prefix - this is security critical
+        let check_count = core::cmp::min(rows.len(), me_legacy.c_coords.len());
+        for i in 0..check_count {
+            let computed = dot(&rows[i]);
+            let expected = me_legacy.c_coords[i];
+            anyhow::ensure!(
+                computed == expected,
+                "SECURITY: Ajtai row {} validation failed - <L_{}, z_digits> = {} != c_coords[{}] = {}. \
+                 Authentic binding rows from PP are required for security.",
+                i, i, computed, i, expected
+            );
         }
     }
     
-    if use_synthetic {
-        // Official API doesn't provide correct rows yet - fall back to synthetic
-        let z_digits_f: Vec<p3_goldilocks::Goldilocks> = wit_legacy
-            .z_digits
-            .iter()
-            .map(|&zi| if zi >= 0 { p3_goldilocks::Goldilocks::from_u64(zi as u64) }
-                         else       { -p3_goldilocks::Goldilocks::from_u64((-zi) as u64) })
-            .collect();
-
-        let j = z_digits_f
-            .iter()
-            .position(|&z| z != p3_goldilocks::Goldilocks::ZERO);
-            
-        if let Some(j) = j {
-            let inv_zj = z_digits_f[j].inverse();
-            let mut synthetic_rows = vec![vec![p3_goldilocks::Goldilocks::ZERO; z_len]; me_legacy.c_coords.len()];
-            for (i, c) in me_legacy.c_coords.iter().enumerate() {
-                synthetic_rows[i][j] = (*c) * inv_zj;
-            }
-            wit_legacy.ajtai_rows = Some(synthetic_rows);
-        }
-    } else {
-        // Use official rows
-        wit_legacy.ajtai_rows = Some(rows);
-    }
+    // Install the validated authentic rows
+    wit_legacy.ajtai_rows = Some(rows);
 
     Ok((me_legacy, wit_legacy))
 }

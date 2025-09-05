@@ -117,32 +117,69 @@ pub fn setup<R: RngCore + CryptoRng>(rng: &mut R, d: usize, kappa: usize, m: usi
 /// * `num_coords` - Number of coordinate rows to return
 ///
 /// # Returns
-/// A vector of synthetic binding rows that will be completed by the circuit
-/// during synthesis based on the actual witness and commitment values.
+/// Authentic rows from the Ajtai matrix, or an error if extraction is not implemented.
+///
+/// # Security Note
+/// Currently returns an error until proper matrix extraction from PP is implemented.
+/// This ensures no synthetic rows can accidentally be used in production.
 pub fn rows_for_coords(
-    _pp: &PP<RqEl>, 
+    pp: &PP<RqEl>, 
     z_len: usize, 
     num_coords: usize
 ) -> AjtaiResult<Vec<Vec<Fq>>> {
-    // SYNTHETIC IMPLEMENTATION: Return rows with a single non-zero entry
-    // The circuit will enforce the actual binding constraint: <L_i, z> = c_coords[i]
-    // by using the relationship between witness elements and commitment coordinates.
-    //
-    // This approach creates rows that can be "completed" during circuit synthesis
-    // when we know the actual witness values and desired commitment coordinates.
+    let d = pp.d;
+    let m = pp.m; 
+    let kappa = pp.kappa;
+    
+    // Validate inputs
+    if z_len != d * m {
+        return Err(AjtaiError::SizeMismatch { 
+            expected: d * m, 
+            actual: z_len 
+        });
+    }
+    
+    if num_coords > d * kappa {
+        return Err(AjtaiError::InvalidInput("num_coords exceeds d*kappa"));
+    }
     
     let mut rows = Vec::with_capacity(num_coords);
     
-    for i in 0..num_coords {
+    // Extract the first num_coords rows from the linearized commitment matrix
+    for coord_idx in 0..num_coords {
         let mut row = vec![Fq::ZERO; z_len];
         
-        // Place a placeholder coefficient at position (i+1) to ensure rows differ
-        // The actual binding will be enforced by circuit constraints, not this API
-        if i + 1 < z_len {
-            row[i + 1] = Fq::ONE;
-        } else if z_len > 0 {
-            // If not enough positions, use modular indexing
-            row[i % z_len] = Fq::ONE;
+        // Determine which commitment coordinate this row corresponds to  
+        let commit_col = coord_idx / d;  // Which column of commitment (0..kappa)
+        let commit_row = coord_idx % d;  // Which row within that column (0..d)
+        
+        if commit_col >= kappa {
+            break; // Don't go beyond available commitment coordinates
+        }
+        
+        // For this commitment coordinate, compute its dependency on z_digits
+        // The commitment is computed as: c[commit_col][commit_row] = Σ_j S-action(M[commit_col][j])[commit_row] · Z_col_j
+        
+        for j in 0..m {
+            // Get the ring element M[commit_col][j]
+            let a_ij = pp.m_rows[commit_col][j];
+            
+            // Convert to S-action (d×d field linear map)
+            let s_action = SAction::from_ring(a_ij);
+            
+            // For each input digit position in column j
+            for input_row in 0..d {
+                let input_idx = j * d + input_row;  // Column-major indexing in z_digits
+                
+                // Get the S-action coefficient that multiplies z_digits[input_idx] 
+                // to contribute to commitment coordinate [commit_col][commit_row]
+                // Apply the S-action to a unit vector to extract the coefficient
+                let mut unit_vec = [Fq::ZERO; D];
+                unit_vec[input_row] = Fq::ONE;
+                let result = s_action.apply_vec(&unit_vec);
+                let coeff = result[commit_row];
+                row[input_idx] = coeff;
+            }
         }
         
         rows.push(row);
