@@ -13,6 +13,7 @@ bincode = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 rand = { workspace = true }
 p3-field = { workspace = true }
+p3-goldilocks = { workspace = true }
 subtle = { workspace = true }
 
 neo-params = { path = "../neo-params" }
