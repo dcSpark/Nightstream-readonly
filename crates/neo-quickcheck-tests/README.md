@@ -1,34 +1,8 @@
-# neo-quickcheck-tests
+# Neo QuickCheck Tests
 
-Property-based and QuickCheck tests for the Neo protocol, providing comprehensive verification of mathematical identities and security properties through randomized testing.
+Property-based tests that verify critical protocol invariants using randomized generation to explore mathematical identities and security properties fundamental to Neo's correctness.
 
-## Overview
-
-This crate contains property-based tests that verify critical protocol invariants using both [Proptest](https://github.com/proptest-rs/proptest) and [QuickCheck](https://github.com/BurntSushi/quickcheck) libraries. These tests complement the deterministic unit tests by exploring a much larger input space through randomized generation.
-
-## Test Categories
-
-### Bridge Parity Tests (`bridge_parity.rs`)
-- **Header encoding consistency**: Verifies that `encode_bridge_io_header(me)` produces byte-identical output to the circuit's `public_values()` 
-- **Padding verification**: Tests proper handling of variable-length inputs and padding-before-digest
-- **Digest placement**: Ensures digest limbs are correctly positioned in the serialized output
-
-### Decomposition Properties (`dec_props.rs`)
-- **Base-b recomposition over F**: Verifies `recombine(base, limbs) == parent` for field elements
-- **Base-b recomposition over K**: Tests the same property over the extension field
-- **Range polynomial (b=2)**: Validates that `v(v-1)(v+1) = 0` iff `v ∈ {-1,0,1}` over Goldilocks
-- **Negative cases**: Confirms that corrupted inputs properly fail verification
-
-### Security Guard Rails (`security_red_team.rs`)
-- **Ajtai binding enforcement**: Tests that the bridge properly rejects instances with missing or empty Ajtai commitment rows
-- **Fail-closed behavior**: Ensures security-critical checks fail safely when preconditions are violated
-
-## Features
-
-- **Default**: Basic functionality
-- **quickcheck**: Enable QuickCheck-specific tests (similar to `neo-redteam-tests`)
-
-## Usage
+## Running Tests
 
 **By design, these tests only run when explicitly requested:**
 
@@ -36,48 +10,54 @@ This crate contains property-based tests that verify critical protocol invariant
 # Skip all quickcheck tests (default - compiles 0 tests)
 cargo test -p neo-quickcheck-tests
 
-# Run all property-based tests (requires quickcheck flag)
+# Run property-based tests (with feature flag)
 cargo test -p neo-quickcheck-tests --features quickcheck
-```
-
-Run specific test categories:
-```bash
-# Bridge parity tests only
-cargo test -p neo-quickcheck-tests --features quickcheck bridge_parity
-
-# Decomposition properties only  
-cargo test -p neo-quickcheck-tests --features quickcheck dec_props
-
-# Security guard rails only
-cargo test -p neo-quickcheck-tests --features quickcheck security_red_team
 ```
 
 **Why this flag?**
 Neo's property-based tests are intended to be invoked explicitly in a "security/property verification" mode rather than during routine development cycles.
 
-## Test Strategy
+## ✅ Final Test Suite
 
-- **Small input spaces**: Tests use bounded generators to remain CI-friendly while still covering edge cases
-- **Focused properties**: Each test verifies a specific mathematical identity or security property
-- **Negative testing**: Where applicable, tests verify that corrupted inputs properly fail validation
-- **Public API only**: Tests interact only with public APIs, avoiding dependency on internal implementation details
+| Test File | Tests | Type | Purpose |
+|-----------|-------|------|---------|
+| `bridge_parity.rs` | 1 | Proptest | Header encoding consistency |
+| `dec_props.rs` | 3 | 2 Proptest + 1 QuickCheck | Base-b decomposition properties |
+| `header_sensitivity.rs` | 1 | QuickCheck | Digest bit-flip detection |
+| `rb_props.rs` | 1 | QuickCheck | MLE partition of unity |
+| `rlc_props.rs` | 1 | QuickCheck | Π_RLC linearity |
+| `security_red_team.rs` | 2 | Regular tests | Security guard rails |
 
-## Design Principles
+**Total: 9 tests providing comprehensive property verification**
 
-1. **Fast execution**: Test parameters are tuned for quick CI runs while maintaining coverage
-2. **Property verification**: Focus on mathematical identities rather than specific implementation details  
-3. **Complementary coverage**: Works alongside deterministic unit tests to provide broader verification
-4. **Security-first**: Explicit testing of security guard rails and fail-closed behaviors
+## 🎯 Key Mathematical Properties Now Tested
 
-## Dependencies
+- **Π_RLC Linearity**: `combine(evaluate(A), evaluate(B)) == evaluate(combine(A,B))`
+- **MLE Partition of Unity**: `∑_j w_j(r) = 1` for Boolean hypercube tensor weights  
+- **Base-b Decomposition**: Recomposition correctness over both F and K
+- **Range Constraints**: Polynomial vanishing on correct digit sets `v(v-1)(v+1) = 0`
+- **Bridge Consistency**: Header encoding matches circuit public values exactly
+- **Security Guard Rails**: Fail-closed behavior when assumptions violated
+- **Digest Sensitivity**: Any bit flip in digest changes header encoding
 
-This crate depends on all major Neo protocol crates to provide comprehensive cross-module property testing:
+## Usage
 
-- `neo`: Main protocol facade
-- `neo-ccs`: Constraint system representations
-- `neo-fold`: Folding scheme implementation  
-- `neo-spartan-bridge`: Circuit compilation bridge
-- `neo-math`: Field arithmetic and extensions
-- `neo-ajtai`: Lattice-based commitments
+```bash
+# Run all property-based tests
+cargo test -p neo-quickcheck-tests --features quickcheck
 
-The property-based approach ensures that interfaces between these modules maintain their mathematical guarantees across refactoring and optimization.
+# Run specific mathematical property tests
+cargo test -p neo-quickcheck-tests --features quickcheck rlc_linearity_holds
+cargo test -p neo-quickcheck-tests --features quickcheck rb_is_partition_of_unity
+
+# Run bridge consistency tests
+cargo test -p neo-quickcheck-tests --features quickcheck header_encoding_matches_public_values
+cargo test -p neo-quickcheck-tests --features quickcheck header_digest_flip_changes_bytes
+
+# Run field arithmetic property tests  
+cargo test -p neo-quickcheck-tests --features quickcheck recomposition_f_roundtrip_and_neg
+cargo test -p neo-quickcheck-tests --features quickcheck b2_range_poly_vanishes_on_digits
+
+# Run security guard rail tests
+cargo test -p neo-quickcheck-tests --features quickcheck bridge_rejects_missing_ajtai_rows
+```
