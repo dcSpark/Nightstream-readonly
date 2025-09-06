@@ -13,6 +13,7 @@ members = [
   # Tests
   "crates/neo-tests",
   "crates/neo-redteam-tests",
+  "crates/neo-quickcheck-tests",
 ]
 resolver = "2"
 

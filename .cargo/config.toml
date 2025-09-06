@@ -20,5 +20,5 @@ lto = "thin"
 
 [env]
 RUSTFLAGS = "-C target-cpu=native"
-QUICKCHECK_TESTS = "5"
+QUICKCHECK_TESTS = "20"
 
