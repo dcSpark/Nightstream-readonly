@@ -5,10 +5,32 @@
 //! These tests verify that tampering with public inputs, commitments, or proof data
 //! would be properly detected by the verification process.
 
-use neo_spartan_bridge::compress_me_to_spartan;
+use neo_spartan_bridge::{compress_me_to_spartan, verify_me_spartan, ProofBundle};
 use neo_ccs::{MEInstance, MEWitness};
 use p3_goldilocks::Goldilocks as F;
 use p3_field::{PrimeCharacteristicRing, integers::QuotientMap};
+
+/// Helper function to handle both prove-time and verify-time tampering detection
+fn expect_detected(res: anyhow::Result<ProofBundle>, expect_err_contains: Option<&str>) {
+    match res {
+        Err(e) => {
+            if let Some(substr) = expect_err_contains {
+                assert!(
+                    e.to_string().contains(substr),
+                    "expected error containing {:?}, got: {e:?}", substr
+                );
+            } else {
+                panic!("unexpected error: {e:?}");
+            }
+            // Detected at prove-time
+        }
+        Ok(bundle) => {
+            // Detected at verify-time
+            let ok = verify_me_spartan(&bundle).unwrap_or(false);
+            assert!(!ok, "tampering should be detected at verify-time");
+        }
+    }
+}
 
 /// Create a minimal ME instance for testing (same as bridge_smoke.rs)
 fn tiny_me_instance() -> (MEInstance, MEWitness) {
@@ -178,7 +200,6 @@ fn comprehensive_tampering_matrix() {
     println!("🔒 Testing comprehensive tampering detection matrix");
     
     let (me, wit) = tiny_me_instance();
-    let reference_proof = compress_me_to_spartan(&me, &wit).unwrap();
     
     let mut test_cases = Vec::new();
     
@@ -197,28 +218,21 @@ fn comprehensive_tampering_matrix() {
     me3.r_point[1] = F::from_canonical_checked(777).unwrap();
     test_cases.push(("challenge", me3, wit.clone()));
     
-    // Test case 4: Tamper witness (should affect proof but not public IO)
+    // Test case 4: Tamper range (witness with out-of-range digit)
     let mut wit4 = wit.clone();
-    wit4.z_digits[0] = 999; // invalid witness
-    test_cases.push(("witness", me.clone(), wit4));
+    wit4.z_digits[0] = 999; // invalid witness - outside [-3, 3] for base_b=4
+    test_cases.push(("range", me.clone(), wit4));
     
     for (tamper_type, test_me, test_wit) in test_cases {
-        let tampered_proof = compress_me_to_spartan(&test_me, &test_wit).unwrap();
-        
-        if tamper_type == "witness" {
-            // Witness tampering might not change public IO but should affect proof
-            // (though in current stub implementation it might be the same)
-            println!("   {} tampering: proof differs = {}", 
-                tamper_type, 
-                tampered_proof.proof != reference_proof.proof
-            );
+        if tamper_type == "range" {
+            // Range tampering should be detected at prove-time with fail-fast validation
+            let res = compress_me_to_spartan(&test_me, &test_wit);
+            expect_detected(res, Some("RangeViolation"));
+            println!("   {} tampering: ✅ detected", tamper_type);
         } else {
-            // Public input tampering should always change public IO
-            assert_ne!(
-                reference_proof.public_io_bytes,
-                tampered_proof.public_io_bytes,
-                "{} tampering should change public IO", tamper_type
-            );
+            // Other tampering should succeed at prove-time but be detected at verify-time
+            let res = compress_me_to_spartan(&test_me, &test_wit);
+            expect_detected(res, None);
             println!("   {} tampering: ✅ detected", tamper_type);
         }
     }

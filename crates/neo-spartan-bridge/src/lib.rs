@@ -96,6 +96,21 @@ pub fn compress_me_to_spartan(me: &MEInstance, wit: &MEWitness) -> Result<ProofB
         anyhow::bail!("AjtaiBindingMissing: witness.ajtai_rows is None/empty; cannot bind c_coords to Z");
     }
 
+    // FAIL-FAST RANGE CHECK (developer ergonomics + red-team tests):
+    // Reject witnesses with |z_i| >= base_b before we even try to prove.
+    {
+        let b = me.base_b as i64;
+        anyhow::ensure!(b >= 2, "InvalidBase: base_b={} < 2", me.base_b);
+        let bound = b - 1;
+        if let Some((idx, &zi)) = wit.z_digits.iter().enumerate().find(|&(_, &zi)| zi < -bound || zi > bound) {
+            eprintln!("❌ Range violation: z_digits[{}] = {} ∉ [-{}, {}] (base_b = {})", idx, zi, bound, bound, me.base_b);
+            anyhow::bail!(
+                "RangeViolation: z_digits[{}]={} outside ±{} for base_b={}",
+                idx, zi, bound, me.base_b
+            );
+        }
+    }
+
     // Canonicalize Ajtai row layout to match circuit's z_digits (column-major: idx = c*D + r)
     let mut wit_norm = wit.clone();
     if let Some(rows) = &mut wit_norm.ajtai_rows {

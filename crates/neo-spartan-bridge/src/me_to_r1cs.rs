@@ -257,7 +257,19 @@ impl SpartanCircuit<E> for MeCircuit {
             } else {
                 // Generic small-b range: ∏_{t=-(b-1)}^{b-1} (z - t) == 0
                 // Keep it simple for now (b is small).
-                let mut acc = AllocatedNum::alloc(cs.namespace(|| format!("range_acc_init_{}", i)), || Ok(<E as Engine>::Scalar::ONE))?;
+                let mut acc = AllocatedNum::alloc(
+                    cs.namespace(|| format!("range_acc_init_{}", i)),
+                    || Ok(<E as Engine>::Scalar::ONE)
+                )?;
+                // CRITICAL: anchor the accumulator to ONE
+                // Enforce acc * 1 = 1  ⇒  acc == 1
+                cs.enforce(
+                    || format!("range_acc_init_is_one_{}", i),
+                    |lc| lc + acc.get_variable(),
+                    |lc| lc + CS::one(),
+                    |lc| lc + CS::one(),
+                );
+                n_constraints += 1;
                 for t in (-(self.me.base_b as i64 - 1))..=(self.me.base_b as i64 - 1) {
                     let c = if t >= 0 { 
                         <E as Engine>::Scalar::from(t as u64) 

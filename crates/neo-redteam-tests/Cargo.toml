@@ -27,3 +27,4 @@ p3-field = { workspace = true }
 [dev-dependencies]
 proptest = { workspace = true }
 criterion = { workspace = true }
+serial_test = "3"
