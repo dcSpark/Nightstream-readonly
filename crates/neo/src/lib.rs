@@ -200,8 +200,13 @@ pub fn prove(input: ProveInput) -> Result<Proof> {
 
     // Step 1: Ajtai setup (parameter-aware global registry)
     let d = neo_math::ring::D;
-    let m_w = input.witness.len();
-    ensure_ajtai_pp_for_dims(d, m_w, || {
+    let _m_w = input.witness.len(); // Original witness length before decomposition
+    // CRITICAL FIX: Use decomposed dimensions for PP setup, not raw witness length
+    let decomp_z = decomp_b(input.witness, input.params.b, d, DecompStyle::Balanced);
+    anyhow::ensure!(decomp_z.len() % d == 0, "decomp length not multiple of d");
+    let m_correct = decomp_z.len() / d; // This is the actual m we'll use
+    
+    ensure_ajtai_pp_for_dims(d, m_correct, || {
         // Use deterministic RNG only in debug builds for reproducibility
         // In release builds, use cryptographically secure randomness
         #[cfg(debug_assertions)]
@@ -209,16 +214,13 @@ pub fn prove(input: ProveInput) -> Result<Proof> {
         #[cfg(not(debug_assertions))]
         let mut rng = rand::rng();
         
-        let pp = ajtai_setup(&mut rng, d, /*kappa*/ 16, m_w)?;
+        let pp = ajtai_setup(&mut rng, d, /*kappa*/ 16, m_correct)?;
         neo_ajtai::set_global_pp(pp).map_err(anyhow::Error::from)
     })?;
     
-    // Step 2: Decompose and commit to witness
-    let decomp_z = decomp_b(input.witness, input.params.b, d, DecompStyle::Balanced);
-    anyhow::ensure!(decomp_z.len() % d == 0, "decomp length not multiple of d");
-    
-    // Pick PP that matches this exact Z shape
-    let m = decomp_z.len() / d;
+    // Step 2: Decomposition already done above, now commit to witness
+    // Use the correct m that was already calculated
+    let m = m_correct;
     let pp = neo_ajtai::get_global_pp_for_dims(d, m)
         .map_err(|e| anyhow::anyhow!("Failed to get Ajtai PP for (d={}, m={}): {}", d, m, e))?;
     let commitment = commit(&*pp, &decomp_z);
@@ -271,7 +273,7 @@ pub fn prove(input: ProveInput) -> Result<Proof> {
     let uncompressed_bytes = bincode::serialize(&bundle)?;
     let compressed_bytes = lz4_flex::compress_prepend_size(&uncompressed_bytes);
     
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "debug-logs")]
     eprintln!("✅ LZ4 compression: {} → {} bytes ({:.1}% reduction)", 
               uncompressed_bytes.len(), compressed_bytes.len(),
               100.0 * (1.0 - compressed_bytes.len() as f64 / uncompressed_bytes.len() as f64));
@@ -375,10 +377,17 @@ fn adapt_from_modern(
     let mut wit_legacy = neo_fold::bridge_adapter::modern_to_legacy_witness(first_wit, params)
         .map_err(|e| anyhow::anyhow!("Bridge adapter failed: {}", e))?;
 
-    // 2) Build v_j = M_j^T * chi_r  in K^m and split to F-limbs
-    let chi_r_k: Vec<neo_math::K> = tensor_point::<neo_math::K>(&first_me.r);
-    anyhow::ensure!(chi_r_k.len() == ccs.n,
-        "tensor_point(r) length {} != ccs.n {}", chi_r_k.len(), ccs.n);
+    // 2) Build v_j = M_j^T * chi_r in K^m and split to F-limbs
+    //    NOTE: For non power-of-two n, ℓ = ceil(log2 n) and |χ_r| = 2^ℓ ≥ n.
+    //    We only use the first n entries to match the CCS matrices' row count.
+    let chi_r_k_full: Vec<neo_math::K> = tensor_point::<neo_math::K>(&first_me.r);
+    anyhow::ensure!(
+        chi_r_k_full.len() >= ccs.n,
+        "tensor_point(r) length {} < ccs.n {} (r has ℓ={}, so 2^ℓ={})",
+        chi_r_k_full.len(), ccs.n, first_me.r.len(), chi_r_k_full.len()
+    );
+    // Restrict to the first n coordinates; the remaining 2^ℓ - n correspond to padded rows.
+    let chi_r_k = &chi_r_k_full[..ccs.n];
 
     // Base powers for row-lift: b^k for k=0..d-1
     let d = neo_math::ring::D;
@@ -459,7 +468,7 @@ fn adapt_from_modern(
     }
 
     // Install compact outputs
-    #[cfg(debug_assertions)]
+    #[cfg(feature = "debug-logs")]
     eprintln!("✅ Built {} y scalars and {} weight vectors (2*t, massively reduced from 2*d*m)", 
               y_full.len(), weight_vectors.len());
     
@@ -505,8 +514,22 @@ fn adapt_from_modern(
         }
     }
     
-    // Install the validated authentic rows
-    wit_legacy.ajtai_rows = Some(rows);
+    // Install the validated authentic rows, padded to match z_digits length
+    // CRITICAL: Bridge adapter pads z_digits to power-of-two, so Ajtai rows must match
+    if wit_legacy.z_digits.len() > z_len {
+        // z_digits was padded by bridge adapter - extend Ajtai rows with zero coefficients
+        let mut padded_rows = rows;
+        let pad_len = wit_legacy.z_digits.len() - z_len;
+        for row in &mut padded_rows {
+            row.extend(std::iter::repeat(F::ZERO).take(pad_len));
+        }
+        #[cfg(feature = "debug-logs")]
+        eprintln!("🔍 Ajtai rows padded from {} to {} to match z_digits padding", 
+                  z_len, wit_legacy.z_digits.len());
+        wit_legacy.ajtai_rows = Some(padded_rows);
+    } else {
+        wit_legacy.ajtai_rows = Some(rows);
+    }
 
     Ok((me_legacy, wit_legacy))
 }

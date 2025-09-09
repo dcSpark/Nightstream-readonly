@@ -11,6 +11,7 @@ use neo_ccs::{CcsStructure, McsInstance, McsWitness, MeInstance, Mat, SparsePoly
 use neo_ajtai::Commitment as Cmt;
 use neo_math::{F, K};
 use p3_field::{PrimeCharacteristicRing, Field};
+use rayon::prelude::*;
 
 /// Π_CCS proof containing the single sum-check over K
 #[derive(Debug, Clone)]
@@ -392,30 +393,112 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     let sample_xs: Vec<K> = (0..=d_sc as u64).map(|u| K::from(F::from_u64(u))).collect();
 
     for i in 0..ell {
-        // For each sample X, compute S_i(X) = Σ_{tail} Q(prefix, X, tail), batched over instances.
-        let mut sample_ys = vec![K::ZERO; sample_xs.len()];
-        for (sx, &X) in sample_xs.iter().enumerate() {
-            let tail_len = ell - i - 1;
-            let mut sum_at_X = K::ZERO;
-            for tail in 0..(1usize << tail_len) {
-                // Build u = prefix || X || tail_bits
-                let mut u = Vec::with_capacity(ell);
-                u.extend_from_slice(&prefix);
-                u.push(X);
-                for j in 0..tail_len {
-                    u.push(if (tail >> j) & 1 == 1 { K::ONE } else { K::ZERO });
+        let tail_len = ell - i - 1;
+        
+        // SAFETY: 32-bit safe tail count calculation using u128 then bound-check cast
+        let num_tails_u128 = (1u128)
+            .checked_shl(tail_len as u32)
+            .ok_or_else(|| PiCcsError::SumcheckError(format!(
+                "tail_len ({}) too large for bit shift", tail_len
+            )))?;
+        let num_tails = usize::try_from(num_tails_u128)
+            .map_err(|_| PiCcsError::SumcheckError(format!(
+                "tail space 2^{} exceeds usize", tail_len
+            )))?;
+        
+        // OPTIMIZATION: Smart parallelization heuristic based on problem size
+        // Parallelize the dimension with more work to maximize CPU utilization
+        let num_threads = rayon::current_num_threads();
+        let par_over_samples = sample_xs.len() >= 2 * num_threads && num_tails <= 64;
+        
+        let sample_ys: Vec<K> = if par_over_samples {
+            // Many samples, few tails: parallelize over samples with buffer reuse
+            sample_xs.par_iter().map(|&X| {
+                // MICRO-OPT: Prebuild prefix_with_X once per sample to avoid repeated prefix construction
+                let mut prefix_with_x = Vec::with_capacity(prefix.len() + 1);
+                prefix_with_x.extend_from_slice(&prefix);
+                prefix_with_x.push(X);
+                
+                // PERFORMANCE: Use single buffer reuse instead of per-tail cloning
+                let mut u_buf = prefix_with_x.clone();
+                let mut sum = K::ZERO;
+                for tail in 0..num_tails {
+                    // Reuse buffer: truncate to prefix length, then append tail bits
+                    u_buf.truncate(prefix_with_x.len());
+                    for j in 0..tail_len {
+                        u_buf.push(if (tail >> j) & 1 == 1 { K::ONE } else { K::ZERO });
+                    }
+                    
+                    let mut q_val_sum = K::ZERO;
+                    for (inst_idx, inst) in insts.iter().enumerate() {
+                        let q_val = eval_composed_polynomial_q(
+                            s, &inst.z, inst.Z, Some(&inst.mz),
+                            &claimed_y_empty, &u_buf, &batch_coeffs, params, inst_idx
+                        );
+                        q_val_sum += q_val;
+                    }
+                    sum += q_val_sum;
                 }
-                // Evaluate composed polynomial Q(u) for each instance
-                for (inst_idx, inst) in insts.iter().enumerate() {
-                    let q_val = eval_composed_polynomial_q(
-                        s, &inst.z, inst.Z, Some(&inst.mz),
-                        &claimed_y_empty, &u, &batch_coeffs, params, inst_idx
-                    );
-                    sum_at_X += q_val;
+                sum
+            }).collect()
+        } else {
+            // Many tails: use existing tail-parallelization strategy
+            sample_xs.iter().map(|&X| {
+                let sum_at_X = if num_tails > 64 {
+                    // Large tail space: parallelize with grain size to reduce scheduling overhead
+                    (0..num_tails).into_par_iter()
+                        .with_min_len(128) // Grain size control to avoid too many tiny tasks
+                        .map(|tail| {
+                            // OPTIMIZATION: Reuse buffer to reduce allocation churn
+                            let mut u = Vec::with_capacity(ell);
+                        u.extend_from_slice(&prefix);
+                        u.push(X);
+                        
+                        // Build tail bits efficiently
+                        for j in 0..tail_len {
+                            u.push(if (tail >> j) & 1 == 1 { K::ONE } else { K::ZERO });
+                        }
+                        
+                        // Evaluate composed polynomial Q(u) for all instances
+                        let mut tail_sum = K::ZERO;
+                        for (inst_idx, inst) in insts.iter().enumerate() {
+                            let q_val = eval_composed_polynomial_q(
+                                s, &inst.z, inst.Z, Some(&inst.mz),
+                                &claimed_y_empty, &u, &batch_coeffs, params, inst_idx
+                            );
+                            tail_sum += q_val;
+                        }
+                        tail_sum
+                    }).sum()
+                } else {
+                    // Small tail space: keep sequential to avoid parallel overhead
+                    let mut sum = K::ZERO;
+                    let mut u = Vec::with_capacity(ell); // Reuse buffer
+                    
+                    for tail in 0..num_tails {
+                        // Reset and rebuild u
+                        u.clear();
+                    u.extend_from_slice(&prefix);
+                    u.push(X);
+                    
+                    for j in 0..tail_len {
+                        u.push(if (tail >> j) & 1 == 1 { K::ONE } else { K::ZERO });
+                    }
+                    
+                    // Evaluate for all instances
+                    for (inst_idx, inst) in insts.iter().enumerate() {
+                        let q_val = eval_composed_polynomial_q(
+                            s, &inst.z, inst.Z, Some(&inst.mz),
+                            &claimed_y_empty, &u, &batch_coeffs, params, inst_idx
+                        );
+                        sum += q_val;
+                    }
                 }
-            }
-            sample_ys[sx] = sum_at_X;
-        }
+                    sum
+                };
+                sum_at_X
+            }).collect()
+        };
         let coeffs = lagrange_interpolate_k(&sample_xs, &sample_ys);
         if coeffs.len() > d_sc + 1 {
             return Err(PiCcsError::SumcheckError(format!(

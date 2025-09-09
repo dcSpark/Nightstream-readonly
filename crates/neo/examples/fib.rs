@@ -68,7 +68,7 @@ fn main() -> Result<()> {
     println!("==============================================");
     
     // High-level input: Length of Fibonacci series to prove
-    let fib_length = 8;
+    let fib_length = 1000;
     
     // Step 1: Create Fibonacci CCS constraint system
     println!("\n📐 Step 1: Creating Fibonacci CCS...");

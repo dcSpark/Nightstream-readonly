@@ -24,13 +24,26 @@ mod types;
 pub mod hash_mle;
 pub mod me_to_r1cs;
 
+// Tests will be added in a separate PR to avoid compilation complexity
+
 pub use types::ProofBundle;
 
 use anyhow::Result;
 use neo_ccs::{MEInstance, MEWitness};
-use p3_field::PrimeCharacteristicRing;
+use p3_field::{PrimeField64, PrimeCharacteristicRing};
 use spartan2::spartan::{R1CSSNARK, SpartanVerifierKey};
+// Arc not needed for this file - it's used in me_to_r1cs
 use spartan2::traits::snark::R1CSSNARKTrait;
+
+/// Safe conversion from signed integer to field element, avoiding edge cases like i64::MIN
+#[inline]
+fn f_from_i64(z: i64) -> neo_math::F {
+    if z >= 0 {
+        neo_math::F::from_u64(z as u64)
+    } else {
+        -neo_math::F::from_u64(z.wrapping_neg() as u64)
+    }
+}
 
 type E = spartan2::provider::GoldilocksMerkleMleEngine;
 
@@ -94,6 +107,65 @@ pub fn compress_me_to_spartan(me: &MEInstance, wit: &MEWitness) -> Result<ProofB
     // SECURITY: Without Ajtai rows, c_coords is not bound to z_digits.
     if wit.ajtai_rows.as_ref().map_or(true, |rows| rows.is_empty()) {
         anyhow::bail!("AjtaiBindingMissing: witness.ajtai_rows is None/empty; cannot bind c_coords to Z");
+    }
+
+    // SECURITY: Validate that c_coords are consistent with Ajtai commitment before SNARK generation
+    // This prevents forged commitments from being accepted even with valid Ajtai rows
+    if let Some(ajtai_rows) = &wit.ajtai_rows {
+        // Enforce strict dimension matching - no silent truncation
+        anyhow::ensure!(
+            ajtai_rows.len() == me.c_coords.len(),
+            "Ajtai rows ({}) must match c_coords ({})",
+            ajtai_rows.len(), me.c_coords.len()
+        );
+        
+        // Check if Ajtai rows need padding to match z_digits (which may have been padded by bridge)
+        let max_row_len = ajtai_rows.iter().map(|row| row.len()).max().unwrap_or(0);
+        if max_row_len < wit.z_digits.len() {
+            // All rows are shorter than z_digits - likely due to power-of-two padding
+            // Pad all rows with zeros to match z_digits length
+            let mut padded_ajtai_rows = ajtai_rows.clone();
+            for row in &mut padded_ajtai_rows {
+                if row.len() < wit.z_digits.len() {
+                    let pad_len = wit.z_digits.len() - row.len();
+                    row.extend(std::iter::repeat(neo_math::F::ZERO).take(pad_len));
+                }
+            }
+            
+            // Create a new witness with padded rows for validation
+            let mut wit_padded = wit.clone();
+            wit_padded.ajtai_rows = Some(padded_ajtai_rows);
+            return compress_me_to_spartan(me, &wit_padded);
+        }
+        
+        // UNIFORM WIDTH REQUIREMENT: All Ajtai rows must have same length = |z_digits|
+        // This avoids ambiguity about truncation semantics and makes validation predictable
+        for (i, row) in ajtai_rows.iter().enumerate() {
+            anyhow::ensure!(
+                row.len() == wit.z_digits.len(),
+                "Ajtai row {} length ({}) must equal z_digits length ({})", 
+                i, row.len(), wit.z_digits.len()
+            );
+        }
+        
+        // Validate each commitment: c[i] = <row_i, z_digits>
+        for (i, (row, &claimed)) in ajtai_rows.iter().zip(&me.c_coords).enumerate() {
+            // Compute inner product <row_i, z_digits> using safe field conversion
+            let computed = row.iter().zip(&wit.z_digits).fold(neo_math::F::ZERO, |acc, (&a, &z)| {
+                acc + a * f_from_i64(z)
+            });
+            
+            // Strict equality check - no tolerance
+            if computed != claimed {
+                eprintln!("❌ Ajtai commitment validation failed:");
+                eprintln!("   c_coords[{}] = {} (claimed)", i, claimed.as_canonical_u64());
+                eprintln!("   <row_{}, z> = {} (computed)", i, computed.as_canonical_u64());
+                anyhow::bail!(
+                    "AjtaiCommitmentInconsistent at index {}: computed {}, claimed {}",
+                    i, computed.as_canonical_u64(), claimed.as_canonical_u64()
+                );
+            }
+        }
     }
 
     // FAIL-FAST RANGE CHECK (developer ergonomics + red-team tests):
@@ -160,7 +232,7 @@ pub fn compress_me_to_spartan(me: &MEInstance, wit: &MEWitness) -> Result<ProofB
 
     // Try the SNARK generation and provide detailed error diagnostics
     let snark_result = me_to_r1cs::prove_me_snark(me, &wit_norm);
-    let (proof_bytes, _public_outputs, vk) = match snark_result {
+    let (proof_bytes, _public_outputs, vk_arc) = match snark_result {
         Ok(result) => {
             eprintln!("✅ SNARK generation successful!");
             result
@@ -185,7 +257,7 @@ pub fn compress_me_to_spartan(me: &MEInstance, wit: &MEWitness) -> Result<ProofB
         }
     };
     
-    let vk_bytes = bincode::serialize(&vk)?;
+    let vk_bytes = bincode::serialize(&*vk_arc)?;
     let io = encode_bridge_io_header(me);
     Ok(ProofBundle::new_with_vk(proof_bytes, vk_bytes, io))
 }

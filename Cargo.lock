@@ -325,6 +325,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "dashmap"
+version = "5.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "978747c1d849a7d2ee5e8adc0159961c48fb7e5db2f06af6723b80123bb53856"
+dependencies = [
+ "cfg-if",
+ "hashbrown",
+ "lock_api",
+ "once_cell",
+ "parking_lot_core",
+]
+
+[[package]]
 name = "deranged"
 version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -601,6 +614,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "hashbrown"
+version = "0.14.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e5274423e17b7c9fc20b6e7e208532f9b19825d82dfd615708b70edd83df41f1"
+
+[[package]]
 name = "hex"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -830,6 +849,7 @@ dependencies = [
  "proptest",
  "rand 0.9.2",
  "rand_chacha",
+ "rayon",
  "thiserror 2.0.16",
 ]
 
@@ -907,10 +927,12 @@ dependencies = [
  "anyhow",
  "bellpepper-core",
  "bincode",
+ "dashmap",
  "ff",
  "neo-ajtai",
  "neo-ccs",
  "neo-math",
+ "once_cell",
  "p3-challenger",
  "p3-field",
  "p3-goldilocks",
