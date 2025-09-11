@@ -32,6 +32,7 @@ fn facade_smoke_test() -> Result<()> {
         ccs: &ccs, 
         public_input: &public_input,
         witness: &witness,
+        output_claims: &[],
     };
     
     let proof = prove(prove_input)?;
@@ -63,6 +64,7 @@ fn facade_invalid_witness_should_fail() {
         ccs: &ccs,
         public_input: &public_input, 
         witness: &invalid_witness,
+        output_claims: &[],
     };
     
     // This should fail during proof generation due to unsatisfied constraints

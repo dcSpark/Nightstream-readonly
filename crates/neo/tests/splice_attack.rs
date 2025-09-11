@@ -131,7 +131,8 @@ fn splice_proof_bytes_and_public_io_must_fail() -> Result<()> {
         params: &params, 
         ccs: &ccs_a, 
         public_input: &pub_a, 
-        witness: &wit_a 
+        witness: &wit_a,
+        output_claims: &[],
     })?;
     println!("✅ Generated proof A: {} bytes", proof_a.size());
 
@@ -144,7 +145,8 @@ fn splice_proof_bytes_and_public_io_must_fail() -> Result<()> {
         params: &params, 
         ccs: &ccs_b, 
         public_input: &pub_b, 
-        witness: &wit_b 
+        witness: &wit_b,
+        output_claims: &[],
     })?;
     println!("✅ Generated proof B: {} bytes", proof_b.size());
 
@@ -183,7 +185,8 @@ fn normal_proofs_should_still_work() -> Result<()> {
         params: &params, 
         ccs: &ccs_a, 
         public_input: &pub_a, 
-        witness: &wit_a 
+        witness: &wit_a,
+        output_claims: &[],
     })?;
     
     // Should verify normally
@@ -196,7 +199,8 @@ fn normal_proofs_should_still_work() -> Result<()> {
         params: &params, 
         ccs: &ccs_b, 
         public_input: &pub_b, 
-        witness: &wit_b 
+        witness: &wit_b,
+        output_claims: &[],
     })?;
     
     // Should verify normally

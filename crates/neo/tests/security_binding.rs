@@ -104,6 +104,7 @@ fn test_verify_rejects_proof_with_tampered_public_input() -> Result<()> {
         ccs: &ccs, 
         public_input: &public_input,
         witness: &witness,
+        output_claims: &[],
     })?;
     
     // Verification should succeed with original context
@@ -131,6 +132,7 @@ fn test_verify_rejects_proof_with_different_ccs() -> Result<()> {
         ccs: &ccs,
         public_input: &public_input, 
         witness: &witness,
+        output_claims: &[],
     })?;
     
     // Create a different CCS by modifying one matrix entry
@@ -156,7 +158,8 @@ fn test_verify_succeeds_with_correct_context() -> Result<()> {
         params: &params,
         ccs: &ccs,
         public_input: &public_input,
-        witness: &witness, 
+        witness: &witness,
+        output_claims: &[], 
     })?;
     
     // Verification should succeed with exact same context
@@ -176,6 +179,7 @@ fn test_unsupported_proof_version_rejected() -> Result<()> {
         ccs: &ccs,
         public_input: &public_input,
         witness: &witness,
+        output_claims: &[],
     })?;
     
     // Tamper with version
@@ -201,6 +205,7 @@ fn test_malformed_proof_rejected() -> Result<()> {
         ccs: &ccs, 
         public_input: &public_input,
         witness: &witness,
+        output_claims: &[],
     })?;
     
     // Make public_io too short to contain context digest
@@ -235,6 +240,7 @@ fn rejects_wrong_ccs_or_public_input() -> Result<()> {
         ccs: &ccs_a,
         public_input: &pub_a,
         witness: &z_a,
+        output_claims: &[],
     })?;
 
     // Baseline: verifies for the statement it was created for
@@ -275,6 +281,7 @@ fn rejects_tampered_public_io() -> Result<()> {
         ccs: &ccs,
         public_input: &public_input,
         witness: &z,
+        output_claims: &[],
     })?;
 
     // flip one byte in the header/public-IO binding
@@ -303,6 +310,7 @@ fn fails_when_vk_registry_is_missing() -> Result<()> {
         ccs: &ccs,
         public_input: &public_input,
         witness: &z,
+        output_claims: &[],
     })?;
 
     // Blow away the ephemeral VK cache and ensure verify fails hard.

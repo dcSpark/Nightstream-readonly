@@ -29,7 +29,8 @@ fn rt26_verify_wrong_public_input_must_fail() {
 
     // Prove for (ccs, public_input)
     let proof = prove(ProveInput {
-        params: &params, ccs: &ccs, public_input: &public_input, witness: &witness
+        params: &params, ccs: &ccs, public_input: &public_input, witness: &witness,
+        output_claims: &[],
     }).expect("prove ok");
 
     // Tamper: change the public_input at verification time
@@ -46,7 +47,8 @@ fn rt26_verify_wrong_ccs_must_fail() {
     let public_input: Vec<F> = vec![];
 
     let proof = prove(ProveInput {
-        params: &params, ccs: &ccs, public_input: &public_input, witness: &witness
+        params: &params, ccs: &ccs, public_input: &public_input, witness: &witness,
+        output_claims: &[],
     }).expect("prove ok");
 
     // Tamper CCS deterministically: flip one entry in the first matrix
@@ -72,6 +74,8 @@ fn rt29_proof_bundle_too_large_rejected_fast() {
             oversized.resize(too_big as usize, 0u8); // fill to oversized amount
             oversized
         },
+        public_results: vec![],
+        meta: Default::default(),
     };
 
     let res = verify(&dummy_ccs_structure(), &[], &proof);

@@ -376,7 +376,9 @@ fn main() -> Result<()> {
     println!();
 
     // Run the demo with a reasonable number of steps
-    let n_steps = 10; // Small number for demo purposes
+    // Note: Limited by parameter constraint (k+1)·T·(b-1) < B where B=4096, T=216, b=2
+    // Max instances ≈ 4096/(216*1) ≈ 18 for these parameters
+    let n_steps = 15; // Within safety bounds for demo
     println!("\n{}", "=".repeat(80));
     run_fibonacci_folding_demo(n_steps)?;
     
@@ -387,6 +389,12 @@ fn main() -> Result<()> {
     println!("  ✅ Folds them via Π_CCS → Π_RLC → Π_DEC into a constant-size accumulator");
     println!("  ✅ Proves the folding was done correctly"); 
     println!("  ✅ Enables IVC for arbitrarily long computations!");
+    println!();
+    println!("📝 Note on Scalability:");
+    println!("  • Single fold limited by (k+1)·T·(b-1) < B constraint (~18 instances max)");
+    println!("  • For longer computations: fold in batches, then fold the results recursively");
+    println!("  • True IVC chains multiple folding operations with persistent accumulator");
+    println!("  • This demonstrates the CORE folding primitive that enables unbounded IVC!");
     
     Ok(())
 }

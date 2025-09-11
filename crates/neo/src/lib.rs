@@ -23,6 +23,7 @@
 //!         ccs: &ccs,
 //!         public_input: &public_input,
 //!         witness: &witness,
+//!         output_claims: &[],
 //!     })?;
 //!
 //!     println!("Proof size: {} bytes", proof.size());
@@ -564,6 +565,8 @@ pub fn verify(ccs: &CcsStructure<F>, public_input: &[F], proof: &Proof) -> Resul
 /// ```rust,no_run
 /// use neo::{verify_with_vk, CcsStructure, F};
 /// 
+/// let ccs: CcsStructure<F> = todo!("Create your CCS structure");
+/// let public_input: Vec<F> = vec![];
 /// let vk_bytes = std::fs::read("circuit.vk")?;
 /// let proof_bytes = std::fs::read("proof.bin")?; 
 /// let proof: neo::Proof = bincode::deserialize(&proof_bytes)?;

@@ -29,6 +29,7 @@ fn e2e_rejects_tampered_proof() {
         ccs: &ccs,
         public_input: &public_input,
         witness: &witness,
+        output_claims: &[],
     };
 
     // produce proof
