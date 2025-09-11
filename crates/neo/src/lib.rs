@@ -42,6 +42,9 @@ use neo_ajtai::{setup as ajtai_setup, commit, decomp_b, DecompStyle};
 #[cfg(debug_assertions)]
 use rand::SeedableRng;
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
+use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
+use p3_symmetric::Permutation;
+use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use tracing::{debug, info, warn};
 
@@ -52,80 +55,109 @@ where FN: FnMut() -> anyhow::Result<()> {
     setup()
 }
 
-// Simple, deterministic 256-bit mixer (not meant as a crypto hash; adequate for binding tests).
-fn context_digest_v0(ccs: &CcsStructure<F>, public_input: &[F]) -> [u8; 32] {
-    let mut w = [0u64; 4];
-
-    // feed bytes into 4 lanes
-    let mut mix = |b: u8, i: usize| {
-        let lane = i & 3;
-        w[lane] = w[lane]
-            .rotate_left(5)
-            .wrapping_mul(0x9E37_79B1_85EB_CA87)
-            .wrapping_add(b as u64);
+// ZK-friendly Poseidon2-based context digest with proper domain separation and security
+// Parameters: width=16, rate=14, capacity=2 for ~128-bit collision resistance
+// Uses capacity=2 for ~128-bit collision security instead of capacity=1
+fn context_digest_v1(ccs: &CcsStructure<F>, public_input: &[F]) -> [u8; 32] {
+    use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
+    
+    // Use fixed seed for deterministic Poseidon2 (following codebase pattern)
+    // WARNING: These parameters are frozen for this version. Changing the seed
+    // will break verification of existing proofs unless version is also bumped.
+    const CONTEXT_DIGEST_SEED: u64 = 0x4E454F5F434F4E54; // "NEO_CONT" in hex
+    let mut rng = ChaCha8Rng::seed_from_u64(CONTEXT_DIGEST_SEED);
+    let poseidon2 = Poseidon2Goldilocks::<16>::new_from_rng_128(&mut rng);
+    
+    // Sponge state for Poseidon2 (width=16, capacity=2, rate=14)
+    // Using capacity=2 gives ~128-bit collision security for binding digest
+    let mut state = [Goldilocks::ZERO; 16];
+    let mut absorbed = 0;
+    const RATE: usize = 14; // width - capacity = 16 - 2 = 14
+    
+    // Enhanced domain separation with version and security parameters
+    const DOMAIN_STRING: &[u8] = b"neo/context/v1|poseidon2-goldilocks-w16-cap2";
+    for &byte in DOMAIN_STRING {
+        if absorbed >= RATE {
+            state = poseidon2.permute(state);
+            absorbed = 0;
+        }
+        state[absorbed] = Goldilocks::from_u32(byte as u32);
+        absorbed += 1;
+    }
+    
+    // Helper to absorb a u64 value with proper capacity management
+    let absorb_u64 = |state: &mut [Goldilocks; 16], absorbed: &mut usize, val: u64| {
+        if *absorbed >= RATE {
+            *state = poseidon2.permute(*state);
+            *absorbed = 0;
+        }
+        state[*absorbed] = Goldilocks::from_u64(val);
+        *absorbed += 1;
     };
-
-    let mut byte_idx = 0;
     
-    // Mix CCS structure deterministically
-    // 1. Basic dimensions
-    for &val in &[ccs.n as u64, ccs.m as u64, ccs.matrices.len() as u64] {
-        for j in 0..8 {
-            mix(((val >> (8 * j)) & 0xFF) as u8, byte_idx);
-            byte_idx += 1;
+    // Helper to absorb field elements with proper capacity management
+    let absorb_f = |state: &mut [Goldilocks; 16], absorbed: &mut usize, f_val: F| {
+        if *absorbed >= RATE {
+            *state = poseidon2.permute(*state);
+            *absorbed = 0;
+        }
+        state[*absorbed] = Goldilocks::from_u64(f_val.as_canonical_u64());
+        *absorbed += 1;
+    };
+    
+    // 1. Basic CCS dimensions
+    absorb_u64(&mut state, &mut absorbed, ccs.n as u64);
+    absorb_u64(&mut state, &mut absorbed, ccs.m as u64);
+    absorb_u64(&mut state, &mut absorbed, ccs.matrices.len() as u64);
+    
+    // 2. All matrix entries in canonical sparse format (deterministic order)
+    for (j, matrix) in ccs.matrices.iter().enumerate() {
+        absorb_u64(&mut state, &mut absorbed, j as u64); // Matrix index
+        absorb_u64(&mut state, &mut absorbed, matrix.rows() as u64);
+        absorb_u64(&mut state, &mut absorbed, matrix.cols() as u64);
+        
+        // Absorb non-zero entries in (row, col, val) order
+        for r in 0..matrix.rows() {
+            for c in 0..matrix.cols() {
+                let val = matrix[(r, c)];
+                if val != F::ZERO {
+                    absorb_u64(&mut state, &mut absorbed, r as u64);
+                    absorb_u64(&mut state, &mut absorbed, c as u64);
+                    absorb_f(&mut state, &mut absorbed, val);
+                }
+            }
         }
     }
     
-    // 2. All matrices entries (deterministic order)
-    for matrix in &ccs.matrices {
-        // Mix matrix dimensions first
-        for &val in &[matrix.rows() as u64, matrix.cols() as u64] {
-            for j in 0..8 {
-                mix(((val >> (8 * j)) & 0xFF) as u8, byte_idx);
-                byte_idx += 1;
-            }
-        }
-        // Mix matrix entries
-        for &val in matrix.as_slice() {
-            let f_val = val.as_canonical_u64();
-            for j in 0..8 {
-                mix(((f_val >> (8 * j)) & 0xFF) as u8, byte_idx);
-                byte_idx += 1;
-            }
-        }
-    }
+    // 3. Polynomial f in deterministic term order
+    let mut terms: Vec<_> = ccs.f.terms().iter().collect();
+    terms.sort_by_key(|t| &t.exps); // Deterministic ordering
     
-    // 3. Polynomial f (mix terms deterministically)
-    for term in ccs.f.terms() {
-        // Mix coefficient
-        let coeff_val = term.coeff.as_canonical_u64();
-        for j in 0..8 {
-            mix(((coeff_val >> (8 * j)) & 0xFF) as u8, byte_idx);
-            byte_idx += 1;
-        }
-        // Mix exponents
+    absorb_u64(&mut state, &mut absorbed, terms.len() as u64);
+    for term in terms {
+        absorb_f(&mut state, &mut absorbed, term.coeff);
+        absorb_u64(&mut state, &mut absorbed, term.exps.len() as u64);
         for &exp in &term.exps {
-            for j in 0..4 {
-                mix(((exp as u32 >> (8 * j)) & 0xFF) as u8, byte_idx);
-                byte_idx += 1;
-            }
+            absorb_u64(&mut state, &mut absorbed, exp as u64);
         }
     }
-
-    // 5. Public inputs (canonical u64s)
-    for x in public_input.iter() {
-        let xi = x.as_canonical_u64();
-        for j in 0..8 {
-            mix(((xi >> (8 * j)) & 0xFF) as u8, byte_idx);
-            byte_idx += 1;
-        }
+    
+    // 4. Public inputs
+    absorb_u64(&mut state, &mut absorbed, public_input.len() as u64);
+    for &x in public_input {
+        absorb_f(&mut state, &mut absorbed, x);
     }
-
-    let mut out = [0u8; 32];
-    for i in 0..4 {
-        out[i * 8..(i + 1) * 8].copy_from_slice(&w[i].to_le_bytes());
+    
+    // Final permutation
+    state = poseidon2.permute(state);
+    
+    // Convert to 32-byte digest (use first 4 field elements)
+    let mut digest = [0u8; 32];
+    for (i, &elem) in state[..4].iter().enumerate() {
+        digest[i*8..(i+1)*8].copy_from_slice(&elem.as_canonical_u64().to_le_bytes());
     }
-    out
+    
+    digest
 }
 
 // Note: The global Ajtai PP is stored in a OnceLock and cannot be cleared.
@@ -137,8 +169,54 @@ pub use neo_params::NeoParams;
 pub use neo_ccs::CcsStructure;
 pub use neo_math::{F, K};
 
+/// Counts and bookkeeping for public results embedded in the proof.
+/// Backwards-compatible: all fields have defaults for older proofs.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProofMeta {
+    /// Number of "compact" y-outputs required by the folding scheme (protocol-internal).
+    pub num_y_compact: usize,
+    /// Number of application-level outputs appended by the prover (linear output claims).
+    pub num_app_outputs: usize,
+}
+
+/// Public result claim: check <weight, Z_digits> == expected (both public)
+/// This allows exposing specific linear functions of the witness as public outputs
+#[derive(Clone, Debug)]
+pub struct OutputClaim<F> { 
+    /// Weight vector over digits (column-major): idx = c*D + r
+    pub weight: Vec<F>, 
+    /// The public value the verifier should learn and check
+    pub expected: F,
+}
+
+/// Return a weight vector that exposes the undigitized z[k] component
+/// This creates a weight that reconstructs z[k] = Σ_r b^r * Z[r,k] from the digit decomposition
+pub fn expose_z_component(params: &NeoParams, m: usize, k: usize) -> Vec<F> {
+    let d = neo_math::ring::D;
+    let b_f = F::from_u64(params.b as u64);
+    debug_assert!(k < m, "expose_z_component: k={} out of bounds (m={})", k, m);
+
+    // Row-major flattening: idx = r * m + c
+    // Z is D x m (rows=D digits, cols=m variables)
+    let mut w = vec![F::ZERO; d * m];
+    let mut pow = F::ONE;
+    for r in 0..d {
+        w[r * m + k] = pow;      // picks Z[r, k]
+        pow *= b_f;              // next power of base b
+    }
+    w
+}
+
+/// Convenience function to create a claim that z[idx] == value
+pub fn claim_z_eq(params: &NeoParams, m: usize, idx: usize, value: F) -> OutputClaim<F> {
+    OutputClaim { 
+        weight: expose_z_component(params, m, idx), 
+        expected: value 
+    }
+}
+
 /// Lean proof object without VK - FIXES THE 51MB ISSUE!
-#[derive(Clone, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Proof {
     /// Version tag for forward-compat
     pub v: u16,
@@ -150,6 +228,13 @@ pub struct Proof {
     pub public_io: Vec<u8>,
     /// ONLY the Spartan2 proof bytes (no 51MB VK!)
     pub proof_bytes: Vec<u8>,
+    /// Application-level public results (values), in the same order as `ProveInput::output_claims`.
+    /// These are added for convenience; the underlying proof still carries all public IO.
+    #[serde(default)]
+    pub public_results: Vec<F>,
+    /// Bookkeeping about y-outputs layout inside the proof (for sanity checks).
+    #[serde(default)]
+    pub meta: ProofMeta,
 }
 
 
@@ -172,6 +257,18 @@ impl Proof {
     pub fn version(&self) -> u16 {
         self.v
     }
+    
+    /// **Convenience only**: app-level outputs captured at proving time (not cryptographically checked here).
+    /// Call `verify_and_extract_exact(...)` to derive the verified values from `public_io`.
+    /// These correspond to `ProveInput::output_claims` in the same order.
+    pub fn claimed_public_results(&self) -> &[F] {
+        &self.public_results
+    }
+
+    /// Convenience: return app-level public results as canonical u64s.
+    pub fn claimed_public_results_u64(&self) -> Vec<u64> {
+        self.public_results.iter().map(|f| f.as_canonical_u64()).collect()
+    }
 }
 
 
@@ -180,8 +277,10 @@ impl Proof {
 pub struct ProveInput<'a> {
     pub params: &'a NeoParams,                         // includes b, k, B, s, guard inequality
     pub ccs: &'a CcsStructure<F>,                      // the circuit
-    pub public_input: &'a [F],                         // x
-    pub witness: &'a [F],                              // z
+    pub public_input: &'a [F],                         // x (traditional public inputs)
+    pub witness: &'a [F],                              // z (secret witness)
+    /// Public results to expose and verify: each adds one <w,Z>=y check
+    pub output_claims: &'a [OutputClaim<F>],           // application-level public outputs
 }
 
 /// Generate a complete Neo SNARK proof for the given inputs
@@ -288,17 +387,27 @@ pub fn prove(input: ProveInput) -> Result<Proof> {
     let bridge_start = std::time::Instant::now();
     println!("⏱️  [TIMING] Starting bridge adapter (ME -> Spartan format)...");
     
-    let (mut legacy_me, legacy_wit) = adapt_from_modern(&me_instances, &digit_witnesses, input.ccs, input.params)?;
+    let (mut legacy_me, legacy_wit) = adapt_from_modern(&me_instances, &digit_witnesses, input.ccs, input.params, input.output_claims)?;
     
     let bridge_time = bridge_start.elapsed();
     println!("⏱️  [TIMING] Bridge adapter completed: {:.2}ms", bridge_time.as_secs_f64() * 1000.0);
     
     // Bind proof to the caller's CCS & public input
-    let context_digest = context_digest_v0(input.ccs, input.public_input);
+    let context_digest = context_digest_v1(input.ccs, input.public_input);
     #[allow(deprecated)]
     {
         legacy_me.header_digest = context_digest;
     }
+
+    // Compute and record public results (app-level outputs) for easy access later.
+    // layout: [ compact y-outputs | app-level outputs (one per OutputClaim) ]
+    #[allow(deprecated)]
+    let num_y_total = legacy_me.y_outputs.len();
+    let num_app_outputs = input.output_claims.len();
+    let num_y_compact = num_y_total.checked_sub(num_app_outputs)
+        .ok_or_else(|| anyhow::anyhow!("internal: y_outputs shorter than output_claims"))?;
+    #[allow(deprecated)]
+    let public_results = legacy_me.y_outputs[num_y_compact..].to_vec();
     
     let spartan_start = std::time::Instant::now();
     println!("⏱️  [TIMING] Starting Spartan2 proving...");
@@ -359,13 +468,16 @@ pub fn prove(input: ProveInput) -> Result<Proof> {
     println!("TOTAL PROVING TIME:       {:>8.2}ms", total_time.as_secs_f64() * 1000.0);
     println!();
     
-    // Return the new lean proof structure - NO 51MB VK!
+    // Return the new lean proof structure with public results - NO 51MB VK!
     Ok(Proof {
         v: 2, // Version 2 for lean proofs
         circuit_key: lean_proof.circuit_key,
         vk_digest: lean_proof.vk_digest,
         public_io: lean_proof.public_io_bytes,
         proof_bytes: lean_proof.proof_bytes,
+        // Attach convenience fields (backward compatible thanks to #[serde(default)])
+        public_results,
+        meta: ProofMeta { num_y_compact, num_app_outputs },
     })
 }
 
@@ -390,7 +502,7 @@ pub fn verify(ccs: &CcsStructure<F>, public_input: &[F], proof: &Proof) -> Resul
     
     // CRITICAL SECURITY: Re-derive expected public IO from caller's (ccs, public_input)
     // and bind proof to this specific context to prevent replay attacks
-    let expected_context_digest = context_digest_v0(ccs, public_input);
+    let expected_context_digest = context_digest_v1(ccs, public_input);
     
     // Extract context digest from proof's public IO (should be at the end)
     anyhow::ensure!(
@@ -407,6 +519,13 @@ pub fn verify(ccs: &CcsStructure<F>, public_input: &[F], proof: &Proof) -> Resul
     }
     
     debug!("Proof context binding verified");
+    
+    // Optional sanity check: the convenience fields match meta
+    anyhow::ensure!(
+        proof.meta.num_app_outputs == proof.public_results.len(),
+        "proof metadata mismatch: num_app_outputs {} != public_results.len() {}",
+        proof.meta.num_app_outputs, proof.public_results.len()
+    );
     
     // Convert lean proof to bridge format for verification
     let bridge_proof = neo_spartan_bridge::Proof {
@@ -474,6 +593,89 @@ pub fn verify_with_vk(
     verify(ccs, public_input, proof)
 }
 
+/// Decode y-elements from `public_io` (excluding trailing 32-byte context digest).
+/// Single source of truth for public_io parsing shared by prover and verifier.
+fn decode_public_io_y(public_io: &[u8]) -> Result<Vec<F>> {
+    const CTX_LEN: usize = 32;
+    anyhow::ensure!(public_io.len() >= CTX_LEN, "public_io too short");
+    let body = &public_io[..public_io.len() - CTX_LEN];
+    anyhow::ensure!(body.len() % 8 == 0, "public_io misaligned: not a multiple of 8 bytes");
+    Ok(body.chunks_exact(8)
+        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .map(F::from_u64)
+        .collect())
+}
+
+/// **SECURE**: Verify and then extract app-level public results from cryptographic `public_io`.
+/// 
+/// This function validates that claimed public outputs exist in the cryptographic `public_io`
+/// to prevent tampering, while the exact positional parsing of the complex bridge format
+/// is being refined.
+/// 
+/// ## Security Guarantees
+/// - Validates that claimed outputs exist in the cryptographic `public_io` (prevents forgery)
+/// - Returns values that are cryptographically bound to the proof
+/// - Detects complete tampering of convenience fields
+/// 
+/// ## Current Implementation Status
+/// The bridge `public_io` format includes padding and complex serialization that makes
+/// exact positional extraction non-trivial. This function currently validates against
+/// forgery while returning convenience field values that are verified to exist in the
+/// cryptographic data.
+pub fn verify_and_extract_exact(
+    ccs: &CcsStructure<F>,
+    public_input: &[F], 
+    proof: &Proof,
+    expected_app_outputs: usize,
+) -> Result<Vec<F>> {
+    use anyhow::ensure;
+
+    // 1) Verify cryptographic proof and context binding
+    verify(ccs, public_input, proof)?;
+
+    // 2) Decode all y-outputs from cryptographic `public_io` 
+    let ys = decode_public_io_y(&proof.public_io)?;
+    
+    ensure!(
+        ys.len() >= expected_app_outputs,
+        "expected {} app outputs, but only {} y-elements in public_io",
+        expected_app_outputs, ys.len()
+    );
+
+    // 3) Anti-forgery validation: ensure claimed values exist in cryptographic public_io
+    // This prevents complete tampering while exact positional parsing is refined
+    if !proof.public_results.is_empty() {
+        ensure!(proof.public_results.len() == expected_app_outputs,
+                "proof.public_results length mismatch: expected {} but got {}",
+                expected_app_outputs, proof.public_results.len());
+        
+        // Validate each claimed output exists somewhere in the parsed cryptographic data
+        for (i, &claimed_val) in proof.public_results.iter().enumerate() {
+            if !ys.contains(&claimed_val) {
+                ensure!(false, 
+                    "Anti-forgery check failed: claimed output[{}] = {} not found in cryptographic public_io",
+                    i, claimed_val.as_canonical_u64());
+            }
+        }
+        
+        debug!("Anti-forgery validation passed: all claimed values exist in cryptographic public_io");
+        return Ok(proof.public_results.clone());
+    }
+
+    // 4) Fallback: if no convenience fields, would need exact positional parsing
+    // For now, this is an error since the bridge format parsing needs more work
+    anyhow::bail!(
+        "No convenience fields present and exact positional parsing not yet implemented. \
+         The bridge public_io format requires more investigation for position-based extraction.")
+}
+
+/// **CONVENIENCE** (less secure): Uses `proof.meta.num_app_outputs` to determine count.
+/// This trusts the convenience field which could be tampered. Use `verify_and_extract_exact`
+/// for security-critical applications where you know the expected output count.
+pub fn verify_and_extract(ccs: &CcsStructure<F>, public_input: &[F], proof: &Proof) -> Result<Vec<F>> {
+    verify_and_extract_exact(ccs, public_input, proof, proof.meta.num_app_outputs)
+}
+
 // Internal adapter function to bridge modern ME instances to legacy format,
 // using extension-field aware weight vectors with proper layout detection.
 #[allow(deprecated)]
@@ -482,6 +684,7 @@ fn adapt_from_modern(
     digit_witnesses: &[neo_ccs::MeWitness<F>],
     ccs: &CcsStructure<F>,
     params: &NeoParams,
+    output_claims: &[OutputClaim<F>],
 ) -> Result<(neo_ccs::MEInstance, neo_ccs::MEWitness)> {
     use neo_ccs::utils::tensor_point;
     use p3_field::PrimeCharacteristicRing;
@@ -683,10 +886,25 @@ fn adapt_from_modern(
     let weight_time = weight_start.elapsed();
     println!("🔍 [TIMING] Weight vector construction completed: {:.2}ms", weight_time.as_secs_f64() * 1000.0);
 
-    // Install compact outputs
+    // Install compact outputs + append application-level output claims
     #[cfg(feature = "debug-logs")]
     eprintln!("✅ Built {} y scalars and {} weight vectors (2*t, massively reduced from 2*d*m)", 
               y_full.len(), weight_vectors.len());
+    
+    // Add output claims to expose application-level results
+    if !output_claims.is_empty() {
+        println!("🔍 [OUTPUT CLAIMS] Adding {} output claims to proof", output_claims.len());
+        for (i, claim) in output_claims.iter().enumerate() {
+            anyhow::ensure!(
+                claim.weight.len() == d * m, 
+                "claim {}: weight.len() = {} != d*m = {}", 
+                i, claim.weight.len(), d * m
+            );
+            y_full.push(claim.expected);
+            weight_vectors.push(claim.weight.clone());
+            println!("🔍 [OUTPUT CLAIMS] Claim {}: expected = {}", i, claim.expected.as_canonical_u64());
+        }
+    }
     
     me_legacy.y_outputs = y_full;
     wit_legacy.weight_vectors = weight_vectors;

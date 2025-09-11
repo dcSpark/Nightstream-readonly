@@ -21,6 +21,8 @@ rand = { workspace = true }
 rayon = { workspace = true }
 p3-field = { workspace = true }
 p3-goldilocks = { workspace = true }
+p3-symmetric = { workspace = true }
+rand_chacha = { workspace = true }
 subtle = { workspace = true }
 
 # For structured logging (gated behind neo-logs feature)
@@ -37,6 +39,7 @@ neo-spartan-bridge = { path = "../neo-spartan-bridge" }
 rand = { workspace = true }
 mimalloc = { workspace = true }
 num_cpus = { workspace = true }
+num-bigint = "0.4"  # For examples only
 # Enable testing features for security tests
 neo-spartan-bridge = { path = "../neo-spartan-bridge", features = ["testing"] }
 
