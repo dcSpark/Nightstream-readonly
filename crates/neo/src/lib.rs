@@ -170,6 +170,19 @@ pub use neo_params::NeoParams;
 pub use neo_ccs::CcsStructure;
 pub use neo_math::{F, K};
 
+/// IVC (Incrementally Verifiable Computation) with embedded verifier
+pub mod ivc;
+
+// Re-export high-level IVC API for production use
+pub use ivc::{
+    // Core IVC types
+    Accumulator, IvcProof, IvcStepInput, IvcChainProof, IvcStepResult, IvcChainStepInput,
+    // High-level proving/verifying functions  
+    prove_ivc_step, verify_ivc_step, prove_ivc_chain, verify_ivc_chain,
+    // Advanced commitment binding (production-ready)
+    Commitment, BindingMetadata, bind_commitment_full,
+};
+
 /// Counts and bookkeeping for public results embedded in the proof.
 /// Backwards-compatible: all fields have defaults for older proofs.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

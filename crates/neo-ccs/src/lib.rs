@@ -22,9 +22,7 @@ pub mod traits;
 /// Utility functions for tensor products and matrix operations.
 pub mod utils;
 
-// Tests module
-#[cfg(test)]
-mod tests;
+// Tests are now in tests/ccs_property_tests.rs as integration tests
 
 // Re-export core types
 pub use error::{CcsError, DimMismatch, RelationError};
@@ -38,7 +36,7 @@ pub use relations::{
     check_ccs_rowwise_relaxed,
 };
 pub use traits::SModuleHomomorphism;
-pub use utils::{tensor_point, mat_vec_mul_fk, mat_vec_mul_ff, validate_power_of_two};
+pub use utils::{tensor_point, mat_vec_mul_fk, mat_vec_mul_ff, validate_power_of_two, direct_sum, direct_sum_mixed, direct_sum_transcript_mixed};
 
 // ===== DEPRECATED LEGACY BRIDGE TYPES =====
 // These are kept temporarily for bridge compatibility but are NOT audit-ready.
