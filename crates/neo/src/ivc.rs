@@ -1777,8 +1777,8 @@ pub fn augmentation_ccs(
         let mut rng = rand::rngs::StdRng::from_seed([42u8; 32]);
         #[cfg(not(debug_assertions))]
         let mut rng = {
-            use rand::rngs::OsRng;
-            rand_chacha::ChaCha20Rng::from_rng(OsRng)?
+            use rand_chacha::ChaCha20Rng;
+            ChaCha20Rng::from_os_rng()
         };
         let pp = neo_ajtai::setup(&mut rng, d, kappa, m)?;
         neo_ajtai::set_global_pp(pp).map_err(anyhow::Error::from)

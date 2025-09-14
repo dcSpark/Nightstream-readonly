@@ -30,7 +30,6 @@ use neo_ccs::{check_ccs_rowwise_zero, r1cs_to_ccs, Mat, direct_sum_transcript_mi
 use neo_ajtai::{setup as ajtai_setup, decomp_b, DecompStyle};
 use neo_math::ring::D;
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
-use rand::SeedableRng;
 
 /// Fibonacci state for IVC
 #[derive(Debug, Clone)]
@@ -233,7 +232,10 @@ fn run_ivc_hash_demo(n_steps: usize) -> Result<()> {
     
     ensure_ajtai_pp_for_dims(D, m, Box::new(|| {
         #[cfg(debug_assertions)]
-        let mut rng = rand::rngs::StdRng::from_seed([42u8; 32]);
+        let mut rng = {
+            use rand::SeedableRng;
+            rand::rngs::StdRng::from_seed([42u8; 32])
+        };
         #[cfg(not(debug_assertions))]
         let mut rng = rand::thread_rng();
         

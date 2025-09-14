@@ -102,38 +102,43 @@ pub fn setup<R: RngCore + CryptoRng>(rng: &mut R, d: usize, kappa: usize, m: usi
 
 // Variable-time optimization removed for security and simplicity
 
-/// OFFICIAL API: Extract Ajtai binding rows for Neo circuit integration.
-/// 
-/// **TEMPORARY IMPLEMENTATION**: This function returns synthetic binding rows
-/// that satisfy the circuit's requirements by construction. Each row `L_i` 
-/// satisfies `<L_i, z_digits> = c_coords[i]` for any witness/commitment pair.
-/// 
-/// **TODO**: Replace with true mathematical extraction from the Ajtai public parameters
-/// once the mapping between witness decomposition and commitment coordinates is clarified.
 ///
-/// # Arguments  
-/// * `_pp` - Ajtai public parameters (currently unused in synthetic implementation)
-/// * `z_len` - Length of z_digits vector 
-/// * `num_coords` - Number of coordinate rows to return
+/// **PRODUCTION IMPLEMENTATION** — true extraction from Ajtai public parameters.
 ///
-/// # Returns
-/// Authentic rows from the Ajtai matrix, optimized with S-action caching and parallel processing.
+/// Builds the linear map `L ∈ F_q^{(d·κ) × (d·m)}` such that, for **column‑major**
+/// encodings of `Z ∈ F_q^{d×m}` and commitment `c ∈ F_q^{d×κ}`:
 ///
-/// # Performance Optimizations
-/// - Caches pre-computed S-action matrices to avoid repeated polynomial multiplications
-/// - Parallelizes row construction across available CPU cores
-/// - Uses HashMap for O(1) element deduplication vs O(n²) linear search
+///   `vec(c) = L · vec(Z)`  where  `c = cf(M · cf^{-1}(Z))`.
 ///
-/// # Security Note  
-/// Includes bounds validation to ensure matrix dimensions are consistent and prevent panics.
-/// Optimized rows_for_coords implementation
+/// Using the identity `cf(a·b) = rot(a) · cf(b)`, the row corresponding to
+/// `(commit_col=i, commit_row=r)` has blocks
+///
+///   `L[(i,r), (j, 0..d-1)] = col_t(rot(a_ij))[r]  for t=0..d-1`,
+///
+/// i.e. the `t`‑th rotation column of `a_ij` evaluated at row `r`. This matches the
+/// prover's constant‑time path (`commit_masked_ct`) exactly.
+///
+/// **Indexing conventions**
+/// - `z_len` must be `d·m`. The caller pads rows externally if the circuit padded `z_digits`
+///   to a power of two (we intentionally keep the extractor strict).
+/// - `num_coords` ≤ `d·κ`; typical usage requests all `d·κ` rows.
+///
+/// **Performance**
+/// - Deduplicates equal `a_ij` by hashing `cf(a_ij)` (O(1) average).
+/// - Precomputes all rotation columns per unique ring element via `rot_step`.
+/// - Builds rows in parallel with Rayon.
+///
+/// **Security**
+/// - Strict runtime dimension checks (prevents binding bugs).
+/// - No secret‑dependent branching/memory access; depends only on public `pp`.
+///
 pub fn rows_for_coords(
     pp: &PP<RqEl>, 
     z_len: usize, 
     num_coords: usize
 ) -> AjtaiResult<Vec<Vec<Fq>>> {
     use rayon::prelude::*;
-    
+
     // SECURITY: Gated logging to prevent CWE-532 (sensitive info leakage)
     #[cfg(feature = "neo-logs")]
     use tracing::{debug, info};
@@ -155,7 +160,8 @@ pub fn rows_for_coords(
         ));
     }
     
-    // CRITICAL: Validate dimensions to prevent binding bugs (B4)
+    // CRITICAL: Validate dimensions to prevent binding bugs (B4).
+    // Keep extractor strict; the caller can pad rows externally if z_digits was power-of-two padded.
     if z_len != d * m {
         return Err(AjtaiError::InvalidInput("z_len must equal d*m".to_string()));
     }
@@ -163,18 +169,18 @@ pub fn rows_for_coords(
         return Err(AjtaiError::InvalidInput("num_coords exceeds d*kappa".to_string()));
     }
     
-    info!("Starting optimized Ajtai binding rows computation...");
+    info!("Starting Ajtai binding rows computation (true extraction)...");
     let total_start = std::time::Instant::now();
 
-    // 🚀 OPTIMIZATION 1: Pre-compute and cache all unique S-action matrices
-    debug!("Building S-action cache for {} ring elements...", kappa * m);
+    // 🚀 OPTIMIZATION 1: Deduplicate identical ring elements
+    debug!("Deduplicating {} ring elements...", kappa * m);
     let cache_start = std::time::Instant::now();
     
     // Use HashMap with cf() canonical form for O(1) deduplication instead of O(n²) Vec::position
     use std::collections::HashMap;
     
     let mut unique_map = HashMap::new();
-    let mut all_elements = Vec::new();
+    let mut all_elements: Vec<RqEl> = Vec::new();
     let mut element_indices = vec![vec![0; m]; kappa];
     
     for commit_col in 0..kappa {
@@ -197,28 +203,21 @@ pub fn rows_for_coords(
     
     debug!("Found {} unique ring elements (vs {} total)", all_elements.len(), kappa * m);
     
-    // Pre-compute S-action matrix for each unique element
-    let mut s_action_matrices = Vec::with_capacity(all_elements.len());
-    for &a_ij in &all_elements {
-        let s_action = SAction::from_ring(a_ij);
-        
-        // 🚀 OPTIMIZATION 2: Compute full S-action matrix once (not 54 unit vector ops!)
-        let mut matrix = vec![vec![Fq::ZERO; d]; d];
-        for input_row in 0..d {
-            let mut unit_vec = [Fq::ZERO; D];
-            unit_vec[input_row] = Fq::ONE;
-            let result = s_action.apply_vec(&unit_vec);
-            for commit_row in 0..d {
-                matrix[commit_row][input_row] = result[commit_row];
-            }
-        }
-        s_action_matrices.push(matrix);
-    }
+    // 🚀 OPTIMIZATION 2: Precompute all rotation columns for each unique element.
+    // cols[t] = cf(a * X^t) for t ∈ [0..d-1]; computed via rot_step in O(d^2) once.
+    let precomp_start = std::time::Instant::now();
+    let mut rot_columns: Vec<Box<[[Fq; D]]>> = Vec::with_capacity(all_elements.len());
+    rot_columns.par_extend(
+        all_elements.par_iter().map(|&a_ij| {
+            let mut cols = vec![[Fq::ZERO; D]; D].into_boxed_slice();
+            precompute_rot_columns(a_ij, &mut cols);
+            cols
+        })
+    );
+    let _precomp_time = precomp_start.elapsed();
     
     let _cache_time = cache_start.elapsed();
-    debug!("S-action cache built: {:.2}ms ({:.0}x reduction in S-action computations)", 
-             _cache_time.as_secs_f64() * 1000.0, 
-             (kappa * m * num_coords) as f64 / all_elements.len() as f64);
+    debug!("Precomputation completed: {:.2}ms", _precomp_time.as_secs_f64() * 1000.0);
 
     // 🚀 OPTIMIZATION 3: Parallel row computation
     debug!("Computing {} rows in parallel across {} threads...", 
@@ -242,16 +241,16 @@ pub fn rows_for_coords(
                 return row; // Defensive fallback for release builds
             }
             
-            // 🚀 OPTIMIZATION 4: Vectorized coefficient extraction
+            // 🚀 OPTIMIZATION 4: Vectorized coefficient extraction from precomputed rot columns
             for j in 0..m {
                 let element_idx = element_indices[commit_col][j];
-                let s_action_matrix = &s_action_matrices[element_idx];
+                let cols = &rot_columns[element_idx];
                 
                 // Extract entire column of coefficients at once
                 let base_idx = j * d;
                 for input_row in 0..d {
-                    let input_idx = base_idx + input_row;  // Column-major indexing in z_digits
-                    row[input_idx] = s_action_matrix[commit_row][input_row];
+                    let input_idx = base_idx + input_row;      // column-major in z_digits
+                    row[input_idx] = cols[input_row][commit_row];
                 }
             }
             
@@ -630,3 +629,47 @@ pub fn open_linear(
 //
 // Use neo_fold::verify_linear for Π_RLC verification and verify_split_open for
 // recomposition checks. The commitment layer only provides S-homomorphic binding.
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rand::{rngs::StdRng, SeedableRng};
+
+    #[test]
+    fn rows_for_coords_matches_commit() {
+        let mut rng = StdRng::seed_from_u64(42);
+        let d = D;
+        let kappa = 4;
+        let m = 3;
+
+        let pp = setup(&mut rng, d, kappa, m).expect("setup ok");
+
+        // random Z
+        let mut z = vec![Fq::ZERO; d*m];
+        for x in &mut z { *x = super::sample_uniform_fq(&mut rng); }
+
+        // build rows
+        let z_len = d*m;
+        let num_coords = d*kappa;
+        let rows = rows_for_coords(&pp, z_len, num_coords).expect("rows ok");
+
+        // compute L·z
+        let mut c_flat = vec![Fq::ZERO; num_coords];
+        for (row_i, row) in rows.iter().enumerate() {
+            debug_assert_eq!(row.len(), z_len);
+            let mut acc = Fq::ZERO;
+            for (a, &b) in row.iter().zip(&z) { acc += (*a) * b; }
+            c_flat[row_i] = acc;
+        }
+
+        // compute commit and flatten column-major
+        let c = commit_masked_ct(&pp, &z);
+        let mut c_flat_expected = vec![Fq::ZERO; num_coords];
+        for i in 0..kappa {
+            for r in 0..d {
+                c_flat_expected[i*d + r] = c.data[i * d + r];
+            }
+        }
+        assert_eq!(c_flat, c_flat_expected, "L·z must equal vec(commit(pp, Z))");
+    }
+}

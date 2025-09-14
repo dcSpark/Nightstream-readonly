@@ -40,10 +40,7 @@
 
 use anyhow::Result;
 use neo_ajtai::{setup as ajtai_setup, commit, decomp_b, DecompStyle};
-#[cfg(debug_assertions)]
 use rand::SeedableRng;
-#[cfg(not(debug_assertions))]  
-use rand_chacha::ChaCha20Rng;
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 // Poseidon2 is now imported via the unified module
 use p3_symmetric::Permutation;
@@ -296,11 +293,15 @@ pub fn prove(input: ProveInput) -> Result<Proof> {
         "unsafe params: (k+1)·T·(b−1) ≥ B"
     );
 
-    // Fail-fast CCS consistency check: witness must satisfy the constraint system
-    // Only perform expensive check in debug builds - skip in release for performance
-    #[cfg(debug_assertions)]
+    // Fail-fast CCS consistency check: witness must satisfy the constraint system.
+    // Always run to catch invalid witnesses early with minimal performance impact.
     neo_ccs::check_ccs_rowwise_zero(input.ccs, input.public_input, input.witness)
-        .map_err(|e| anyhow::anyhow!("CCS check failed - witness does not satisfy constraints: {:?}", e))?;
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "CCS check failed - witness does not satisfy constraints: {:?}",
+                e
+            )
+        })?;
 
     // Step 1: Ajtai setup (parameter-aware global registry)  
     let ajtai_start = std::time::Instant::now();
@@ -319,8 +320,8 @@ pub fn prove(input: ProveInput) -> Result<Proof> {
         let mut rng = rand::rngs::StdRng::from_seed([42u8; 32]);
         #[cfg(not(debug_assertions))]
         let mut rng = {
-            use rand::rngs::OsRng;
-            rand_chacha::ChaCha20Rng::from_rng(OsRng)?
+            use rand_chacha::ChaCha20Rng;
+            ChaCha20Rng::from_os_rng()
         };
         
         let pp = ajtai_setup(&mut rng, d, /*kappa*/ 16, m_correct)?;
