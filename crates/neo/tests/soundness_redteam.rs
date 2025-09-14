@@ -116,6 +116,7 @@ fn test_malicious_y_step_attack_should_fail() -> Result<()> {
             y_step_offsets: vec![], // Empty = should be rejected with security error
             x_witness_indices: vec![], // No step_x binding needed for this test
             y_prev_witness_indices: vec![], // Empty = should be rejected
+            const1_witness_index: 0, // Constant-1 at index 0
         },
     };
     
@@ -132,6 +133,7 @@ fn test_malicious_y_step_attack_should_fail() -> Result<()> {
                 y_step_offsets: vec![], 
                 x_witness_indices: vec![],
                 y_prev_witness_indices: vec![],
+                const1_witness_index: 0, // Constant-1 at index 0
             };
             let verify_result = verify_ivc_step(&step_ccs, &step_result.proof, &accumulator, &verify_binding_spec);
             
@@ -185,9 +187,10 @@ fn test_honest_y_step_should_succeed() -> Result<()> {
     
     // Use secure API with proper binding specification
     let binding_spec = neo::ivc::StepBindingSpec {
-        y_step_offsets: vec![2], // For increment: [1, prev_x, next_x], next_x at index 2  
+        y_step_offsets: vec![3], // For increment: [const, prev_x, step_number, next_x], next_x at index 3  
         x_witness_indices: vec![], // No step public inputs
         y_prev_witness_indices: vec![1], // prev_x at index 1
+        const1_witness_index: 0, // Constant-1 at index 0
     };
     let mut honest_batch = IvcBatchBuilder::new_with_bindings(
         params,
@@ -231,9 +234,10 @@ fn test_batch_step_stitching_attack() -> Result<()> {
     
     // Use secure API with proper binding specification  
     let binding_spec = neo::ivc::StepBindingSpec {
-        y_step_offsets: vec![2], // For increment: [1, prev_x, next_x], next_x at index 2
+        y_step_offsets: vec![3], // For increment: [const, prev_x, step_number, next_x], next_x at index 3
         x_witness_indices: vec![], // No step public inputs
         y_prev_witness_indices: vec![1], // prev_x at index 1
+        const1_witness_index: 0, // Constant-1 at index 0
     };
     let mut batch = IvcBatchBuilder::new_with_bindings(
         params.clone(),
@@ -422,6 +426,7 @@ fn test_secure_batch_builder_blocks_stitching_attack() -> Result<()> {
         y_step_offsets,
         x_witness_indices: vec![], // No step public inputs
         y_prev_witness_indices: vec![1], // prev_x at index 1
+        const1_witness_index: 0, // Constant-1 at index 0
     };
     let mut secure_batch = IvcBatchBuilder::new_with_bindings(
         params.clone(),
@@ -487,6 +492,7 @@ fn test_secure_batch_builder_blocks_stitching_attack() -> Result<()> {
         y_step_offsets: vec![3],
         x_witness_indices: vec![], // No step public inputs
         y_prev_witness_indices: vec![1], // prev_x at index 1
+        const1_witness_index: 0, // Constant-1 at index 0
     };
     let mut honest_batch = IvcBatchBuilder::new_with_bindings(
         params,
@@ -546,6 +552,7 @@ fn test_secure_batch_builder_basic() -> Result<()> {
         y_step_offsets,
         x_witness_indices: vec![], // No step public inputs
         y_prev_witness_indices: vec![1], // prev_x at index 1
+        const1_witness_index: 0, // Constant-1 at index 0
     };
     let mut secure_batch = IvcBatchBuilder::new_with_bindings(
         params,

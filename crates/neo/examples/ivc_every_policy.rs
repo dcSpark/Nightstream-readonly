@@ -70,6 +70,7 @@ fn main() -> Result<()> {
         y_step_offsets: vec![2], // next_x at index 2
         x_witness_indices: vec![], // No step public inputs for increment
         y_prev_witness_indices: vec![1], // prev_x at index 1
+        const1_witness_index: 0, // Constant-1 at index 0
     };
     
     // Use Every(3) policy - emit proof every 3 steps
@@ -130,6 +131,7 @@ fn main() -> Result<()> {
         y_step_offsets: vec![2], // same as original
         x_witness_indices: vec![],
         y_prev_witness_indices: vec![1], // same as original
+        const1_witness_index: 0, // Constant-1 at index 0
     };
     let mut batch_clone = IvcBatchBuilder::new_with_bindings(
         params.clone(), 

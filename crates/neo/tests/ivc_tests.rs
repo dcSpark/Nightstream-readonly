@@ -317,7 +317,8 @@ fn test_high_level_ivc_api() {
         binding_spec: &neo::ivc::StepBindingSpec {
             y_step_offsets: vec![2, 2], // Both y_step elements map to output at index 2
             x_witness_indices: vec![], // No step public inputs
-            y_prev_witness_indices: vec![1, 1], // Both y_prev elements map to input at index 1 
+            y_prev_witness_indices: vec![1, 1], // Both y_prev elements map to input at index 1
+            const1_witness_index: 0, // Constant-1 at index 0
         },
     };
     
@@ -333,6 +334,7 @@ fn test_high_level_ivc_api() {
                 y_step_offsets: vec![2, 2], // Both y_step elements map to output at index 2
                 x_witness_indices: vec![], // No step public inputs
                 y_prev_witness_indices: vec![1, 1], // Both y_prev elements map to input at index 1
+                const1_witness_index: 0, // Constant-1 at index 0
             };
             match verify_ivc_step(&step_ccs, &step_result.proof, &initial_acc, &verify_binding_spec) {
                 Ok(is_valid) => {
@@ -393,18 +395,6 @@ fn test_production_poseidon2_embedded_verifier() {
             println!("   Note: This is expected if the variable sharing between P2 and EV isn't implemented yet");
         }
     }
-}
-
-/// Compare toy vs production Poseidon2 performance/output
-#[test]
-#[ignore = "Removed misleading production functions that used toy hash"]
-fn test_toy_vs_production_poseidon2_comparison() {
-    // This test was disabled because the "production" functions were actually 
-    // using the toy hash implementation, causing confusion.
-    // 
-    // For real production use:
-    //   - Option A: ev_with_public_rho_ccs() (current, off-circuit ρ)
-    //   - Option B: Unified Poseidon2+EV (future, with frozen params)
 }
 
 /// **NOVA STEP 1 TEST**: Public Input Binding Proof of Concept

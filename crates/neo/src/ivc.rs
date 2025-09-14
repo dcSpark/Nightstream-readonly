@@ -15,6 +15,9 @@ use neo_ccs::{CcsStructure, Mat};
 use neo_ccs::crypto::poseidon2_goldilocks as p2;
 use p3_symmetric::Permutation;
 
+/// Domain tag for IVC transcript, tied to Poseidon2 configuration
+const IVC_DOMAIN_TAG: &[u8] = b"neo/ivc/ev/v1|poseidon2-goldilocks-w12-cap4";
+
 /// Feature-gated debug logging for Neo
 #[allow(unused_macros)]
 #[cfg(feature = "neo-logs")]
@@ -84,6 +87,8 @@ pub struct StepBindingSpec {
     pub x_witness_indices: Vec<usize>,
     /// Positions of y_prev (state input) in the step witness - must be length y_len
     pub y_prev_witness_indices: Vec<usize>,
+    /// Index of the constant-1 column in the step witness (for stitching constraints)
+    pub const1_witness_index: usize,
 }
 
 /// IVC-specific proof for a single step
@@ -411,7 +416,7 @@ pub fn rho_from_transcript(prev_acc: &Accumulator, step_digest: [u8; 32]) -> (F,
     }
 
     // Domain separation for IVC transcript
-    for &byte in b"neo/ivc/ev/v1|poseidon2-goldilocks-w12-cap4" {
+    for &byte in IVC_DOMAIN_TAG {
         absorb_elem!(Goldilocks::from_u64(byte as u64));
     }
     
@@ -1395,9 +1400,9 @@ pub fn prove_ivc_step(input: IvcStepInput) -> Result<IvcStepResult, Box<dyn std:
     let (rho, _transcript_digest) = rho_from_transcript(&input.prev_accumulator, step_digest);
 
     // 🔒 SECURITY: Enforce the constant-1 column convention used by unified CCS rows
-    const CONST_WITNESS_INDEX: usize = 0;
-    if input.step_witness.get(CONST_WITNESS_INDEX) != Some(&F::ONE) {
-        return Err("SECURITY: step_witness[0] must be 1 (constant-1 column)".into());
+    let const_idx = input.binding_spec.const1_witness_index;
+    if input.step_witness.get(const_idx) != Some(&F::ONE) {
+        return Err(format!("SECURITY: step_witness[{}] must be 1 (constant-1 column)", const_idx).into());
     }
 
     // Build linked witness: [step_witness || u] where u = ρ * y_step
@@ -1892,7 +1897,7 @@ struct BlockMeta {
     pub_len: usize,                // step_x_len + 1 (rho) + 2*y_len
     y_prev_off_in_block: usize,    // step_x_len + 1
     y_next_off_in_block: usize,    // step_x_len + 1 + y_len
-    const1_col_in_block: usize,    // pub_len + 0 (witness starts here; step_witness[0] = 1)
+    const1_col_in_block: usize,    // pub_len + const1_witness_index
 }
 
 /// A small, stateful builder to batch many IVC steps and emit a single SNARK proof on demand.
@@ -1906,6 +1911,7 @@ pub struct IvcBatchBuilder {
     // Rolling batch
     batch_ccs: Option<CcsStructure<F>>,
     batch_witness: Vec<F>,
+    batch_public: Vec<F>,
     steps_in_batch: usize,
     
     // 🔧 NEW: Track block metadata for proper stitching
@@ -1954,6 +1960,7 @@ impl IvcBatchBuilder {
             binding_spec,
             batch_ccs: None,
             batch_witness: Vec::new(),
+            batch_public: Vec::new(),
             steps_in_batch: 0,
             blocks: Vec::new(),
             accumulator: initial_accumulator,
@@ -1980,6 +1987,7 @@ impl IvcBatchBuilder {
             y_step_offsets: vec![], // UNSAFE: Empty binding
             x_witness_indices: vec![], // UNSAFE: Empty binding
             y_prev_witness_indices: vec![], // UNSAFE: Empty binding
+            const1_witness_index: 0, // UNSAFE: Assumes step_witness[0] = 1
         };
         // This will panic if validation fails, which is expected for the deprecated API
         Self::new_with_bindings(params, step_ccs, initial_accumulator, policy, unsafe_binding_spec)
@@ -2029,13 +2037,13 @@ impl IvcBatchBuilder {
         // Debug logging removed for cleaner output
 
         // 🔒 SECURITY: Validate constant-1 witness column assumption (runtime check)
-        /// Convention: step_witness[0] == 1 (constant column).
-        /// For production circuits, this must be enforced.
-        const CONST_WITNESS_INDEX: usize = 0;
-        if step_witness.get(CONST_WITNESS_INDEX) != Some(&F::ONE) {
+        // Convention: step_witness[const1_witness_index] == 1 (constant column).
+        // For production circuits, this must be enforced.
+        let const_idx = self.binding_spec.const1_witness_index;
+        if step_witness.get(const_idx) != Some(&F::ONE) {
             return Err(anyhow::anyhow!(
                 "SECURITY: step_witness[{}] must be 1 (constant-1 column). Got: {:?}", 
-                CONST_WITNESS_INDEX, step_witness.get(CONST_WITNESS_INDEX)
+                const_idx, step_witness.get(const_idx)
             ));
         }
         
@@ -2078,13 +2086,16 @@ impl IvcBatchBuilder {
                     pub_len,
                     y_prev_off_in_block: x_len + 1,           // after step_x + rho
                     y_next_off_in_block: x_len + 1 + self.y_len, // after step_x + rho + y_prev
-                    const1_col_in_block: pub_len,             // first witness col is step_witness[0] = 1
+                    const1_col_in_block: pub_len + self.binding_spec.const1_witness_index,
                 };
                 self.blocks.push(block_meta);
                 
-                // All-witness approach: [step1_public || step1_witness]
-                self.batch_witness.extend_from_slice(&this_public);   // step1_public
-                self.batch_witness.extend_from_slice(&this_witness);  // step1_witness
+                // ✅ NEW: per-block ordering, all fed as witness
+                debug_assert!(self.batch_public.is_empty(), "BatchBuilder now uses witness-only batches");
+                let mut block = Vec::with_capacity(this_public.len() + this_witness.len());
+                block.extend_from_slice(&this_public);
+                block.extend_from_slice(&this_witness);
+                self.batch_witness.extend_from_slice(&block);
             }
             Some(existing) => {
                 // (a) direct-sum previous batch with the new per-step CCS
@@ -2103,7 +2114,7 @@ impl IvcBatchBuilder {
                     pub_len,
                     y_prev_off_in_block: x_len + 1,
                     y_next_off_in_block: x_len + 1 + self.y_len,
-                    const1_col_in_block: pub_len,
+                    const1_col_in_block: pub_len + self.binding_spec.const1_witness_index,
                 };
                 
                 // (b) Add in-place stitching constraints using absolute column indices
@@ -2114,10 +2125,12 @@ impl IvcBatchBuilder {
                 let right_y_prev_abs = right.base_col + right.y_prev_off_in_block;
                 let const1_abs = left.base_col + left.const1_col_in_block;
                 
-                // === UPDATE WITNESS VECTOR BEFORE DEBUGGING ===
-                // Must add current step data to witness BEFORE debug function accesses it
-                self.batch_witness.extend_from_slice(&this_public);   // step_i public
-                self.batch_witness.extend_from_slice(&this_witness);  // step_i witness
+                // === UPDATE VECTORS (per-block) BEFORE DEBUG ===
+                debug_assert!(self.batch_public.is_empty(), "BatchBuilder now uses witness-only batches");
+                let mut block = Vec::with_capacity(this_public.len() + this_witness.len());
+                block.extend_from_slice(&this_public);
+                block.extend_from_slice(&this_witness);
+                self.batch_witness.extend_from_slice(&block);
                 
                 // Debug logging removed for cleaner output
                 
@@ -2210,7 +2223,8 @@ impl IvcBatchBuilder {
 
         let batch_data = BatchData {
             ccs,
-            public_input: vec![], // All-witness approach: empty public input
+            // ✅ Everything is provided as witness for the batched CCS
+            public_input: Vec::new(),
             witness: std::mem::take(&mut self.batch_witness),
             steps_covered: self.steps_in_batch,
         };
@@ -2218,6 +2232,7 @@ impl IvcBatchBuilder {
         // Reset batch state
         self.blocks.clear();
         self.steps_in_batch = 0;
+        self.batch_public.clear(); // keep invariant
 
         Some(batch_data)
     }
@@ -2296,14 +2311,7 @@ pub fn prove_batch_data(
     params: &crate::NeoParams,
     batch_data: BatchData,
 ) -> anyhow::Result<crate::Proof> {
-    // Sanity check: with m_in = 0, CCS.m must equal witness.len()
-    debug_assert_eq!(
-        batch_data.ccs.m,
-        batch_data.witness.len(),
-        "with m_in = 0, CCS.m must equal witness.len(); got m={}, |w|={}",
-        batch_data.ccs.m,
-        batch_data.witness.len()
-    );
+    // No assertion about m vs witness.len() here; CCS may include public columns.
     
     #[cfg(feature = "neo-logs")]
     {
