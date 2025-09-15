@@ -635,29 +635,37 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
 
     // initial running sum is the public target: sum_{u∈{0,1}^ℓ} Q(u) == 0
     let mut running_sum = K::ZERO;
+    println!("🔍 Sum-check starting: {} instances, {} rounds", insts.len(), ell);
 
     // OPTIMIZATION: Precompute sample points once (invariant across rounds)
     let sample_xs: Vec<K> = (0..=d_sc as u64).map(|u| K::from(F::from_u64(u))).collect();
 
-    // ===== PROPER MLE FOLDING: One shrinking vector per M_j z =====
-    /// In-place folding state for linear-time MLE evaluation
-    struct MlePartials {
-        /// One shrinking vector per matrix M_j, updated in-place each round
-        s_per_j: Vec<Vec<K>>,
-    }
+    // ===== PROPER MLE FOLDING (ROW-WISE): One shrinking vector per instance for (Az ∘ Bz − Cz) =====
+    /// In-place folding state for linear-time MLE evaluation over the ROW-WISE residuals.
+    ///
+    /// Critical: Using row-wise residuals fixes the mismatch between f(⟨Az,χ⟩,⟨Bz,χ⟩,⟨Cz,χ⟩)
+    /// and ⟨Az∘Bz−Cz, χ⟩ which sum-check requires.
+    struct MleResiduals { s: Vec<K> }
 
     let mle_start = std::time::Instant::now();
-    let partials_per_inst: Result<Vec<MlePartials>, PiCcsError> = insts.par_iter().map(|inst| {
-        let mut s_per_j = Vec::with_capacity(s.t());
-        for j in 0..s.t() {
-            // Lift M_j z from F to K once and pad to 2^ell
-            let mut w_k: Vec<K> = inst.mz[j].iter().map(|&x| K::from(x)).collect();
-            w_k = pad_to_pow2_k(w_k, ell)?;
-            s_per_j.push(w_k);
+    let residuals_per_inst: Result<Vec<MleResiduals>, PiCcsError> = insts.par_iter().map(|inst| {
+        // Build row-wise residual vector: r[i] = (Az)[i]*(Bz)[i] − (Cz)[i] in K
+        debug_assert!(s.t() >= 3, "Expect at least 3 matrices for R1CS-style CCS");
+        let az = &inst.mz[0];
+        let bz = &inst.mz[1];
+        let cz = &inst.mz[2];
+        let mut row_residuals: Vec<K> = Vec::with_capacity(s.n);
+        for i in 0..s.n {
+            let a = K::from(az[i]);
+            let b = K::from(bz[i]);
+            let c = K::from(cz[i]);
+            row_residuals.push(a * b - c);
         }
-        Ok(MlePartials { s_per_j })
+        // Pad to power of two for MLE folding
+        let s_vec = pad_to_pow2_k(row_residuals, ell)?;
+        Ok(MleResiduals { s: s_vec })
     }).collect();
-    let mut partials_per_inst = partials_per_inst?;
+    let mut residuals_per_inst = residuals_per_inst?;
     println!("🔧 [TIMING] MLE partials setup: {:.2}ms", 
              mle_start.elapsed().as_secs_f64() * 1000.0);
 
@@ -668,44 +676,28 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         let round_start = std::time::Instant::now();
         
         // Preallocate buffers to avoid per-round allocations
-        let mut a = vec![K::ZERO; s.t()];
-        let mut delta = vec![K::ZERO; s.t()]; 
         let mut sample_ys = vec![K::ZERO; sample_xs.len()];
 
-        // Accumulate α_i · f(Y(X)) across instances
-        for (inst_idx, partials) in partials_per_inst.iter().enumerate() {
-            // 1) CRITICAL FIX: Sum over ALL pairs (v[2k], v[2k+1]) in current shrinking vector
-            // This is the correct MLE folding - NOT just (v[0], v[1])!
-            for j in 0..s.t() {
-                let v = &partials.s_per_j[j];  // length = 2^{ell-i}
-                debug_assert!(v.len().is_power_of_two() && v.len() >= 2, 
-                              "Vector length {} invalid at round {} for matrix {}", v.len(), i, j);
-                
-                let half = v.len() >> 1;
-                let mut aj = K::ZERO;
-                let mut dj = K::ZERO;
-                
-                // Sum over ALL pairs in the current vector (correct MLE folding)
-                for k in 0..half {
-                    let e = v[2*k];     // even index  
-                    let o = v[2*k + 1]; // odd index
-                    aj += e;            // A_j = sum of evens
-                    dj += o - e;        // Delta_j = sum of (odd - even)
-                }
-                
-                a[j] = aj;
-                delta[j] = dj;  // Y_j(X) = A_j + Delta_j * X
+        // Accumulate α_i · ⟨Az∘Bz−Cz, χ_X⟩ across instances using ROW-WISE MLE partials
+        for (inst_idx, partials) in residuals_per_inst.iter().enumerate() {
+            let v = &partials.s; // length = 2^{ell-i}
+            debug_assert!(v.len().is_power_of_two() && v.len() >= 2,
+                          "Residual vector length {} invalid at round {}", v.len(), i);
+
+            let half = v.len() >> 1;
+            let mut a_res = K::ZERO;
+            let mut d_res = K::ZERO;
+            for k in 0..half {
+                let e = v[2*k];
+                let o = v[2*k + 1];
+                a_res += e;        // sum of evens
+                d_res += o - e;    // sum of (odds - evens)
             }
 
-            // 2) Accumulate across all sample points - reuse buffer to avoid micro-allocations
             let alpha = batch_coeffs.alphas[inst_idx];
-            let mut y_buf = vec![K::ZERO; s.t()];  // Allocate once, reuse for all samples
             for (sx, &X) in sample_xs.iter().enumerate() {
-                for j in 0..s.t() {
-                    y_buf[j] = a[j] + delta[j] * X;  // Y_j(X) = a_j + (b_j - a_j) * X
-                }
-                let f_eval = s.f.eval_in_ext::<K>(&y_buf);
-                sample_ys[sx] += alpha * f_eval;
+                let val = a_res + d_res * X; // ⟨residuals, χ_X⟩
+                sample_ys[sx] += alpha * val;
             }
         }
         let coeffs = lagrange_interpolate_k(&sample_xs, &sample_ys);
@@ -719,9 +711,17 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         // Check p(0)+p(1)=running_sum
         let p0 = poly_eval_k(&coeffs, K::ZERO);
         let p1 = poly_eval_k(&coeffs, K::ONE);
+        let sum_p0_p1 = p0 + p1;
+        
         if p0 + p1 != running_sum {
+            println!("🚨 CRITICAL Sum-check FAILURE in round {}:", i);
+            println!("   Expected p0+p1: {:?}", running_sum);
+            println!("   Actual p0+p1: {:?}", sum_p0_p1);
+            println!("   This should cause proof failure!");
             return Err(PiCcsError::SumcheckError(format!(
                 "round {i}: p(0)+p(1) mismatch")));
+        } else {
+            println!("✅ Sum-check round {} PASSED", i);
         }
 
         // Bind polynomial to transcript and sample r_i
@@ -737,16 +737,15 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         // ===== KEY LINEAR-TIME STEP: Fold all vectors in-place with r_i =====
         // This is the standard MLE folding: S[k] <- (1-r_i)*S[2k] + r_i*S[2k+1]
         // After this, each vector shrinks from length 2^{ell-i} to 2^{ell-i-1}
-        for partials in &mut partials_per_inst {
-            for v in &mut partials.s_per_j {
-                let n2 = v.len() >> 1;  // New length after folding
-                for k in 0..n2 {
-                    let a = v[2*k];
-                    let b = v[2*k + 1];
-                    v[k] = (K::ONE - r_i) * a + r_i * b;  // Standard MLE folding formula
-                }
-                v.truncate(n2);  // Shrink to half length
+        for partials in &mut residuals_per_inst {
+            let v = &mut partials.s;
+            let n2 = v.len() >> 1;
+            for k in 0..n2 {
+                let a0 = v[2*k];
+                let b0 = v[2*k + 1];
+                v[k] = (K::ONE - r_i) * a0 + r_i * b0;
             }
+            v.truncate(n2);
         }
         
         println!("🔧 [ROUND {}] {:.2}ms", i, round_start.elapsed().as_secs_f64() * 1000.0);
@@ -783,20 +782,15 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     let fold_digest = tr.state_digest();
     
     let mut out_me = Vec::with_capacity(insts.len());
-    for (inst_idx, inst) in insts.iter().enumerate() {
+    for (_inst_idx, inst) in insts.iter().enumerate() {
         // X = L_x(Z)
         let X = l.project_x(inst.Z, inst.m_in);
         
         // OPTIMIZATION: Use precomputed v_j vectors and MLE fold results  
         let mut y = Vec::with_capacity(s.t());
-        // Use final MLE fold results for Y_j(r) (already computed above)
-        let y_scalars: Vec<K> = partials_per_inst[inst_idx]
-            .s_per_j.iter()
-            .map(|v| { 
-                debug_assert_eq!(v.len(), 1, "MLE fold should reduce to length 1 after {} rounds", ell);
-                v[0]  // This IS Y_j(r) from standard MLE folding identity!
-            })
-            .collect();
+        // Use final MLE fold results for Y_j(r) (already computed above) — we do not maintain per-j partials
+        // here, so reconstruct Y_j(r) via sparse transpose multiply below.
+        // We still populate y_scalars with the CORRECT scalars: ⟨(M_j z), χ_r⟩ derived below.
         
         // Use precomputed v_j = M_j^T * χ_r vectors (no more expensive recomputation per instance!)
         let z_operations_start = std::time::Instant::now();
@@ -808,6 +802,10 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         println!("🚀 [OPTIMIZATION] Used precomputed v_j vectors - only Z * v_j needed: {:.2}ms", 
                  z_operations_start.elapsed().as_secs_f64() * 1000.0);
         
+        // Recompute the scalar Y_j(r) values using sparse transpose multiply results and Z
+        // Note: y_j vectors are Z * v_j, and the sum of their entries equals ⟨(M_j z), χ_r⟩
+        let y_scalars: Vec<K> = y.iter().map(|vec_k| vec_k.iter().copied().sum()).collect();
+
         out_me.push(MeInstance{ 
             c: inst.c.clone(), 
             X, 

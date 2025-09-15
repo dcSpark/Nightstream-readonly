@@ -11,6 +11,15 @@ use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
 use anyhow::Result;
 
+/// Helper function to convert triplets to dense matrix data
+fn triplets_to_dense(rows: usize, cols: usize, triplets: Vec<(usize, usize, F)>) -> Vec<F> {
+    let mut dense = vec![F::ZERO; rows * cols];
+    for (row, col, val) in triplets {
+        dense[row * cols + col] = val;
+    }
+    dense
+}
+
 /// Simple step: increment by 1
 /// State: [x] -> [x+1]
 fn build_increment_step_ccs() -> CcsStructure<F> {
@@ -20,21 +29,48 @@ fn build_increment_step_ccs() -> CcsStructure<F> {
     let rows = 1;
     let cols = 3;
     
-    let mut a_data = vec![F::ZERO; rows * cols];
-    let mut b_data = vec![F::ZERO; rows * cols]; 
-    let c_data = vec![F::ZERO; rows * cols];
+    let mut a_trips: Vec<(usize, usize, F)> = Vec::new();
+    let mut b_trips: Vec<(usize, usize, F)> = Vec::new();
+    let c_trips: Vec<(usize, usize, F)> = Vec::new(); // always zero
     
-    // next_x - prev_x - 1 = 0 (multiply by const=1)
-    a_data[0 * cols + 2] = F::ONE;   // +next_x
-    a_data[0 * cols + 1] = -F::ONE;  // -prev_x  
-    a_data[0 * cols + 0] = -F::ONE;  // -const (represents -1)
-    b_data[0 * cols + 0] = F::ONE;   // × const
+    // Constraint: next_x - prev_x - 1 = 0  
+    // Written as: (next_x - prev_x - const) × const = 0
+    a_trips.push((0, 2, F::ONE));   // +next_x
+    a_trips.push((0, 1, -F::ONE));  // -prev_x  
+    a_trips.push((0, 0, -F::ONE));  // -const (represents -1)
+    b_trips.push((0, 0, F::ONE));   // select constant 1
     
-    let a_mat = Mat::from_row_major(rows, cols, a_data);
-    let b_mat = Mat::from_row_major(rows, cols, b_data);
-    let c_mat = Mat::from_row_major(rows, cols, c_data);
+    // Build matrices using the same pattern as fib_ivc.rs
+    let a_data = triplets_to_dense(rows, cols, a_trips.clone());
+    let b_data = triplets_to_dense(rows, cols, b_trips.clone());
+    let c_data = triplets_to_dense(rows, cols, c_trips.clone());
     
-    r1cs_to_ccs(a_mat, b_mat, c_mat)
+    let a_mat = Mat::from_row_major(rows, cols, a_data.clone());
+    let b_mat = Mat::from_row_major(rows, cols, b_data.clone());
+    let c_mat = Mat::from_row_major(rows, cols, c_data.clone());
+    
+    println!("🔍 Debug CCS construction:");
+    println!("   a_mat: {}x{}", a_mat.rows(), a_mat.cols());
+    println!("   b_mat: {}x{}", b_mat.rows(), b_mat.cols());  
+    println!("   c_mat: {}x{}", c_mat.rows(), c_mat.cols());
+    println!("   a_data: {:?}", a_data);
+    println!("   b_data: {:?}", b_data);
+    
+    let ccs = r1cs_to_ccs(a_mat, b_mat, c_mat);
+    println!("   resulting ccs.n (constraints): {}", ccs.n);
+    println!("   resulting ccs.m (variables): {}", ccs.m);
+    
+    // 🔍 VALIDATION: Test the step CCS directly
+    let test_witness = vec![F::ONE, F::from_u64(5), F::from_u64(6)]; // [1, 5, 6] -> next_x should be 6
+    let test_result = neo_ccs::check_ccs_rowwise_zero(&ccs, &[], &test_witness);
+    println!("   Step CCS validation with [1,5,6]: {:?}", test_result);
+    
+    // Test with our actual witness
+    let actual_witness = vec![F::ONE, F::ZERO, F::ONE]; // [1, 0, 1] -> 0+1=1 
+    let actual_result = neo_ccs::check_ccs_rowwise_zero(&ccs, &[], &actual_witness);
+    println!("   Step CCS validation with [1,0,1]: {:?}", actual_result);
+    
+    ccs
 }
 
 /// Generate increment step witness: [const=1, prev_x, next_x]
@@ -72,6 +108,15 @@ fn main() -> Result<()> {
         y_prev_witness_indices: vec![1], // prev_x at index 1
         const1_witness_index: 0, // Constant-1 at index 0
     };
+    
+    println!("🔍 Debug initial binding spec:");
+    println!("   binding_spec.x_witness_indices: {:?}", binding_spec.x_witness_indices);
+    println!("   binding_spec.y_step_offsets: {:?}", binding_spec.y_step_offsets);
+    println!("   binding_spec.y_prev_witness_indices: {:?}", binding_spec.y_prev_witness_indices);
+    println!("   binding_spec.const1_witness_index: {}", binding_spec.const1_witness_index);
+    println!("   step_ccs.n (constraints): {}", step_ccs.n);
+    println!("   step_ccs.m (variables): {}", step_ccs.m);
+    println!("   initial_acc.y_compact.len(): {}", initial_acc.y_compact.len());
     
     // Use Every(3) policy - emit proof every 3 steps
     let mut batch_builder = IvcBatchBuilder::new_with_bindings(
@@ -111,6 +156,9 @@ fn main() -> Result<()> {
             println!("     🔒 AUTO-EMITTED: Proof #{} (covered steps {})", 
                      proofs_emitted, 
                      if proofs_emitted == 1 { "0-2" } else { "3-5" });
+            println!("     🔍 Accumulator state after auto-emit:");
+            println!("       acc.step: {}", batch_builder.accumulator.step);
+            println!("       acc.y_compact.len(): {}", batch_builder.accumulator.y_compact.len());
         }
         
         current_x += 1;
@@ -133,17 +181,75 @@ fn main() -> Result<()> {
         y_prev_witness_indices: vec![1], // same as original
         const1_witness_index: 0, // Constant-1 at index 0
     };
+    
+    println!("🔍 Debug batch_clone creation:");
+    println!("   binding_spec_clone.x_witness_indices: {:?}", binding_spec_clone.x_witness_indices);
+    println!("   binding_spec_clone.y_step_offsets: {:?}", binding_spec_clone.y_step_offsets);
+    println!("   binding_spec_clone.y_prev_witness_indices: {:?}", binding_spec_clone.y_prev_witness_indices);
+    println!("   binding_spec_clone.const1_witness_index: {}", binding_spec_clone.const1_witness_index);
+    
+    let original_acc = batch_builder.accumulator.clone();
+    println!("   original_acc.y_compact.len(): {}", original_acc.y_compact.len());
+    println!("   original_acc.step: {}", original_acc.step);
+    
     let mut batch_clone = IvcBatchBuilder::new_with_bindings(
         params.clone(), 
         step_ccs.clone(),
-        batch_builder.accumulator.clone(),
+        original_acc.clone(),
         EmissionPolicy::Every(3),
-        binding_spec_clone,
+        binding_spec_clone.clone(),
     )?;
+    
+    println!("   batch_clone created successfully, pending_steps: {}", batch_clone.pending_steps());
     
     // Re-add the last step to demonstrate
     let last_witness = build_increment_witness(6);
     let last_y_step = extractor.extract_y_step(&last_witness);
+    
+    println!("🔍 Debug last step append:");
+    println!("   last_witness: {:?}", last_witness);
+    println!("   last_witness.len(): {}", last_witness.len());
+    println!("   last_y_step: {:?}", last_y_step);
+    println!("   last_y_step.len(): {}", last_y_step.len());
+    println!("   step_ccs.n (constraints): {}", step_ccs.n);
+    println!("   step_ccs.m (variables): {}", step_ccs.m);
+    
+    batch_clone.append_step(&last_witness, None, &last_y_step)?;
+    println!("   append_step completed, pending_steps: {}", batch_clone.pending_steps());
+    
+    println!("🔍 Debug before finalize_and_prove:");
+    println!("   batch_clone.pending_steps(): {}", batch_clone.pending_steps());
+    println!("   batch_clone.has_pending_batch(): {}", batch_clone.has_pending_batch());
+    
+    // Debug: Extract batch data to inspect CCS structure before proving
+    println!("🔍 DEBUG: Inspecting CCS structure before failing finalize_and_prove:");
+    let _debug_batch_data = if let Some(debug_data) = batch_clone.finalize() {
+        println!("   SINGLE-STEP CCS:");
+        println!("     constraints (n): {}", debug_data.ccs.n);
+        println!("     variables (m): {}", debug_data.ccs.m);
+        println!("     matrices count: {}", debug_data.ccs.matrices.len());
+        println!("     public_input.len(): {}", debug_data.public_input.len());
+        println!("     witness.len(): {}", debug_data.witness.len());
+        println!("     steps_covered: {}", debug_data.steps_covered);
+        
+        // Debug first few elements of witness
+        println!("     witness (first 10): {:?}", 
+                debug_data.witness.iter().take(10).collect::<Vec<_>>());
+        
+        Some(debug_data)
+    } else {
+        println!("   No debug batch data available");
+        None
+    };
+    
+    // Recreate batch_clone since finalize() consumed it
+    let mut batch_clone = IvcBatchBuilder::new_with_bindings(
+        params.clone(), 
+        step_ccs.clone(),
+        original_acc,
+        EmissionPolicy::Every(3),
+        binding_spec_clone,
+    )?;
     batch_clone.append_step(&last_witness, None, &last_y_step)?;
     
     let immediate_proof = batch_clone.finalize_and_prove()?;

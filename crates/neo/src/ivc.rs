@@ -2211,8 +2211,15 @@ impl IvcBatchBuilder {
         // 8) Emission policy
         if let EmissionPolicy::Every(n) = self.policy {
             if self.steps_in_batch >= n {
-                // Emit right away; ignore the proof result here, caller can call emit_now() explicitly if needed.
-                let _ = self.emit_now_internal();
+                // 🔧 FIX: Don't ignore proof errors - they indicate critical failures like sum-check issues
+                match self.emit_now_internal() {
+                    Ok(_) => {
+                        // Auto-emit succeeded
+                    }
+                    Err(e) => {
+                        return Err(anyhow::anyhow!("Auto-emit failed: {}", e).into());
+                    }
+                }
             }
         }
 
@@ -2231,54 +2238,44 @@ impl IvcBatchBuilder {
             return None;
         }
 
-        // REVIEWER FIX: Handle single-step vs multi-step differently based on direct_sum usage
-        
-        // Single-step case: the per-step CCS still expects (public, witness)
-        if self.steps_in_batch == 1 {
-            let batch_data = BatchData {
-                ccs,
-                public_input: std::mem::take(&mut self.batch_public),
-                witness: std::mem::take(&mut self.batch_witness),
-                steps_covered: 1,
-            };
-            
-            // Reset batch state
-            self.blocks.clear();
-            self.steps_in_batch = 0;
-            
-            return Some(batch_data);
-        }
-
-        // Multi-step case: the safe direct-sum expects everything packed into the witness
+        // Pack per-step as stored in the direct-sum CCS: [p_i || w_i] per step,
+        // then concatenate steps: [p0|w0|p1|w1|...]. And make ALL of this private.
         let wit_len_per_block = self.witness_len_per_block.expect("set on first append");
-        let steps = self.blocks.len(); // Capture before clearing
-        let mut combined_witness = 
-            Vec::with_capacity(self.batch_public.len() + self.batch_witness.len());
+        let steps = self.blocks.len();
 
+        let pub_total = self.batch_public.len();
+        let wit_total = self.batch_witness.len();
+
+        let mut combined_witness = Vec::with_capacity(pub_total + wit_total);
         let mut p_off = 0usize;
         let mut w_off = 0usize;
-
         for blk in &self.blocks {
             let pub_len = blk.pub_len;
-            // [block_public || block_witness]
             combined_witness.extend_from_slice(&self.batch_public[p_off .. p_off + pub_len]);
             combined_witness.extend_from_slice(&self.batch_witness[w_off .. w_off + wit_len_per_block]);
             p_off += pub_len;
             w_off += wit_len_per_block;
         }
+        debug_assert_eq!(p_off, pub_total);
+        debug_assert_eq!(w_off, wit_total);
 
-        debug_assert_eq!(p_off, self.batch_public.len());
-        debug_assert_eq!(w_off, self.batch_witness.len());
-
-        // Reset rolling buffers for next batch
+        // Reset for next batch
         self.blocks.clear();
         self.steps_in_batch = 0;
         self.batch_public.clear();
         self.batch_witness.clear();
 
+        // IMPORTANT: the direct-sum CCS's columns are [p0|w0|p1|w1|...].
+        // By returning empty public_input, the McsInstance will naturally have m_in = 0.
+
+        println!("🔍 DEBUG extract_batch result:");
+        println!("   public_input.len(): {}", 0);
+        println!("   witness.len(): {}", combined_witness.len());
+        println!("   steps_covered: {}", steps);
+
         Some(BatchData {
             ccs,
-            public_input: Vec::new(), // <- IMPORTANT: all inputs are now in witness
+            public_input: Vec::new(),
             witness: combined_witness,
             steps_covered: steps,
         })
@@ -2300,6 +2297,84 @@ impl IvcBatchBuilder {
             return Ok(None);
         };
 
+        // Sanity: with packed witness approach, public_input should be empty and m == |witness|
+        anyhow::ensure!(
+            batch_data.public_input.is_empty(),
+            "With packed witness approach, public_input should be empty, got {} elements",
+            batch_data.public_input.len()
+        );
+        anyhow::ensure!(
+            batch_data.ccs.m == batch_data.witness.len(),
+            "CCS.m ({}) must equal |witness| ({}) with packed witness approach",
+            batch_data.ccs.m, batch_data.witness.len()
+        );
+
+        // Debug: Log working multi-step CCS structure for comparison
+        println!("🔍 DEBUG: MULTI-STEP CCS with PACKED WITNESS approach:");
+        println!("     constraints (n): {}", batch_data.ccs.n);
+        println!("     variables (m): {}", batch_data.ccs.m);
+        println!("     matrices count: {}", batch_data.ccs.matrices.len());
+        println!("     public_input.len(): {}", batch_data.public_input.len());
+        println!("     witness.len(): {}", batch_data.witness.len());
+        println!("     steps_covered: {}", batch_data.steps_covered);
+        println!("     z layout: witness-only [p0|w0|p1|w1|...] (interleaved per-step)");
+        
+        // Debug: Check if the combined witness satisfies the combined CCS
+        println!("🔍 DEBUG: Detailed CCS constraint analysis (PACKED WITNESS approach)...");
+        
+        // With packed witness: z = witness (no public input)
+        let full_z = &batch_data.witness;
+        
+        println!("     Full z vector length: {}", full_z.len());
+        println!("     CCS expects: {} variables", batch_data.ccs.m);
+        println!("     All variables packed in witness: {} elements", batch_data.witness.len());
+        
+        // Show first few elements for manual verification
+        println!("     Witness (first 10): {:?}", 
+                batch_data.witness.iter().take(10).collect::<Vec<_>>());
+        
+        // Manual constraint checking with detailed output
+        println!("🔍 DEBUG: Manual constraint verification...");
+        for row_idx in 0..std::cmp::min(batch_data.ccs.n, 5) { // Check first 5 constraints
+            let mut a_dot_z = crate::F::ZERO;
+            let mut b_dot_z = crate::F::ZERO; 
+            let mut c_dot_z = crate::F::ZERO;
+            
+            // Compute A[row] · z, B[row] · z, C[row] · z
+            for col_idx in 0..batch_data.ccs.m {
+                if col_idx < full_z.len() {
+                    a_dot_z += batch_data.ccs.matrices[0][(row_idx, col_idx)] * full_z[col_idx];
+                    b_dot_z += batch_data.ccs.matrices[1][(row_idx, col_idx)] * full_z[col_idx];
+                    c_dot_z += batch_data.ccs.matrices[2][(row_idx, col_idx)] * full_z[col_idx];
+                }
+            }
+            
+            let constraint_value = a_dot_z * b_dot_z - c_dot_z;
+            let satisfied = constraint_value == crate::F::ZERO;
+            
+            println!("     Constraint {}: A·z={:?}, B·z={:?}, C·z={:?}, A·B-C={:?}, OK={}",
+                    row_idx, 
+                    a_dot_z.as_canonical_u64(),
+                    b_dot_z.as_canonical_u64(), 
+                    c_dot_z.as_canonical_u64(),
+                    constraint_value.as_canonical_u64(),
+                    satisfied);
+                    
+            if !satisfied {
+                println!("     ❌ FIRST FAILING CONSTRAINT FOUND: row {}", row_idx);
+                break;
+            }
+        }
+        
+        // Overall check (using empty public_input with packed witness approach)
+        match neo_ccs::check_ccs_rowwise_zero(&batch_data.ccs, &[], &batch_data.witness) {
+            Ok(()) => println!("     ✅ All CCS constraints satisfied with PACKED WITNESS approach!"),
+            Err(e) => {
+                println!("     ❌ CCS constraints VIOLATED: {:?}", e);
+                println!("     This means the packed witness approach still has issues");
+            }
+        }
+
         // NOTE: We do not set application-level OutputClaims here; pass [].
         let proof = crate::prove(crate::ProveInput {
             params: &self.params,
@@ -2308,6 +2383,9 @@ impl IvcBatchBuilder {
             witness: &batch_data.witness,
             output_claims: &[],
         })?;
+
+        println!("     🔒 AUTO-EMITTED: Proof #{} (covered steps {}-{})",
+                "?", "?", "?");
 
         Ok(Some(proof))
     }

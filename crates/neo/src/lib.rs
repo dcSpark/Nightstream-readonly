@@ -309,8 +309,13 @@ pub fn prove(input: ProveInput) -> Result<Proof> {
     
     let d = neo_math::ring::D;
     let _m_w = input.witness.len(); // Original witness length before decomposition
+    
+    // 🔧 FIX: For augmented CCS, decompose full variable vector [public_input || witness]
+    let mut full_variable_vector = input.public_input.to_vec();
+    full_variable_vector.extend_from_slice(input.witness);
+    
     // CRITICAL FIX: Use decomposed dimensions for PP setup, not raw witness length
-    let decomp_z = decomp_b(input.witness, input.params.b, d, DecompStyle::Balanced);
+    let decomp_z = decomp_b(&full_variable_vector, input.params.b, d, DecompStyle::Balanced);
     anyhow::ensure!(decomp_z.len() % d == 0, "decomp length not multiple of d");
     let m_correct = decomp_z.len() / d; // This is the actual m we'll use
     
@@ -354,10 +359,10 @@ pub fn prove(input: ProveInput) -> Result<Proof> {
     let mcs_inst = neo_ccs::McsInstance { 
         c: commitment, 
         x: input.public_input.to_vec(), 
-        m_in: 0  // All witness elements are private (no public input constraints in CCS)
+        m_in: input.public_input.len()  // 🔧 FIX: Use actual public input count, not hardcoded 0
     };
     let mcs_wit = neo_ccs::McsWitness::<F> { 
-        w: input.witness.to_vec(), 
+        w: input.witness.to_vec(),  // Only witness part (public inputs are in McsInstance.x)
         Z: z_matrix 
     };
 
