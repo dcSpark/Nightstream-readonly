@@ -271,7 +271,6 @@ fn test_direct_sum_small_ccs_edge_cases() {
 
 /// Test the new high-level IVC API (production-ready proving/verification)
 #[test] 
-#[ignore] // Expensive test - requires full proving pipeline
 fn test_high_level_ivc_api() {
     use neo::{prove_ivc_step, verify_ivc_step, IvcStepInput, Accumulator, NeoParams};
     use neo_ccs::{r1cs_to_ccs, Mat};
