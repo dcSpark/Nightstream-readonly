@@ -203,6 +203,7 @@ fn run_ivc_step_with_hash(
 
 /// Demonstrate IVC with in-circuit ρ derivation
 fn run_ivc_hash_demo(n_steps: usize) -> Result<()> {
+    let demo_start = Instant::now();
     println!("🚀 Neo IVC with In-Circuit ρ Derivation Demo");
     println!("==============================================");
     println!("Computing F({}) using {} IVC steps with IN-CIRCUIT ρ DERIVATION", n_steps, n_steps);
@@ -278,7 +279,7 @@ fn run_ivc_hash_demo(n_steps: usize) -> Result<()> {
         .map_err(|e| anyhow::anyhow!("Step CCS verification failed: {:?}", e))?;
     println!("   ✅ Step CCS verification passed!");
     
-    // Step 4: Initialize accumulator and run IVC steps
+    // Step 4: Initialize accumulator and run IVC steps (row-wise sanity + batch prover)
     println!("\n🔄 Running IVC steps with in-circuit ρ derivation...");
     let mut accumulator = Accumulator {
         c_z_digest: [0u8; 32],
@@ -288,18 +289,22 @@ fn run_ivc_hash_demo(n_steps: usize) -> Result<()> {
     };
     
     let mut state = FibState::new();
+
+    // (Batch proving omitted in this example; we demonstrate the in-circuit hash EV flow.)
     
     for i in 0..n_steps {
         println!("\n--- IVC Step {} ---", i + 1);
         let step_start = Instant::now();
         
         let (next_acc, next_state) = run_ivc_step_with_hash(
-            &params, 
-            &step_ccs, 
-            &augmented_ccs, 
-            &accumulator, 
-            &state
+            &params,
+            &step_ccs,
+            &augmented_ccs,
+            &accumulator,
+            &state,
         )?;
+
+        // (Skip batch append in this example)
         
         accumulator = next_acc;
         state = next_state;
@@ -308,6 +313,8 @@ fn run_ivc_hash_demo(n_steps: usize) -> Result<()> {
         println!("   Step completed: {:.2}ms", step_time.as_secs_f64() * 1000.0);
     }
     
+    // (No batch finalize in this example)
+
     // Step 5: Summary
     println!("\n🎉 In-Circuit ρ Derivation IVC Demo Complete!");
     println!("==============================================");
@@ -341,6 +348,17 @@ fn run_ivc_hash_demo(n_steps: usize) -> Result<()> {
     println!("   • ✅ Full commitment binding: bytes + length + domain separation");
     println!("   • ✅ Transcript-bound mixing: f1 + β*f2 (cancellation-resistant)");
     println!("   • 🔄 Next: Connect to real folding pipeline compact y outputs");
+
+    // Final concise summary (similar style to fib.rs)
+    let total_time = demo_start.elapsed();
+    println!("\n🏁 IVC SUMMARY");
+    println!("=========================================");
+    println!("Steps (Fibonacci transitions):   {:>8}", n_steps);
+    println!("Final F({}) mod p:              {:>8}", state.i, state.a);
+    println!("Verification match:              {:>8}", if state.a == expected { "YES" } else { "NO" });
+    println!("Total demo time:                 {:>8.2} ms", total_time.as_secs_f64() * 1000.0);
+    println!("CPU Threads Used:                {:>8}", rayon::current_num_threads());
+    println!("=========================================");
     
     Ok(())
 }
@@ -392,7 +410,7 @@ fn main() -> Result<()> {
     println!();
 
     // Run with a small number of steps for the demo
-    let n_steps = 6;
+    let n_steps = 1000;
     println!("{}", "=".repeat(80));
     run_ivc_hash_demo(n_steps)?;
     
