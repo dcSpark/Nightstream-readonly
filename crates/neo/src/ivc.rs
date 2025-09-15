@@ -1349,7 +1349,18 @@ pub fn prove_ivc_step_with_extractor(
 /// not just constraint satisfaction checking.
 pub fn prove_ivc_step(input: IvcStepInput) -> Result<IvcStepResult, Box<dyn std::error::Error>> {
     // 1. Create step digest for transcript binding (include step public input)
-    let step_x: Vec<F> = input.public_input.map(|x| x.to_vec()).unwrap_or_default();
+    //    Bind step_x to a Poseidon2 digest of the previous accumulator (Las requirement).
+    let acc_digest_fields = compute_accumulator_digest_fields(&input.prev_accumulator)?;
+    let step_x: Vec<F> = match input.public_input {
+        Some(x) => {
+            let provided = x.to_vec();
+            if provided != acc_digest_fields {
+                return Err("step public input must equal H(prev_accumulator)".into());
+            }
+            provided
+        }
+        None => acc_digest_fields,
+    };
     let step_data = build_step_data_with_x(&input.prev_accumulator, input.step, &step_x);
     let step_digest = create_step_digest(&step_data);
     
@@ -1362,8 +1373,12 @@ pub fn prove_ivc_step(input: IvcStepInput) -> Result<IvcStepResult, Box<dyn std:
     if !input.binding_spec.y_step_offsets.is_empty() && input.binding_spec.y_step_offsets.len() != input.y_step.len() {
         return Err("y_step_offsets length must match y_step length".into());
     }
-    if !step_x.is_empty() && input.binding_spec.x_witness_indices.len() != step_x.len() {
-        return Err("x_witness_indices length must match step_x length".into());
+    // Allow empty x_witness_indices (no binders) even when step_x is present.
+    // If binders are provided, the lengths must match.
+    if !input.binding_spec.x_witness_indices.is_empty()
+        && input.binding_spec.x_witness_indices.len() != step_x.len()
+    {
+        return Err("x_witness_indices length must match step_x length when provided".into());
     }
 
     // 3. Build base augmented CCS (step ⊕ embedded verifier) 
@@ -1490,6 +1505,12 @@ pub fn verify_ivc_step(
     prev_accumulator: &Accumulator,
     binding_spec: &StepBindingSpec,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    // 0. Enforce Las binding: step_x must equal H(prev_accumulator)
+    let expected_x = compute_accumulator_digest_fields(prev_accumulator)?;
+    if ivc_proof.step_public_input != expected_x {
+        return Ok(false);
+    }
+
     // 1. Reconstruct the augmented CCS that was used for proving
     let step_data = build_step_data_with_x(prev_accumulator, ivc_proof.step, &ivc_proof.step_public_input);
     let step_digest = create_step_digest(&step_data);
@@ -2581,7 +2602,7 @@ pub fn build_augmented_ccs_linked(
     //  - y_len prev binder rows                 (REVIEWER FIX: y_prev[k] - step_witness[prev_k] = 0)
     let step_rows = step_ccs.n;
     let ev_rows = 2 * y_len;
-    let x_bind_rows = step_x_len;
+    let x_bind_rows = if x_witness_indices.is_empty() { 0 } else { step_x_len };
     let prev_bind_rows = 0; // 🔒 Do not bind public y_prev to step witness columns in folding
     let total_rows = step_rows + ev_rows + x_bind_rows + prev_bind_rows;
 
@@ -2636,15 +2657,17 @@ pub fn build_augmented_ccs_linked(
         }
 
         // Binder X: step_x[i] - step_witness[x_i] = 0  (if any)
-        for i in 0..step_x_len {
-            let r = step_rows + ev_rows + i;
-            match matrix_idx {
-                0 => {
-                    data[r * total_cols + (0 + i)] = F::ONE;                         // + step_x[i]
-                    data[r * total_cols + (pub_cols + x_witness_indices[i])] = -F::ONE; // - step_witness[x_i]
+        if !x_witness_indices.is_empty() {
+            for i in 0..step_x_len {
+                let r = step_rows + ev_rows + i;
+                match matrix_idx {
+                    0 => {
+                        data[r * total_cols + (0 + i)] = F::ONE;                         // + step_x[i]
+                        data[r * total_cols + (pub_cols + x_witness_indices[i])] = -F::ONE; // - step_witness[x_i]
+                    }
+                    1 => data[r * total_cols + col_wit0] = F::ONE,                        // × 1
+                    _ => {}
                 }
-                1 => data[r * total_cols + col_wit0] = F::ONE,                        // × 1
-                _ => {}
             }
         }
 
@@ -2699,6 +2722,18 @@ pub fn build_linked_augmented_public_input(
     public_input.extend_from_slice(y_prev);
     public_input.extend_from_slice(y_next);
     public_input
+}
+
+/// Compute Poseidon2 digest of the running accumulator as F-elements for step_x binding
+/// Layout hashed (as bytes): step | c_z_digest | len(y) | y elements (u64 little-endian)
+fn compute_accumulator_digest_fields(acc: &Accumulator) -> Result<Vec<F>, Box<dyn std::error::Error>> {
+    // Reuse existing serializer for exact byte encoding
+    let bytes = serialize_accumulator_for_commitment(acc)?;
+    // Hash to 4 field elements (32 bytes) and return them as F limbs
+    let digest_felts = p2::poseidon2_hash_packed_bytes(&bytes);
+    let mut out = Vec::with_capacity(p2::DIGEST_LEN);
+    for x in digest_felts { out.push(F::from_u64(x.as_canonical_u64())); }
+    Ok(out)
 }
 
 

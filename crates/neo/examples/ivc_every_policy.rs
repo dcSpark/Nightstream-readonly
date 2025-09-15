@@ -8,7 +8,7 @@
 use neo::{F, NeoParams};
 use neo::ivc::{IvcBatchBuilder, EmissionPolicy, LastNExtractor, StepOutputExtractor, Accumulator};
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
-use p3_field::PrimeCharacteristicRing;
+use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use anyhow::Result;
 
 /// Helper function to convert triplets to dense matrix data
@@ -147,7 +147,21 @@ fn main() -> Result<()> {
         println!("   Step {}: {} -> {}", step, current_x, current_x + 1);
         
         let pending_before = batch_builder.pending_steps();
-        let _y_next = batch_builder.append_step(&step_witness, None, &y_step_real)?;
+        // Provide step_x = H(prev_accumulator) to satisfy binding (Las requirement)
+        let x_digest = {
+            // Access the internal helper via an equivalent: reserialize and hash locally here
+            let acc = &batch_builder.accumulator;
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&acc.step.to_le_bytes());
+            bytes.extend_from_slice(&acc.c_z_digest);
+            bytes.extend_from_slice(&(acc.y_compact.len() as u64).to_le_bytes());
+            for &y in &acc.y_compact { bytes.extend_from_slice(&y.as_canonical_u64().to_le_bytes()); }
+            let d = neo_ccs::crypto::poseidon2_goldilocks::poseidon2_hash_packed_bytes(&bytes);
+            let mut out = Vec::with_capacity(d.len());
+            for x in d { out.push(neo::F::from_u64(x.as_canonical_u64())); }
+            out
+        };
+        let _y_next = batch_builder.append_step(&step_witness, Some(&x_digest), &y_step_real)?;
         let pending_after = batch_builder.pending_steps();
         
         // Check if a proof was auto-emitted
