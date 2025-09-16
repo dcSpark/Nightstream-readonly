@@ -129,23 +129,50 @@ fn main() -> Result<()> {
     }
     let steps_time = steps_start.elapsed();
 
-    // Finalize and verify
-    let verify_start = Instant::now();
-    let ok = ivc::verify(state, &[]);
-    let verify_time = verify_start.elapsed();
+    // Finalize and prove (generate the cryptographic proof)
+    let prove_start = Instant::now();
+    let proof_result = ivc::finalize_and_prove(state)?;
+    let prove_time = prove_start.elapsed();
 
-    println!("\nVerification: {}", if ok { "✅ valid" } else { "❌ invalid" });
-    println!(
-        "Constraints per step: {}  | Vars: {}  | Matrices: {}",
-        step_ccs.n, step_ccs.m, step_ccs.matrices.len()
-    );
-    println!(
-        "Timings: setup={:.2}ms, steps={:.2}ms, verify={:.2}ms, total={:.2}ms",
-        params_time.as_secs_f64() * 1000.0,
-        steps_time.as_secs_f64() * 1000.0,
-        verify_time.as_secs_f64() * 1000.0,
-        total_start.elapsed().as_secs_f64() * 1000.0
-    );
+    match proof_result {
+        Some((proof, batch_ccs, batch_public_input)) => {
+            println!("\n✅ Proof generation completed successfully");
+            println!("Proof size: {} bytes", proof.size());
+            
+            // Now verify the proof using the correct batch CCS
+            let verify_start = Instant::now();
+            let is_valid = neo::verify(&batch_ccs, &batch_public_input, &proof)?;
+            let verify_time = verify_start.elapsed();
+            
+            println!("Proof verification: {}", if is_valid { "✅ VALID" } else { "❌ INVALID" });
+            
+            println!(
+                "Batch CCS: {} constraints, {} variables, {} matrices",
+                batch_ccs.n, batch_ccs.m, batch_ccs.matrices.len()
+            );
+            println!(
+                "Step CCS: {} constraints, {} variables, {} matrices", 
+                step_ccs.n, step_ccs.m, step_ccs.matrices.len()
+            );
+            println!(
+                "Timings: setup={:.2}ms, steps={:.2}ms, prove={:.2}ms, verify={:.2}ms, total={:.2}ms",
+                params_time.as_secs_f64() * 1000.0,
+                steps_time.as_secs_f64() * 1000.0,
+                prove_time.as_secs_f64() * 1000.0,
+                verify_time.as_secs_f64() * 1000.0,
+                total_start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+        None => {
+            println!("\nNo steps to prove (empty batch)");
+            println!(
+                "Timings: setup={:.2}ms, steps={:.2}ms, total={:.2}ms",
+                params_time.as_secs_f64() * 1000.0,
+                steps_time.as_secs_f64() * 1000.0,
+                total_start.elapsed().as_secs_f64() * 1000.0
+            );
+        }
+    }
 
     Ok(())
 }

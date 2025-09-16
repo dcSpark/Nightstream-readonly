@@ -76,26 +76,22 @@ pub fn step(mut state: State, io: &[F], witness: &[F]) -> State {
     state
 }
 
-/// Finalize the current batch into a proof and verify it.
+/// Finalize the current batch into a proof and return it along with verification parameters.
 ///
-/// Returns true if verification succeeded or there was nothing to verify.
-pub fn verify(mut state: State, _io: &[F]) -> bool {
+/// This separates proof generation from verification for clearer API design.
+/// Returns `Ok(Some((proof, batch_ccs, batch_public_input)))` if there were pending steps, `Ok(None)` if batch was empty.
+pub fn finalize_and_prove(mut state: State) -> anyhow::Result<Option<(crate::Proof, neo_ccs::CcsStructure<F>, Vec<F>)>> {
     // Extract pending batch (if any)
     let Some(batch) = state.builder.finalize() else {
-        // No steps pending; treat as vacuously true
-        return true;
+        // No steps pending
+        return Ok(None);
     };
 
-    // Prove the batch and verify against the exact CCS + public input
-    // Keep copies of CCS and public input for verification after proving
-    let ccs = batch.ccs.clone();
-    let public_input = batch.public_input.clone();
+    // Keep copies of CCS and public input for verification
+    let batch_ccs = batch.ccs.clone();
+    let batch_public_input = batch.public_input.clone();
 
-    match crate::ivc::prove_batch_data(&state.params, batch) {
-        Ok(proof) => match crate::verify(&ccs, &public_input, &proof) {
-            Ok(ok) => ok,
-            Err(_) => false,
-        },
-        Err(_) => false,
-    }
+    // Generate the proof from accumulated batch data
+    let proof = crate::ivc::prove_batch_data(&state.params, batch)?;
+    Ok(Some((proof, batch_ccs, batch_public_input)))
 }

@@ -377,7 +377,7 @@ pub fn prove(input: ProveInput) -> Result<Proof> {
     let fold_start = std::time::Instant::now();
     debug!("Starting CCS folding (Pi_CCS + Pi_RLC)");
     
-    let (me_instances, digit_witnesses, _folding_proof) = neo_fold::fold_ccs_instances(
+    let (me_instances, digit_witnesses, folding_proof) = neo_fold::fold_ccs_instances(
         input.params, 
         input.ccs, 
         &mcs_instances, 
@@ -393,7 +393,14 @@ pub fn prove(input: ProveInput) -> Result<Proof> {
     #[cfg(feature = "neo-logs")]
     println!("⏱️  [TIMING] Starting bridge adapter (ME -> Spartan format)...");
     
-    let (mut legacy_me, legacy_wit) = adapt_from_modern(&me_instances, &digit_witnesses, input.ccs, input.params, input.output_claims)?;
+    let (mut legacy_me, legacy_wit) = adapt_from_modern(
+        &me_instances,
+        &digit_witnesses,
+        input.ccs,
+        input.params,
+        input.output_claims,
+        Some(&folding_proof.pi_ccs_proof.vjs),
+    )?;
     
     let bridge_time = bridge_start.elapsed();
     #[cfg(feature = "neo-logs")]
@@ -699,6 +706,7 @@ fn adapt_from_modern(
     ccs: &CcsStructure<F>,
     params: &NeoParams,
     output_claims: &[OutputClaim<F>],
+    vjs_opt: Option<&[Vec<neo_math::K>]>,
 ) -> Result<(neo_ccs::MEInstance, neo_ccs::MEWitness)> {
     use neo_ccs::utils::tensor_point;
     use p3_field::PrimeCharacteristicRing;
@@ -762,73 +770,73 @@ fn adapt_from_modern(
     println!("⏱️  [OPTIMIZATION] Pre-computing {} k_split operations...", n);
     let r_pairs: Vec<(F, F)> = chi_r_k.iter().map(|&x| k_split(x)).collect();
     
-    // 💥 MASSIVE WIN: TRUE O(nnz) sparse matrix-vector multiply using CSR
-    let spmv_start = std::time::Instant::now();
-    let (v_re, v_im): (Vec<Vec<F>>, Vec<Vec<F>>) = csr_matrices
-        .par_iter()
-        .enumerate()
-        .map(|(j, csr)| {
-            println!("💥 [TRUE SPARSE] Matrix {} SpMV: {} non-zeros (vs {:.0}M dense)", 
-                     j, csr.nnz(), (n * m) as f64 / 1_000_000.0);
-            
-            // This is the REAL performance win - only touches non-zero elements!
-            let mut vj_re = vec![F::ZERO; m];
-            let mut vj_im = vec![F::ZERO; m];
-            
-            // Process rows in parallel chunks with thread-local accumulators
-            let threads = rayon::current_num_threads();
-            let chunks = (threads * 2).max(1);
-            let chunk_sz = (n + chunks - 1) / chunks;
-            
-            let partials: Vec<(Vec<F>, Vec<F>)> = (0..chunks)
-                .into_par_iter()
-                .map(|ci| {
-                    let start = ci * chunk_sz;
-                    let end = (start + chunk_sz).min(n);
-                    
-                    let mut loc_re = vec![F::ZERO; m];
-                    let mut loc_im = vec![F::ZERO; m];
-                    
-                    // TRUE SPARSE: Only process actual non-zeros!
-                    for row in start..end {
-                        let (rre, rim) = r_pairs[row];
-                        let row_start = csr.row_ptrs[row];
-                        let row_end = csr.row_ptrs[row + 1];
-                        
-                        // Iterate ONLY non-zero elements - HUGE win!
-                        for idx in row_start..row_end {
-                            let col = csr.col_indices[idx];
-                            let a = csr.values[idx];
-                            
-                            // Simple accumulation - no features, just working code
-                            loc_re[col] += a * rre;
-                            loc_im[col] += a * rim;
-                        }
-                    }
-                    
-                    (loc_re, loc_im)
-                })
-                .collect();
-            
-            // Reduce partials
-            for (loc_re, loc_im) in partials {
-                for i in 0..m {
-                    vj_re[i] += loc_re[i];
-                    vj_im[i] += loc_im[i];
-                }
+    // Reuse v_j = M_j^T * χ_r if provided by Pi-CCS; otherwise, compute via CSR SpMV
+    let (v_re, v_im): (Vec<Vec<F>>, Vec<Vec<F>>) = if let Some(vjs) = vjs_opt {
+        let mut v_re = Vec::with_capacity(vjs.len());
+        let mut v_im = Vec::with_capacity(vjs.len());
+        for vj in vjs.iter() {
+            let mut re = vec![F::ZERO; m];
+            let mut im = vec![F::ZERO; m];
+            for (c, &kc) in vj.iter().enumerate() {
+                let (r, i) = k_split(kc);
+                re[c] = r;
+                im[c] = i;
             }
-            
-            (vj_re, vj_im)
-        })
-        .unzip();
-    
-    let spmv_time = spmv_start.elapsed();
-    println!("💥 [TRUE SPARSE] All SpMV completed: {:.2}ms", spmv_time.as_secs_f64() * 1000.0);
-    
-    let total_nnz: usize = csr_matrices.iter().map(|csr| csr.nnz()).sum();
-    let total_dense = n * m * t;
-    println!("💥 [PERFORMANCE] Processed {} non-zeros instead of {} elements ({:.0}x reduction)", 
-             total_nnz, total_dense, total_dense as f64 / total_nnz as f64);
+            v_re.push(re);
+            v_im.push(im);
+        }
+        (v_re, v_im)
+    } else {
+        let spmv_start = std::time::Instant::now();
+        let (v_re, v_im): (Vec<Vec<F>>, Vec<Vec<F>>) = csr_matrices
+            .par_iter()
+            .enumerate()
+            .map(|(j, csr)| {
+                println!("💥 [TRUE SPARSE] Matrix {} SpMV: {} non-zeros (vs {:.0}M dense)", 
+                         j, csr.nnz(), (n * m) as f64 / 1_000_000.0);
+                let mut vj_re = vec![F::ZERO; m];
+                let mut vj_im = vec![F::ZERO; m];
+                let threads = rayon::current_num_threads();
+                let chunks = (threads * 2).max(1);
+                let chunk_sz = (n + chunks - 1) / chunks;
+                let partials: Vec<(Vec<F>, Vec<F>)> = (0..chunks)
+                    .into_par_iter()
+                    .map(|ci| {
+                        let start = ci * chunk_sz;
+                        let end = (start + chunk_sz).min(n);
+                        let mut loc_re = vec![F::ZERO; m];
+                        let mut loc_im = vec![F::ZERO; m];
+                        for row in start..end {
+                            let (rre, rim) = r_pairs[row];
+                            let row_start = csr.row_ptrs[row];
+                            let row_end = csr.row_ptrs[row + 1];
+                            for idx in row_start..row_end {
+                                let col = csr.col_indices[idx];
+                                let a = csr.values[idx];
+                                loc_re[col] += a * rre;
+                                loc_im[col] += a * rim;
+                            }
+                        }
+                        (loc_re, loc_im)
+                    })
+                    .collect();
+                for (loc_re, loc_im) in partials {
+                    for i in 0..m {
+                        vj_re[i] += loc_re[i];
+                        vj_im[i] += loc_im[i];
+                    }
+                }
+                (vj_re, vj_im)
+            })
+            .unzip();
+        let spmv_time = spmv_start.elapsed();
+        println!("💥 [TRUE SPARSE] All SpMV completed: {:.2}ms", spmv_time.as_secs_f64() * 1000.0);
+        let total_nnz: usize = csr_matrices.iter().map(|csr| csr.nnz()).sum();
+        let total_dense = n * m * t;
+        println!("💥 [PERFORMANCE] Processed {} non-zeros instead of {} elements ({:.0}x reduction)", 
+                 total_nnz, total_dense, total_dense as f64 / total_nnz as f64);
+        (v_re, v_im)
+    };
 
     // 4) Compact outputs: 2·t limbs (Re/Im per matrix), not 2·d·m.
     //    For each CCS matrix j, build ONE weight vector w_re[j] and w_im[j] over F^{d·m}
