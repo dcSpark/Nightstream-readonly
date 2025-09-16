@@ -199,11 +199,11 @@ sage sage_params.sage
 ### Near Term (Next Release)
 - [ ] **Explicit parameter threading** (remove global PP state)
 - [ ] **Sparse bridge representation** (reduce memory footprint)
-- [ ] **Typed public-IO validation** (bind verifier parameters to proof)
+- [x] **Typed public-IO validation** (bind verifier parameters to proof)
 - [ ] **Comprehensive benchmarks** (end-to-end and per-phase)
 
 ### Medium Term  
-- [ ] **Recursive proof composition** (proof-carrying state)
+- [x] **Recursive proof composition** (proof-carrying state)
 - [ ] **Additional circuit examples** (Merkle trees, VDF gadgets)
 - [ ] **Performance optimizations** (parallel operations, memory efficiency)
 - [ ] **Security audit preparation** (hardened parameter sets)

@@ -17,3 +17,8 @@ output-commit.txt
 css-output.txt
 output-spartan-integration.txt
 /*.txt
+fib_proof_1000.bin
+fib_proof_1000.bin
+fib_proof_10.bin
+test_bundled.bin
+test_lean.bin

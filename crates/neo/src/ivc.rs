@@ -2089,10 +2089,13 @@ impl IvcBatchBuilder {
             self.witness_len_per_block = Some(this_witness.len());
         }
         
-        println!("🔍 Debug step {} witness construction:", self.steps_in_batch);
-        println!("   Input step_witness len: {}", step_witness.len());
-        println!("   Built this_witness len: {}", this_witness.len());
-        println!("   Per-step CCS: {} constraints, {} variables", per_step_ccs.n, per_step_ccs.m);
+        #[cfg(feature = "neo-logs")]
+        {
+            println!("🔍 Debug step {} witness construction:", self.steps_in_batch);
+            println!("   Input step_witness len: {}", step_witness.len());
+            println!("   Built this_witness len: {}", this_witness.len());
+            println!("   Per-step CCS: {} constraints, {} variables", per_step_ccs.n, per_step_ccs.m);
+        }
         
         // 4) Build y_next from folding: y_next = y_prev + ρ * y_step
         let y_next: Vec<F> = self.accumulator.y_compact.iter()
@@ -2107,6 +2110,7 @@ impl IvcBatchBuilder {
         let this_public = build_linked_augmented_public_input(
             &x_vec, rho, &self.accumulator.y_compact, &y_next
         );
+        #[cfg(feature = "neo-logs")]
         println!("   Built this_public len: {}", this_public.len());
 
         // ✅ All binding (step_x, y_prev) now integrated into unified CCS
@@ -2291,10 +2295,13 @@ impl IvcBatchBuilder {
         // IMPORTANT: the direct-sum CCS's columns are [p0|w0|p1|w1|...].
         // By returning empty public_input, the McsInstance will naturally have m_in = 0.
 
-        println!("🔍 DEBUG extract_batch result:");
-        println!("   public_input.len(): {}", 0);
-        println!("   witness.len(): {}", combined_witness.len());
-        println!("   steps_covered: {}", steps);
+        #[cfg(feature = "neo-logs")]
+        {
+            println!("🔍 DEBUG extract_batch result:");
+            println!("   public_input.len(): {}", 0);
+            println!("   witness.len(): {}", combined_witness.len());
+            println!("   steps_covered: {}", steps);
+        }
 
         Some(BatchData {
             ccs,
@@ -2333,30 +2340,39 @@ impl IvcBatchBuilder {
         );
 
         // Debug: Log working multi-step CCS structure for comparison
-        println!("🔍 DEBUG: MULTI-STEP CCS with PACKED WITNESS approach:");
-        println!("     constraints (n): {}", batch_data.ccs.n);
-        println!("     variables (m): {}", batch_data.ccs.m);
-        println!("     matrices count: {}", batch_data.ccs.matrices.len());
-        println!("     public_input.len(): {}", batch_data.public_input.len());
-        println!("     witness.len(): {}", batch_data.witness.len());
-        println!("     steps_covered: {}", batch_data.steps_covered);
-        println!("     z layout: witness-only [p0|w0|p1|w1|...] (interleaved per-step)");
+        #[cfg(feature = "neo-logs")]
+        {
+            println!("🔍 DEBUG: MULTI-STEP CCS with PACKED WITNESS approach:");
+            println!("     constraints (n): {}", batch_data.ccs.n);
+            println!("     variables (m): {}", batch_data.ccs.m);
+            println!("     matrices count: {}", batch_data.ccs.matrices.len());
+            println!("     public_input.len(): {}", batch_data.public_input.len());
+            println!("     witness.len(): {}", batch_data.witness.len());
+            println!("     steps_covered: {}", batch_data.steps_covered);
+            println!("     z layout: witness-only [p0|w0|p1|w1|...] (interleaved per-step)");
+        }
         
         // Debug: Check if the combined witness satisfies the combined CCS
+        #[cfg(feature = "neo-logs")]
         println!("🔍 DEBUG: Detailed CCS constraint analysis (PACKED WITNESS approach)...");
         
         // With packed witness: z = witness (no public input)
         let full_z = &batch_data.witness;
         
-        println!("     Full z vector length: {}", full_z.len());
-        println!("     CCS expects: {} variables", batch_data.ccs.m);
-        println!("     All variables packed in witness: {} elements", batch_data.witness.len());
+        #[cfg(feature = "neo-logs")]
+        {
+            println!("     Full z vector length: {}", full_z.len());
+            println!("     CCS expects: {} variables", batch_data.ccs.m);
+            println!("     All variables packed in witness: {} elements", batch_data.witness.len());
+        }
         
         // Show first few elements for manual verification
+        #[cfg(feature = "neo-logs")]
         println!("     Witness (first 10): {:?}", 
                 batch_data.witness.iter().take(10).collect::<Vec<_>>());
         
         // Manual constraint checking with detailed output
+        #[cfg(feature = "neo-logs")]
         println!("🔍 DEBUG: Manual constraint verification...");
         for row_idx in 0..std::cmp::min(batch_data.ccs.n, 5) { // Check first 5 constraints
             let mut a_dot_z = crate::F::ZERO;
@@ -2375,6 +2391,7 @@ impl IvcBatchBuilder {
             let constraint_value = a_dot_z * b_dot_z - c_dot_z;
             let satisfied = constraint_value == crate::F::ZERO;
             
+            #[cfg(feature = "neo-logs")]
             println!("     Constraint {}: A·z={:?}, B·z={:?}, C·z={:?}, A·B-C={:?}, OK={}",
                     row_idx, 
                     a_dot_z.as_canonical_u64(),
@@ -2384,6 +2401,7 @@ impl IvcBatchBuilder {
                     satisfied);
                     
             if !satisfied {
+                #[cfg(feature = "neo-logs")]
                 println!("     ❌ FIRST FAILING CONSTRAINT FOUND: row {}", row_idx);
                 break;
             }
@@ -2391,10 +2409,16 @@ impl IvcBatchBuilder {
         
         // Overall check (using empty public_input with packed witness approach)
         match neo_ccs::check_ccs_rowwise_zero(&batch_data.ccs, &[], &batch_data.witness) {
-            Ok(()) => println!("     ✅ All CCS constraints satisfied with PACKED WITNESS approach!"),
-            Err(e) => {
-                println!("     ❌ CCS constraints VIOLATED: {:?}", e);
-                println!("     This means the packed witness approach still has issues");
+            Ok(()) => {
+                #[cfg(feature = "neo-logs")]
+                println!("     ✅ All CCS constraints satisfied with PACKED WITNESS approach!")
+            },
+            Err(_e) => {
+                #[cfg(feature = "neo-logs")]
+                {
+                    println!("     ❌ CCS constraints VIOLATED: {:?}", _e);
+                    println!("     This means the packed witness approach still has issues");
+                }
             }
         }
 
@@ -2407,6 +2431,7 @@ impl IvcBatchBuilder {
             output_claims: &[],
         })?;
 
+        #[cfg(feature = "neo-logs")]
         println!("     🔒 AUTO-EMITTED: Proof #{} (covered steps {}-{})",
                 "?", "?", "?");
 
@@ -2926,12 +2951,17 @@ fn debug_stitch_columns(
     const1_abs: usize,
     y_len: usize,
 ) {
+    #[cfg(feature = "neo-logs")]
     println!("🔎 stitch step {}:", step_idx);
+    #[cfg(feature = "neo-logs")]
     println!("   left_y_next_abs={} .. {}", left_y_next_abs, left_y_next_abs + y_len - 1);
+    #[cfg(feature = "neo-logs")]
     println!("   right_y_prev_abs={} .. {}", right_y_prev_abs, right_y_prev_abs + y_len - 1);
     if const1_abs < witness.len() {
+        #[cfg(feature = "neo-logs")]
         println!("   const1_abs={} (value={})", const1_abs, witness[const1_abs].as_canonical_u64());
     } else {
+        #[cfg(feature = "neo-logs")]
         println!("   const1_abs={} (OUT OF BOUNDS, witness len={})", const1_abs, witness.len());
         return;
     }
@@ -2941,6 +2971,7 @@ fn debug_stitch_columns(
         let right_idx = right_y_prev_abs + i;
         
         if left_idx >= witness.len() || right_idx >= witness.len() {
+            #[cfg(feature = "neo-logs")]
             println!("   ⚠️ index out of bounds at [{}]: left_idx={}, right_idx={}, witness_len={}", 
                      i, left_idx, right_idx, witness.len());
             continue;
@@ -2949,6 +2980,7 @@ fn debug_stitch_columns(
         let yn = witness[left_idx];
         let yp = witness[right_idx];
         if yn != yp {
+            #[cfg(feature = "neo-logs")]
             println!("   ⚠️ mismatch at [{}]: y_next={}  y_prev={}", i, yn.as_canonical_u64(), yp.as_canonical_u64());
         }
     }
