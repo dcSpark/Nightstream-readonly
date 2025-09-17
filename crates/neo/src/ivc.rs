@@ -1445,6 +1445,7 @@ pub fn prove_ivc_step(input: IvcStepInput) -> Result<IvcStepResult, Box<dyn std:
         public_input: &public_input,
         witness: &witness,
         output_claims: &[], // IVC uses accumulator outputs
+        vjs_opt: None,
     })?;
     
     // 7. 🔒 SECURITY: Evolve commitment coordinates with same rho as y folding
@@ -1917,6 +1918,19 @@ pub struct BatchData {
     pub steps_covered: usize,
 }
 
+/// Per-emission timing statistics for benchmarking.
+#[derive(Debug, Clone)]
+pub struct EmitStats {
+    /// Number of steps covered in this emitted batch
+    pub steps_covered: usize,
+    /// Total variables (columns) in the batch CCS
+    pub m_total: usize,
+    /// Assembly time in milliseconds (extract + stitching)
+    pub assemble_ms: f64,
+    /// Proving time in milliseconds for this batch
+    pub prove_ms: f64,
+}
+
 // BlockMeta removed: assemble-on-emit no longer tracks absolute positions incrementally
 
 #[derive(Debug, Clone)]
@@ -1961,6 +1975,9 @@ pub struct IvcBatchBuilder {
     per_step_expected_x_len: Option<usize>,
     per_step_expected_pub_len: Option<usize>,
     per_step_expected_step_m: Option<usize>,
+
+    // Optional hook to report emit-time timings (assembly vs proving)
+    emit_hook: Option<Box<dyn FnMut(&EmitStats) + Send>>, 
 }
 
 impl IvcBatchBuilder {
@@ -2014,7 +2031,17 @@ impl IvcBatchBuilder {
             per_step_expected_x_len: None,
             per_step_expected_pub_len: None,
             per_step_expected_step_m: None,
+            emit_hook: None,
         })
+    }
+
+    /// Install a hook to observe per-emission timings (assembly and proving).
+    /// The hook is invoked after a successful emit with basic stats.
+    pub fn set_emit_hook<F>(&mut self, hook: F)
+    where
+        F: FnMut(&EmitStats) + Send + 'static,
+    {
+        self.emit_hook = Some(Box::new(hook));
     }
     
     /// Create a new batch builder (UNSAFE - for testing/legacy compatibility only).
@@ -2248,77 +2275,76 @@ impl IvcBatchBuilder {
     /// Resets the batch after extraction.
     ///
     /// This is the correct method for `EmissionPolicy::Never` - accumulate fast, prove later.
-    pub fn extract_batch(&mut self) -> Option<BatchData> {
+    pub fn extract_batch(&mut self) -> anyhow::Result<Option<BatchData>> {
         if self.steps_in_batch == 0 || self.pending.is_empty() {
-            return None;
+            return Ok(None);
         }
 
         // Move pending out so we can avoid cloning CCS blocks.
+        // Save counters so we can restore them on failure.
         let moved_pending = std::mem::take(&mut self.pending);
+        let saved_steps = self.steps_in_batch;
         let saved_m_total = self.pending_m_total;
-        let steps = moved_pending.len();
 
-        // 1) Pack witness now (before potentially consuming steps)
-        let pub_total: usize = moved_pending.iter().map(|p| p.public.len()).sum();
-        let wit_total: usize = moved_pending.iter().map(|p| p.witness.len()).sum();
-        let mut combined_witness = Vec::with_capacity(pub_total + wit_total);
-        for p in &moved_pending {
-            combined_witness.extend_from_slice(&p.public);
-            combined_witness.extend_from_slice(&p.witness);
-        }
+        // Assemble inside a closure to catch errors and restore state.
+        let assembled: anyhow::Result<BatchData> = (|| {
+            let steps = moved_pending.len();
 
-        // 2) Build CCS once from all pending steps (balanced merges, preserves order)
-        let blocks: Vec<(CcsStructure<F>, [u8; 32])> = moved_pending
-            .iter()
-            .map(|p| (p.ccs.clone(), p.step_digest))
-            .collect();
-        let mut ccs = match direct_sum_transcript_mixed_many(blocks) {
-            Ok(ccs) => ccs,
-            Err(e) => {
-                eprintln!("direct_sum_transcript_mixed_many failed: {}", e);
-                // Restore state and bail
-                self.pending = moved_pending;
-                self.pending_m_total = saved_m_total;
-                return None;
-            },
-        };
+            // 1) Pack witness now (before potentially consuming steps)
+            let pub_total: usize = moved_pending.iter().map(|p| p.public.len()).sum();
+            let wit_total: usize = moved_pending.iter().map(|p| p.witness.len()).sum();
+            let mut combined_witness = Vec::with_capacity(pub_total + wit_total);
+            for p in &moved_pending {
+                combined_witness.extend_from_slice(&p.public);
+                combined_witness.extend_from_slice(&p.witness);
+            }
 
-        // 3) Add stitching constraints in one pass
-        if steps >= 2 {
-            match add_stitching_constraints_from_layouts(&ccs, &moved_pending, self.y_len, &self.binding_spec) {
-                Ok(ccs2) => { ccs = ccs2; }
-                Err(e) => {
-                    eprintln!("add_stitching_constraints_from_layouts failed: {}", e);
-                    // Restore state and bail
-                    self.pending = moved_pending;
-                    self.pending_m_total = saved_m_total;
-                    return None;
+            // 2) Build CCS once from all pending steps (balanced merges, preserves order)
+            let blocks: Vec<(CcsStructure<F>, [u8; 32])> = moved_pending
+                .iter()
+                .map(|p| (p.ccs.clone(), p.step_digest))
+                .collect();
+            let mut ccs = direct_sum_transcript_mixed_many(blocks)
+                .map_err(|e| anyhow::anyhow!("direct_sum_transcript_mixed_many failed: {}", e))?;
+
+            // 3) Add stitching constraints in one pass
+            if steps >= 2 {
+                ccs = add_stitching_constraints_from_layouts(&ccs, &moved_pending, self.y_len, &self.binding_spec)
+                    .map_err(|e| anyhow::anyhow!("add_stitching_constraints_from_layouts failed: {}", e))?;
+            }
+
+            Ok(BatchData {
+                ccs,
+                public_input: Vec::new(),
+                witness: combined_witness,
+                steps_covered: steps,
+            })
+        })();
+
+        match assembled {
+            Ok(batch) => {
+                // Success: reset counters and drop moved_pending
+                self.steps_in_batch = 0;
+                self.pending_m_total = 0;
+
+                #[cfg(feature = "neo-logs")]
+                {
+                    println!("🔍 DEBUG extract_batch result:");
+                    println!("   public_input.len(): {}", 0);
+                    println!("   witness.len(): {}", batch.witness.len());
+                    println!("   steps_covered: {}", batch.steps_covered);
                 }
+
+                Ok(Some(batch))
+            }
+            Err(e) => {
+                // Failure: restore state
+                self.pending = moved_pending;
+                self.steps_in_batch = saved_steps;
+                self.pending_m_total = saved_m_total;
+                Err(e)
             }
         }
-
-        // Reset for next batch (success path)
-        self.steps_in_batch = 0;
-        self.pending_m_total = 0;
-        // moved_pending consumed and dropped here
-
-        // IMPORTANT: the direct-sum CCS's columns are [p0|w0|p1|w1|...].
-        // By returning empty public_input, the McsInstance will naturally have m_in = 0.
-
-        #[cfg(feature = "neo-logs")]
-        {
-            println!("🔍 DEBUG extract_batch result:");
-            println!("   public_input.len(): {}", 0);
-            println!("   witness.len(): {}", combined_witness.len());
-            println!("   steps_covered: {}", steps);
-        }
-
-        Some(BatchData {
-            ccs,
-            public_input: Vec::new(),
-            witness: combined_witness,
-            steps_covered: steps,
-        })
     }
 
     /// Emit a single SNARK proof for the *current batch*, then reset the batch.
@@ -2333,9 +2359,11 @@ impl IvcBatchBuilder {
     }
 
     fn emit_now_internal(&mut self) -> anyhow::Result<Option<crate::Proof>> {
-        let Some(batch_data) = self.extract_batch() else {
+        let assemble_start = std::time::Instant::now();
+        let Some(batch_data) = self.extract_batch()? else {
             return Ok(None);
         };
+        let assemble_ms = assemble_start.elapsed().as_secs_f64() * 1000.0;
 
         // Sanity: with packed witness approach, public_input should be empty and m == |witness|
         anyhow::ensure!(
@@ -2425,13 +2453,26 @@ impl IvcBatchBuilder {
         }
 
         // NOTE: We do not set application-level OutputClaims here; pass [].
+        let prove_start = std::time::Instant::now();
         let proof = crate::prove(crate::ProveInput {
             params: &self.params,
             ccs: &batch_data.ccs,
             public_input: &batch_data.public_input,
             witness: &batch_data.witness,
             output_claims: &[],
+            vjs_opt: None,
         })?;
+        let prove_ms = prove_start.elapsed().as_secs_f64() * 1000.0;
+
+        if let Some(hook) = self.emit_hook.as_mut() {
+            let stats = EmitStats {
+                steps_covered: batch_data.steps_covered,
+                m_total: batch_data.ccs.m,
+                assemble_ms,
+                prove_ms,
+            };
+            hook(&stats);
+        }
 
         #[cfg(feature = "neo-logs")]
         println!("     🔒 AUTO-EMITTED: Proof #{} (covered steps {}-{})",
@@ -2457,7 +2498,7 @@ impl IvcBatchBuilder {
     ///
     /// Returns `Some(BatchData)` if there were pending steps, `None` if batch was empty.
     /// The caller can then pass the BatchData to their "Final SNARK Layer".
-    pub fn finalize(&mut self) -> Option<BatchData> {
+    pub fn finalize(&mut self) -> anyhow::Result<Option<BatchData>> {
         self.extract_batch()
     }
 
@@ -2502,6 +2543,7 @@ pub fn prove_batch_data(
         public_input: &batch_data.public_input,
         witness: &batch_data.witness,
         output_claims: &[], // No application-level output claims for IVC
+        vjs_opt: None,
     })
 }
 
@@ -2977,18 +3019,19 @@ fn add_stitching_constraints_from_layouts(
     }
 
     let t = base.matrices.len();
-    if t % 3 != 0 { return Err(format!("Expected triads (t % 3 == 0), got t={}", t)); }
+    if t % 3 != 0 { return Err(format!("Stitching expects t to be a multiple of 3 (triads), got t={}", t)); }
 
-    let mut new_mats = Vec::with_capacity(t);
-    for (mat_idx, old) in base.matrices.iter().enumerate() {
-        let mut data = vec![F::ZERO; new_rows * old_cols];
-        // copy old
-        for r in 0..old_rows {
-            for c in 0..old_cols { data[r * old_cols + c] = old[(r, c)]; }
-        }
+    use rayon::prelude::*;
+    let new_mats: Vec<Mat<F>> = base.matrices
+        .par_iter()
+        .enumerate()
+        .map(|(mat_idx, old)| {
+            // Efficient row append on dense Mat
+            let mut mat = old.clone();
+            mat.append_zero_rows(new_rows - old_rows, F::ZERO);
         // append constraints
-        let a_idx = 0usize;
-        let b_idx = 1usize;
+        let is_a = (mat_idx % 3) == 0;
+        let is_b = (mat_idx % 3) == 1;
         let mut r_out = old_rows;
         for i in 0..pending.len() - 1 {
             let left = &pending[i].layout;
@@ -2998,51 +3041,53 @@ fn add_stitching_constraints_from_layouts(
             let left_y_next_abs = left_base + left.y_next_off_in_block;
             let right_y_prev_abs = right_base + right.y_prev_off_in_block;
             let const1_abs = left_base + left.const1_col_in_block;
-            for k in 0..y_len {
-                let r = r_out + k;
-                if mat_idx == a_idx {
-                    data[r * old_cols + (left_y_next_abs + k)] = F::ONE;
-                    data[r * old_cols + (right_y_prev_abs + k)] = -F::ONE;
-                } else if mat_idx == b_idx {
-                    data[r * old_cols + const1_abs] = F::ONE;
+                for k in 0..y_len {
+                    let r = r_out + k;
+                    if is_a {
+                        mat.set(r, left_y_next_abs + k, F::ONE);
+                        mat.set(r, right_y_prev_abs + k, -F::ONE);
+                    } else if is_b {
+                        mat.set(r, const1_abs, F::ONE);
+                    }
                 }
+                r_out += y_len;
             }
-            r_out += y_len;
-        }
-        // Optional: witness stitching next_x(i)[k] == prev_x(i+1)[k]
-        if do_wit_stitch {
-            for i in 0..pending.len() - 1 {
+            // Optional: witness stitching next_x(i)[k] == prev_x(i+1)[k]
+            if do_wit_stitch {
+                for i in 0..pending.len() - 1 {
                 let left = &pending[i].layout;
                 let right = &pending[i + 1].layout;
                 let left_base = base_cols[i];
                 let right_base = base_cols[i + 1];
                 let const1_abs = left_base + left.const1_col_in_block;
-                for k in 0..y_len {
-                    let left_next_abs = left_base + left.pub_len + binding.y_step_offsets[k];
-                    let right_prev_abs = right_base + right.pub_len + binding.y_prev_witness_indices[k];
-                    let r = r_out + k;
-                    if mat_idx == a_idx {
-                        data[r * old_cols + left_next_abs] = F::ONE;
-                        data[r * old_cols + right_prev_abs] = -F::ONE;
-                    } else if mat_idx == b_idx {
-                        data[r * old_cols + const1_abs] = F::ONE;
+                    for k in 0..y_len {
+                        let left_next_abs = left_base + left.pub_len + binding.y_step_offsets[k];
+                        let right_prev_abs = right_base + right.pub_len + binding.y_prev_witness_indices[k];
+                        let r = r_out + k;
+                        if is_a {
+                            mat.set(r, left_next_abs, F::ONE);
+                            mat.set(r, right_prev_abs, -F::ONE);
+                        } else if is_b {
+                            mat.set(r, const1_abs, F::ONE);
+                        }
                     }
+                    r_out += y_len;
                 }
-                r_out += y_len;
             }
-        }
-        // Debug-assert: for C (idx 2) appended rows must remain zero
-        #[cfg(debug_assertions)]
-        if mat_idx == 2 {
-            for r in old_rows..new_rows {
-                let mut zero = true;
-                for c in 0..old_cols { if data[r * old_cols + c] != F::ZERO { zero = false; break; } }
-                debug_assert!(zero, "C-matrix appended row {} must be zero", r - old_rows);
+            // Debug-assert: for C (idx 2) appended rows must remain zero
+            #[cfg(debug_assertions)]
+            if (mat_idx % 3) == 2 {
+                for r in old_rows..new_rows {
+                    let row = mat.row(r);
+                    let zero = row.iter().all(|&v| v == F::ZERO);
+                    debug_assert!(zero, "C-matrix appended row {} must be zero", r - old_rows);
+                }
             }
-        }
 
-        new_mats.push(Mat::from_row_major(new_rows, old_cols, data));
-    }
+            mat
+        })
+        .collect();
+
     CcsStructure::new(new_mats, base.f.clone()).map_err(|e| format!("Failed to stitch CCS: {:?}", e))
 }
 

@@ -328,6 +328,7 @@ fn run_fibonacci_proof(fib_length: usize) -> Result<()> {
         public_input: &public_inputs,
         witness: &z,
         output_claims: &[final_claim],
+        vjs_opt: None,
     })?;
     
     let prove_time = prove_start.elapsed();

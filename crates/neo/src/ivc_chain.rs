@@ -82,7 +82,7 @@ pub fn step(mut state: State, io: &[F], witness: &[F]) -> State {
 /// Returns `Ok(Some((proof, batch_ccs, batch_public_input)))` if there were pending steps, `Ok(None)` if batch was empty.
 pub fn finalize_and_prove(mut state: State) -> anyhow::Result<Option<(crate::Proof, neo_ccs::CcsStructure<F>, Vec<F>)>> {
     // Extract pending batch (if any)
-    let Some(batch) = state.builder.finalize() else {
+    let Some(batch) = state.builder.finalize()? else {
         // No steps pending
         return Ok(None);
     };
