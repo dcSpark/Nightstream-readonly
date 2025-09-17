@@ -17,6 +17,7 @@ use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
 use anyhow::Result;
 use std::time::Instant;
+use std::env;
 
 /// Helper function to convert triplets to dense matrix data
 fn triplets_to_dense(rows: usize, cols: usize, triplets: Vec<(usize, usize, F)>) -> Vec<F> {
@@ -91,9 +92,16 @@ fn main() -> Result<()> {
     let total_start = Instant::now();
 
     // Setup
+    println!("🔄 Initializing parameters...");
     let params_start = Instant::now();
     let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
+    println!("✅ Parameters initialized in {:.2}ms", params_start.elapsed().as_secs_f64() * 1000.0);
+    
+    println!("🔄 Building step CCS...");
+    let ccs_start = Instant::now();
     let step_ccs = build_increment_step_ccs();
+    println!("✅ Step CCS built in {:.2}ms", ccs_start.elapsed().as_secs_f64() * 1000.0);
+    
     let params_time = params_start.elapsed();
 
     // Binding spec for witness layout: [1, prev_x, delta, next_x]
@@ -113,7 +121,11 @@ fn main() -> Result<()> {
     )?;
 
     // Run steps: x -> x+1
-    let num_steps = 7u64;
+    let num_steps = env::args()
+        .nth(1)
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(100u64); // Default to 100 instead of 1000
+    
     println!("Running {num_steps} increment steps...");
     let steps_start = Instant::now();
     let mut state = state0;
@@ -130,6 +142,7 @@ fn main() -> Result<()> {
     let steps_time = steps_start.elapsed();
 
     // Finalize and prove (generate the cryptographic proof)
+    println!("\n🔄 Starting proof generation...");
     let prove_start = Instant::now();
     let proof_result = ivc::finalize_and_prove(state)?;
     let prove_time = prove_start.elapsed();
