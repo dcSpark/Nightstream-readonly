@@ -27,7 +27,7 @@ fn header_digest_flip_changes_bytes(
     let base = 2 + (base_raw % 9); // base in [2..10]
 
     let me0 = MEInstance {
-        c_step_coords: vec![], // TODO: Pattern A - populate with actual pre-commit coords
+        c_step_coords: vec![], // Pattern B: Populated by IVC layer, not folding
         u_offset: 0,
         u_len: 0,
         c_coords: c.clone(),
@@ -43,7 +43,7 @@ fn header_digest_flip_changes_bytes(
     digest[idx] ^= 0x01;
 
     let me1 = MEInstance {
-        c_step_coords: vec![], // TODO: Pattern A - populate with actual pre-commit coords
+        c_step_coords: vec![], // Pattern B: Populated by IVC layer, not folding
         u_offset: 0,
         u_len: 0,
         c_coords: c,

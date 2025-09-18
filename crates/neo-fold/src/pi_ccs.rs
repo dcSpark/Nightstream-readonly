@@ -885,9 +885,9 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
             .collect();
 
         out_me.push(MeInstance{ 
-            c_step_coords: vec![],
-        u_offset: 0,  // TODO: Pattern A - populate with actual U offset
-        u_len: 0,     // TODO: Pattern A - populate with actual U length // TODO: Pattern A - populate with actual pre-commit coords
+            c_step_coords: vec![], // Pattern B: Populated by IVC layer, not folding
+            u_offset: 0,  // Pattern B: Unused (computed deterministically from witness structure)
+            u_len: 0,     // Pattern B: Unused (computed deterministically from witness structure)
             c: inst.c.clone(), 
             X, 
             r: r.clone(), 

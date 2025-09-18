@@ -37,7 +37,7 @@ fn tiny_me_and_witness() -> (MEInstance, MEWitness) {
     let w1 = vec![F::ZERO, F::ZERO, F::ZERO, F::ZERO, F::ZERO, F::ONE, F::ZERO, F::ONE];
 
     let me = MEInstance {
-        c_step_coords: vec![], // TODO: Pattern A - populate with actual pre-commit coords
+        c_step_coords: vec![], // Pattern B: Populated by IVC layer, not folding
         u_offset: 0,
         u_len: 0,
         c_coords,
