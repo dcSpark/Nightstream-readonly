@@ -93,9 +93,9 @@ pub struct MeInstance<C, F, K> {
     /// c_step_coords[i] are the coordinates of the pre-commitment (with ρ=0 for EV part)
     /// Used to enforce: c_full[i] - c_step_coords[i] = ⟨L_i, U⟩ where U = ρ·y_step
     pub c_step_coords: Vec<F>,
-    /// Pattern A: Offset where ρ-dependent part starts in witness vector
+    /// Pattern A: Offset where ρ-dependent part starts in witness vector (unused in Pattern B)
     pub u_offset: usize,
-    /// Pattern A: Length of the ρ-dependent part (typically y_len)  
+    /// Pattern A: Length of the ρ-dependent part (unused in Pattern B)
     pub u_len: usize,
 }
 

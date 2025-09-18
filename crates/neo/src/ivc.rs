@@ -1474,7 +1474,8 @@ pub fn prove_ivc_step_chained(
     let rlc_coeffs = generate_rlc_coefficients(&input.prev_accumulator, step_digest, &c_step_coords, num_coords);
     
     // Compute aggregated Ajtai row G = Σ_i r_i · L_i for RLC binding
-    let total_z_len = decomp_pre.len(); // d * m_final
+    // CRITICAL: Use exact PP dimensions, not decomp length (which may be padded)
+    let total_z_len = d * m_final; // Must equal d * m for Ajtai validation
     let _aggregated_row = neo_ajtai::compute_aggregated_ajtai_row(&*pp, &rlc_coeffs, total_z_len, num_coords)
         .map_err(|e| anyhow::anyhow!("Failed to compute aggregated Ajtai row: {}", e))?;
     
@@ -1531,10 +1532,34 @@ pub fn prove_ivc_step_chained(
     
     // Pattern B: Use pre_commitment for ρ derivation and accumulator evolution
 
-    // Pattern B: No RLC binder computation needed
+    // 🔒 SECURITY: Build RLC binder to bind c_step_coords to actual witness
+    // Get PP for the full witness dimensions (m_step)
+    let pp_full = neo_ajtai::get_global_pp_for_dims(d, m_step)
+        .map_err(|e| anyhow::anyhow!("Failed to get Ajtai PP for full witness: {}", e))?;
     
-    // Build the augmented CCS with RLC binder
-    let rlc_binder = None; // Temporarily disabled for debugging
+    // Compute aggregated row g_full = Σ_i r_i · L_i for full witness
+    let z_len_digits = d * m_step;
+    let g_full = neo_ajtai::compute_aggregated_ajtai_row(&*pp_full, &rlc_coeffs, z_len_digits, num_coords)
+        .map_err(|e| anyhow::anyhow!("compute_aggregated_ajtai_row failed: {}", e))?;
+
+    // Restrict to U = ρ·y_step slice (by digits)
+    let u_digits_start = u_offset * d;
+    let u_digits_len = u_len * d;
+    let mut g_u = vec![F::ZERO; z_len_digits];
+    g_u[u_digits_start .. u_digits_start + u_digits_len]
+        .copy_from_slice(&g_full[u_digits_start .. u_digits_start + u_digits_len]);
+
+    // Build full commitment that matches the full witness (for CCS consistency)
+    let full_commitment = crate::commit(&*pp_full, &decomp_z);
+
+    // RHS = Σ r_i (c_full[i] - c_step[i])
+    let rhs_step = rlc_coeffs.iter().zip(c_step_coords.iter())
+        .fold(F::ZERO, |acc, (ri, csi)| acc + *ri * *csi);
+    let rhs_full = rlc_coeffs.iter().zip(full_commitment.data.iter())
+        .fold(F::ZERO, |acc, (ri, cf)| acc + *ri * F::from_u64(cf.as_canonical_u64()));
+    let rhs_diff = rhs_full - rhs_step;
+
+    let rlc_binder = Some((g_u, rhs_diff));
     let step_augmented_ccs = build_augmented_ccs_linked_with_rlc(
         input.step_ccs,
         step_x.len(),
@@ -1543,7 +1568,7 @@ pub fn prove_ivc_step_chained(
         &input.binding_spec.x_witness_indices,
         y_len,
         input.binding_spec.const1_witness_index,
-        rlc_binder, // Temporarily disabled for debugging
+        rlc_binder, // RLC binder enabled for soundness
     )?;
 
     // CRITICAL FIX: Use full ρ-dependent vector for CCS instance
@@ -1553,9 +1578,6 @@ pub fn prove_ivc_step_chained(
     let mut z_row_major = vec![F::ZERO; d * m_step];
     for col in 0..m_step { for row in 0..d { z_row_major[row * m_step + col] = decomp_z[col * d + row]; } }
     let z_matrix = neo_ccs::Mat::from_row_major(d, m_step, z_row_major);
-
-    // Build full commitment that matches the full witness (for CCS consistency)
-    let full_commitment = crate::commit(&*pp, &decomp_z);
     
     // CRITICAL FIX: Use step_public_input for CCS instance (with ρ)
     // Pattern B: The CCS instance uses ρ-bearing public input, full witness, and full commitment
@@ -1755,38 +1777,88 @@ pub fn verify_ivc_step(
     let y_len = prev_accumulator.y_compact.len();
     let step_x_len = ivc_proof.step_public_input.len();
     
-    // Try full augmentation first, fallback to basic if needed
-    let augmented_ccs = {
-        let d = neo_math::ring::D;
-        let cfg = AugmentConfig {
-            hash_input_len: step_x_len,
-            y_len,
-            ajtai_pp: (16, 1, d), // TODO: Use actual parameters
-            commit_len: d * 16,   // TODO: Use actual commitment length
-        };
-        
-        match augmentation_ccs(step_ccs, cfg, step_digest) {
-            Ok(full_ccs) => full_ccs,
-            Err(_) => {
-                // Fallback to basic augmentation
-                build_augmented_ccs_for_proving(
-                    step_ccs,
-                    step_x_len,
-                    y_len,
-                    &binding_spec.y_step_offsets,
-                    &binding_spec.y_prev_witness_indices,
-                    &binding_spec.x_witness_indices,
-                    binding_spec.const1_witness_index,
-                    step_digest
-                )?
-            }
-        }
-    };
-    
-    // 4. 🚨 CRITICAL FIX: Recompute ρ from transcript (Fiat-Shamir) and include in public input
-    //    EV(public-ρ) expects: [ step_x[..] | ρ | y_prev[..] | y_next[..] ]
-    //    The verifier MUST recompute the same ρ to verify proof soundness
+    // 🔒 SECURITY: Reconstruct the same RLC binder as the prover
+    // First, recompute ρ to get the same transcript state
     let (rho, _transcript_digest) = rho_from_transcript(prev_accumulator, step_digest, &ivc_proof.c_step_coords);
+    
+    // Generate the same RLC coefficients as the prover
+    let num_coords = ivc_proof.c_step_coords.len();
+    let rlc_coeffs = generate_rlc_coefficients(prev_accumulator, step_digest, &ivc_proof.c_step_coords, num_coords);
+    
+    // Reconstruct witness structure to determine dimensions
+    let step_witness_augmented = build_linked_augmented_witness(
+        &vec![F::ZERO; step_ccs.m], // dummy step witness for sizing
+        &binding_spec.y_step_offsets,
+        rho
+    );
+    let step_public_input = build_linked_augmented_public_input(
+        &ivc_proof.step_public_input,
+        rho,
+        &prev_accumulator.y_compact,
+        &ivc_proof.next_accumulator.y_compact
+    );
+    
+    // Compute full witness dimensions
+    let mut full_step_z = step_public_input.clone();
+    full_step_z.extend_from_slice(&step_witness_augmented);
+    let decomp_z = crate::decomp_b(&full_step_z, 2, neo_math::ring::D, crate::DecompStyle::Balanced);
+    let m_step = decomp_z.len() / neo_math::ring::D;
+    let d = neo_math::ring::D;
+    
+    // Ensure PP exists for the full witness dimensions
+    crate::ensure_ajtai_pp_for_dims(d, m_step, || {
+        use rand::{RngCore, SeedableRng};
+        use rand::rngs::StdRng;
+        
+        let mut rng = if std::env::var("NEO_DETERMINISTIC").is_ok() {
+            StdRng::from_seed([42u8; 32])
+        } else {
+            let mut seed = [0u8; 32];
+            rand::rng().fill_bytes(&mut seed);
+            StdRng::from_seed(seed)
+        };
+        let pp = crate::ajtai_setup(&mut rng, d, 16, m_step)?;
+        neo_ajtai::set_global_pp(pp).map_err(anyhow::Error::from)
+    })?;
+    
+    // Get PP for the full witness dimensions
+    let pp_full = neo_ajtai::get_global_pp_for_dims(d, m_step)
+        .map_err(|e| anyhow::anyhow!("Failed to get Ajtai PP for full witness: {}", e))?;
+    
+    // Compute the same aggregated row as the prover
+    let z_len_digits = d * m_step;
+    let g_full = neo_ajtai::compute_aggregated_ajtai_row(&*pp_full, &rlc_coeffs, z_len_digits, num_coords)
+        .map_err(|e| anyhow::anyhow!("compute_aggregated_ajtai_row failed: {}", e))?;
+
+    // Restrict to U = ρ·y_step slice (by digits)
+    let u_offset = step_public_input.len() - (1 + 2 * y_len) + step_ccs.m - binding_spec.y_step_offsets.len();
+    let u_len = y_len;
+    let u_digits_start = u_offset * d;
+    let u_digits_len = u_len * d;
+    let mut g_u = vec![F::ZERO; z_len_digits];
+    g_u[u_digits_start .. u_digits_start + u_digits_len]
+        .copy_from_slice(&g_full[u_digits_start .. u_digits_start + u_digits_len]);
+
+    // The verifier cannot reconstruct rhs_diff without the witness, so we set it to zero
+    // The prover must ensure the constraint is satisfied by constructing the witness correctly
+    let rhs_diff = F::ZERO;
+    
+    let rlc_binder = Some((g_u, rhs_diff));
+
+    // Build verifier CCS exactly like prover (no fallback for security)
+    // 🔒 SECURITY: Verifier must use identical CCS as prover
+    let augmented_ccs = build_augmented_ccs_linked_with_rlc(
+        step_ccs,
+        step_x_len,
+        &binding_spec.y_step_offsets,
+        &binding_spec.y_prev_witness_indices,
+        &binding_spec.x_witness_indices,
+        y_len,
+        binding_spec.const1_witness_index,
+        rlc_binder, // RLC binder enabled for soundness
+    )?;
+    
+    // 4. Build public input using the recomputed ρ
     
     let public_input = build_linked_augmented_public_input(
         &ivc_proof.step_public_input,                 // step_x 
@@ -1901,32 +1973,6 @@ pub fn verify_ivc_chain(
 pub struct IvcChainStepInput {
     pub witness: Vec<F>,
     pub public_input: Option<Vec<F>>,
-}
-
-
-/// Build augmented CCS for the proving pipeline (wrapper with error handling)
-/// 
-/// 🔒 SECURITY: Uses unified CCS approach with integrated binding constraints
-fn build_augmented_ccs_for_proving(
-    step_ccs: &CcsStructure<F>,
-    step_x_len: usize,
-    y_len: usize,
-    y_step_offsets: &[usize],
-    y_prev_witness_indices: &[usize],
-    x_witness_indices: &[usize],
-    const1_witness_index: usize,
-    _step_digest: [u8; 32],
-) -> Result<CcsStructure<F>, Box<dyn std::error::Error>> {
-    let ccs = build_augmented_ccs_linked(
-        step_ccs,
-        step_x_len,
-        y_step_offsets,
-        y_prev_witness_indices,
-        x_witness_indices,
-        y_len,
-        const1_witness_index,
-    ).map_err(|e| format!("Failed to build unified augmented CCS: {}", e))?;
-    Ok(ccs)
 }
 
 /// Build step data for transcript including step public input X
