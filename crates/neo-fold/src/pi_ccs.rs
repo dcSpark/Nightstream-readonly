@@ -204,39 +204,6 @@ fn pad_to_pow2_k(mut v: Vec<K>, ell: usize) -> Result<Vec<K>, PiCcsError> {
 
 // ===== Blocked Parallel Matrix-Vector Multiplication =====
 
-/// Cache-friendly blocked parallel matrix-vector multiplication  
-/// Kept as fallback for high-density matrices; CSR is preferred for sparse matrices
-#[allow(dead_code)]
-#[inline]
-fn mat_vec_mul_blocked_parallel<F: Field + Send + Sync>(
-    a: &[F], 
-    n: usize, 
-    m: usize, 
-    z: &[F]
-) -> Vec<F> {
-    const BLOCK_SIZE: usize = 256; // Tune based on cache size
-    let mut result = vec![F::ZERO; n];
-    
-    // Process matrix in cache-friendly blocks
-    for k0 in (0..m).step_by(BLOCK_SIZE) {
-        let k1 = (k0 + BLOCK_SIZE).min(m);
-        
-        // Parallel across rows within each block
-        result.par_iter_mut().enumerate().for_each(|(i, result_i)| {
-            let row_slice = &a[i * m + k0..i * m + k1];
-            let z_slice = &z[k0..k1];
-            
-            // Manual unroll for better ILP
-            let mut acc = F::ZERO;
-            for j in 0..row_slice.len() {
-                acc += row_slice[j] * z_slice[j];
-            }
-            *result_i += acc;
-        });
-    }
-    result
-}
-
 #[inline]
 fn poly_mul_k(a: &[K], b: &[K]) -> Vec<K> {
     let mut out = vec![K::ZERO; a.len() + b.len() - 1];
@@ -292,35 +259,6 @@ fn absorb_sparse_polynomial(tr: &mut FoldTranscript, f: &SparsePoly<F>) {
 struct BatchingCoeffs {
     /// α coefficients for CCS constraints f(Mz)  
     alphas: Vec<K>,
-}
-
-/// Compute Y_j(u) = ⟨(M_j z), χ_u⟩ in K, for all j, then f(Y(u)) in K.
-/// This is the CCS constraint component of Q.
-#[allow(dead_code)]
-fn eval_ccs_component(
-    s: &CcsStructure<F>,
-    z: &[F],
-    mz_cache: Option<&[Vec<F>]>,   // optional cache: M_j z over F
-    u: &[K],
-) -> K {
-    let rb = neo_ccs::utils::tensor_point::<K>(u); // χ_u ∈ K^n
-    let t = s.t();
-    // M_j z rows over F (compute or reuse)
-    let mz: Vec<Vec<F>> = if let Some(cached) = mz_cache {
-        cached.to_vec()
-    } else {
-        s.matrices.iter().map(|mj| neo_ccs::utils::mat_vec_mul_ff::<F>(
-            mj.as_slice(), s.n, s.m, z
-        )).collect()
-    };
-    // Y_j(u) = Σ_i (M_j z)[i] * χ_u[i]  (promote F→K)
-    let mut y_ext = Vec::with_capacity(t);
-    for j in 0..t {
-        let mut yj = K::ZERO;
-        for i in 0..s.n { yj += K::from(mz[j][i]) * rb[i]; }
-        y_ext.push(yj);
-    }
-    s.f.eval_in_ext::<K>(&y_ext)
 }
 
 /// Evaluate range/decomposition constraint polynomials NC_i(z,Z) at point u.
@@ -453,31 +391,6 @@ pub fn eval_tie_constraints(
     }
 
     total
-}
-
-/// Evaluate the composed polynomial Q(u) = α·CCS
-/// This is what the sum-check actually proves is zero.
-///
-/// v1: RANGE and TIE are enforced outside the sum-check (Π_DEC and ME checks).
-/// This prevents the prover/verifier polynomial mismatch until proper eq() gating is implemented.
-#[allow(dead_code)]
-fn eval_composed_polynomial_q(
-    s: &CcsStructure<F>,
-    z: &[F],
-    _Z: &neo_ccs::Mat<F>,
-    mz_cache: Option<&[Vec<F>]>,
-    _claimed_y: &[Vec<K>],
-    u: &[K],
-    coeffs: &BatchingCoeffs,
-    _params: &neo_params::NeoParams,
-    instance_idx: usize,
-) -> K {
-    // CCS component: α_i · f(M_i z)(u)
-    let ccs_term = coeffs.alphas[instance_idx] * eval_ccs_component(s, z, mz_cache, u);
-    
-    // RANGE: omit in v1 (checked via Π_DEC)
-    // TIE:   omit in v1 (checked via ME/Π_RLC)
-    ccs_term
 }
 
 /// Prove Π_CCS: CCS instances satisfy constraints via sum-check

@@ -200,22 +200,6 @@ impl MeCircuit {
             })
             .collect()
     }
-
-    /// v1: y ∈ Fq; when you move y ∈ K = Fq^2, split here.
-    #[inline]
-    #[allow(dead_code)]
-    fn k_to_limbs(
-        &self,
-        x: p3_goldilocks::Goldilocks,
-    ) -> (p3_goldilocks::Goldilocks, p3_goldilocks::Goldilocks) {
-        (x, p3_goldilocks::Goldilocks::ZERO)
-    }
-
-    #[inline]
-    #[allow(dead_code)]
-    fn is_pow2(n: usize) -> bool {
-        n.is_power_of_two()
-    }
 }
 
 /// Public inputs order **must** mirror `encode_bridge_io_header()`:

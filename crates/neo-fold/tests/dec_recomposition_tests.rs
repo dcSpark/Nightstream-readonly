@@ -15,14 +15,6 @@ fn arb_f() -> impl Strategy<Value = F> {
     any::<u64>().prop_map(F::from_u64)
 }
 
-/// Generate a random K element 
-#[allow(dead_code)] // Used in some tests
-fn arb_k() -> impl Strategy<Value = K> {
-    (any::<u64>(), any::<u64>()).prop_map(|(a, b)| {
-        K::new_complex(F::from_u64(a), F::from_u64(b))
-    })
-}
-
 /// Generate a random base (2-16 for reasonable test cases)
 fn arb_base() -> impl Strategy<Value = F> {
     (2u64..=16).prop_map(F::from_u64)

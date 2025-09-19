@@ -131,15 +131,6 @@ fn fibonacci_step_witness(state: &FibState) -> (Vec<F>, FibState) {
     (w, next)
 }
 
-// DISABLED: Batching API removed for security
-#[allow(dead_code)]
-fn build_fib_batch_ccs(_params: &NeoParams, _steps: usize) -> anyhow::Result<()> {
-    // This function is disabled because the batching API was removed for security reasons
-    anyhow::bail!("Batching API has been removed for security reasons. Use the new per-step IVC API instead.")
-}
-
-// ---------- File format ----------
-
 #[derive(serde::Serialize, serde::Deserialize)]
 struct FibProofFile {
     /// Fibonacci length n used to derive the CCS

@@ -626,14 +626,6 @@ pub fn clear_vk_registry() {
     VK_REGISTRY.clear()
 }
 
-/// Clear the VK registry (internal)
-/// SECURITY: Restricted to crate-only access to prevent VK registry tampering
-#[cfg(not(any(test, feature = "testing")))]
-#[allow(dead_code)] // May be used by internal code
-pub(crate) fn clear_vk_registry() {
-    VK_REGISTRY.clear()
-}
-
 // ===============================================================================
 // 🔒 STABLE BINCODE SERIALIZATION - Critical for VK digest consistency
 // ===============================================================================
