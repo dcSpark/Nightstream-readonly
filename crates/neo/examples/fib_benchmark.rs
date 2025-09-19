@@ -152,7 +152,7 @@ fn main() -> Result<()> {
     // Allow overriding the benchmark list via env var N="10,20,50,100"
     let ns: Vec<usize> = match env::var("N") {
         Ok(s) => s.split(',').filter_map(|x| x.trim().parse().ok()).collect(),
-        Err(_) => vec![100, 1000],  // Reasonable defaults for benchmarking
+        Err(_) => vec![100, 1000, 10000, 100000],  // Reasonable defaults for benchmarking
     };
 
     // Warm-up (small n) to stabilize allocations, not timed in the table
@@ -167,11 +167,31 @@ fn main() -> Result<()> {
         results.push((n, ms, bytes));
     }
 
-    // Print all results at the end with header
-    println!("n,prover time (ms),proof size (bytes)");
+    // Print results in a nicely formatted ASCII table
+    println!("\n┌─────────┬──────────────┬────────────────────┐");
+    println!("│    n    │ Prover Time  │  Proof Size (KB)   │");
+    println!("├─────────┼──────────────┼────────────────────┤");
+    
     for (n, ms, bytes) in results {
-        println!("{},{:.0},{}", n, ms, bytes);
+        // Convert milliseconds to min:sec:ms format
+        let total_ms = ms as u64;
+        let minutes = total_ms / 60_000;
+        let seconds = (total_ms % 60_000) / 1_000;
+        let remaining_ms = total_ms % 1_000;
+        
+        let time_str = if minutes > 0 {
+            format!("{}:{:02}.{:03}", minutes, seconds, remaining_ms)
+        } else {
+            format!("{}.{:03}", seconds, remaining_ms)
+        };
+        
+        // Convert bytes to KB for readability
+        let kb = bytes as f64 / 1024.0;
+        
+        println!("│ {:>7} │ {:>12} │ {:>16.1} │", n, time_str, kb);
     }
+    
+    println!("└─────────┴──────────────┴────────────────────┘");
 
     Ok(())
 }

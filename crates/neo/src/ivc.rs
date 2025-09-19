@@ -1707,11 +1707,13 @@ pub fn prove_ivc_step_chained(
     };
 
     // 9) Package IVC proof (no per-step SNARK compression)
+    // Compute context digest for the augmented CCS and step_x (public input)
+    let context_digest = crate::context_digest_v1(&step_augmented_ccs, &step_x);
     let step_proof = crate::Proof {
         v: 2,
         circuit_key: [0u8; 32],           
         vk_digest: [0u8; 32],             
-        public_io: vec![],                
+        public_io: context_digest.to_vec(),  // Include context digest for verification
         proof_bytes: vec![],              
         public_results: y_next.clone(),   
         meta: crate::ProofMeta { num_y_compact: y_len, num_app_outputs: y_next.len() },
@@ -1780,6 +1782,21 @@ pub fn verify_ivc_step(
     // 🔒 SECURITY: Reconstruct the same RLC binder as the prover
     // First, recompute ρ to get the same transcript state
     let (rho, _transcript_digest) = rho_from_transcript(prev_accumulator, step_digest, &ivc_proof.c_step_coords);
+    
+    // --- Guard A: if the proof carries a step_rho, it must match the verifier's recomputation
+    // This prevents any attempt to smuggle an inconsistent rho alongside forged c_step_coords.
+    #[cfg(feature = "neo-logs")]
+    eprintln!("🔍 DEBUG: Verifier recomputed ρ = {}, proof.step_rho = {}", 
+              rho.as_canonical_u64(), ivc_proof.step_rho.as_canonical_u64());
+    if ivc_proof.step_rho != F::ZERO && ivc_proof.step_rho != rho {
+        #[cfg(feature = "neo-logs")]
+        eprintln!(
+            "❌ SECURITY GUARD A: Recomputed ρ ({}) != proof.step_rho ({})",
+            rho.as_canonical_u64(),
+            ivc_proof.step_rho.as_canonical_u64()
+        );
+        return Ok(false);
+    }
     
     // Generate the same RLC coefficients as the prover
     let num_coords = ivc_proof.c_step_coords.len();
