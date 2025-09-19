@@ -307,7 +307,7 @@ fn test_high_level_ivc_api() {
         step_ccs: &step_ccs,
         step_witness: &step_witness,
         prev_accumulator: &initial_acc,
-        step: 1,
+        step: 0,
         public_input: None,
         y_step: &y_step, // REAL y_step from step computation
         // 🔒 SECURITY: Using correct binding spec for identity circuit  
@@ -328,23 +328,18 @@ fn test_high_level_ivc_api() {
             println!("   Next accumulator step: {}", step_result.proof.next_accumulator.step);
             println!("   Next state length: {}", step_result.next_state.len());
             
-            // Test high-level verification  
+            // Test high-level verification - MUST use the same binding spec as prover for digest consistency
             let verify_binding_spec = neo::ivc::StepBindingSpec {
                 y_step_offsets: vec![2, 2], // Both y_step elements map to output at index 2
                 x_witness_indices: vec![], // No step public inputs
-                y_prev_witness_indices: vec![1, 1], // Both y_prev elements map to input at index 1
+                y_prev_witness_indices: vec![], // Same as prover: No binding to EV y_prev
                 const1_witness_index: 0, // Constant-1 at index 0
             };
-            match verify_ivc_step(&step_ccs, &step_result.proof, &initial_acc, &verify_binding_spec) {
-                Ok(is_valid) => {
-                    if is_valid {
-                        println!("✅ High-level IVC verification succeeded!");
-                    } else {
-                        println!("❌ High-level IVC verification failed!");
-                    }
-                }
-                Err(e) => println!("⚠️ Verification error: {}", e),
-            }
+            // Test high-level verification - this MUST succeed for the test to pass
+            let is_valid = verify_ivc_step(&step_ccs, &step_result.proof, &initial_acc, &verify_binding_spec)
+                .expect("IVC verification should not error");
+            assert!(is_valid, "IVC verification must succeed for valid proof");
+            println!("✅ High-level IVC verification succeeded!");
         }
         Err(e) => {
             println!("⚠️ High-level IVC proving error (expected in test env): {}", e);
