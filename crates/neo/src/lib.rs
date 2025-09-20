@@ -147,6 +147,10 @@ pub use ivc::{
     Accumulator, IvcProof, IvcStepInput, IvcChainProof, IvcStepResult, IvcChainStepInput,
     // High-level proving/verifying functions  
     prove_ivc_step, prove_ivc_step_with_extractor, verify_ivc_step, prove_ivc_chain, verify_ivc_chain,
+    // Folding verification functions
+    verify_ivc_step_folding,
+    verify_ivc_chain_strict,
+    recreate_mcs_instances_for_verification,
     // Step output extractors (fixes "folding with itself" issue)
     StepOutputExtractor, LastNExtractor, IndexExtractor,
     // Advanced commitment binding (production-ready)

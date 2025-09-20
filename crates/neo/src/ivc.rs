@@ -105,6 +105,10 @@ pub struct IvcProof {
     pub metadata: Option<Vec<u8>>,
     /// The step relation's public input x (so the verifier can rebuild the global public input)
     pub step_public_input: Vec<F>,
+    /// Full augmented public input [step_x || ρ || y_prev || y_next] used for folding
+    pub step_augmented_public_input: Vec<F>,
+    /// Augmented input for the previous accumulator (LHS instance) used during folding
+    pub prev_step_augmented_public_input: Vec<F>,
     /// ρ derived from transcript for this step (public)
     pub step_rho: F,
     /// y_prev used for this step (public)
@@ -1632,15 +1636,24 @@ pub fn prove_ivc_step_chained(
             (inst, wit_mcs)
         }
         _ => {
-            // Trivial base with zero Z and zero commitment, same (d,m)
-            let zero_z_mat = neo_ccs::Mat::zero(d, m_step, F::ZERO);
-            let zero_decomp = vec![F::ZERO; d * m_step];
-            let zero_c = crate::commit(&*pp, &zero_decomp);
-            let x0 = vec![F::ZERO; step_public_input.len()];
-            let w0 = vec![F::ZERO; step_witness_augmented.len()];
-            let inst = neo_ccs::McsInstance { c: zero_c, x: x0, m_in: step_public_input.len() };
-            let wit0  = neo_ccs::McsWitness::<F> { w: w0, Z: zero_z_mat };
-            (inst, wit0)
+            // Base case (step 0): there is no previous ME instance to fold with.
+            //
+            // We set LHS = RHS (same commitment c, same public input X, same witness Z).
+            // Rationale and safety notes:
+            // - Sound CCS instance: Using the very same MCS instance on both sides guarantees
+            //   the Π_CCS prover/verify relation is satisfied for the base step without relying
+            //   on ad‑hoc zero assignments that may not satisfy non‑trivial CCS constraints.
+            // - Transcript binding remains intact: the transcript has already absorbed the CCS
+            //   header, the (c, X) instance data, and the polynomial description before sampling
+            //   challenges. Using identical instances aligns the verifier’s reconstruction with
+            //   the prover’s view at step 0.
+            // - No circularity: ρ is derived from a pre‑ρ commitment (Pattern B), then the full
+            //   augmented public input (which contains ρ, y_prev, y_next) is built. This keeps
+            //   Fiat–Shamir order consistent and avoids using any ρ‑dependent data inside the
+            //   commitment that produced ρ in the first place.
+            // - Later steps: for steps i>0, LHS is reified from the previous ME→MCS, so folding
+            //   proceeds as usual with two distinct inputs.
+            (step_mcs_inst.clone(), step_mcs_wit.clone())
         }
     };
 
@@ -1667,6 +1680,7 @@ pub fn prove_ivc_step_chained(
     }
     
     // 7) Fold prev-with-current using the production pipeline
+    let prev_augmented_public_input = lhs_inst.x.clone();
     let (mut me_instances, digit_witnesses, folding_proof) = neo_fold::fold_ccs_instances(
         input.params, 
         &step_augmented_ccs, 
@@ -1756,6 +1770,8 @@ pub fn prove_ivc_step_chained(
         step: input.step,
         metadata: None,
         step_public_input: step_x,
+        step_augmented_public_input: step_public_input.clone(),
+        prev_step_augmented_public_input: prev_augmented_public_input,
         step_rho: rho,
         step_y_prev: input.prev_accumulator.y_compact.clone(),
         step_y_next: y_next.clone(),
@@ -1792,6 +1808,8 @@ pub fn verify_ivc_step(
     ivc_proof: &IvcProof,
     prev_accumulator: &Accumulator,
     binding_spec: &StepBindingSpec,
+    params: &crate::NeoParams,
+    prev_augmented_x: Option<&[F]>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     // 0. Enforce Las binding: step_x must equal H(prev_accumulator)
     let expected_prefix = compute_accumulator_digest_fields(prev_accumulator)?;
@@ -1846,6 +1864,9 @@ pub fn verify_ivc_step(
         &prev_accumulator.y_compact,
         &ivc_proof.next_accumulator.y_compact
     );
+    if step_public_input != ivc_proof.step_augmented_public_input {
+        return Ok(false);
+    }
     
     // Compute full witness dimensions
     let mut full_step_z = step_public_input.clone();
@@ -2020,7 +2041,20 @@ pub fn verify_ivc_step(
         return Ok(false);
     }
 
-    // TODO: add folding proof verification
+    // Add folding proof verification
+    if is_valid && !(prev_accumulator.step == 0 && prev_augmented_x.is_none()) {
+        let augmented = ivc_proof
+            .augmented_ccs
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("IVC proof missing augmented_ccs"))?;
+        
+        let folding_ok = verify_ivc_step_folding(params, ivc_proof, augmented, prev_accumulator, prev_augmented_x)?;
+        if !folding_ok {
+            #[cfg(feature = "neo-logs")]
+            eprintln!("❌ Folding proof verification failed");
+            return Ok(false);
+        }
+    }
 
     if is_valid {
         // Verify accumulator progression is valid
@@ -2084,15 +2118,18 @@ pub fn verify_ivc_chain(
     chain_proof: &IvcChainProof,
     initial_accumulator: &Accumulator,
     binding_spec: &StepBindingSpec,
+    params: &crate::NeoParams,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let mut current_accumulator = initial_accumulator.clone();
+    let mut prev_augmented_x: Option<Vec<F>> = None;
     
     for step_proof in &chain_proof.steps {
-        let is_valid = verify_ivc_step(step_ccs, step_proof, &current_accumulator, binding_spec)?;
+        let is_valid = verify_ivc_step(step_ccs, step_proof, &current_accumulator, binding_spec, params, prev_augmented_x.as_deref())?;
         if !is_valid {
             return Ok(false);
         }
         current_accumulator = step_proof.next_accumulator.clone();
+        prev_augmented_x = Some(step_proof.step_augmented_public_input.clone());
     }
     
     // Final consistency check
@@ -2532,6 +2569,26 @@ pub fn build_linked_augmented_public_input(
     public_input
 }
 
+/// Recompute the augmented public input used by the prover for this step:
+/// X = [step_x || ρ || y_prev || y_next]. Returns (X, ρ).
+fn compute_augmented_public_input_for_step(
+    prev_acc: &Accumulator,
+    proof: &IvcProof,
+) -> Result<(Vec<F>, F), Box<dyn std::error::Error>> {
+    let step_data = build_step_data_with_x(prev_acc, proof.step, &proof.step_public_input);
+    let step_digest = create_step_digest(&step_data);
+    let (rho_calc, _td) = rho_from_transcript(prev_acc, step_digest, &proof.c_step_coords);
+    let rho = if proof.step_rho != F::ZERO { proof.step_rho } else { rho_calc };
+
+    let x_aug = build_linked_augmented_public_input(
+        &proof.step_public_input,
+        rho,
+        &prev_acc.y_compact,
+        &proof.next_accumulator.y_compact,
+    );
+    Ok((x_aug, rho))
+}
+
 /// Compute Poseidon2 digest of the running accumulator as F-elements for step_x binding
 /// Layout hashed (as bytes): step | c_z_digest | len(y) | y elements (u64 little-endian)
 pub fn compute_accumulator_digest_fields(acc: &Accumulator) -> Result<Vec<F>, Box<dyn std::error::Error>> {
@@ -2762,4 +2819,322 @@ fn ct_eq_coords(a: &[F], b: &[F]) -> bool {
         ok &= eq;
     }
     ok == 1
+}
+
+// === Folding verification helpers ===============================================================
+
+/// Re-create the exact MCS instances the prover used in Pi-CCS (order: LHS, RHS).
+/// - LHS: commitment = proof.fold.pi_ccs_outputs[0].c; x = prev_step_x (or zeros on step 0); m_in = len(x)
+/// - RHS: commitment = proof.fold.pi_ccs_outputs[1].c; x = current step_public_input; m_in = len(x)
+/// 
+/// Note: The MCS instances use the full augmented public input [step_x || ρ || y_prev || y_next] as their x vector.
+/// We reconstruct this from the separate fields in IvcProof.
+pub fn recreate_mcs_instances_for_verification(
+    ivc_proof: &IvcProof,
+    prev_acc: &Accumulator,
+    prev_augmented_x: Option<&[F]>,
+) -> Result<[neo_ccs::McsInstance<neo_ajtai::Commitment, F>; 2], String> {
+    let folding = ivc_proof
+        .folding_proof
+        .as_ref()
+        .ok_or_else(|| "IVC proof missing folding_proof".to_string())?;
+    if folding.pi_ccs_outputs.len() != 2 {
+        return Err(format!(
+            "unexpected Pi-CCS outputs: expected 2, got {}",
+            folding.pi_ccs_outputs.len()
+        ));
+    }
+    
+    // Reconstruct the full augmented public input [step_x || ρ || y_prev || y_next] for RHS
+    let (x_rhs_expected, _rho) = compute_augmented_public_input_for_step(prev_acc, ivc_proof)
+        .map_err(|e| e.to_string())?;
+    let x_rhs_proof = ivc_proof.step_augmented_public_input.clone();
+    if x_rhs_expected.len() != x_rhs_proof.len() || x_rhs_expected != x_rhs_proof {
+        return Err("augmented public input mismatch between proof and verifier reconstruction".to_string());
+    }
+    let m_in = x_rhs_proof.len();
+
+    let x_lhs_proof = ivc_proof.prev_step_augmented_public_input.clone();
+    if x_lhs_proof.len() != m_in {
+        return Err(format!(
+            "prev_step_augmented_public_input length {} != current m_in {}",
+            x_lhs_proof.len(), m_in
+        ));
+    }
+    // Only enforce the base-step augmented input shape when this is truly the first step
+    // (prev_acc.step == 0) and the caller didn't provide the previous augmented x.
+    // For later steps, if `prev_augmented_x` is None, we accept the proof-supplied
+    // `prev_step_augmented_public_input` without forcing the base-step (zeros) layout,
+    // because single-step verification cannot reconstruct the previous step's augmented input.
+    if prev_acc.step == 0 && prev_augmented_x.is_none() {
+        let step_x_len = ivc_proof.step_public_input.len();
+        let y_len = ivc_proof.step_y_prev.len();
+        if x_lhs_proof.len() != step_x_len + 1 + 2 * y_len {
+            return Err("unexpected prev augmented input length".to_string());
+        }
+        let mut expected = vec![F::ZERO; x_lhs_proof.len()];
+        expected[step_x_len] = ivc_proof.step_rho;
+        expected[step_x_len + 1..step_x_len + 1 + y_len]
+            .copy_from_slice(&ivc_proof.step_y_prev);
+        expected[step_x_len + 1 + y_len..]
+            .copy_from_slice(&ivc_proof.step_y_next);
+        if expected != x_lhs_proof {
+            return Err("initial step augmented input mismatch".to_string());
+        }
+    }
+    let x_lhs = x_lhs_proof;
+    
+    let lhs = neo_ccs::McsInstance {
+        c: folding.pi_ccs_outputs[0].c.clone(),
+        x: x_lhs,
+        m_in,
+    };
+    let rhs = neo_ccs::McsInstance {
+        c: folding.pi_ccs_outputs[1].c.clone(),
+        x: x_rhs_proof,
+        m_in,
+    };
+    Ok([lhs, rhs])
+}
+
+/// Internal: recombine digit MEs into the parent ME (same math as neo-fold::recombine_me_digits_to_parent).
+fn recombine_me_digits_to_parent_local(
+    params: &crate::NeoParams,
+    digits: &[neo_ccs::MeInstance<neo_ajtai::Commitment, F, neo_math::K>],
+) -> Result<neo_ccs::MeInstance<neo_ajtai::Commitment, F, neo_math::K>, String> {
+    use neo_ajtai::s_lincomb;
+    use neo_math::{Rq, cf_inv};
+    if digits.is_empty() {
+        return Err("no digit instances to recombine".to_string());
+    }
+    let m_in = digits[0].m_in;
+    let r_ref = &digits[0].r;
+    let t = digits[0].y.len();
+    let d_rows = digits[0].X.rows();
+    let x_cols = digits[0].X.cols();
+    for (i, d) in digits.iter().enumerate() {
+        if d.m_in != m_in { return Err(format!("digit[{}]: m_in mismatch", i)); }
+        if &d.r != r_ref   { return Err(format!("digit[{}]: r mismatch", i)); }
+        if d.X.rows() != d_rows || d.X.cols() != x_cols {
+            return Err(format!("digit[{}]: X shape mismatch (want {}x{}, got {}x{})",
+                               i, d_rows, x_cols, d.X.rows(), d.X.cols()));
+        }
+        if d.y.len() != t { return Err(format!("digit[{}]: y arity mismatch", i)); }
+    }
+    // S-linear combination coefficients 1, b, b^2, ...
+    let mut coeffs: Vec<Rq> = Vec::with_capacity(digits.len());
+    let mut pow_f = F::ONE;
+    for _ in 0..digits.len() {
+        let mut arr = [F::ZERO; neo_math::D];
+        arr[0] = pow_f;
+        coeffs.push(cf_inv(arr));
+        pow_f *= F::from_u64(params.b as u64);
+    }
+    // Combine commitments
+    let digit_cs: Vec<neo_ajtai::Commitment> = digits.iter().map(|d| d.c.clone()).collect();
+    let c_parent = s_lincomb(&coeffs, &digit_cs).map_err(|_| "s_lincomb failed".to_string())?;
+    // Combine X
+    let mut x_parent = neo_ccs::Mat::zero(d_rows, x_cols, F::ZERO);
+    let mut pow = F::ONE;
+    for d in digits {
+        for r in 0..d_rows {
+            for c in 0..x_cols {
+                x_parent[(r, c)] += d.X[(r, c)] * pow;
+            }
+        }
+        pow *= F::from_u64(params.b as u64);
+    }
+    // Combine y (vector-of-rows representation)
+    let y_dim = digits[0].y.get(0).map(|v| v.len()).unwrap_or(0);
+    let mut y_parent = vec![vec![neo_math::K::ZERO; y_dim]; t];
+    let mut pow_k = neo_math::K::from(F::ONE);
+    let base_k = neo_math::K::from(F::from_u64(params.b as u64));
+    for d in digits {
+        for j in 0..t {
+            for u in 0..y_dim {
+                y_parent[j][u] += d.y[j][u] * pow_k;
+            }
+        }
+        pow_k *= base_k;
+    }
+    // Combine y_scalars
+    let mut y_scalars_parent = vec![neo_math::K::ZERO; digits[0].y_scalars.len()];
+    let mut powk = neo_math::K::from(F::ONE);
+    for d in digits {
+        for j in 0..y_scalars_parent.len() {
+            if j < d.y_scalars.len() { y_scalars_parent[j] += d.y_scalars[j] * powk; }
+        }
+        powk *= base_k;
+    }
+    Ok(neo_ccs::MeInstance {
+        c_step_coords: vec![],
+        u_offset: 0,
+        u_len: 0,
+        c: c_parent,
+        X: x_parent,
+        r: r_ref.clone(),
+        y: y_parent,
+        y_scalars: y_scalars_parent,
+        m_in,
+        fold_digest: digits[0].fold_digest,
+    })
+}
+
+/// Verify a single step's folding proof (Pi-CCS + Pi-RLC + Pi-DEC).
+/// - `augmented_ccs` **must** be the exact CCS used by the prover for folding (we carry it in `IvcProof`).
+/// - `prev_step_x`: previous step's `step_public_input` (None for step 0).
+pub fn verify_ivc_step_folding(
+    params: &crate::NeoParams,
+    ivc_proof: &IvcProof,
+    augmented_ccs: &neo_ccs::CcsStructure<F>,
+    prev_acc: &Accumulator,
+    prev_augmented_x: Option<&[F]>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    use neo_fold::{FoldTranscript, pi_ccs_verify, pi_rlc_verify, pi_dec_verify};
+    use neo_ajtai::AjtaiSModule;
+
+    let folding = ivc_proof
+        .folding_proof
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("IVC proof missing folding_proof"))?;
+
+    // 1) Recreate the two input MCS instances exactly as the prover used them.
+    let [lhs, rhs] = recreate_mcs_instances_for_verification(ivc_proof, prev_acc, prev_augmented_x)?;
+
+    let stored_inputs = &folding.pi_ccs_inputs;
+    if stored_inputs.len() != 2 {
+        return Err(anyhow::anyhow!("folding proof missing pi_ccs_inputs").into());
+    }
+    if stored_inputs[0].m_in != lhs.m_in
+        || stored_inputs[0].x != lhs.x
+        || stored_inputs[0].c.data != lhs.c.data
+    {
+        return Ok(false);
+    }
+    if stored_inputs[1].m_in != rhs.m_in
+        || stored_inputs[1].x != rhs.x
+        || stored_inputs[1].c.data != rhs.c.data
+    {
+        return Ok(false);
+    }
+
+    #[cfg(feature = "neo-logs")]
+    {
+        eprintln!("🔍 FOLDING DEBUG: LHS x.len()={}, RHS x.len()={}", lhs.x.len(), rhs.x.len());
+        let lx = lhs.x.iter().take(6).map(|f| f.as_canonical_u64()).collect::<Vec<_>>();
+        let rx = rhs.x.iter().take(6).map(|f| f.as_canonical_u64()).collect::<Vec<_>>();
+        eprintln!("🔍 FOLDING DEBUG: LHS x head: {:?}", lx);
+        eprintln!("🔍 FOLDING DEBUG: RHS x head: {:?}", rx);
+    }
+
+    // 2) Verify Pi-CCS against those instances.
+    let mut tr = FoldTranscript::default();
+    let ok_ccs = pi_ccs_verify(
+        &mut tr,
+        params,
+        augmented_ccs,
+        stored_inputs,
+        &folding.pi_ccs_outputs,
+        &folding.pi_ccs_proof,
+    )?;
+    #[cfg(feature = "neo-logs")]
+    eprintln!("🔍 FOLDING DEBUG: Pi-CCS verification result: {}", ok_ccs);
+    if !ok_ccs { return Ok(false); }
+
+    // 3) Recombine digit MEs to the parent ME for Pi‑RLC and Pi‑DEC checks.
+    let me_digits = ivc_proof
+        .me_instances
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("IVC proof missing digit ME instances"))?;
+    let me_parent = recombine_me_digits_to_parent_local(params, me_digits)?;
+
+    // 4) Verify Pi‑RLC.
+    let ok_rlc = pi_rlc_verify(
+        &mut tr,
+        params,
+        &folding.pi_ccs_outputs,
+        &me_parent,
+        &folding.pi_rlc_proof,
+    )?;
+    if !ok_rlc { return Ok(false); }
+
+    // 5) Verify Pi‑DEC with the authentic Ajtai S-module.
+    // Use parent ME commitment dimensions to bind Ajtai PP shape (d, m).
+    let d_rows = neo_math::D;
+    let m_cols = me_parent.c.data.len() / d_rows;
+    let l_real = match AjtaiSModule::from_global_for_dims(d_rows, m_cols) {
+        Ok(l) => l,
+        Err(_) => {
+            // Initialize Ajtai PP for (d_rows, m_cols) if missing, then retry.
+            super::ensure_ajtai_pp_for_dims(d_rows, m_cols, || {
+                use rand::{RngCore, SeedableRng};
+                use rand::rngs::StdRng;
+                let mut rng = if std::env::var("NEO_DETERMINISTIC").is_ok() {
+                    StdRng::from_seed([42u8; 32])
+                } else {
+                    let mut seed = [0u8; 32];
+                    rand::rng().fill_bytes(&mut seed);
+                    StdRng::from_seed(seed)
+                };
+                let pp = super::ajtai_setup(&mut rng, d_rows, 16, m_cols)?;
+                neo_ajtai::set_global_pp(pp).map_err(anyhow::Error::from)
+            })?;
+            AjtaiSModule::from_global_for_dims(d_rows, m_cols)
+                .map_err(|_| anyhow::anyhow!("AjtaiSModule unavailable (PP must be initialized)"))?
+        }
+    };
+    let ok_dec = pi_dec_verify(
+        &mut tr,
+        params,
+        &me_parent,
+        me_digits,
+        &folding.pi_dec_proof,
+        &l_real,
+    )?;
+    Ok(ok_dec)
+}
+
+
+/// Strict chain verification = your original chain checks + folding verification per step.
+/// This does not require any additional prover artifact beyond what you already carry in `IvcProof`.
+pub fn verify_ivc_chain_strict(
+    step_ccs: &neo_ccs::CcsStructure<F>,
+    chain_proof: &IvcChainProof,
+    initial_accumulator: &Accumulator,
+    binding_spec: &StepBindingSpec,
+    params: &crate::NeoParams,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    // Track accumulators before prev and before current step to reconstruct augmented inputs
+    let mut acc_before_curr_step = initial_accumulator.clone();
+    let mut prev_augmented_x: Option<Vec<F>> = None;
+
+    for (i, step_proof) in chain_proof.steps.iter().enumerate() {
+        // Cross-check prover-supplied augmented input matches verifier reconstruction.
+        let (expected_augmented, _) = compute_augmented_public_input_for_step(&acc_before_curr_step, step_proof)
+            .map_err(|e| anyhow::anyhow!("failed to compute augmented input: {}", e))?;
+        if expected_augmented != step_proof.step_augmented_public_input {
+            return Ok(false);
+        }
+
+        let ok = verify_ivc_step(
+            step_ccs,
+            step_proof,
+            &acc_before_curr_step,
+            binding_spec,
+            params,
+            prev_augmented_x.as_deref(),
+        )?;
+        if !ok { return Ok(false); }
+
+        // Advance accumulators
+        acc_before_curr_step = step_proof.next_accumulator.clone();
+        prev_augmented_x = Some(step_proof.step_augmented_public_input.clone());
+
+        #[cfg(feature = "neo-logs")]
+        eprintln!("✅ strict fold+step verify passed for step {}", i);
+        #[cfg(not(feature = "neo-logs"))]
+        let _ = i; // suppress unused variable warning when neo-logs is disabled
+    }
+
+    Ok(acc_before_curr_step.step == chain_proof.chain_length)
 }

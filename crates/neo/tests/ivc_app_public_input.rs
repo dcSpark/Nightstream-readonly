@@ -76,7 +76,7 @@ fn tampered_digest_prefix_rejected() {
     if !forged.step_public_input.is_empty() {
         forged.step_public_input[0] = F::from_u64(999);
     }
-    let valid = verify_ivc_step(&step_ccs, &forged, &prev_acc, &binding).expect("verifier should not error");
+    let valid = verify_ivc_step(&step_ccs, &forged, &prev_acc, &binding, &params, None).expect("verifier should not error");
     assert!(!valid, "verifier must reject when digest prefix does not match H(prev_acc)");
 }
 

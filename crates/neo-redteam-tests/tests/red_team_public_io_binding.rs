@@ -116,7 +116,7 @@ fn test_public_io_digest_matches_augmented_pi() -> Result<()> {
     // the FULL augmented public input, not just x
     // 
     // We reconstruct what the verifier should compute and check it matches
-    let is_valid = verify_ivc_step(&step_ccs, &proof, &initial_acc, &binding_spec)
+    let is_valid = verify_ivc_step(&step_ccs, &proof, &initial_acc, &binding_spec, &params, None)
         .map_err(|e| anyhow::anyhow!("Verification failed: {}", e))?;
     
     if !is_valid {
@@ -195,7 +195,7 @@ fn test_verifier_rejects_when_augmented_pi_changes_but_x_same() -> Result<()> {
     
     // Critical test: Try to verify proof A against accumulator B
     // This should FAIL because y_prev is different (0 vs 10) even though x is the same
-    let cross_verify = verify_ivc_step(&step_ccs, &result_a.proof, &acc_b, &binding_spec)
+    let cross_verify = verify_ivc_step(&step_ccs, &result_a.proof, &acc_b, &binding_spec, &params, None)
         .map_err(|e| anyhow::anyhow!("Cross-verification failed: {}", e))?;
     
     if cross_verify {
@@ -561,7 +561,7 @@ fn test_verifier_accepts_with_mismatched_prev_acc_vulnerability() -> Result<()> 
     let proof = step_result.proof;
     
     // Positive control: A should verify
-    let valid_verify = verify_ivc_step(&step_ccs, &proof, &prev_acc_a, &binding_spec)
+    let valid_verify = verify_ivc_step(&step_ccs, &proof, &prev_acc_a, &binding_spec, &params, None)
         .map_err(|e| anyhow::anyhow!("Verifier error for A: {}", e))?;
     
     if !valid_verify {
@@ -579,7 +579,7 @@ fn test_verifier_accepts_with_mismatched_prev_acc_vulnerability() -> Result<()> 
     
     // CRITICAL TEST: With a sound verifier, this MUST be REJECTED 
     // because y_prev is bound in the witness but the accumulator has different y_prev
-    let accepted = verify_ivc_step(&step_ccs, &proof, &prev_acc_b, &binding_spec)
+    let accepted = verify_ivc_step(&step_ccs, &proof, &prev_acc_b, &binding_spec, &params, None)
         .unwrap_or(false);
     
     if accepted {
@@ -652,7 +652,7 @@ fn test_vulnerability_when_y_prev_not_bound() -> Result<()> {
     let proof = step_result.proof;
     
     // Test against the original prev_acc A (y_prev=0)
-    let accepted_a = verify_ivc_step(&step_ccs, &proof, &prev_acc_a, &binding_spec)
+    let accepted_a = verify_ivc_step(&step_ccs, &proof, &prev_acc_a, &binding_spec, &params, None)
         .unwrap_or(false);
     
     // Test against a different prev_acc B (y_prev=999)
@@ -663,7 +663,7 @@ fn test_vulnerability_when_y_prev_not_bound() -> Result<()> {
         step: 0,
     };
     
-    let accepted_b = verify_ivc_step(&step_ccs, &proof, &prev_acc_b, &binding_spec)
+    let accepted_b = verify_ivc_step(&step_ccs, &proof, &prev_acc_b, &binding_spec, &params, None)
         .unwrap_or(false);
     
     if accepted_a && accepted_b {
@@ -746,11 +746,11 @@ fn test_context_digest_provides_automatic_y_prev_binding() -> Result<()> {
     let proof = step_result.proof;
     
     // Verify against the correct prev_acc_a
-    let accepted_a = verify_ivc_step(&step_ccs, &proof, &prev_acc_a, &binding_spec)
+    let accepted_a = verify_ivc_step(&step_ccs, &proof, &prev_acc_a, &binding_spec, &params, None)
         .unwrap_or(false);
     
     // Try to verify against different prev_acc_b  
-    let accepted_b = verify_ivc_step(&step_ccs, &proof, &prev_acc_b, &binding_spec)
+    let accepted_b = verify_ivc_step(&step_ccs, &proof, &prev_acc_b, &binding_spec, &params, None)
         .unwrap_or(false);
     
     println!("   📊 Results:");
@@ -833,11 +833,11 @@ fn test_step_index_manipulation_attack() -> Result<()> {
     let proof = step_result.proof;
     
     // Verify against correct step 0
-    let accepted_step_0 = verify_ivc_step(&step_ccs, &proof, &acc_step_0, &binding_spec)
+    let accepted_step_0 = verify_ivc_step(&step_ccs, &proof, &acc_step_0, &binding_spec, &params, None)
         .unwrap_or(false);
     
     // Try to verify same proof against step 1 accumulator
-    let accepted_step_1 = verify_ivc_step(&step_ccs, &proof, &acc_step_1, &binding_spec)
+    let accepted_step_1 = verify_ivc_step(&step_ccs, &proof, &acc_step_1, &binding_spec, &params, None)
         .unwrap_or(false);
     
     println!("   📊 Step Index Manipulation Results:");
@@ -917,11 +917,11 @@ fn test_public_input_prefix_attack() -> Result<()> {
     let proof = step_result.proof;
     
     // Verify against correct accumulator A
-    let accepted_a = verify_ivc_step(&step_ccs, &proof, &acc_a, &binding_spec)
+    let accepted_a = verify_ivc_step(&step_ccs, &proof, &acc_a, &binding_spec, &params, None)
         .unwrap_or(false);
     
     // Try to verify same proof against accumulator B (different c_z_digest)
-    let accepted_b = verify_ivc_step(&step_ccs, &proof, &acc_b, &binding_spec)
+    let accepted_b = verify_ivc_step(&step_ccs, &proof, &acc_b, &binding_spec, &params, None)
         .unwrap_or(false);
     
     println!("   📊 Public Input Prefix Attack Results:");
@@ -1001,7 +1001,7 @@ fn test_public_io_malleability_attack() -> Result<()> {
     let proof = step_result.proof;
     
     // Verify original proof works
-    let original_valid = verify_ivc_step(&step_ccs, &proof, &acc_original, &binding_spec)
+    let original_valid = verify_ivc_step(&step_ccs, &proof, &acc_original, &binding_spec, &params, None)
         .unwrap_or(false);
     
     println!("   📊 Original proof verification: {}", original_valid);
@@ -1026,11 +1026,11 @@ fn test_public_io_malleability_attack() -> Result<()> {
         println!("   🔧 Modified public_io: changed first y_next from 35 to 235");
         
         // Try to verify against acc_original with manipulated proof
-        let malicious_accepted_original = verify_ivc_step(&step_ccs, &malicious_proof, &acc_original, &binding_spec)
+        let malicious_accepted_original = verify_ivc_step(&step_ccs, &malicious_proof, &acc_original, &binding_spec, &params, None)
             .unwrap_or(false);
         
         // Try to verify against acc_target with manipulated proof  
-        let malicious_accepted_target = verify_ivc_step(&step_ccs, &malicious_proof, &acc_target, &binding_spec)
+        let malicious_accepted_target = verify_ivc_step(&step_ccs, &malicious_proof, &acc_target, &binding_spec, &params, None)
             .unwrap_or(false);
         
         println!("   📊 Malicious proof results:");
@@ -1101,7 +1101,7 @@ fn test_zero_rho_bypass_attack() -> Result<()> {
     let mut proof = step_result.proof;
     
     // Verify original proof works
-    let original_valid = verify_ivc_step(&step_ccs, &proof, &acc_original, &binding_spec)
+    let original_valid = verify_ivc_step(&step_ccs, &proof, &acc_original, &binding_spec, &params, None)
         .unwrap_or(false);
     
     if !original_valid {
@@ -1118,7 +1118,7 @@ fn test_zero_rho_bypass_attack() -> Result<()> {
         println!("   - Forged c_step_coords[0] by adding 42");
         println!("   - Set step_rho to ZERO to bypass guard");
         
-        let malicious_accepted = verify_ivc_step(&step_ccs, &proof, &acc_original, &binding_spec)
+        let malicious_accepted = verify_ivc_step(&step_ccs, &proof, &acc_original, &binding_spec, &params, None)
             .unwrap_or(false);
         
         println!("   📊 Zero ρ Bypass Results:");
@@ -1190,7 +1190,7 @@ fn test_coordinated_rho_coordinates_attack() -> Result<()> {
     let mut proof = step_result.proof;
     
     // Verify original proof works
-    let original_valid = verify_ivc_step(&step_ccs, &proof, &acc_original, &binding_spec)
+    let original_valid = verify_ivc_step(&step_ccs, &proof, &acc_original, &binding_spec, &params, None)
         .unwrap_or(false);
     
     if !original_valid {
@@ -1218,7 +1218,7 @@ fn test_coordinated_rho_coordinates_attack() -> Result<()> {
         println!("   - Original step_rho: {}", original_rho.as_canonical_u64());
         println!("   - Recomputed step_rho: {}", proof.step_rho.as_canonical_u64());
         
-        let malicious_accepted = verify_ivc_step(&step_ccs, &proof, &acc_original, &binding_spec)
+        let malicious_accepted = verify_ivc_step(&step_ccs, &proof, &acc_original, &binding_spec, &params, None)
             .unwrap_or(false);
         
         println!("   📊 Coordinated Attack Results:");

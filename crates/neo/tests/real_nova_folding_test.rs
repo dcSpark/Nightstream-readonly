@@ -137,7 +137,7 @@ fn test_real_nova_folding_5_steps() -> Result<(), Box<dyn std::error::Error + Se
         
         // 🔍 VALIDATION 0: Verify the proof is valid
         use neo::ivc::verify_ivc_step;
-        let is_valid = verify_ivc_step(&step_ccs, &step_result.proof, &current_accumulator, &binding_spec)
+        let is_valid = verify_ivc_step(&step_ccs, &step_result.proof, &current_accumulator, &binding_spec, &params, None)
             .expect("IVC verification should not error");
         assert!(is_valid, "IVC step verification must succeed for step {}", step_i);
         println!("   ✅ Step {} verification: PASSED", step_i);
@@ -273,7 +273,7 @@ fn test_folding_equation_validation() -> Result<(), Box<dyn std::error::Error + 
     
     // Verify the proof is valid
     use neo::ivc::verify_ivc_step;
-    let is_valid = verify_ivc_step(&step_ccs, &step_result.proof, &initial_accumulator, &binding_spec)
+    let is_valid = verify_ivc_step(&step_ccs, &step_result.proof, &initial_accumulator, &binding_spec, &params, None)
         .expect("IVC verification should not error");
     assert!(is_valid, "IVC step verification must succeed");
     println!("✅ Step verification: PASSED");

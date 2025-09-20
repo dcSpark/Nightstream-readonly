@@ -101,7 +101,7 @@ fn test_ivc_proof_with_forged_coords() -> Result<()> {
     
     // --- Positive control: the unmodified proof must verify
     println!("🔍 Verifying original (unmodified) IVC proof as positive control...");
-    let ok_original = match ivc::verify_ivc_step(&step_ccs, &valid_proof, &initial_acc, &binding_spec) {
+    let ok_original = match ivc::verify_ivc_step(&step_ccs, &valid_proof, &initial_acc, &binding_spec, &params, None) {
         Ok(result) => {
             println!("   Verification returned: {}", result);
             result
@@ -148,7 +148,7 @@ fn test_ivc_proof_with_forged_coords() -> Result<()> {
     valid_proof.c_step_coords = forged_coords;
 
     // Test verification with forged coordinates
-    let forged_result = match ivc::verify_ivc_step(&step_ccs, &valid_proof, &initial_acc, &binding_spec) {
+    let forged_result = match ivc::verify_ivc_step(&step_ccs, &valid_proof, &initial_acc, &binding_spec, &params, None) {
         Ok(result) => result,
         Err(e) => {
             println!("⚠️  Forged proof verification failed with error: {}", e);
@@ -225,7 +225,7 @@ fn test_multiple_forged_coords() -> Result<()> {
     
     // --- Positive control: the unmodified proof must verify
     println!("🔍 Verifying original (unmodified) IVC proof as positive control...");
-    let ok_original = match ivc::verify_ivc_step(&step_ccs, &original_proof, &initial_acc, &binding_spec) {
+    let ok_original = match ivc::verify_ivc_step(&step_ccs, &original_proof, &initial_acc, &binding_spec, &params, None) {
         Ok(result) => {
             println!("   Verification returned: {}", result);
             result
@@ -261,7 +261,7 @@ fn test_multiple_forged_coords() -> Result<()> {
         
         forged_proof.c_step_coords = forged_coords;
         
-        match ivc::verify_ivc_step(&step_ccs, &forged_proof, &initial_acc, &binding_spec) {
+        match ivc::verify_ivc_step(&step_ccs, &forged_proof, &initial_acc, &binding_spec, &params, None) {
             Ok(true) => {
                 accepted_count += 1;
                 println!("  Trial {}: ❌ ACCEPTED (unsound)", trial);

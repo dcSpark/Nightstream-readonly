@@ -130,7 +130,7 @@ fn verifier_rejects_tampered_step_x() {
     forged.step_public_input = vec![F::from_u64(999), F::from_u64(888), F::from_u64(777), F::from_u64(666)];
 
     // Verifier must reject tampered x
-    let is_valid = verify_ivc_step(&step_ccs, &forged, &prev_acc, &binding).expect("verify must not error");
+    let is_valid = verify_ivc_step(&step_ccs, &forged, &prev_acc, &binding, &params, None).expect("verify must not error");
     assert!(!is_valid, "verifier should reject proof with tampered step_x");
 }
 

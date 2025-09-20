@@ -336,7 +336,7 @@ fn test_high_level_ivc_api() {
                 const1_witness_index: 0, // Constant-1 at index 0
             };
             // Test high-level verification - this MUST succeed for the test to pass
-            let is_valid = verify_ivc_step(&step_ccs, &step_result.proof, &initial_acc, &verify_binding_spec)
+            let is_valid = verify_ivc_step(&step_ccs, &step_result.proof, &initial_acc, &verify_binding_spec, &params, None)
                 .expect("IVC verification should not error");
             assert!(is_valid, "IVC verification must succeed for valid proof");
             println!("✅ High-level IVC verification succeeded!");

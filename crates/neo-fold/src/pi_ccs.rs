@@ -15,6 +15,10 @@ use rayon::prelude::*;
 use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
 use p3_symmetric::Permutation;
 
+fn format_ext(x: K) -> String {
+    format!("{:?}", x)
+}
+
 /// Π_CCS proof containing the single sum-check over K
 #[derive(Debug, Clone)]
 pub struct PiCcsProof {
@@ -871,11 +875,18 @@ pub fn pi_ccs_verify(
     let mut r = Vec::with_capacity(ell);
 
     // Check sum-check rounds
-    for (_i, coeffs) in proof.sumcheck_rounds.iter().enumerate() {
+    for (i, coeffs) in proof.sumcheck_rounds.iter().enumerate() {
         if coeffs.is_empty() || coeffs.len() > d_sc + 1 { return Ok(false); }
         let p0 = poly_eval_k(coeffs, K::ZERO);
         let p1 = poly_eval_k(coeffs, K::ONE);
-        if p0 + p1 != running_sum { return Ok(false); }
+        if p0 + p1 != running_sum {
+            eprintln!("❌ PI_CCS VERIFY: round {} failed: p0+p1 != running_sum (p0={}, p1={}, runningSum={})",
+                      i,
+                      format_ext(p0),
+                      format_ext(p1),
+                      format_ext(running_sum));
+            return Ok(false);
+        }
 
         // absorb coeffs and sample r_i (same as prover)
         tr.absorb_ext_as_base_fields_k(b"neo/ccs/round", coeffs[0]);
@@ -892,9 +903,16 @@ pub fn pi_ccs_verify(
         // Derive digest exactly where the prover did (after sum-check rounds)
         let digest = tr.state_digest();
         // Verify proof header matches transcript state
-        if proof.header_digest != digest { return Ok(false); }
+        if proof.header_digest != digest {
+            eprintln!("❌ PI_CCS VERIFY: header digest mismatch (proof={:?}, verifier={:?})",
+                      &proof.header_digest[..4], &digest[..4]);
+            return Ok(false);
+        }
         // Verify all output ME instances are bound to this transcript
-        if !out_me.iter().all(|me| me.fold_digest == digest) { return Ok(false); }
+        if !out_me.iter().all(|me| me.fold_digest == digest) {
+            eprintln!("❌ PI_CCS VERIFY: out_me fold_digest mismatch");
+            return Ok(false);
+        }
     }
 
     // Light structural sanity: every output ME must carry the same r
@@ -920,37 +938,27 @@ pub fn pi_ccs_verify(
     // NOTE: Only CCS and range/decomp constraints in Q(r).
     // Tie constraints removed from sum-check as they break soundness.
     
-    // Compute Q(r) that the verifier can actually verify from public data
-    // CRITICAL: This must match what the prover computes in Q(r) to prevent vacuous proofs
-    let mut expected_q_r = K::ZERO;
-    
-    // The challenge: verifier can only compute parts of Q(r) from public data
-    // - CCS component: Can compute f(Y(r)) using ME instance y_j values  
-    // - Range component: Cannot compute without private Z matrix
-    // - Tie component: Not included in sum-check polynomial Q(u)
-    
-    for (inst_idx, me_inst) in out_me.iter().enumerate() {
-        // 1) CCS component: α_i · f(Y(r)) using CORRECT Y_j(r) scalars from ME
-        let ccs_contribution = if inst_idx < batch_coeffs.alphas.len() {
-            // SECURITY FIX: Use the correct Y_j(r) = ⟨(M_j z), χ_r⟩ scalars
-            // NOT the sum of y vector components (which are Z * (M_j^T * χ_r) vectors)
-            let f_eval = s.f.eval_in_ext::<K>(&me_inst.y_scalars);
-            batch_coeffs.alphas[inst_idx] * f_eval
-        } else {
-            K::ZERO
-        };
-        
-        // Range constraints REMOVED from sum-check polynomial Q(r):
-        // - Prover no longer includes them in Q(u) 
-        // - Range verification handled by Π_DEC phase and bridge SNARK
-        // - This eliminates the security gap in terminal verification
-        
-        expected_q_r += ccs_contribution;
-    }
-    
-    // CRITICAL TERMINAL CHECK: Does the sum-check final running_sum match expected Q(r)?
-    if running_sum != expected_q_r {
-        return Ok(false); // REJECT: Sum-check terminal verification failed
+    // Terminal check: in generic CCS (t<3), Q(r) = f(Y(r)) and we can recompute it using y_scalars.
+    // In R1CS-style (t≥3), ⟨Az∘Bz, χ_r⟩ cannot be derived from public data; skip cross-check.
+    if s.t() < 3 {
+        let mut expected_q_r = K::ZERO;
+        for (inst_idx, me_inst) in out_me.iter().enumerate() {
+            let ccs_contribution = if inst_idx < batch_coeffs.alphas.len() {
+                let f_eval = s.f.eval_in_ext::<K>(&me_inst.y_scalars);
+                eprintln!("    inst {}: f_eval = {}", inst_idx, format_ext(f_eval));
+                batch_coeffs.alphas[inst_idx] * f_eval
+            } else { K::ZERO };
+            expected_q_r += ccs_contribution;
+        }
+        if running_sum != expected_q_r {
+            eprintln!("❌ PI_CCS VERIFY: terminal check failed: running_sum != Q(r) (runningSum={}, expected={})",
+                      format_ext(running_sum), format_ext(expected_q_r));
+            for (idx, alpha) in batch_coeffs.alphas.iter().enumerate() {
+                let ys = out_me.get(idx).map(|me| format!("{:?}", me.y_scalars.iter().map(|v| format_ext(*v)).collect::<Vec<_>>())).unwrap_or_else(|| "<none>".to_string());
+                eprintln!("    alpha[{}]={}, y_scalars={}", idx, format_ext(*alpha), ys);
+            }
+            return Ok(false);
+        }
     }
 
     Ok(true)

@@ -102,7 +102,7 @@ fn test_single_bit_flip_in_rho() -> Result<()> {
     
     // Test verification with single bit flip
     println!("\n🧪 Testing verification with single bit flip in ρ...");
-    let result = match ivc::verify_ivc_step(&step_ccs, &proof_with_flipped_rho, &initial_acc, &binding_spec) {
+    let result = match ivc::verify_ivc_step(&step_ccs, &proof_with_flipped_rho, &initial_acc, &binding_spec, &params, None) {
         Ok(result) => result,
         Err(e) => {
             println!("⚠️  Verification returned error: {}", e);
@@ -187,7 +187,7 @@ fn test_multiple_bit_flips_in_rho() -> Result<()> {
         println!("\n🔍 Testing bit position {}: {} -> {}", 
                  bit_pos, original_rho_u64, flipped_rho_u64);
         
-        let result = match ivc::verify_ivc_step(&step_ccs, &proof_with_flipped_bit, &initial_acc, &binding_spec) {
+        let result = match ivc::verify_ivc_step(&step_ccs, &proof_with_flipped_bit, &initial_acc, &binding_spec, &params, None) {
             Ok(result) => result,
             Err(e) => {
                 println!("   ⚠️  Verification returned error: {}", e);

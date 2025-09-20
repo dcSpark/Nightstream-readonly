@@ -304,6 +304,8 @@ fn test_c_step_coords_tampering_detection() {
                 &step_result.proof,
                 &prev_accumulator,
                 &binding_spec,
+                &params,
+                None,
             );
             
             match valid_verify_result {
@@ -332,6 +334,8 @@ fn test_c_step_coords_tampering_detection() {
                     &tampered_proof,
                     &prev_accumulator,
                     &binding_spec,
+                    &params,
+                    None,
                 );
                 
                 match verify_result {

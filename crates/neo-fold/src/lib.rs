@@ -46,6 +46,8 @@ use p3_field::PrimeCharacteristicRing;
 pub struct FoldingProof {
     /// Π_CCS proof (sum-check over K) 
     pub pi_ccs_proof: PiCcsProof,
+    /// The k+1 MCS instances provided to Π_CCS (public, transcript-bound)
+    pub pi_ccs_inputs: Vec<neo_ccs::McsInstance<Cmt, F>>,
     /// The k+1 ME(b, L) instances produced by Π_CCS (public, transcript-bound)
     pub pi_ccs_outputs: Vec<MeInstance<Cmt, F, K>>,
     /// Π_RLC proof (S-action combination)
@@ -86,12 +88,30 @@ pub fn fold_ccs_instances(
             "Ajtai PP not initialized for (d={}, m={}): {}", d, m, e
         )))?;
 
+    let pi_ccs_inputs: Vec<neo_ccs::McsInstance<Cmt, F>> = instances
+        .iter()
+        .map(|inst| neo_ccs::McsInstance {
+            c: inst.c.clone(),
+            x: inst.x.clone(),
+            m_in: inst.m_in,
+        })
+        .collect();
+
     // One transcript shared end-to-end
     let mut tr = FoldTranscript::default();
 
     // 1) Π_CCS: k+1 MCS → k+1 ME(b,L)
     let (me_list, pi_ccs_proof) =
         pi_ccs::pi_ccs_prove(&mut tr, params, structure, instances, witnesses, &l)?;
+
+    #[cfg(debug_assertions)]
+    {
+        let mut tr_check = FoldTranscript::default();
+        match pi_ccs::pi_ccs_verify(&mut tr_check, params, structure, instances, &me_list, &pi_ccs_proof) {
+            Ok(ok) => eprintln!("[DEBUG] Prover self-check Pi-CCS verify: {}", ok),
+            Err(e) => eprintln!("[DEBUG] Prover self-check Pi-CCS verify error: {}", e),
+        }
+    }
 
     // SECURITY FIX: Removed single-instance fast path that bypassed RLC/DEC
     // All instances must go through the complete pipeline for security
@@ -140,6 +160,7 @@ pub fn fold_ccs_instances(
 
     let proof = FoldingProof {
         pi_ccs_proof,
+        pi_ccs_inputs,
         pi_ccs_outputs: me_list.clone(),
         pi_rlc_proof,
         pi_dec_proof,
