@@ -2070,8 +2070,10 @@ pub fn build_augmented_ccs_linked_with_rlc(
             }
         }
 
-        // RLC Binder: ⟨G, z⟩ = Σ r_i * c_step[i] (if provided)
-        // This is the critical soundness fix that binds c_step to the actual step witness
+        // RLC Binder: enforce linear equality ⟨G, z⟩ = rhs where
+        // G = aggregated_row over witness coordinates and rhs = Σ r_i * c_step[i] (or diff variant)
+        // Encode in R1CS as: <A,z> * <B,z> = <C,z>
+        //   A row = G · z, B row selects const-1 (== 1), C puts rhs in const-1 column
         if let Some((ref aggregated_row, rhs)) = rlc_binder {
             let r = step_rows + ev_rows + x_bind_rows + prev_bind_rows;
             match matrix_idx {
@@ -2086,12 +2088,14 @@ pub fn build_augmented_ccs_linked_with_rlc(
                     }
                 }
                 1 => {
-                    // B matrix: constant term = rhs (Σ r_i * c_step[i])
+                    // B matrix: multiply by 1 (const-1 witness column)
+                    data[r * total_cols + col_const1_abs] = F::ONE;
+                }
+                2 => {
+                    // C matrix: place rhs on const-1 column so equality is linear
                     data[r * total_cols + col_const1_abs] = rhs;
                 }
-                _ => {
-                    // C matrix: stays zero for linear constraint
-                }
+                _ => {}
             }
         }
 

@@ -14,11 +14,10 @@ use p3_field::{PrimeCharacteristicRing, Field, PrimeField64};
 use rayon::prelude::*;
 use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
 use p3_symmetric::Permutation;
-use crate::sumcheck::{RoundOracle, run_sumcheck, verify_sumcheck_rounds, SumcheckOutput};
+use crate::sumcheck::{RoundOracle, run_sumcheck, run_sumcheck_skip_eval_at_one, verify_sumcheck_rounds, SumcheckOutput};
 
-fn format_ext(x: K) -> String {
-    format!("{:?}", x)
-}
+#[allow(dead_code)]
+fn format_ext(x: K) -> String { format!("{:?}", x) }
 
 /// Π_CCS proof containing the single sum-check over K
 #[derive(Debug, Clone)]
@@ -35,16 +34,16 @@ pub struct PiCcsProof {
 
 /// Minimal CSR (Compressed Sparse Row) format for sparse matrix operations
 /// This enables O(nnz) operations instead of O(n*m) for our extremely sparse matrices
-struct Csr<F> {
-    rows: usize,
-    cols: usize,
-    indptr: Vec<usize>,  // len = rows + 1
-    indices: Vec<usize>, // len = nnz  
-    data: Vec<F>,        // len = nnz
+pub struct Csr<F> {
+    pub rows: usize,
+    pub cols: usize,
+    pub indptr: Vec<usize>,  // len = rows + 1
+    pub indices: Vec<usize>, // len = nnz  
+    pub data: Vec<F>,        // len = nnz
 }
 
 /// Convert dense matrix to CSR format - O(nm) but done once
-fn to_csr<F: Field + Copy>(m: &Mat<F>, rows: usize, cols: usize) -> Csr<F> {
+pub fn to_csr<F: Field + Copy>(m: &Mat<F>, rows: usize, cols: usize) -> Csr<F> {
     let mut indptr = Vec::with_capacity(rows + 1);
     let mut indices = Vec::new();
     let mut data = Vec::new();
@@ -78,37 +77,95 @@ fn spmv_csr_ff<F: Field + Send + Sync + Copy>(a: &Csr<F>, x: &[F]) -> Vec<F> {
     y
 }
 
-/// Sparse transpose multiply: v = A^T * w  (O(nnz))
-/// v[c] += A[row,c] * w[row] for all non-zeros
-fn spmv_csr_t_fk<F: Field, Kf: Field + From<F> + Send + Sync>(
-    a: &Csr<F>, w: &[Kf]
-) -> Vec<Kf> {
-    let mut v = vec![Kf::ZERO; a.cols];
-    // Parallel by rows with local buffers to avoid atomics
+// (dense χ_r variant removed; tests compute the dense check inline to avoid dead code)
+
+// ===== Streaming/half-table equality-weighted CSR transpose multiply =====
+
+/// Row weight provider: returns χ_r(row) or an equivalent row weight.
+pub trait RowWeight: Sync {
+    fn w(&self, row: usize) -> K;
+}
+
+/// Half-table implementation of χ_r row weights to avoid materializing the full tensor.
+pub struct HalfTableEq {
+    lo: Vec<K>,
+    hi: Vec<K>,
+    split: usize,
+}
+
+impl HalfTableEq {
+    pub fn new(r: &[K]) -> Self {
+        let ell = r.len();
+        let split = ell / 2; // lower split bits in lo, higher in hi
+        let lo_len = 1usize << split;
+        let hi_len = 1usize << (ell - split);
+
+        // Precompute factors (1-r_i, r_i)
+        let mut one_minus = Vec::with_capacity(ell);
+        for &ri in r { one_minus.push(K::ONE - ri); }
+
+        // Build lo table
+        let mut lo = vec![K::ONE; lo_len];
+        for mask in 0..lo_len {
+            let mut acc = K::ONE;
+            let mut m = mask;
+            for i in 0..split {
+                let bit = m & 1;
+                acc *= if bit == 0 { one_minus[i] } else { r[i] };
+                m >>= 1;
+            }
+            lo[mask] = acc;
+        }
+
+        // Build hi table
+        let mut hi = vec![K::ONE; hi_len];
+        for mask in 0..hi_len {
+            let mut acc = K::ONE;
+            let mut m = mask;
+            for j in 0..(ell - split) {
+                let idx = split + j;
+                let bit = m & 1;
+                acc *= if bit == 0 { one_minus[idx] } else { r[idx] };
+                m >>= 1;
+            }
+            hi[mask] = acc;
+        }
+
+        Self { lo, hi, split }
+    }
+}
+
+impl RowWeight for HalfTableEq {
+    #[inline]
+    fn w(&self, row: usize) -> K {
+        let lo_mask = (1usize << self.split) - 1;
+        let lo_idx = row & lo_mask;
+        let hi_idx = row >> self.split;
+        self.lo[lo_idx] * self.hi[hi_idx]
+    }
+}
+
+/// Weighted version of CSR transpose multiply: v = A^T * w, where w(row) is provided on-the-fly.
+pub fn spmv_csr_t_weighted_fk<W: RowWeight + Sync>(a: &Csr<F>, w: &W) -> Vec<K> {
+    let mut v = vec![K::ZERO; a.cols];
     let chunk = a.rows / rayon::current_num_threads().max(1) + 1;
-    let partials: Vec<Vec<(usize, Kf)>> = (0..a.rows)
+    let partials: Vec<Vec<(usize, K)>> = (0..a.rows)
         .into_par_iter()
         .with_min_len(chunk)
         .map(|r| {
             let mut loc = Vec::with_capacity(a.indptr[r + 1] - a.indptr[r]);
-            let start = a.indptr[r];
-            let end = a.indptr[r + 1];
-            let wr = w[r];
-            for k in start..end {
+            let wr = w.w(r);
+            for k in a.indptr[r]..a.indptr[r + 1] {
                 let c = a.indices[k];
-                loc.push((c, Kf::from(a.data[k]) * wr));
+                loc.push((c, K::from(a.data[k]) * wr));
             }
             loc
         })
         .collect();
-    // Combine partials (small nnz, single-threaded combine is fine)
-    for loc in partials {
-        for (c, val) in loc { 
-            v[c] += val; 
-        }
-    }
+    for loc in partials { for (c, val) in loc { v[c] += val; } }
     v
 }
+
 
 // ===== Matrix Digest Optimization =====
 
@@ -229,8 +286,11 @@ struct GenericCcsOracle<'a> {
     s: &'a CcsStructure<F>,
     alphas: Vec<K>,
     partials_per_inst: Vec<MlePartials>,
+    // Small-value fast path for round 0: access original F-vectors without lifting
+    mz_f_per_inst: Vec<Vec<&'a [F]>>,
     ell: usize,
     d_sc: usize,
+    first_round_done: bool,
 }
 impl<'a> RoundOracle for GenericCcsOracle<'a> {
     fn num_rounds(&self) -> usize { self.ell }
@@ -238,28 +298,60 @@ impl<'a> RoundOracle for GenericCcsOracle<'a> {
     fn evals_at(&mut self, sample_xs: &[K]) -> Vec<K> {
         let t = self.s.t();
         let mut sample_ys = vec![K::ZERO; sample_xs.len()];
-        for (inst_idx, partials) in self.partials_per_inst.iter().enumerate() {
-            let mut a = vec![K::ZERO; t];
-            let mut delta = vec![K::ZERO; t];
-            for j in 0..t {
-                let v = &partials.s_per_j[j];
-                debug_assert!(v.len().is_power_of_two() && v.len() >= 2);
-                let half = v.len() >> 1;
-                let (mut aj, mut dj) = (K::ZERO, K::ZERO);
-                for k in 0..half {
-                    let e = v[2*k];
-                    let o = v[2*k + 1];
-                    aj += e;
-                    dj += o - e;
+        if !self.first_round_done {
+            // Round-0 small-value path: accumulate in F, then lift once per sample X
+            for (inst_idx, mz_f) in self.mz_f_per_inst.iter().enumerate() {
+                let mut a_f = vec![F::ZERO; t];
+                let mut d_f = vec![F::ZERO; t];
+                let n_pad = 1usize << self.ell;
+                let half = n_pad >> 1;
+                for j in 0..t {
+                    let v_f = mz_f[j];
+                    let mut aj = F::ZERO;
+                    let mut dj = F::ZERO;
+                    for k in 0..half {
+                        let idx_e = 2*k;
+                        let idx_o = idx_e + 1;
+                        let e = if idx_e < v_f.len() { v_f[idx_e] } else { F::ZERO };
+                        let o = if idx_o < v_f.len() { v_f[idx_o] } else { F::ZERO };
+                        aj += e;
+                        dj += o - e;
+                    }
+                    a_f[j] = aj; d_f[j] = dj;
                 }
-                a[j] = aj; delta[j] = dj;
+                let alpha = self.alphas[inst_idx];
+                let mut y_buf = vec![K::ZERO; t];
+                for (sx, &X) in sample_xs.iter().enumerate() {
+                    for j in 0..t { y_buf[j] = K::from(a_f[j]) + K::from(d_f[j]) * X; }
+                    let f_eval = self.s.f.eval_in_ext::<K>(&y_buf);
+                    sample_ys[sx] += alpha * f_eval;
+                }
             }
-            let alpha = self.alphas[inst_idx];
-            let mut y_buf = vec![K::ZERO; t];
-            for (sx, &X) in sample_xs.iter().enumerate() {
-                for j in 0..t { y_buf[j] = a[j] + delta[j] * X; }
-                let f_eval = self.s.f.eval_in_ext::<K>(&y_buf);
-                sample_ys[sx] += alpha * f_eval;
+            self.first_round_done = true;
+        } else {
+            for (inst_idx, partials) in self.partials_per_inst.iter().enumerate() {
+                let mut a = vec![K::ZERO; t];
+                let mut delta = vec![K::ZERO; t];
+                for j in 0..t {
+                    let v = &partials.s_per_j[j];
+                    debug_assert!(v.len().is_power_of_two() && v.len() >= 2);
+                    let half = v.len() >> 1;
+                    let (mut aj, mut dj) = (K::ZERO, K::ZERO);
+                    for k in 0..half {
+                        let e = v[2*k];
+                        let o = v[2*k + 1];
+                        aj += e;
+                        dj += o - e;
+                    }
+                    a[j] = aj; delta[j] = dj;
+                }
+                let alpha = self.alphas[inst_idx];
+                let mut y_buf = vec![K::ZERO; t];
+                for (sx, &X) in sample_xs.iter().enumerate() {
+                    for j in 0..t { y_buf[j] = a[j] + delta[j] * X; }
+                    let f_eval = self.s.f.eval_in_ext::<K>(&y_buf);
+                    sample_ys[sx] += alpha * f_eval;
+                }
             }
         }
         sample_ys
@@ -618,7 +710,11 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     // --- Run sum-check rounds over composed polynomial Q (degree ≤ d_sc) ---
     println!("🔍 Sum-check starting: {} instances, {} rounds", insts.len(), ell);
     let sample_xs: Vec<K> = (0..=d_sc as u64).map(|u| K::from(F::from_u64(u))).collect();
-    let use_generic_ccs = s.t() < 3;
+    
+    // TODO: Implement product-binding check for R1CS
+    // SOUNDNESS: until we add a product-binding check for R1CS,
+    // force the generic CCS oracle for all t.
+    let use_generic_ccs = true;
 
     // Build partial states (invariant across the engine)
     let mle_start = std::time::Instant::now();
@@ -659,36 +755,33 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         let mut oracle = GenericCcsOracle {
             s, alphas: batch_coeffs.alphas.clone(),
             partials_per_inst: partials_per_inst_opt.unwrap(),
+            mz_f_per_inst: insts.iter().map(|inst| inst.mz.iter().map(|v| v.as_slice()).collect()).collect(),
             ell, d_sc,
+            first_round_done: false,
         };
-        run_sumcheck(tr, &mut oracle, initial_sum, &sample_xs)?
+        if d_sc >= 1 { run_sumcheck_skip_eval_at_one(tr, &mut oracle, initial_sum, &sample_xs)? }
+        else { run_sumcheck(tr, &mut oracle, initial_sum, &sample_xs)? }
     } else {
         let mut oracle = R1csResidualOracle {
             alphas: batch_coeffs.alphas.clone(),
             residuals_per_inst: residuals_per_inst_opt.unwrap(),
             ell, d_sc,
         };
-        run_sumcheck(tr, &mut oracle, initial_sum, &sample_xs)?
+        if d_sc >= 1 { run_sumcheck_skip_eval_at_one(tr, &mut oracle, initial_sum, &sample_xs)? }
+        else { run_sumcheck(tr, &mut oracle, initial_sum, &sample_xs)? }
     };
 
     println!("🔧 [TIMING] Sum-check rounds complete ({} rounds)", ell);
-    let rb = neo_ccs::utils::tensor_point::<K>(&r);
-    debug_assert!(rb.len() >= s.n, "tensor point smaller than n");
 
-    // MAJOR OPTIMIZATION: Use CSR sparse transpose multiply - O(nnz) instead of O(n*m)!
-    // Compute M_j^T * χ_r ONCE for all instances using sparse operations
-    println!("🚀 [OPTIMIZATION] Computing sparse M_j^T * χ_r once for all instances...");
+    // Compute M_j^T * χ_r using streaming/half-table weights (no full χ_r materialization)
+    println!("🚀 [OPTIMIZATION] Computing M_j^T * χ_r with half-table weights...");
     let transpose_once_start = std::time::Instant::now();
+    let w = HalfTableEq::new(&r);
     let vjs: Vec<Vec<K>> = mats_csr.par_iter()
-        .map(|csr| {
-            // v_j = A_j^T * χ_r using sparse CSR transpose multiply - O(nnz)!
-            spmv_csr_t_fk::<F, K>(csr, &rb)
-        })
+        .map(|csr| spmv_csr_t_weighted_fk::<_>(csr, &w))
         .collect();
-    println!("💥 [OPTIMIZATION] CSR M_j^T * χ_r computed once: {:.2}ms (nnz={} vs {}M dense - {}x reduction, saved ~500ms per instance!)", 
-             transpose_once_start.elapsed().as_secs_f64() * 1000.0, total_nnz,
-             (s.n * s.m * s.matrices.len()) / 1_000_000,
-             (s.n * s.m * s.matrices.len()) / total_nnz.max(1));
+    println!("💥 [OPTIMIZATION] Weighted CSR M_j^T * χ_r computed: {:.2}ms (nnz={})",
+             transpose_once_start.elapsed().as_secs_f64() * 1000.0, total_nnz);
 
     // --- Build ME instances (one per input) ---
     let me_start = std::time::Instant::now();
@@ -718,16 +811,14 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         println!("🚀 [OPTIMIZATION] Used precomputed v_j vectors - only Z * v_j needed: {:.2}ms", 
                  z_operations_start.elapsed().as_secs_f64() * 1000.0);
         
-        // Compute the CORRECT Y_j(r) scalars: ⟨(M_j z), χ_r⟩ using cached M_j z over F
-        let y_scalars: Vec<K> = (0..s.t())
-            .map(|j| {
-                let mut acc = K::ZERO;
-                for i in 0..s.n {
-                    acc += K::from(insts[inst_idx].mz[j][i]) * rb[i];
-                }
-                acc
-            })
-            .collect();
+        // Compute the CORRECT Y_j(r) scalars: ⟨(M_j z), χ_r⟩ using streaming weights
+        let y_scalars: Vec<K> = (0..s.t()).map(|j| {
+            let mut acc = K::ZERO;
+            for i in 0..s.n {
+                acc += K::from(insts[inst_idx].mz[j][i]) * w.w(i);
+            }
+            acc
+        }).collect();
 
         out_me.push(MeInstance{ 
             c_step_coords: vec![], // Pattern B: Populated by IVC layer, not folding
@@ -845,26 +936,27 @@ pub fn pi_ccs_verify(
     // NOTE: Only CCS and range/decomp constraints in Q(r).
     // Tie constraints removed from sum-check as they break soundness.
     
-    // Terminal check: in generic CCS (t<3), Q(r) = f(Y(r)) and we can recompute it using y_scalars.
-    // In R1CS-style (t≥3), ⟨Az∘Bz, χ_r⟩ cannot be derived from public data; skip cross-check.
+    // Terminal check: Only safe when Q(r) can be computed from y_scalars alone.
+    // For generic CCS with t < 3 (no element-wise product), Q(r) = Σ α_i · f(Y_i(r)).
+    // For R1CS-style (t ≥ 3), ⟨Az∘Bz, χ_r⟩ cannot be derived from y_scalars; skip here.
     if s.t() < 3 {
+        if !out_me.iter().all(|me| me.y_scalars.len() == s.t()) { return Ok(false); }
         let mut expected_q_r = K::ZERO;
         for (inst_idx, me_inst) in out_me.iter().enumerate() {
-            let ccs_contribution = if inst_idx < batch_coeffs.alphas.len() {
-                let f_eval = s.f.eval_in_ext::<K>(&me_inst.y_scalars);
-                eprintln!("    inst {}: f_eval = {}", inst_idx, format_ext(f_eval));
-                batch_coeffs.alphas[inst_idx] * f_eval
-            } else { K::ZERO };
-            expected_q_r += ccs_contribution;
+            let f_eval = s.f.eval_in_ext::<K>(&me_inst.y_scalars);
+            expected_q_r += batch_coeffs.alphas[inst_idx] * f_eval;
         }
-        if running_sum != expected_q_r {
-            eprintln!("❌ PI_CCS VERIFY: terminal check failed: running_sum != Q(r) (runningSum={}, expected={})",
-                      format_ext(running_sum), format_ext(expected_q_r));
-            for (idx, alpha) in batch_coeffs.alphas.iter().enumerate() {
-                let ys = out_me.get(idx).map(|me| format!("{:?}", me.y_scalars.iter().map(|v| format_ext(*v)).collect::<Vec<_>>())).unwrap_or_else(|| "<none>".to_string());
-                eprintln!("    alpha[{}]={}, y_scalars={}", idx, format_ext(*alpha), ys);
-            }
-            return Ok(false);
+        if running_sum != expected_q_r { return Ok(false); }
+    }
+
+    // Verify v_j = M_j^T χ_r if provided
+    if !proof.vjs.is_empty() {
+        let mats_csr: Vec<Csr<F>> = s.matrices.iter().map(|m| to_csr::<F>(m, s.n, s.m)).collect();
+        let w = HalfTableEq::new(&r);
+        let vjs_hat: Vec<Vec<K>> = mats_csr.par_iter().map(|csr| spmv_csr_t_weighted_fk::<_>(csr, &w)).collect();
+        if proof.vjs.len() != vjs_hat.len() { return Ok(false); }
+        for (lhs, rhs) in proof.vjs.iter().zip(vjs_hat.iter()) {
+            if lhs.len() != rhs.len() || !lhs.iter().zip(rhs).all(|(a,b)| *a == *b) { return Ok(false); }
         }
     }
 

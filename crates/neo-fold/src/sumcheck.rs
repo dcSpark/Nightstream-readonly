@@ -10,7 +10,7 @@
 use crate::error::PiCcsError;
 use crate::transcript::FoldTranscript;
 use neo_math::K;
-use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
+use p3_field::{Field, PrimeCharacteristicRing};
 
 /// Trait implemented by problem-specific provers (e.g., generic CCS, R1CS fast-path).
 pub trait RoundOracle {
@@ -73,31 +73,44 @@ fn lagrange_interpolate_k(xs: &[K], ys: &[K]) -> Vec<K> {
     coeffs
 }
 
+#[inline]
+fn effective_degree(coeffs: &[K]) -> usize {
+    match coeffs.iter().rposition(|&c| c != K::ZERO) {
+        Some(idx) => idx,
+        None => 0, // treat zero polynomial as degree 0 for bounding purposes
+    }
+}
+
 /// Prover: run ℓ rounds of sum-check driven by `oracle`.
 /// - `initial_sum` is the public sum claim (0 in Π_CCS use).
 /// - `sample_xs` are the interpolation points (e.g., 0..=d).
+/// 
+/// For unique reconstruction, pass at least `d_sc+1` pairwise-distinct `sample_xs`.
 pub fn run_sumcheck(
     tr: &mut FoldTranscript,
     oracle: &mut dyn RoundOracle,
     initial_sum: K,
     sample_xs: &[K],
 ) -> Result<SumcheckOutput, PiCcsError> {
-    // Guard: Lagrange interpolation requires distinct sample points.
-    // Use a HashSet over canonical coefficient pairs (F coords) for O(n) expected time.
-    {
-        use std::collections::HashSet;
-        use neo_math::KExtensions;
-        let mut seen: HashSet<(u64, u64)> = HashSet::with_capacity(sample_xs.len());
-        for &x in sample_xs {
-            let [re, im] = x.as_coeffs();
-            let key = (re.as_canonical_u64(), im.as_canonical_u64());
-            if !seen.insert(key) {
+    // Guard: Lagrange interpolation requires pairwise-distinct nodes.
+    // Keep it K-agnostic and future-proof (works for any extension degree d_K ≥ 1).
+    for i in 0..sample_xs.len() {
+        for j in 0..i {
+            if sample_xs[i] == sample_xs[j] {
                 return Err(PiCcsError::SumcheckError("duplicate sample_xs".into()));
             }
         }
     }
     let ell = oracle.num_rounds();
     let d_sc = oracle.degree_bound();
+    
+    // Optional: enforce sufficient nodes for degree bound (stronger soundness)
+    if sample_xs.len() < d_sc + 1 {
+        return Err(PiCcsError::SumcheckError(format!(
+            "insufficient sample points: need at least {} for degree bound {}, got {}",
+            d_sc + 1, d_sc, sample_xs.len()
+        )));
+    }
 
     let mut rounds = Vec::with_capacity(ell);
     let mut challenges = Vec::with_capacity(ell);
@@ -113,9 +126,10 @@ pub fn run_sumcheck(
         }
 
         let coeffs = lagrange_interpolate_k(sample_xs, &sample_ys);
-        if coeffs.len() > d_sc + 1 {
+        let deg = effective_degree(&coeffs);
+        if deg > d_sc {
             return Err(PiCcsError::SumcheckError(format!(
-                "round {i}: degree {} exceeds bound {d_sc}", coeffs.len() - 1
+                "round {i}: degree {} exceeds bound {d_sc}", deg
             )));
         }
 
@@ -157,9 +171,9 @@ pub fn verify_sumcheck_rounds(
     let mut r = Vec::with_capacity(rounds.len());
 
     for coeffs in rounds.iter() {
-        if coeffs.is_empty() || coeffs.len() > d_sc + 1 {
-            return (Vec::new(), K::ZERO, false);
-        }
+        if coeffs.is_empty() { return (Vec::new(), K::ZERO, false); }
+        let deg = effective_degree(coeffs);
+        if deg > d_sc { return (Vec::new(), K::ZERO, false); }
         let p0 = poly_eval_k(coeffs, K::ZERO);
         let p1 = poly_eval_k(coeffs, K::ONE);
         if p0 + p1 != running_sum {
@@ -174,4 +188,107 @@ pub fn verify_sumcheck_rounds(
         r.push(r_i);
     }
     (r, running_sum, true)
+}
+
+/// Prover: run ℓ rounds but skip evaluating the round polynomial at X=1.
+/// We reconstruct s_i(1) from the sum-check invariant s_i(0) + s_i(1) = running_sum.
+/// This saves one evaluation per round while keeping transcript binding identical.
+///
+/// Requirements on `sample_xs_full`:
+/// - must contain distinct points
+/// - must include 0 and 1
+pub fn run_sumcheck_skip_eval_at_one(
+    tr: &mut FoldTranscript,
+    oracle: &mut dyn RoundOracle,
+    initial_sum: K,
+    sample_xs_full: &[K],
+) -> Result<SumcheckOutput, PiCcsError> {
+    // Guards identical to run_sumcheck
+    for i in 0..sample_xs_full.len() {
+        for j in 0..i {
+            if sample_xs_full[i] == sample_xs_full[j] {
+                return Err(PiCcsError::SumcheckError("duplicate sample_xs".into()));
+            }
+        }
+    }
+    let ell = oracle.num_rounds();
+    let d_sc = oracle.degree_bound();
+    if sample_xs_full.len() < d_sc + 1 {
+        return Err(PiCcsError::SumcheckError(format!(
+            "insufficient sample points: need at least {} for degree bound {}, got {}",
+            d_sc + 1, d_sc, sample_xs_full.len()
+        )));
+    }
+
+    // Locate 0 and 1 in the full sampling set
+    let _idx_zero = sample_xs_full
+        .iter()
+        .position(|&x| x == K::ZERO)
+        .ok_or_else(|| PiCcsError::SumcheckError("sample_xs_full must contain 0".into()))?;
+    let idx_one = sample_xs_full
+        .iter()
+        .position(|&x| x == K::ONE)
+        .ok_or_else(|| PiCcsError::SumcheckError("sample_xs_full must contain 1".into()))?;
+
+    // Build reduced set without X=1, preserving order
+    let mut sample_xs_wo_one = Vec::with_capacity(sample_xs_full.len().saturating_sub(1));
+    for (i, &x) in sample_xs_full.iter().enumerate() {
+        if i != idx_one { sample_xs_wo_one.push(x); }
+    }
+
+    let mut rounds = Vec::with_capacity(ell);
+    let mut challenges = Vec::with_capacity(ell);
+    let mut running_sum = initial_sum;
+
+    for _i in 0..ell {
+        // Evaluate at all points except X=1
+        let sample_ys_wo_one = oracle.evals_at(&sample_xs_wo_one);
+        if sample_ys_wo_one.len() != sample_xs_wo_one.len() {
+            return Err(PiCcsError::SumcheckError("evals_at returned wrong length".into()));
+        }
+
+        // Extract s_i(0)
+        let pos_zero_in_reduced = sample_xs_wo_one
+            .iter()
+            .position(|&x| x == K::ZERO)
+            .ok_or_else(|| PiCcsError::SumcheckError("reduced sample set missing 0".into()))?;
+        let s_i_at_0 = sample_ys_wo_one[pos_zero_in_reduced];
+        // Derive s_i(1) from invariant
+        let s_i_at_1 = running_sum - s_i_at_0;
+
+        // Reconstruct full evaluation array in original order, inserting s_i(1)
+        let mut sample_ys_full = Vec::with_capacity(sample_xs_full.len());
+        let mut j = 0usize;
+        for f in 0..sample_xs_full.len() {
+            if f == idx_one { sample_ys_full.push(s_i_at_1); } else { sample_ys_full.push(sample_ys_wo_one[j]); j += 1; }
+        }
+
+        // Interpolate and enforce degree/invariant checks
+        let coeffs = lagrange_interpolate_k(sample_xs_full, &sample_ys_full);
+        let deg = effective_degree(&coeffs);
+        if deg > d_sc {
+            return Err(PiCcsError::SumcheckError(format!(
+                "degree {} exceeds bound {d_sc}", deg
+            )));
+        }
+
+        let p0 = poly_eval_k(&coeffs, K::ZERO);
+        let p1 = poly_eval_k(&coeffs, K::ONE);
+        if p0 + p1 != running_sum {
+            return Err(PiCcsError::SumcheckError("p(0)+p(1) mismatch (skip-1)".into()));
+        }
+
+        // Transcript binding
+        tr.absorb_ext_as_base_fields_k(b"neo/ccs/round", coeffs[0]);
+        for c in coeffs.iter().skip(1) { tr.absorb_ext_as_base_fields_k(b"neo/ccs/round", *c); }
+        let r_i = tr.challenge_k();
+
+        running_sum = poly_eval_k(&coeffs, r_i);
+        oracle.fold(r_i);
+
+        challenges.push(r_i);
+        rounds.push(coeffs);
+    }
+
+    Ok(SumcheckOutput { rounds, challenges, final_sum: running_sum })
 }
