@@ -17,20 +17,6 @@ use neo_params::NeoParams;
 use p3_field::PrimeCharacteristicRing;
 use rand::rng;
 
-/// Simple test S-module for security testing
-#[allow(dead_code)]
-struct TestSModule;
-impl SModuleHomomorphism<F, neo_ajtai::Commitment> for TestSModule {
-    fn commit(&self, z: &Mat<F>) -> neo_ajtai::Commitment {
-        neo_ajtai::Commitment::zeros(z.rows(), 4)
-    }
-    fn project_x(&self, z: &Mat<F>, m_in: usize) -> Mat<F> {
-        let rows = z.rows().min(z.rows());
-        let cols = m_in.min(z.cols());
-        Mat::zero(rows, cols, F::ZERO)
-    }
-}
-
 /// Test P0-1: Verify that composed polynomial Q actually enforces constraints
 #[test]
 #[allow(non_snake_case)]

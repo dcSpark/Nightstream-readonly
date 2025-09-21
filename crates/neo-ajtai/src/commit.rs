@@ -40,16 +40,6 @@ fn rot_step_phi_81(cur: &[Fq; D], next: &mut [Fq; D]) {
     next[27] -= last;       // -X^27 * last
 }
 
-/// Optional: if you ever support X^D + 1 rings (AGL/Mersenne), use this fallback
-#[allow(dead_code)]
-#[inline]
-fn rot_step_xd_plus_1(cur: &[Fq; D], next: &mut [Fq; D]) {
-    let last = cur[D - 1];
-    next[0] = Fq::ZERO;
-    next[1..D].copy_from_slice(&cur[..(D - 1)]);
-    next[0] -= last; // X^D ≡ -1
-}
-
 /// Rotation step dispatcher - compile-time constant for η=81 ⇒ D=54  
 /// 
 /// **WARNING**: This function is exposed publicly only for integration testing.
@@ -299,43 +289,6 @@ pub fn try_commit(pp: &PP<RqEl>, Z: &[Fq]) -> AjtaiResult<Commitment> {
 #[allow(non_snake_case)]
 pub fn commit(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
     try_commit(pp, Z).expect("commit: Z dimensions must match d×m")
-}
-
-/// Commit implementation via SAction::apply_vec.
-/// 
-/// **Constant-time depends on SAction implementation** - this function has fixed loops
-/// but relies on SAction::apply_vec being constant-time. For guaranteed constant-time
-/// behavior, prefer commit_masked_ct() or commit_precomp_ct() which are constant-time
-/// by construction.
-#[cfg(any(test, feature = "testing"))]
-#[allow(non_snake_case, dead_code)]
-fn commit_via_saction(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
-    let d = pp.d; let m = pp.m; let kappa = pp.kappa;
-
-    // Pre-extract columns of Z (digits per column)
-    let cols: Vec<&[Fq]> = (0..m).map(|j| &Z[j*d .. (j+1)*d]).collect();
-
-    let mut c = Commitment::zeros(d, kappa);
-
-    // For each Ajtai row i, compute Σ_j S-action(a_ij) · Z_col_j into c_col_i.
-    for i in 0..kappa {
-        let acc = c.col_mut(i);
-        #[allow(clippy::needless_range_loop)]
-        for j in 0..m {
-            let a_ij = &pp.m_rows[i][j];           // R_q element
-            let s_action = SAction::from_ring(*a_ij);  // Create S-action from ring element
-            let v: [Fq; neo_math::ring::D] = cols[j].try_into().expect("column length should be d"); // digits for column j
-
-            // Apply S-action to the coefficient vector
-            let result = s_action.apply_vec(&v);
-            
-            // Constant-time accumulation (no secret-dependent branching).
-            for (a, &r) in acc.iter_mut().zip(&result) {
-                *a += r;
-            }
-        }
-    }
-    c
 }
 
 /// MUST: Verify opening by recomputing commitment (binding implies uniqueness).

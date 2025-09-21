@@ -10,11 +10,13 @@
 //! a final SNARK proof (Stage 5) on demand.
 
 use crate::{F, NeoParams};
+use crate::{OutputClaim, expose_z_component};
 use crate::ivc::{Accumulator, IvcProof, StepBindingSpec, prove_ivc_step_chained, LastNExtractor, IvcStepInput, StepOutputExtractor};
 use p3_field::PrimeCharacteristicRing;
 use neo_ccs::CcsStructure;
 
 /// Minimal state wrapper for the simple API
+#[derive(Clone)]
 pub struct State {
     params: NeoParams,
     step_ccs: CcsStructure<F>,
@@ -114,6 +116,17 @@ pub fn step(mut state: State, io: &[F], witness: &[F]) -> anyhow::Result<State> 
 /// This generates a succinct proof that attests to the entire IVC chain.
 /// Returns `Ok(Some((proof, augmented_ccs, final_public_input)))` if there were steps, `Ok(None)` if no steps.
 pub fn finalize_and_prove(state: State) -> anyhow::Result<Option<(crate::Proof, neo_ccs::CcsStructure<F>, Vec<F>)>> {
+    finalize_and_prove_with_options(state, FinalizeOptions { embed_ivc_ev: false })
+}
+
+/// Options to control final proof generation
+pub struct FinalizeOptions { pub embed_ivc_ev: bool }
+
+/// Same as `finalize_and_prove` but with options (e.g., embed IVC EV inside Spartan).
+pub fn finalize_and_prove_with_options(
+    state: State,
+    opts: FinalizeOptions,
+) -> anyhow::Result<Option<(crate::Proof, neo_ccs::CcsStructure<F>, Vec<F>)>> {
     if state.ivc_proofs.is_empty() {
         return Ok(None);
     }
@@ -161,11 +174,36 @@ pub fn finalize_and_prove(state: State) -> anyhow::Result<Option<(crate::Proof, 
     };
     let y_next = &state.accumulator.y_compact;
     
-    // Get the augmented CCS from the final proof for verification
-    let augmented_ccs = state.ivc_proofs.last().unwrap()
-        .augmented_ccs.as_ref()
-        .expect("Final proof missing augmented CCS")
-        .clone();
+    // Build augmented public input with recomputed ρ
+    let step_public_input_aug = crate::ivc::build_linked_augmented_public_input(
+        step_x,
+        rho,
+        y_prev,
+        y_next,
+    );
+    // Dummy witness (zeros) to size the augmented witness tail
+    let step_witness_aug = crate::ivc::build_linked_augmented_witness(
+        &vec![F::ZERO; state.step_ccs.m],
+        &state.binding.y_step_offsets,
+        rho,
+    );
+    // Full z = [public || witness]
+    let mut full_step_z = step_public_input_aug.clone();
+    full_step_z.extend_from_slice(&step_witness_aug);
+    let d = neo_math::ring::D;
+    let decomp_z = crate::decomp_b(&full_step_z, 2, d, crate::DecompStyle::Balanced);
+    let _m_step = decomp_z.len() / d;
+    
+    let augmented_ccs = crate::ivc::build_augmented_ccs_linked_with_rlc(
+        &state.step_ccs,
+        step_x.len(),
+        &state.binding.y_step_offsets,
+        &state.binding.y_prev_witness_indices,
+        &state.binding.x_witness_indices,
+        y_prev.len(),
+        state.binding.const1_witness_index,
+        None, // RLC binder disabled in final CCS as well
+    ).map_err(|e| anyhow::anyhow!("Failed to build final augmented CCS: {}", e))?;
 
     // Build the correct public input format: [step_x || ρ || y_prev || y_next]
     let final_public_input = crate::ivc::build_final_snark_public_input(
@@ -180,7 +218,7 @@ pub fn finalize_and_prove(state: State) -> anyhow::Result<Option<(crate::Proof, 
             std::slice::from_ref(final_me_wit),
             &augmented_ccs,
             &state.params,
-            &[],  // no extra OutputClaim for final proof
+            &[],  // possibly replaced below when embedding EV
             None, // no vjs needed for final proof
         ).map_err(|e| anyhow::anyhow!("Bridge adapter failed: {}", e))?;
         
@@ -190,7 +228,39 @@ pub fn finalize_and_prove(state: State) -> anyhow::Result<Option<(crate::Proof, 
         { legacy_me.header_digest = context_digest; }
         
         let ajtai_pp_arc = std::sync::Arc::new(_ajtai_pp);
-        let lean = neo_spartan_bridge::compress_me_to_lean_proof_with_pp(&legacy_me, &legacy_wit, Some(ajtai_pp_arc))?;
+        let lean = if opts.embed_ivc_ev {
+            // Build OutputClaims to expose y_step components from Z
+            let pub_cols = final_public_input.len();
+            let y_len = y_prev.len();
+            let m = final_me_wit.Z.cols();
+            let mut claims: Vec<OutputClaim<F>> = Vec::with_capacity(y_len);
+            // Compute y_step = (y_next - y_prev) / rho (if rho != 0)
+            if rho == F::ZERO { anyhow::bail!("ρ derived from transcript is zero; EV embedding not supported for this rare case"); }
+            let rho_inv = F::ONE / rho;
+            for (i, &off) in state.binding.y_step_offsets.iter().enumerate().take(y_len) {
+                let expected = (y_next[i] - y_prev[i]) * rho_inv;
+                let k_index = pub_cols + off; // position in [public || witness]
+                let weight = expose_z_component(&state.params, m, k_index);
+                claims.push(OutputClaim { weight, expected });
+            }
+
+            // Re-run adapter with claims to append weight vectors and outputs
+            let (mut legacy_me2, legacy_wit2, _pp2) = crate::adapt_from_modern(
+                std::slice::from_ref(final_me),
+                std::slice::from_ref(final_me_wit),
+                &augmented_ccs,
+                &state.params,
+                &claims,
+                None,
+            ).map_err(|e| anyhow::anyhow!("Bridge adapter (with EV claims) failed: {}", e))?;
+            #[allow(deprecated)]
+            { legacy_me2.header_digest = context_digest; }
+
+            let ev_embed = neo_spartan_bridge::IvcEvEmbed { rho, y_prev: y_prev.clone(), y_next: y_next.clone() };
+            neo_spartan_bridge::compress_me_to_lean_proof_with_pp_and_ev(&legacy_me2, &legacy_wit2, Some(ajtai_pp_arc), Some(ev_embed))?
+        } else {
+            neo_spartan_bridge::compress_me_to_lean_proof_with_pp(&legacy_me, &legacy_wit, Some(ajtai_pp_arc))?
+        };
         
         crate::Proof {
             v: 2,

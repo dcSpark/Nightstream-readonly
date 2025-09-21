@@ -295,23 +295,3 @@ pub fn direct_sum_transcript_mixed<F: Field>(
     
     direct_sum_mixed(ccs1, ccs2, beta)
 }
-
-/// DEPRECATED: Simple direct sum without mixing (INSECURE for terminal polynomials).
-/// 
-/// ⚠️ **SECURITY WARNING**: This function allows cancellation attacks in terminal 
-/// polynomial evaluation where f_total = f1 + f2 can cancel adversarially.
-/// 
-/// **Use `direct_sum_mixed` or `direct_sum_transcript_mixed` instead.**
-/// 
-/// This is kept for debugging and testing only.
-#[deprecated(
-    since = "0.1.0", 
-    note = "Use direct_sum_mixed or direct_sum_transcript_mixed to prevent cancellation attacks"
-)]
-pub fn direct_sum_unmixed<F: Field>(
-    ccs1: &crate::relations::CcsStructure<F>,
-    ccs2: &crate::relations::CcsStructure<F>,
-) -> Result<crate::relations::CcsStructure<F>, crate::error::CcsError> {
-    // This is the old direct_sum implementation
-    direct_sum(ccs1, ccs2)
-}

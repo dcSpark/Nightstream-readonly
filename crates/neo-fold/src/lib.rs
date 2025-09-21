@@ -1,7 +1,9 @@
 //! Neo Folding Protocol - Single Three-Reduction Pipeline
 //!
-//! **BREAKING CHANGE v2**: `verify_folding_proof` now requires a `spartan_bundle` parameter
-//! for mandatory succinct last-mile verification and anti-replay protection.
+//! The folding verifier is split in two layers:
+//! - `verify_folding_proof`: checks Π_CCS → Π_RLC → Π_DEC over a single FS transcript.
+//! - `verify_spartan_last_mile`: optional succinct last-mile (Spartan2) check bound to the
+//!    parent ME(B, L) instance produced by the pipeline.
 //!
 //! Implements the complete folding protocol: Π_CCS → Π_RLC → Π_DEC  
 //! Uses one transcript (Poseidon2), one backend (Ajtai), and one sum-check over K.
@@ -15,6 +17,8 @@ pub mod transcript;
 pub mod strong_set;
 /// Π_RLC verifier: Random Linear Combination verification
 pub mod verify_linear;
+/// Generic sum-check engine shared by Π_CCS
+pub mod sumcheck;
 /// Π_CCS: Sum-check reduction over extension field K  
 pub mod pi_ccs;
 /// Π_RLC: Random linear combination with S-action
@@ -46,6 +50,8 @@ use p3_field::PrimeCharacteristicRing;
 pub struct FoldingProof {
     /// Π_CCS proof (sum-check over K) 
     pub pi_ccs_proof: PiCcsProof,
+    /// The k+1 MCS instances provided to Π_CCS (public, transcript-bound)
+    pub pi_ccs_inputs: Vec<neo_ccs::McsInstance<Cmt, F>>,
     /// The k+1 ME(b, L) instances produced by Π_CCS (public, transcript-bound)
     pub pi_ccs_outputs: Vec<MeInstance<Cmt, F, K>>,
     /// Π_RLC proof (S-action combination)
@@ -86,12 +92,30 @@ pub fn fold_ccs_instances(
             "Ajtai PP not initialized for (d={}, m={}): {}", d, m, e
         )))?;
 
+    let pi_ccs_inputs: Vec<neo_ccs::McsInstance<Cmt, F>> = instances
+        .iter()
+        .map(|inst| neo_ccs::McsInstance {
+            c: inst.c.clone(),
+            x: inst.x.clone(),
+            m_in: inst.m_in,
+        })
+        .collect();
+
     // One transcript shared end-to-end
     let mut tr = FoldTranscript::default();
 
     // 1) Π_CCS: k+1 MCS → k+1 ME(b,L)
     let (me_list, pi_ccs_proof) =
         pi_ccs::pi_ccs_prove(&mut tr, params, structure, instances, witnesses, &l)?;
+
+    #[cfg(debug_assertions)]
+    {
+        let mut tr_check = FoldTranscript::default();
+        match pi_ccs::pi_ccs_verify(&mut tr_check, params, structure, instances, &me_list, &pi_ccs_proof) {
+            Ok(ok) => eprintln!("[DEBUG] Prover self-check Pi-CCS verify: {}", ok),
+            Err(e) => eprintln!("[DEBUG] Prover self-check Pi-CCS verify error: {}", e),
+        }
+    }
 
     // SECURITY FIX: Removed single-instance fast path that bypassed RLC/DEC
     // All instances must go through the complete pipeline for security
@@ -140,6 +164,7 @@ pub fn fold_ccs_instances(
 
     let proof = FoldingProof {
         pi_ccs_proof,
+        pi_ccs_inputs,
         pi_ccs_outputs: me_list.clone(),
         pi_rlc_proof,
         pi_dec_proof,
@@ -162,8 +187,6 @@ pub fn verify_folding_proof(
     input_instances: &[neo_ccs::McsInstance<Cmt, F>],
     output_instances: &[MeInstance<Cmt, F, K>],  // k digits from Π_DEC
     proof: &FoldingProof,
-    // NEW: require the succinct proof bundle emitted by your bridge:
-    spartan_bundle: &neo_spartan_bridge::ProofBundle,
 ) -> Result<bool, FoldingError> {
     if input_instances.is_empty() { 
         return Err(FoldingError::InvalidInput("no inputs".into())); 
@@ -208,28 +231,54 @@ pub fn verify_folding_proof(
         .map_err(|e| FoldingError::InvalidInput(format!("pi_dec_verify failed: {e}")))?;
     if !ok_dec { return Ok(false); }
 
-    // 5) Succinct last-mile (MANDATORY):
-    //    This enforces y_j = Z M_j^T χ_r and range ||Z||_∞ < b for the terminal ME(b,L).
-    
-    // CRITICAL SECURITY: Bind Spartan bundle's public IO to THIS call's (c,X,r,y) values
-    // A malicious prover could replay a valid Spartan proof for different data without this check
+    // All checks passed for the folding pipeline (Π_CCS, Π_RLC, Π_DEC)
+    Ok(true)
+}
+
+/// Verify the succinct last‑mile Spartan2 proof for the parent ME(B, L) instance.
+///
+/// Security: This binds the Spartan bundle's public IO to the current call's
+/// parent instance obtained by recombining the provided digits, preventing replay.
+pub fn verify_spartan_last_mile(
+    params: &neo_params::NeoParams,
+    output_instances: &[MeInstance<Cmt, F, K>],
+    spartan_bundle: &neo_spartan_bridge::ProofBundle,
+) -> Result<bool, FoldingError> {
+    // Recompute the parent instance from digits
+    let me_parent = recombine_me_digits_to_parent(params, output_instances)
+        .map_err(|e| FoldingError::InvalidInput(format!("recombine digits: {e}")))?;
+
+    // Bind Spartan bundle's public IO to this call's (c, X, r, y)
     let legacy_me_parent = crate::bridge_adapter::modern_to_legacy_instance(&me_parent, params);
     let expected_public_io = neo_spartan_bridge::encode_bridge_io_header(&legacy_me_parent);
 
-    // If the bundle's bound public IO doesn't match this call's (c, X, r, y), treat as verify-fail.
-    // Check both length and content to prevent edge cases
     if spartan_bundle.public_io_bytes.len() != expected_public_io.len()
         || spartan_bundle.public_io_bytes != expected_public_io
     {
         return Ok(false);
     }
 
-    // Verify the Spartan proof. Any verification error is a verify-fail (not an input error).
+    // Verify the Spartan proof
     match neo_spartan_bridge::verify_me_spartan(spartan_bundle) {
         Ok(true) => Ok(true),
         Ok(false) => Ok(false),
-        Err(_e) => Ok(false), // Internal errors also treated as verification failure
+        Err(_e) => Ok(false),
     }
+}
+
+/// Convenience wrapper that runs the full folding verification and then the
+/// succinct Spartan2 last‑mile verification.
+pub fn verify_folding_proof_with_spartan(
+    params: &neo_params::NeoParams,  
+    structure: &CcsStructure<F>,
+    input_instances: &[neo_ccs::McsInstance<Cmt, F>],
+    output_instances: &[MeInstance<Cmt, F, K>],  // k digits from Π_DEC
+    proof: &FoldingProof,
+    spartan_bundle: &neo_spartan_bridge::ProofBundle,
+) -> Result<bool, FoldingError> {
+    let ok_fold = verify_folding_proof(params, structure, input_instances, output_instances, proof)?;
+    if !ok_fold { return Ok(false); }
+    verify_spartan_last_mile(params, output_instances, spartan_bundle)
 }
 
 /// Recombine k digit ME(b, L) instances into their parent ME(B, L) using base-b scalars.

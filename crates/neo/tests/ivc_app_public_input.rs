@@ -6,20 +6,6 @@ use neo::ivc::{Accumulator, IvcStepInput, StepBindingSpec, prove_ivc_step, verif
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
-#[allow(dead_code)]
-fn build_trivial_step_ccs() -> CcsStructure<F> {
-    // Variables: [1, a, b] with constraint: b - a - 1 = 0
-    let rows = 1; let cols = 3;
-    let mut a = vec![F::ZERO; rows * cols];
-    let mut b = vec![F::ZERO; rows * cols];
-    let c = vec![F::ZERO; rows * cols];
-    a[0*cols + 2] = F::ONE;   // +b
-    a[0*cols + 1] = -F::ONE;  // -a
-    a[0*cols + 0] = -F::ONE;  // -1
-    b[0*cols + 0] = F::ONE;   // *1
-    r1cs_to_ccs(Mat::from_row_major(rows, cols, a), Mat::from_row_major(rows, cols, b), Mat::from_row_major(rows, cols, c))
-}
-
 fn build_extended_step_ccs() -> CcsStructure<F> {
     // Variables: [1, a, b, app1, app2] with constraint: b - a - 1 = 0
     // The app1 and app2 are unconstrained (just witness values for binding)
@@ -90,7 +76,7 @@ fn tampered_digest_prefix_rejected() {
     if !forged.step_public_input.is_empty() {
         forged.step_public_input[0] = F::from_u64(999);
     }
-    let valid = verify_ivc_step(&step_ccs, &forged, &prev_acc, &binding).expect("verifier should not error");
+    let valid = verify_ivc_step(&step_ccs, &forged, &prev_acc, &binding, &params, None).expect("verifier should not error");
     assert!(!valid, "verifier must reject when digest prefix does not match H(prev_acc)");
 }
 

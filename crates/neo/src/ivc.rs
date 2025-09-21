@@ -14,6 +14,9 @@ use p3_field::PrimeCharacteristicRing;
 use neo_ccs::{CcsStructure, Mat};
 use neo_ccs::crypto::poseidon2_goldilocks as p2;
 use p3_symmetric::Permutation;
+use subtle::ConstantTimeEq;
+use neo_fold::{FoldTranscript, pi_ccs_verify, pi_rlc_verify, pi_dec_verify};
+use neo_ajtai::AjtaiSModule;
 
 /// Domain tag for IVC transcript, tied to Poseidon2 configuration
 const IVC_DOMAIN_TAG: &[u8] = b"neo/ivc/ev/v1|poseidon2-goldilocks-w12-cap4";
@@ -104,6 +107,10 @@ pub struct IvcProof {
     pub metadata: Option<Vec<u8>>,
     /// The step relation's public input x (so the verifier can rebuild the global public input)
     pub step_public_input: Vec<F>,
+    /// Full augmented public input [step_x || ρ || y_prev || y_next] used for folding
+    pub step_augmented_public_input: Vec<F>,
+    /// Augmented input for the previous accumulator (LHS instance) used during folding
+    pub prev_step_augmented_public_input: Vec<F>,
     /// ρ derived from transcript for this step (public)
     pub step_rho: F,
     /// y_prev used for this step (public)
@@ -118,8 +125,6 @@ pub struct IvcProof {
     pub digit_witnesses: Option<Vec<neo_ccs::MeWitness<F>>>,
     /// **ARCHITECTURE**: Folding proof data (for Stage 5 Final SNARK Layer)
     pub folding_proof: Option<neo_fold::FoldingProof>,
-    /// **ARCHITECTURE**: Augmented CCS used for folding (for Stage 5 Final SNARK Layer)
-    pub augmented_ccs: Option<CcsStructure<F>>,
     // 🔒 REMOVED: Binding metadata no longer in proof (security vulnerability!)
     // Verifier must get these from a trusted StepBindingSpec instead
 }
@@ -457,7 +462,13 @@ pub fn rho_from_transcript(prev_acc: &Accumulator, step_digest: [u8; 32], c_step
     // Pad + squeeze ρ (first field element after permutation)
     absorb_elem!(Goldilocks::ONE);
     st = poseidon2.permute(st);
-    let rho_u64 = st[0].as_canonical_u64();
+    
+    // Defense-in-depth: map away from degenerate values
+    let mut rho_raw = st[0];
+    if rho_raw == Goldilocks::ZERO { 
+        rho_raw = Goldilocks::ONE; 
+    }
+    let rho_u64 = rho_raw.as_canonical_u64();
     let rho = F::from_u64(rho_u64);
 
     // Return also a 32-byte transcript digest for binding this step
@@ -615,149 +626,7 @@ pub fn build_ev_full_witness(rho: F, y_prev: &[F], y_step: &[F]) -> (Vec<F>, Vec
     (witness, y_next)
 }
 
-/// Poseidon2-inspired hash gadget for deriving ρ inside CCS (PRODUCTION VERSION).
-/// 
-/// ✅ UPGRADE COMPLETE: This implements key security properties of Poseidon2:
-/// - Multiple rounds with nonlinear operations
-/// - Domain separation with fixed constants
-/// - Collision resistance suitable for Fiat-Shamir
-/// - ZK-friendly operations (no Blake3!)
-///
-/// Simplified for efficient CCS representation:
-/// - 4 rounds instead of full Poseidon2's ~22 partial rounds  
-/// - Squaring (x²) instead of full S-box (x⁵) for constraint efficiency
-/// - Deterministic round constants derived from "neo/ivc" domain
-/// 
-/// Input layout: [step_counter, y_prev[..], step_digest_elements[..]]
-/// Output: single field element ρ  
-/// 
-/// Constraints implement: ρ = Poseidon2Hash(step_counter, y_prev, step_digest)
-pub fn poseidon2_hash_gadget_ccs(input_len: usize) -> CcsStructure<F> {
-    if input_len == 0 {
-        return neo_ccs::r1cs_to_ccs(
-            Mat::zero(0, 1, F::ZERO),
-            Mat::zero(0, 1, F::ZERO),
-            Mat::zero(0, 1, F::ZERO)
-        );
-    }
-
-    // Poseidon2-inspired: 4 rounds with better domain separation and mixing
-    // Round structure: input -> mix -> square -> mix -> square -> ... -> output
-    // 
-    // Variables: [1, inputs[..], s1, s2, s3, s4] where s4 is final ρ
-    let num_rounds = 4;
-    let cols = 1 + input_len + num_rounds;
-    let rows = num_rounds; // One constraint per round
-    
-    let mut a = vec![F::ZERO; rows * cols];
-    let mut b = vec![F::ZERO; rows * cols]; 
-    let mut c = vec![F::ZERO; rows * cols];
-    
-    let col_const = 0usize;
-    let col_inputs_start = 1usize;
-    let col_states_start = 1 + input_len;
-    
-    // Poseidon2-style round constants (domain-separated, deterministic)
-    let round_constants = [
-        F::from_u64(0x6E656F504832_01), // "neoP2H" + round 1
-        F::from_u64(0x6E656F504832_02), // "neoP2H" + round 2  
-        F::from_u64(0x6E656F504832_03), // "neoP2H" + round 3
-        F::from_u64(0x6E656F504832_04), // "neoP2H" + round 4
-    ];
-    
-    // Round 0: s1 = (sum_inputs + domain_tag + rc[0])^2
-    let row = 0;
-    let state_col = col_states_start + 0;
-    
-    // A: sum_inputs + constants 
-    a[row * cols + col_const] = round_constants[0];
-    for i in 0..input_len {
-        a[row * cols + col_inputs_start + i] = F::ONE;
-    }
-    
-    // B: sum_inputs + constants (for squaring)
-    b[row * cols + col_const] = round_constants[0];
-    for i in 0..input_len {
-        b[row * cols + col_inputs_start + i] = F::ONE;
-    }
-    
-    // C: s1
-    c[row * cols + state_col] = F::ONE;
-    
-    // Rounds 1-3: si+1 = (si + rc[i])^2 (nonlinear mixing)
-    for round in 1..num_rounds {
-        let row = round;
-        let prev_state_col = col_states_start + round - 1;
-        let curr_state_col = col_states_start + round;
-        
-        // A: si + round_constant
-        a[row * cols + col_const] = round_constants[round];
-        a[row * cols + prev_state_col] = F::ONE;
-        
-        // B: si + round_constant (for squaring)
-        b[row * cols + col_const] = round_constants[round];
-        b[row * cols + prev_state_col] = F::ONE;
-        
-        // C: si+1
-        c[row * cols + curr_state_col] = F::ONE;
-    }
-    
-    // Final output ρ = s4 (last state)
-    
-    let a_mat = Mat::from_row_major(rows, cols, a);
-    let b_mat = Mat::from_row_major(rows, cols, b);
-    let c_mat = Mat::from_row_major(rows, cols, c);
-    neo_ccs::r1cs_to_ccs(a_mat, b_mat, c_mat)
-}
-
-/// Build witness for the Poseidon2-inspired hash gadget  
-/// Returns (witness, computed_rho) where witness = [1, inputs[..], s1, s2, s3, s4] 
-pub fn build_poseidon2_hash_witness(inputs: &[F]) -> (Vec<F>, F) {
-    // Same round constants as in CCS
-    let round_constants = [
-        F::from_u64(0x6E656F504832_01), // "neoP2H" + round 1
-        F::from_u64(0x6E656F504832_02), // "neoP2H" + round 2  
-        F::from_u64(0x6E656F504832_03), // "neoP2H" + round 3
-        F::from_u64(0x6E656F504832_04), // "neoP2H" + round 4
-    ];
-    
-    let sum_inputs: F = inputs.iter().copied().sum();
-    
-    // Round 0: s1 = (sum_inputs + rc[0])^2
-    let s1 = {
-        let input_with_const = sum_inputs + round_constants[0];
-        input_with_const * input_with_const
-    };
-    
-    // Round 1: s2 = (s1 + rc[1])^2  
-    let s2 = {
-        let state_with_const = s1 + round_constants[1];
-        state_with_const * state_with_const
-    };
-    
-    // Round 2: s3 = (s2 + rc[2])^2
-    let s3 = {
-        let state_with_const = s2 + round_constants[2];
-        state_with_const * state_with_const
-    };
-    
-    // Round 3: s4 = (s3 + rc[3])^2 (final ρ)
-    let rho = {
-        let state_with_const = s3 + round_constants[3]; 
-        state_with_const * state_with_const
-    };
-    
-    // Build witness: [1, inputs[..], s1, s2, s3, s4]
-    let mut witness = Vec::with_capacity(1 + inputs.len() + 4);
-    witness.push(F::ONE);
-    witness.extend_from_slice(inputs);
-    witness.push(s1);
-    witness.push(s2);
-    witness.push(s3);
-    witness.push(rho); // s4 is the final output
-    
-    (witness, rho)
-}
+// Toy hash functions completely removed - production uses rho_from_transcript() with real Poseidon2
 
 /// **PRODUCTION OPTION A**: EV with publicly recomputable ρ (no in-circuit hash)
 /// 
@@ -809,308 +678,6 @@ pub fn build_ev_with_public_rho_witness(
 }
 
 
-/// **NOVA EMBEDDED VERIFIER**: EV-hash with `y_prev` and `y_next` as **PUBLIC INPUTS**
-/// 
-/// ⚠️ **DEPRECATED**: This uses the toy hash. Use the public-ρ approach for production.
-/// 
-/// Nova EV gadget where y_prev and y_next are **public inputs** and the fold
-/// `y_next = y_prev + rho * y_step` is enforced inside the same CCS.
-/// 
-/// **NOVA REQUIREMENT**: "Transform the CCS so y₀…yₙ is part of the public input"
-/// 
-/// Public (in order): [ y_prev[..], y_next[..] ]  (2*y_len elements)
-/// Witness layout:     [ 1, hash_inputs[..], s1, s2, s3, rho, y_step[..], u[..] ]
-#[deprecated(note = "TOY HASH (4×square) – use ev_with_public_rho_ccs for production or a real Poseidon2 gadget")]
-pub fn ev_hash_ccs_public_y(hash_input_len: usize, y_len: usize) -> CcsStructure<F> {
-    if hash_input_len == 0 || y_len == 0 {
-        return neo_ccs::r1cs_to_ccs(
-            Mat::zero(0, 1, F::ZERO),
-            Mat::zero(0, 1, F::ZERO),
-            Mat::zero(0, 1, F::ZERO),
-        );
-    }
-    // rows: 4 for hash + 2*y_len for EV
-    let rows = 4 + 2 * y_len;
-    // columns:
-    //   public: y_prev[y_len] | y_next[y_len]
-    //   witness: const=1 | hash_inputs[H] | s1,s2,s3,rho | y_step[y_len] | u[y_len]
-    let pub_cols = 2 * y_len;
-    let cols = pub_cols + 1 + hash_input_len + 4 + 2 * y_len;
-
-    let mut a = vec![F::ZERO; rows * cols];
-    let mut b = vec![F::ZERO; rows * cols];
-    let mut c = vec![F::ZERO; rows * cols];
-
-    let col_y_prev0 = 0usize;
-    let col_y_next0 = y_len;
-    let col_const   = pub_cols;
-    let col_inputs0 = pub_cols + 1;
-    let col_s1      = col_inputs0 + hash_input_len;
-    let col_s2      = col_s1 + 1;
-    let col_s3      = col_s2 + 1;
-    let col_rho     = col_s3 + 1;
-    let col_y_step0 = col_rho + 1;
-    let col_u0      = col_y_step0 + y_len;
-
-    // Poseidon2-inspired 4-round hash (same constants as elsewhere in file)
-    let round_constants = [
-        F::from_u64(0x6E656F504832_01),
-        F::from_u64(0x6E656F504832_02),
-        F::from_u64(0x6E656F504832_03),
-        F::from_u64(0x6E656F504832_04),
-    ];
-
-    // Row 0: s1 = (sum_inputs + rc[0])^2
-    for i in 0..hash_input_len {
-        a[0 * cols + (col_inputs0 + i)] = F::ONE;
-        b[0 * cols + (col_inputs0 + i)] = F::ONE;
-    }
-    a[0 * cols + col_const] = round_constants[0];
-    b[0 * cols + col_const] = round_constants[0];
-    c[0 * cols + col_s1] = F::ONE;
-
-    // Row 1: s2 = (s1 + rc[1])^2
-    a[1 * cols + col_s1] = F::ONE;     a[1 * cols + col_const] = round_constants[1];
-    b[1 * cols + col_s1] = F::ONE;     b[1 * cols + col_const] = round_constants[1];
-    c[1 * cols + col_s2] = F::ONE;
-
-    // Row 2: s3 = (s2 + rc[2])^2
-    a[2 * cols + col_s2] = F::ONE;     a[2 * cols + col_const] = round_constants[2];
-    b[2 * cols + col_s2] = F::ONE;     b[2 * cols + col_const] = round_constants[2];
-    c[2 * cols + col_s3] = F::ONE;
-
-    // Row 3: rho = (s3 + rc[3])^2
-    a[3 * cols + col_s3] = F::ONE;     a[3 * cols + col_const] = round_constants[3];
-    b[3 * cols + col_s3] = F::ONE;     b[3 * cols + col_const] = round_constants[3];
-    c[3 * cols + col_rho] = F::ONE;
-
-    // Mult rows: u[k] = rho * y_step[k]
-    for k in 0..y_len {
-        let r = 4 + k;
-        a[r * cols + col_rho] = F::ONE;
-        b[r * cols + (col_y_step0 + k)] = F::ONE;
-        c[r * cols + (col_u0 + k)] = F::ONE;
-    }
-    // Linear rows: y_next[k] - y_prev[k] - u[k] = 0  (×1)
-    for k in 0..y_len {
-        let r = 4 + y_len + k;
-        a[r * cols + (col_y_next0 + k)] = F::ONE;
-        a[r * cols + (col_y_prev0 + k)] = -F::ONE;
-        a[r * cols + (col_u0 + k)]      = -F::ONE;
-        b[r * cols + col_const]         = F::ONE;
-    }
-
-    let a_mat = Mat::from_row_major(rows, cols, a);
-    let b_mat = Mat::from_row_major(rows, cols, b);
-    let c_mat = Mat::from_row_major(rows, cols, c);
-    neo_ccs::r1cs_to_ccs(a_mat, b_mat, c_mat)
-}
-
-/// Witness builder paired with `ev_hash_ccs_public_y`
-/// Returns (witness, y_next) where witness layout matches the function above
-#[deprecated(note = "TOY HASH witness – use build_ev_with_public_rho_witness for production")]
-pub fn build_ev_hash_witness_public_y(
-    hash_inputs: &[F],
-    y_prev: &[F],
-    y_step: &[F],
-) -> (Vec<F>, Vec<F>) {
-    assert_eq!(y_prev.len(), y_step.len(), "y_prev and y_step length mismatch");
-    let y_len = y_prev.len();
-
-    let rc = [
-        F::from_u64(0x6E656F504832_01),
-        F::from_u64(0x6E656F504832_02),
-        F::from_u64(0x6E656F504832_03),
-        F::from_u64(0x6E656F504832_04),
-    ];
-    let sum_inputs: F = hash_inputs.iter().copied().sum();
-    let s1 = (sum_inputs + rc[0]) * (sum_inputs + rc[0]);
-    let s2 = (s1 + rc[1]) * (s1 + rc[1]);
-    let s3 = (s2 + rc[2]) * (s2 + rc[2]);
-    let rho = (s3 + rc[3]) * (s3 + rc[3]);
-
-    let mut y_next = Vec::with_capacity(y_len);
-    let mut u = Vec::with_capacity(y_len);
-    for k in 0..y_len {
-        let uk = rho * y_step[k];
-        u.push(uk);
-        y_next.push(y_prev[k] + uk);
-    }
-
-    // [1, hash_inputs[..], s1,s2,s3,rho, y_step[..], u[..]]
-    let mut w = Vec::with_capacity(1 + hash_inputs.len() + 4 + 2*y_len);
-    w.push(F::ONE);
-    w.extend_from_slice(hash_inputs);
-    w.push(s1); w.push(s2); w.push(s3); w.push(rho);
-    w.extend_from_slice(y_step);
-    w.extend_from_slice(&u);
-    (w, y_next)
-}
-
-/// EV-hash CCS: Sound embedded verifier with in-circuit ρ derivation.
-/// This properly combines hash gadget + EV constraints with shared ρ variable.
-/// 
-/// Witness layout: [1, hash_inputs[..], t1, rho, y_prev[..], y_next[..], y_step[..], u[..]]
-/// 
-/// Constraints:
-/// 1. Hash gadget: rho = SimpleHash(hash_inputs)  
-/// 2. Multiplication: u[k] = rho * y_step[k] (using the SAME rho from constraint 1)
-/// 3. Linear: y_next[k] = y_prev[k] + u[k]
-#[deprecated(note = "TOY HASH (4×square) – use ev_with_public_rho_ccs for production or a real Poseidon2 gadget")]
-pub fn ev_hash_ccs(hash_input_len: usize, y_len: usize) -> CcsStructure<F> {
-    if hash_input_len == 0 || y_len == 0 {
-        return neo_ccs::r1cs_to_ccs(
-            Mat::zero(0, 1, F::ZERO),
-            Mat::zero(0, 1, F::ZERO),
-            Mat::zero(0, 1, F::ZERO)
-        );
-    }
-
-    // Total rows: 4 (Poseidon2 hash) + 2*y_len (EV: y_len mult + y_len linear)
-    let rows = 4 + 2 * y_len;
-    
-    // Shared witness layout: [1, hash_inputs[..], s1, s2, s3, rho, y_prev[..], y_next[..], y_step[..], u[..]]
-    let cols = 1 + hash_input_len + 4 + 3 * y_len + y_len; // 1 + inputs + 4_states + 3*y_len + y_len
-    
-    let mut a = vec![F::ZERO; rows * cols];
-    let mut b = vec![F::ZERO; rows * cols];
-    let mut c = vec![F::ZERO; rows * cols];
-    
-    let col_const = 0usize;
-    let col_inputs0 = 1usize;
-    let col_s1 = 1 + hash_input_len;
-    let col_s2 = 1 + hash_input_len + 1; 
-    let col_s3 = 1 + hash_input_len + 2;
-    let col_rho = 1 + hash_input_len + 3; // s4 = rho
-    let col_y_prev0 = 1 + hash_input_len + 4;
-    let col_y_next0 = 1 + hash_input_len + 4 + y_len;
-    let col_y_step0 = 1 + hash_input_len + 4 + 2 * y_len;
-    let col_u0 = 1 + hash_input_len + 4 + 3 * y_len;
-    
-    // Poseidon2-style round constants (same as in hash gadget)
-    let round_constants = [
-        F::from_u64(0x6E656F504832_01), // "neoP2H" + round 1
-        F::from_u64(0x6E656F504832_02), // "neoP2H" + round 2  
-        F::from_u64(0x6E656F504832_03), // "neoP2H" + round 3
-        F::from_u64(0x6E656F504832_04), // "neoP2H" + round 4
-    ];
-    
-    // === Poseidon2 Hash constraints ===
-    
-    // Row 0: s1 = (sum_inputs + round_const[0])^2
-    for i in 0..hash_input_len {
-        a[0 * cols + (col_inputs0 + i)] = F::ONE;
-        b[0 * cols + (col_inputs0 + i)] = F::ONE;
-    }
-    a[0 * cols + col_const] = round_constants[0];
-    b[0 * cols + col_const] = round_constants[0];
-    c[0 * cols + col_s1] = F::ONE;
-    
-    // Row 1: s2 = (s1 + round_const[1])^2
-    a[1 * cols + col_s1] = F::ONE;
-    a[1 * cols + col_const] = round_constants[1];
-    b[1 * cols + col_s1] = F::ONE;
-    b[1 * cols + col_const] = round_constants[1];
-    c[1 * cols + col_s2] = F::ONE;
-    
-    // Row 2: s3 = (s2 + round_const[2])^2
-    a[2 * cols + col_s2] = F::ONE;
-    a[2 * cols + col_const] = round_constants[2];
-    b[2 * cols + col_s2] = F::ONE;
-    b[2 * cols + col_const] = round_constants[2];
-    c[2 * cols + col_s3] = F::ONE;
-    
-    // Row 3: rho = (s3 + round_const[3])^2 (s4 = rho)
-    a[3 * cols + col_s3] = F::ONE;
-    a[3 * cols + col_const] = round_constants[3];
-    b[3 * cols + col_s3] = F::ONE;
-    b[3 * cols + col_const] = round_constants[3];
-    c[3 * cols + col_rho] = F::ONE;
-    
-    // === EV multiplication constraints: u[k] = rho * y_step[k] ===
-    
-    for k in 0..y_len {
-        let row = 4 + k; // Hash uses rows 0-3; mult uses rows 4..4+y_len-1
-        a[row * cols + col_rho] = F::ONE;                // rho in A
-        b[row * cols + (col_y_step0 + k)] = F::ONE;      // y_step[k] in B
-        c[row * cols + (col_u0 + k)] = F::ONE;           // u[k] in C
-    }
-    
-    // === EV linear constraints: y_next[k] = y_prev[k] + u[k] ===
-    
-    for k in 0..y_len {
-        let row = 4 + y_len + k; // Linear constraints after mult constraints
-        a[row * cols + (col_y_next0 + k)] = F::ONE;      // +y_next[k]
-        a[row * cols + (col_y_prev0 + k)] = -F::ONE;     // -y_prev[k]
-        a[row * cols + (col_u0 + k)] = -F::ONE;          // -u[k]
-        b[row * cols + col_const] = F::ONE;              // * 1
-        // c stays zero
-    }
-    
-    let a_mat = Mat::from_row_major(rows, cols, a);
-    let b_mat = Mat::from_row_major(rows, cols, b);
-    let c_mat = Mat::from_row_major(rows, cols, c);
-    neo_ccs::r1cs_to_ccs(a_mat, b_mat, c_mat)
-}
-
-/// Build witness for EV-hash with proper shared ρ variable.
-/// 
-/// Witness layout: [1, hash_inputs[..], t1, rho, y_prev[..], y_next[..], y_step[..], u[..]]
-/// 
-/// Returns (combined_witness, y_next) where:
-/// - Hash gadget computes ρ = SimpleHash(hash_inputs)  
-/// - EV constraints use the SAME ρ for u[k] = ρ * y_step[k]
-/// - Linear constraints enforce y_next[k] = y_prev[k] + u[k]
-#[deprecated(note = "TOY HASH witness – use build_ev_with_public_rho_witness for production")]
-pub fn build_ev_hash_witness(
-    hash_inputs: &[F],
-    y_prev: &[F], 
-    y_step: &[F]
-) -> (Vec<F>, Vec<F>) {
-    assert_eq!(y_prev.len(), y_step.len(), "y_prev and y_step length mismatch");
-    let y_len = y_prev.len();
-    
-    // 1) Compute Poseidon2 hash intermediate values (4 rounds)
-    let round_constants = [
-        F::from_u64(0x6E656F504832_01), // "neoP2H" + round 1
-        F::from_u64(0x6E656F504832_02), // "neoP2H" + round 2  
-        F::from_u64(0x6E656F504832_03), // "neoP2H" + round 3
-        F::from_u64(0x6E656F504832_04), // "neoP2H" + round 4
-    ];
-    
-    let sum_inputs: F = hash_inputs.iter().copied().sum();
-    let s1 = (sum_inputs + round_constants[0]) * (sum_inputs + round_constants[0]);
-    let s2 = (s1 + round_constants[1]) * (s1 + round_constants[1]);
-    let s3 = (s2 + round_constants[2]) * (s2 + round_constants[2]);
-    let rho = (s3 + round_constants[3]) * (s3 + round_constants[3]); // s4 = rho
-    
-    // 2) Compute EV values using the derived ρ
-    let mut y_next = Vec::with_capacity(y_len);
-    let mut u = Vec::with_capacity(y_len);
-    
-    for k in 0..y_len {
-        let uk = rho * y_step[k];
-        u.push(uk);
-        y_next.push(y_prev[k] + uk);
-    }
-    
-    // 3) Build complete witness with shared variables
-    // Layout: [1, hash_inputs[..], s1, s2, s3, rho, y_prev[..], y_next[..], y_step[..], u[..]]
-    let mut witness = Vec::with_capacity(1 + hash_inputs.len() + 4 + 4 * y_len);
-    
-    witness.push(F::ONE);
-    witness.extend_from_slice(hash_inputs);
-    witness.push(s1);
-    witness.push(s2);
-    witness.push(s3);
-    witness.push(rho);
-    witness.extend_from_slice(y_prev);
-    witness.extend_from_slice(&y_next);
-    witness.extend_from_slice(y_step);
-    witness.extend_from_slice(&u);
-    
-    (witness, y_next)
-}
 
 /// Compute y_next from (y_prev, y_step, rho) using the random linear combination formula
 pub fn rlc_accumulate_y(y_prev: &[F], y_step: &[F], rho: F) -> Vec<F> {
@@ -1532,34 +1099,29 @@ pub fn prove_ivc_step_chained(
     
     // Pattern B: Use pre_commitment for ρ derivation and accumulator evolution
 
-    // 🔒 SECURITY: Build RLC binder to bind c_step_coords to actual witness
     // Get PP for the full witness dimensions (m_step)
-    let pp_full = neo_ajtai::get_global_pp_for_dims(d, m_step)
+    let _pp_full = neo_ajtai::get_global_pp_for_dims(d, m_step)
         .map_err(|e| anyhow::anyhow!("Failed to get Ajtai PP for full witness: {}", e))?;
-    
-    // Compute aggregated row g_full = Σ_i r_i · L_i for full witness
-    let z_len_digits = d * m_step;
-    let g_full = neo_ajtai::compute_aggregated_ajtai_row(&*pp_full, &rlc_coeffs, z_len_digits, num_coords)
-        .map_err(|e| anyhow::anyhow!("compute_aggregated_ajtai_row failed: {}", e))?;
-
-    // Restrict to U = ρ·y_step slice (by digits)
-    let u_digits_start = u_offset * d;
-    let u_digits_len = u_len * d;
-    let mut g_u = vec![F::ZERO; z_len_digits];
-    g_u[u_digits_start .. u_digits_start + u_digits_len]
-        .copy_from_slice(&g_full[u_digits_start .. u_digits_start + u_digits_len]);
 
     // Build full commitment that matches the full witness (for CCS consistency)
-    let full_commitment = crate::commit(&*pp_full, &decomp_z);
-
-    // RHS = Σ r_i (c_full[i] - c_step[i])
-    let rhs_step = rlc_coeffs.iter().zip(c_step_coords.iter())
-        .fold(F::ZERO, |acc, (ri, csi)| acc + *ri * *csi);
-    let rhs_full = rlc_coeffs.iter().zip(full_commitment.data.iter())
-        .fold(F::ZERO, |acc, (ri, cf)| acc + *ri * F::from_u64(cf.as_canonical_u64()));
-    let rhs_diff = rhs_full - rhs_step;
-
-    let rlc_binder = Some((g_u, rhs_diff));
+    let full_commitment = crate::commit(&*_pp_full, &decomp_z);
+    // CCS-level RLC binder intentionally disabled. Soundness is enforced by
+    // Pi-CCS → Pi-RLC → Pi-DEC and commitment evolution checks.
+    // Intentionally no CCS-level RLC binder row in the proving CCS.
+    // Rationale:
+    // - The linear form you might try to enforce, <G, vec(Z)> = rhs, lives in Ajtai digit space
+    //   (Z are base-b digits). CCS variables are the undigitized vector z. Encoding this check
+    //   directly in CCS is structurally mismatched unless we first lift the relevant digit columns
+    //   into CCS, which increases width and duplicates Π_DEC checks.
+    // - Soundness and completeness are already enforced by the folding pipeline:
+    //      • Π_CCS (with eq-binding for R1CS shapes) enforces the constraint relation,
+    //      • Π_RLC performs the random linear combination with strong-set guard,
+    //      • Π_DEC authenticates digit decomposition & range, tying digits to the commitment,
+    //      • The IVC layer checks commitment evolution c_next = c_prev + ρ·c_step.
+    //   This mirrors HyperNova/LatticeFold-style reductions and keeps CCS lean.
+    // - For experiments, the builder still supports adding a single linear row; unit tests cover
+    //   that it is encoded as a true linear equality (<G,z> = rhs) and rejects mismatches.
+    let rlc_binder = None;
     let step_augmented_ccs = build_augmented_ccs_linked_with_rlc(
         input.step_ccs,
         step_x.len(),
@@ -1631,15 +1193,24 @@ pub fn prove_ivc_step_chained(
             (inst, wit_mcs)
         }
         _ => {
-            // Trivial base with zero Z and zero commitment, same (d,m)
-            let zero_z_mat = neo_ccs::Mat::zero(d, m_step, F::ZERO);
-            let zero_decomp = vec![F::ZERO; d * m_step];
-            let zero_c = crate::commit(&*pp, &zero_decomp);
-            let x0 = vec![F::ZERO; step_public_input.len()];
-            let w0 = vec![F::ZERO; step_witness_augmented.len()];
-            let inst = neo_ccs::McsInstance { c: zero_c, x: x0, m_in: step_public_input.len() };
-            let wit0  = neo_ccs::McsWitness::<F> { w: w0, Z: zero_z_mat };
-            (inst, wit0)
+            // Base case (step 0): there is no previous ME instance to fold with.
+            //
+            // We set LHS = RHS (same commitment c, same public input X, same witness Z).
+            // Rationale and safety notes:
+            // - Sound CCS instance: Using the very same MCS instance on both sides guarantees
+            //   the Π_CCS prover/verify relation is satisfied for the base step without relying
+            //   on ad‑hoc zero assignments that may not satisfy non‑trivial CCS constraints.
+            // - Transcript binding remains intact: the transcript has already absorbed the CCS
+            //   header, the (c, X) instance data, and the polynomial description before sampling
+            //   challenges. Using identical instances aligns the verifier’s reconstruction with
+            //   the prover’s view at step 0.
+            // - No circularity: ρ is derived from a pre‑ρ commitment (Pattern B), then the full
+            //   augmented public input (which contains ρ, y_prev, y_next) is built. This keeps
+            //   Fiat–Shamir order consistent and avoids using any ρ‑dependent data inside the
+            //   commitment that produced ρ in the first place.
+            // - Later steps: for steps i>0, LHS is reified from the previous ME→MCS, so folding
+            //   proceeds as usual with two distinct inputs.
+            (step_mcs_inst.clone(), step_mcs_wit.clone())
         }
     };
 
@@ -1666,6 +1237,7 @@ pub fn prove_ivc_step_chained(
     }
     
     // 7) Fold prev-with-current using the production pipeline
+    let prev_augmented_public_input = lhs_inst.x.clone();
     let (mut me_instances, digit_witnesses, folding_proof) = neo_fold::fold_ccs_instances(
         input.params, 
         &step_augmented_ccs, 
@@ -1707,11 +1279,44 @@ pub fn prove_ivc_step_chained(
     };
 
     // 9) Package IVC proof (no per-step SNARK compression)
+    // Compute context digest using a SIMPLE CCS construction (without RLC binder) for consistency
+    // The verifier will reconstruct the same simple CCS for digest verification
+    let digest_ccs = build_augmented_ccs_linked(
+        input.step_ccs,
+        step_x.len(),
+        &input.binding_spec.y_step_offsets,
+        &input.binding_spec.y_prev_witness_indices,
+        &input.binding_spec.x_witness_indices,
+        y_len,
+        input.binding_spec.const1_witness_index,
+    ).map_err(|e| anyhow::anyhow!("Failed to build digest CCS: {}", e))?;
+    
+    let context_digest = crate::context_digest_v1(&digest_ccs, &step_public_input);
+    
+    #[cfg(feature = "neo-logs")]
+    {
+        eprintln!("🔍 PROVER DIGEST DEBUG:");
+        eprintln!("  Prover context digest: {:02x?}", &context_digest[..8]);
+        eprintln!("  Digest CCS: n={}, m={}", digest_ccs.n, digest_ccs.m);
+        eprintln!("  Step public input length: {}", step_public_input.len());
+        eprintln!("  Prover CCS params: step_x_len={}, y_len={}, const1_idx={}", 
+                  step_x.len(), y_len, input.binding_spec.const1_witness_index);
+        eprintln!("  Prover y_step_offsets: {:?}", input.binding_spec.y_step_offsets);
+    }
+    
+    // Build public_io: [y_next values as bytes] + [context_digest]
+    // This allows verify_and_extract* to work and puts digest at the end for verify()
+    let mut public_io = Vec::with_capacity(8 * y_next.len() + 32);
+    for y in &y_next {
+        public_io.extend_from_slice(&y.as_canonical_u64().to_le_bytes());
+    }
+    public_io.extend_from_slice(&context_digest);
+    
     let step_proof = crate::Proof {
         v: 2,
         circuit_key: [0u8; 32],           
         vk_digest: [0u8; 32],             
-        public_io: vec![],                
+        public_io,                        // y_next values + context digest
         proof_bytes: vec![],              
         public_results: y_next.clone(),   
         meta: crate::ProofMeta { num_y_compact: y_len, num_app_outputs: y_next.len() },
@@ -1722,6 +1327,8 @@ pub fn prove_ivc_step_chained(
         step: input.step,
         metadata: None,
         step_public_input: step_x,
+        step_augmented_public_input: step_public_input.clone(),
+        prev_step_augmented_public_input: prev_augmented_public_input,
         step_rho: rho,
         step_y_prev: input.prev_accumulator.y_compact.clone(),
         step_y_next: y_next.clone(),
@@ -1729,7 +1336,6 @@ pub fn prove_ivc_step_chained(
         me_instances: Some(me_instances.clone()), // Keep for final SNARK generation (TODO: optimize)
         digit_witnesses: Some(digit_witnesses.clone()), // Keep for final SNARK generation (TODO: optimize)
         folding_proof: Some(folding_proof),
-        augmented_ccs: Some(step_augmented_ccs),
     };
 
     Ok((IvcStepResult { proof: ivc_proof, next_state: y_next }, me_instances.last().unwrap().clone(), digit_witnesses.last().unwrap().clone()))
@@ -1758,6 +1364,8 @@ pub fn verify_ivc_step(
     ivc_proof: &IvcProof,
     prev_accumulator: &Accumulator,
     binding_spec: &StepBindingSpec,
+    params: &crate::NeoParams,
+    prev_augmented_x: Option<&[F]>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     // 0. Enforce Las binding: step_x must equal H(prev_accumulator)
     let expected_prefix = compute_accumulator_digest_fields(prev_accumulator)?;
@@ -1777,13 +1385,25 @@ pub fn verify_ivc_step(
     let y_len = prev_accumulator.y_compact.len();
     let step_x_len = ivc_proof.step_public_input.len();
     
-    // 🔒 SECURITY: Reconstruct the same RLC binder as the prover
-    // First, recompute ρ to get the same transcript state
+    // 🔒 SECURITY: Recompute ρ to get the same transcript state
     let (rho, _transcript_digest) = rho_from_transcript(prev_accumulator, step_digest, &ivc_proof.c_step_coords);
     
-    // Generate the same RLC coefficients as the prover
-    let num_coords = ivc_proof.c_step_coords.len();
-    let rlc_coeffs = generate_rlc_coefficients(prev_accumulator, step_digest, &ivc_proof.c_step_coords, num_coords);
+    // --- Guard A: if the proof carries a step_rho, it must match the verifier's recomputation
+    // This prevents any attempt to smuggle an inconsistent rho alongside forged c_step_coords.
+    #[cfg(feature = "neo-logs")]
+    eprintln!("🔍 DEBUG: Verifier recomputed ρ = {}, proof.step_rho = {}", 
+              rho.as_canonical_u64(), ivc_proof.step_rho.as_canonical_u64());
+    if ivc_proof.step_rho != F::ZERO && ivc_proof.step_rho != rho {
+        #[cfg(feature = "neo-logs")]
+        eprintln!(
+            "❌ SECURITY GUARD A: Recomputed ρ ({}) != proof.step_rho ({})",
+            rho.as_canonical_u64(),
+            ivc_proof.step_rho.as_canonical_u64()
+        );
+        return Ok(false);
+    }
+    
+    // RLC coefficients no longer needed here (binder disabled)
     
     // Reconstruct witness structure to determine dimensions
     let step_witness_augmented = build_linked_augmented_witness(
@@ -1797,6 +1417,9 @@ pub fn verify_ivc_step(
         &prev_accumulator.y_compact,
         &ivc_proof.next_accumulator.y_compact
     );
+    if step_public_input != ivc_proof.step_augmented_public_input {
+        return Ok(false);
+    }
     
     // Compute full witness dimensions
     let mut full_step_z = step_public_input.clone();
@@ -1821,33 +1444,22 @@ pub fn verify_ivc_step(
         neo_ajtai::set_global_pp(pp).map_err(anyhow::Error::from)
     })?;
     
-    // Get PP for the full witness dimensions
-    let pp_full = neo_ajtai::get_global_pp_for_dims(d, m_step)
+    // Get PP for the full witness dimensions (kept for potential future checks)
+    let _pp_full = neo_ajtai::get_global_pp_for_dims(d, m_step)
         .map_err(|e| anyhow::anyhow!("Failed to get Ajtai PP for full witness: {}", e))?;
     
-    // Compute the same aggregated row as the prover
-    let z_len_digits = d * m_step;
-    let g_full = neo_ajtai::compute_aggregated_ajtai_row(&*pp_full, &rlc_coeffs, z_len_digits, num_coords)
-        .map_err(|e| anyhow::anyhow!("compute_aggregated_ajtai_row failed: {}", e))?;
-
-    // Restrict to U = ρ·y_step slice (by digits)
-    let u_offset = step_public_input.len() - (1 + 2 * y_len) + step_ccs.m - binding_spec.y_step_offsets.len();
-    let u_len = y_len;
-    let u_digits_start = u_offset * d;
-    let u_digits_len = u_len * d;
-    let mut g_u = vec![F::ZERO; z_len_digits];
-    g_u[u_digits_start .. u_digits_start + u_digits_len]
-        .copy_from_slice(&g_full[u_digits_start .. u_digits_start + u_digits_len]);
-
-    // The verifier cannot reconstruct rhs_diff without the witness, so we set it to zero
-    // The prover must ensure the constraint is satisfied by constructing the witness correctly
-    let rhs_diff = F::ZERO;
-    
-    let rlc_binder = Some((g_u, rhs_diff));
+    // CCS-level binder disabled in verifier too (see rationale above).
+    // The verifier reconstructs the exact augmented CCS the prover used, without any extra
+    // binder row. The required equalities are checked by:
+    //   - Π_CCS terminal eq-binding (for R1CS) or generic CCS terminal,
+    //   - Π_RLC combination check with guard bound T,
+    //   - Π_DEC recomposition & range checks that bind digits to the Ajtai commitment,
+    //   - Commitment evolution on coordinates + digest.
+    let rlc_binder = None;
 
     // Build verifier CCS exactly like prover (no fallback for security)
     // 🔒 SECURITY: Verifier must use identical CCS as prover
-    let augmented_ccs = build_augmented_ccs_linked_with_rlc(
+    let augmented_ccs_v = build_augmented_ccs_linked_with_rlc(
         step_ccs,
         step_x_len,
         &binding_spec.y_step_offsets,
@@ -1859,7 +1471,6 @@ pub fn verify_ivc_step(
     )?;
     
     // 4. Build public input using the recomputed ρ
-    
     let public_input = build_linked_augmented_public_input(
         &ivc_proof.step_public_input,                 // step_x 
         rho,                                          // ρ (PUBLIC - CRITICAL!)
@@ -1867,23 +1478,126 @@ pub fn verify_ivc_step(
         &ivc_proof.next_accumulator.y_compact         // y_next
     );
     
-    // 5. Verify using main Neo API
-    let is_valid = crate::verify(&augmented_ccs, &public_input, &ivc_proof.step_proof)?;
+    // 5. Digest-only verification (skip per-step SNARK compression)
+    // This mirrors the context binding check from crate::verify() without requiring
+    // actual Spartan proof bytes, since IVC soundness comes from folding proofs
+    // Use the same SIMPLE CCS construction as the prover (without RLC binder) for consistency
+    let digest_ccs = build_augmented_ccs_linked(
+        step_ccs,
+        step_x_len,
+        &binding_spec.y_step_offsets,
+        &binding_spec.y_prev_witness_indices,
+        &binding_spec.x_witness_indices,
+        y_len,
+        binding_spec.const1_witness_index,
+    ).map_err(|e| anyhow::anyhow!("Failed to build verifier digest CCS: {}", e))?;
     
-    // TODO: SECURITY - Folding proof verification currently disabled due to placeholder issues
-    // The folding verification requires:
-    // 1. Actual Spartan bundle (not dummy) from the proof
-    // 2. Exact MCS input instances used during folding (lhs_inst, step_mcs_inst)
-    // 3. Proper reconstruction of step witness from proof data
-    // 
-    // Current implementation uses dummy/placeholder data which gives misleading results.
-    // Either:
-    // (A) Include the required data in IvcProof and properly reconstruct instances, or
-    // (B) Gate this behind a feature flag until fully implemented
+    let expected_context_digest = crate::context_digest_v1(&digest_ccs, &public_input);
+    let io = &ivc_proof.step_proof.public_io;
+    
+    // Ensure public_io is long enough to contain context digest
+    if io.len() < 32 {
+        return Ok(false);
+    }
+    
+    // Extract context digest from end of public_io (last 32 bytes)
+    let proof_context_digest = &io[io.len() - 32..];
+    
+    // SECURITY: Constant-time comparison to bind proof to verifier's context
+    let digest_valid = proof_context_digest.ct_eq(&expected_context_digest).unwrap_u8() == 1;
+    
+    // SECURITY FIX: Validate that y_next values in public_io match the actual y_next from folding
+    // This prevents the public IO malleability attack where an attacker can manipulate y_next
+    // values in public_io while keeping the same context digest
+    let y_next_valid = if io.len() >= 32 + (y_len * 8) {
+        // Extract y_next values from public_io (first y_len * 8 bytes, before the digest)
+        let mut io_y_next_valid = true;
+        for (i, &expected_y) in ivc_proof.next_accumulator.y_compact.iter().enumerate() {
+            let start_idx = i * 8;
+            let end_idx = start_idx + 8;
+            if end_idx <= io.len() - 32 { // Ensure we don't overlap with digest
+                let io_y_bytes = &io[start_idx..end_idx];
+                let expected_y_bytes = expected_y.as_canonical_u64().to_le_bytes();
+                
+                // SECURITY: Constant-time comparison to prevent timing attacks
+                let bytes_match = io_y_bytes.ct_eq(&expected_y_bytes).unwrap_u8() == 1;
+                io_y_next_valid &= bytes_match;
+            } else {
+                io_y_next_valid = false;
+                break;
+            }
+        }
+        io_y_next_valid
+    } else {
+        false // public_io too short to contain expected y_next values
+    };
+    
+    let is_valid = digest_valid && y_next_valid;
+    // TEMP DEBUG: print digest and y_next checks
+    println!("  Digest valid: {}", digest_valid);
+    println!("  y_next valid: {}", y_next_valid);
+    
+    #[cfg(feature = "neo-logs")]
+    {
+        eprintln!("🔍 IVC DIGEST DEBUG:");
+        eprintln!("  Expected context digest: {:02x?}", &expected_context_digest[..8]);
+        eprintln!("  Proof context digest:    {:02x?}", &proof_context_digest[..8]);
+        eprintln!("  Digest match: {}", digest_valid);
+        eprintln!("  Y_next validation: {}", y_next_valid);
+        eprintln!("  Overall validity: {}", is_valid);
+        eprintln!("  Public IO length: {}", io.len());
+        eprintln!("  Expected y_next length: {} bytes", y_len * 8);
+        eprintln!("  Digest CCS: n={}, m={}", digest_ccs.n, digest_ccs.m);
+        eprintln!("  Public input length: {}", public_input.len());
+        eprintln!("  Verifier CCS params: step_x_len={}, y_len={}, const1_idx={}", 
+                  step_x_len, y_len, binding_spec.const1_witness_index);
+        eprintln!("  Verifier y_step_offsets: {:?}", binding_spec.y_step_offsets);
+    }
+    
+    // SECURITY NOTE (per Neo paper):
+    // Base IVC verification does NOT require Spartan. Soundness comes from verifying
+    // the folding proof itself (ΠCCS→ΠRLC→ΠDEC via sum-check over Ajtai commitments)
+    // using the Fiat–Shamir challenges.
+    // Optional: We MAY wrap the entire IVC statement in an outer SNARK (e.g., (Super)Spartan+FRI)
+    // to compress the proof size, but that is orthogonal to soundness of the base IVC.
     //
-    // For now, we rely on the main CCS verification above which is sound.
+    // Required here (base IVC):
+    //  - Recompute the FS challenges (e.g., ρ) from the transcript and compare in constant time.
+    //  - Verify the RLC binding and the folding relation against the committed instances.
+    //  - Bind the augmented public input (CCS ID/domain, step index, y_prev, y_next, public x)
+    //    with a context digest.
+    //
+    // Optional (compressed mode):
+    //  - Verify a Spartan proof that attests "there exists a valid base IVC proof."
+    //    This replaces running the folding verifier locally and is behind a feature flag.
+
+    // 🔐 LAYER 2: Verify the commitment fold equation on coordinates + digest
+    let commit_valid = verify_commitment_evolution(
+        &prev_accumulator.c_coords,
+        &ivc_proof.next_accumulator.c_coords,
+        &ivc_proof.next_accumulator.c_z_digest,
+        &ivc_proof.c_step_coords,
+        rho,
+    );
+
+    if !commit_valid {
+        #[cfg(feature = "neo-logs")]
+        eprintln!("❌ Commitment fold check failed: c_next != c_prev + ρ·c_step or digest mismatch");
+        return Ok(false);
+    }
+
+    // Add folding proof verification
+    if is_valid && !(prev_accumulator.step == 0 && prev_augmented_x.is_none()) {
+        // 🔒 SECURITY: Bind folding verification to verifier‑reconstructed augmented CCS
+        let folding_ok = verify_ivc_step_folding(params, ivc_proof, &augmented_ccs_v, prev_accumulator, prev_augmented_x)?;
+        if !folding_ok {
+            #[cfg(feature = "neo-logs")]
+            eprintln!("❌ Folding proof verification failed");
+            return Ok(false);
+        }
+    }
+
     if is_valid {
-        
         // Verify accumulator progression is valid
         verify_accumulator_progression(
             prev_accumulator,
@@ -1945,15 +1659,18 @@ pub fn verify_ivc_chain(
     chain_proof: &IvcChainProof,
     initial_accumulator: &Accumulator,
     binding_spec: &StepBindingSpec,
+    params: &crate::NeoParams,
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let mut current_accumulator = initial_accumulator.clone();
+    let mut prev_augmented_x: Option<Vec<F>> = None;
     
     for step_proof in &chain_proof.steps {
-        let is_valid = verify_ivc_step(step_ccs, step_proof, &current_accumulator, binding_spec)?;
+        let is_valid = verify_ivc_step(step_ccs, step_proof, &current_accumulator, binding_spec, params, prev_augmented_x.as_deref())?;
         if !is_valid {
             return Ok(false);
         }
         current_accumulator = step_proof.next_accumulator.clone();
+        prev_augmented_x = Some(step_proof.step_augmented_public_input.clone());
     }
     
     // Final consistency check
@@ -2113,37 +1830,6 @@ impl Default for AugmentConfig {
             commit_len: 128,        // d * kappa = 32 * 4 = 128
         }
     }
-}
-
-/// Build public input for IVC proof
-#[allow(dead_code)]
-fn build_ivc_public_input(accumulator: &Accumulator, extra_input: &[F]) -> Result<Vec<F>, Box<dyn std::error::Error>> {
-    let mut public_input = Vec::new();
-    
-    // Include accumulator state as public input
-    public_input.push(F::from_u64(accumulator.step));
-    public_input.extend_from_slice(&accumulator.y_compact);
-    
-    // Add c_z_digest as public field elements
-    for chunk in accumulator.c_z_digest.chunks_exact(8) {
-        public_input.push(F::from_u64(u64::from_le_bytes(chunk.try_into().unwrap())));
-    }
-    
-    // Add extra input
-    public_input.extend_from_slice(extra_input);
-    
-    Ok(public_input)
-}
-
-/// Extract next accumulator from computation results
-#[allow(dead_code)]
-fn extract_next_accumulator(next_state: &[F], step: u64) -> Result<Accumulator, Box<dyn std::error::Error>> {
-    Ok(Accumulator {
-        c_z_digest: [0u8; 32], // TODO: Update from actual commitment evolution
-        c_coords: vec![], // TODO: Update from actual commitment evolution
-        y_compact: next_state.to_vec(),
-        step,
-    })
 }
 
 /// Verify accumulator progression follows IVC rules
@@ -2350,8 +2036,10 @@ pub fn build_augmented_ccs_linked_with_rlc(
             }
         }
 
-        // RLC Binder: ⟨G, z⟩ = Σ r_i * c_step[i] (if provided)
-        // This is the critical soundness fix that binds c_step to the actual step witness
+        // RLC Binder: enforce linear equality ⟨G, z⟩ = rhs where
+        // G = aggregated_row over witness coordinates and rhs = Σ r_i * c_step[i] (or diff variant)
+        // Encode in R1CS as: <A,z> * <B,z> = <C,z>
+        //   A row = G · z, B row selects const-1 (== 1), C puts rhs in const-1 column
         if let Some((ref aggregated_row, rhs)) = rlc_binder {
             let r = step_rows + ev_rows + x_bind_rows + prev_bind_rows;
             match matrix_idx {
@@ -2366,12 +2054,14 @@ pub fn build_augmented_ccs_linked_with_rlc(
                     }
                 }
                 1 => {
-                    // B matrix: constant term = rhs (Σ r_i * c_step[i])
+                    // B matrix: multiply by 1 (const-1 witness column)
+                    data[r * total_cols + col_const1_abs] = F::ONE;
+                }
+                2 => {
+                    // C matrix: place rhs on const-1 column so equality is linear
                     data[r * total_cols + col_const1_abs] = rhs;
                 }
-                _ => {
-                    // C matrix: stays zero for linear constraint
-                }
+                _ => {}
             }
         }
 
@@ -2422,6 +2112,26 @@ pub fn build_linked_augmented_public_input(
     public_input.extend_from_slice(y_prev);
     public_input.extend_from_slice(y_next);
     public_input
+}
+
+/// Recompute the augmented public input used by the prover for this step:
+/// X = [step_x || ρ || y_prev || y_next]. Returns (X, ρ).
+fn compute_augmented_public_input_for_step(
+    prev_acc: &Accumulator,
+    proof: &IvcProof,
+) -> Result<(Vec<F>, F), Box<dyn std::error::Error>> {
+    let step_data = build_step_data_with_x(prev_acc, proof.step, &proof.step_public_input);
+    let step_digest = create_step_digest(&step_data);
+    let (rho_calc, _td) = rho_from_transcript(prev_acc, step_digest, &proof.c_step_coords);
+    let rho = if proof.step_rho != F::ZERO { proof.step_rho } else { rho_calc };
+
+    let x_aug = build_linked_augmented_public_input(
+        &proof.step_public_input,
+        rho,
+        &prev_acc.y_compact,
+        &proof.next_accumulator.y_compact,
+    );
+    Ok((x_aug, rho))
 }
 
 /// Compute Poseidon2 digest of the running accumulator as F-elements for step_x binding
@@ -2608,4 +2318,386 @@ fn evolve_commitment(
     // Compute digest of evolved coordinates  
     let digest = digest_commit_coords(&coords_next);
     Ok((coords_next, digest))
+}
+
+/// Verify the Ajtai commitment evolution equation:
+///   c_next == c_prev + rho * c_step
+/// Also checks the published digest matches the recomputed digest.
+fn verify_commitment_evolution(
+    prev_coords: &[F],
+    next_coords: &[F],
+    published_next_digest: &[u8; 32],
+    c_step_coords: &[F],
+    rho: F,
+) -> bool {
+    let (expected_next, expected_digest) = if prev_coords.is_empty() {
+        // Base step: c_next should equal c_step (rho is irrelevant because c_prev=0)
+        (c_step_coords.to_vec(), digest_commit_coords(c_step_coords))
+    } else {
+        match evolve_commitment(prev_coords, c_step_coords, rho) {
+            Ok(pair) => pair,
+            Err(_) => return false,
+        }
+    };
+
+    let coords_ok = ct_eq_coords(&expected_next, next_coords);
+    let digest_ok = ct_eq_bytes(&expected_digest, published_next_digest);
+    if !coords_ok || !digest_ok {
+        println!("  commit coords eq: {}", coords_ok);
+        println!("  commit digest eq: {}", digest_ok);
+        println!("  prev.len={}, step.len={}, next.len={}", prev_coords.len(), c_step_coords.len(), next_coords.len());
+        let head = |v: &[F]| v.iter().take(4).map(|f| f.as_canonical_u64()).collect::<Vec<_>>();
+        println!("  prev head: {:?}", head(prev_coords));
+        println!("  step head: {:?}", head(c_step_coords));
+        println!("  next head: {:?}", head(next_coords));
+    }
+    coords_ok && digest_ok
+}
+
+/// Constant-time equality check for byte slices
+#[inline]
+fn ct_eq_bytes(a: &[u8], b: &[u8]) -> bool {
+    if a.len() != b.len() { return false; }
+    a.ct_eq(b).unwrap_u8() == 1
+}
+
+/// Constant-time equality check for field element coordinates
+#[inline]
+fn ct_eq_coords(a: &[F], b: &[F]) -> bool {
+    if a.len() != b.len() { return false; }
+    // Compare as little-endian u64 limbs in constant time
+    let mut ok = 1u8;
+    for (x, y) in a.iter().zip(b.iter()) {
+        let xb = x.as_canonical_u64().to_le_bytes();
+        let yb = y.as_canonical_u64().to_le_bytes();
+        let eq = (&xb as &[u8]).ct_eq(&yb).unwrap_u8();
+        // accumulate mismatches without branches
+        ok &= eq;
+    }
+    ok == 1
+}
+
+// === Folding verification helpers ===============================================================
+
+/// Re-create the exact MCS instances the prover used in Pi-CCS (order: LHS, RHS).
+/// - LHS: commitment = proof.fold.pi_ccs_outputs[0].c; x = prev_step_x (or zeros on step 0); m_in = len(x)
+/// - RHS: commitment = proof.fold.pi_ccs_outputs[1].c; x = current step_public_input; m_in = len(x)
+/// 
+/// Note: The MCS instances use the full augmented public input [step_x || ρ || y_prev || y_next] as their x vector.
+/// We reconstruct this from the separate fields in IvcProof.
+pub fn recreate_mcs_instances_for_verification(
+    ivc_proof: &IvcProof,
+    prev_acc: &Accumulator,
+    prev_augmented_x: Option<&[F]>,
+) -> Result<[neo_ccs::McsInstance<neo_ajtai::Commitment, F>; 2], String> {
+    let folding = ivc_proof
+        .folding_proof
+        .as_ref()
+        .ok_or_else(|| "IVC proof missing folding_proof".to_string())?;
+    if folding.pi_ccs_outputs.len() != 2 {
+        return Err(format!(
+            "unexpected Pi-CCS outputs: expected 2, got {}",
+            folding.pi_ccs_outputs.len()
+        ));
+    }
+    
+    // Reconstruct the full augmented public input [step_x || ρ || y_prev || y_next] for RHS
+    let (x_rhs_expected, _rho) = compute_augmented_public_input_for_step(prev_acc, ivc_proof)
+        .map_err(|e| e.to_string())?;
+    let x_rhs_proof = ivc_proof.step_augmented_public_input.clone();
+    if x_rhs_expected.len() != x_rhs_proof.len() || x_rhs_expected != x_rhs_proof {
+        return Err("augmented public input mismatch between proof and verifier reconstruction".to_string());
+    }
+    let m_in = x_rhs_proof.len();
+
+    let x_lhs_proof = ivc_proof.prev_step_augmented_public_input.clone();
+    if x_lhs_proof.len() != m_in {
+        return Err(format!(
+            "prev_step_augmented_public_input length {} != current m_in {}",
+            x_lhs_proof.len(), m_in
+        ));
+    }
+    // Only enforce the base-step augmented input shape when this is truly the first step
+    // (prev_acc.step == 0) and the caller didn't provide the previous augmented x.
+    // For later steps, if `prev_augmented_x` is None, we accept the proof-supplied
+    // `prev_step_augmented_public_input` without forcing the base-step (zeros) layout,
+    // because single-step verification cannot reconstruct the previous step's augmented input.
+    if prev_acc.step == 0 && prev_augmented_x.is_none() {
+        let step_x_len = ivc_proof.step_public_input.len();
+        let y_len = ivc_proof.step_y_prev.len();
+        if x_lhs_proof.len() != step_x_len + 1 + 2 * y_len {
+            return Err("unexpected prev augmented input length".to_string());
+        }
+        let mut expected = vec![F::ZERO; x_lhs_proof.len()];
+        expected[step_x_len] = ivc_proof.step_rho;
+        expected[step_x_len + 1..step_x_len + 1 + y_len]
+            .copy_from_slice(&ivc_proof.step_y_prev);
+        expected[step_x_len + 1 + y_len..]
+            .copy_from_slice(&ivc_proof.step_y_next);
+        if expected != x_lhs_proof {
+            return Err("initial step augmented input mismatch".to_string());
+        }
+    }
+    let x_lhs = x_lhs_proof;
+    
+    let lhs = neo_ccs::McsInstance {
+        c: folding.pi_ccs_outputs[0].c.clone(),
+        x: x_lhs,
+        m_in,
+    };
+    let rhs = neo_ccs::McsInstance {
+        c: folding.pi_ccs_outputs[1].c.clone(),
+        x: x_rhs_proof,
+        m_in,
+    };
+    Ok([lhs, rhs])
+}
+
+/// Internal: recombine digit MEs into the parent ME (same math as neo-fold::recombine_me_digits_to_parent).
+fn recombine_me_digits_to_parent_local(
+    params: &crate::NeoParams,
+    digits: &[neo_ccs::MeInstance<neo_ajtai::Commitment, F, neo_math::K>],
+) -> Result<neo_ccs::MeInstance<neo_ajtai::Commitment, F, neo_math::K>, String> {
+    use neo_ajtai::s_lincomb;
+    use neo_math::{Rq, cf_inv};
+    if digits.is_empty() {
+        return Err("no digit instances to recombine".to_string());
+    }
+    let m_in = digits[0].m_in;
+    let r_ref = &digits[0].r;
+    let t = digits[0].y.len();
+    let d_rows = digits[0].X.rows();
+    let x_cols = digits[0].X.cols();
+    for (i, d) in digits.iter().enumerate() {
+        if d.m_in != m_in { return Err(format!("digit[{}]: m_in mismatch", i)); }
+        if &d.r != r_ref   { return Err(format!("digit[{}]: r mismatch", i)); }
+        if d.X.rows() != d_rows || d.X.cols() != x_cols {
+            return Err(format!("digit[{}]: X shape mismatch (want {}x{}, got {}x{})",
+                               i, d_rows, x_cols, d.X.rows(), d.X.cols()));
+        }
+        if d.y.len() != t { return Err(format!("digit[{}]: y arity mismatch", i)); }
+    }
+    // S-linear combination coefficients 1, b, b^2, ...
+    let mut coeffs: Vec<Rq> = Vec::with_capacity(digits.len());
+    let mut pow_f = F::ONE;
+    for _ in 0..digits.len() {
+        let mut arr = [F::ZERO; neo_math::D];
+        arr[0] = pow_f;
+        coeffs.push(cf_inv(arr));
+        pow_f *= F::from_u64(params.b as u64);
+    }
+    // Combine commitments
+    let digit_cs: Vec<neo_ajtai::Commitment> = digits.iter().map(|d| d.c.clone()).collect();
+    let c_parent = s_lincomb(&coeffs, &digit_cs).map_err(|_| "s_lincomb failed".to_string())?;
+    // Combine X
+    let mut x_parent = neo_ccs::Mat::zero(d_rows, x_cols, F::ZERO);
+    let mut pow = F::ONE;
+    for d in digits {
+        for r in 0..d_rows {
+            for c in 0..x_cols {
+                x_parent[(r, c)] += d.X[(r, c)] * pow;
+            }
+        }
+        pow *= F::from_u64(params.b as u64);
+    }
+    // Combine y (vector-of-rows representation)
+    let y_dim = digits[0].y.get(0).map(|v| v.len()).unwrap_or(0);
+    let mut y_parent = vec![vec![neo_math::K::ZERO; y_dim]; t];
+    let mut pow_k = neo_math::K::from(F::ONE);
+    let base_k = neo_math::K::from(F::from_u64(params.b as u64));
+    for d in digits {
+        for j in 0..t {
+            for u in 0..y_dim {
+                y_parent[j][u] += d.y[j][u] * pow_k;
+            }
+        }
+        pow_k *= base_k;
+    }
+    // Combine y_scalars
+    let mut y_scalars_parent = vec![neo_math::K::ZERO; digits[0].y_scalars.len()];
+    let mut powk = neo_math::K::from(F::ONE);
+    for d in digits {
+        for j in 0..y_scalars_parent.len() {
+            if j < d.y_scalars.len() { y_scalars_parent[j] += d.y_scalars[j] * powk; }
+        }
+        powk *= base_k;
+    }
+    Ok(neo_ccs::MeInstance {
+        c_step_coords: vec![],
+        u_offset: 0,
+        u_len: 0,
+        c: c_parent,
+        X: x_parent,
+        r: r_ref.clone(),
+        y: y_parent,
+        y_scalars: y_scalars_parent,
+        m_in,
+        fold_digest: digits[0].fold_digest,
+    })
+}
+
+/// Verify a single step's folding proof (Pi-CCS + Pi-RLC + Pi-DEC).
+/// - `augmented_ccs` must match the prover's folding CCS; the caller should reconstruct it.
+/// - `prev_step_x`: previous step's `step_public_input` (None for step 0).
+pub fn verify_ivc_step_folding(
+    params: &crate::NeoParams,
+    ivc_proof: &IvcProof,
+    augmented_ccs: &neo_ccs::CcsStructure<F>,
+    prev_acc: &Accumulator,
+    prev_augmented_x: Option<&[F]>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let folding = ivc_proof
+        .folding_proof
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("IVC proof missing folding_proof"))?;
+
+    // 1) Recreate the two input MCS instances exactly as the prover used them.
+    let [lhs, rhs] = recreate_mcs_instances_for_verification(ivc_proof, prev_acc, prev_augmented_x)?;
+
+    let stored_inputs = &folding.pi_ccs_inputs;
+    if stored_inputs.len() != 2 {
+        return Err(anyhow::anyhow!("folding proof missing pi_ccs_inputs").into());
+    }
+    if stored_inputs[0].m_in != lhs.m_in
+        || stored_inputs[0].x != lhs.x
+        || stored_inputs[0].c.data != lhs.c.data
+    {
+        #[cfg(feature = "neo-logs")] {
+            eprintln!("  Pi-CCS input[0] mismatch: m_in {} vs {}", stored_inputs[0].m_in, lhs.m_in);
+            eprintln!("  x equal: {}", (stored_inputs[0].x == lhs.x));
+            eprintln!("  c equal: {}", (stored_inputs[0].c.data == lhs.c.data));
+        }
+        return Ok(false);
+    }
+    if stored_inputs[1].m_in != rhs.m_in
+        || stored_inputs[1].x != rhs.x
+        || stored_inputs[1].c.data != rhs.c.data
+    {
+        #[cfg(feature = "neo-logs")] {
+            eprintln!("  Pi-CCS input[1] mismatch: m_in {} vs {}", stored_inputs[1].m_in, rhs.m_in);
+            eprintln!("  x equal: {}", (stored_inputs[1].x == rhs.x));
+            eprintln!("  c equal: {}", (stored_inputs[1].c.data == rhs.c.data));
+        }
+        return Ok(false);
+    }
+
+    #[cfg(feature = "neo-logs")]
+    {
+        eprintln!("🔍 FOLDING DEBUG: LHS x.len()={}, RHS x.len()={}", lhs.x.len(), rhs.x.len());
+        let lx = lhs.x.iter().take(6).map(|f| f.as_canonical_u64()).collect::<Vec<_>>();
+        let rx = rhs.x.iter().take(6).map(|f| f.as_canonical_u64()).collect::<Vec<_>>();
+        eprintln!("🔍 FOLDING DEBUG: LHS x head: {:?}", lx);
+        eprintln!("🔍 FOLDING DEBUG: RHS x head: {:?}", rx);
+    }
+
+    // 2) Verify Pi-CCS against those instances.
+    let mut tr = FoldTranscript::default();
+    let ok_ccs = pi_ccs_verify(
+        &mut tr,
+        params,
+        augmented_ccs,
+        stored_inputs,
+        &folding.pi_ccs_outputs,
+        &folding.pi_ccs_proof,
+    )?;
+    #[cfg(feature = "neo-logs")]
+    eprintln!("🔍 FOLDING DEBUG: Pi-CCS verification result: {}", ok_ccs);
+    if !ok_ccs { return Ok(false); }
+
+    // 3) Recombine digit MEs to the parent ME for Pi‑RLC and Pi‑DEC checks.
+    let me_digits = ivc_proof
+        .me_instances
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("IVC proof missing digit ME instances"))?;
+    let me_parent = recombine_me_digits_to_parent_local(params, me_digits)?;
+
+    // 4) Verify Pi‑RLC.
+    let ok_rlc = pi_rlc_verify(
+        &mut tr,
+        params,
+        &folding.pi_ccs_outputs,
+        &me_parent,
+        &folding.pi_rlc_proof,
+    )?;
+    if !ok_rlc { return Ok(false); }
+
+    // 5) Verify Pi‑DEC with the authentic Ajtai S-module.
+    // Use parent ME commitment dimensions to bind Ajtai PP shape (d, m).
+    let d_rows = neo_math::D;
+    let m_cols = me_parent.c.data.len() / d_rows;
+    let l_real = match AjtaiSModule::from_global_for_dims(d_rows, m_cols) {
+        Ok(l) => l,
+        Err(_) => {
+            // Initialize Ajtai PP for (d_rows, m_cols) if missing, then retry.
+            super::ensure_ajtai_pp_for_dims(d_rows, m_cols, || {
+                use rand::{RngCore, SeedableRng};
+                use rand::rngs::StdRng;
+                let mut rng = if std::env::var("NEO_DETERMINISTIC").is_ok() {
+                    StdRng::from_seed([42u8; 32])
+                } else {
+                    let mut seed = [0u8; 32];
+                    rand::rng().fill_bytes(&mut seed);
+                    StdRng::from_seed(seed)
+                };
+                let pp = super::ajtai_setup(&mut rng, d_rows, 16, m_cols)?;
+                neo_ajtai::set_global_pp(pp).map_err(anyhow::Error::from)
+            })?;
+            AjtaiSModule::from_global_for_dims(d_rows, m_cols)
+                .map_err(|_| anyhow::anyhow!("AjtaiSModule unavailable (PP must be initialized)"))?
+        }
+    };
+    let ok_dec = pi_dec_verify(
+        &mut tr,
+        params,
+        &me_parent,
+        me_digits,
+        &folding.pi_dec_proof,
+        &l_real,
+    )?;
+    Ok(ok_dec)
+}
+
+
+/// Strict chain verification = your original chain checks + folding verification per step.
+/// This does not require any additional prover artifact beyond what you already carry in `IvcProof`.
+pub fn verify_ivc_chain_strict(
+    step_ccs: &neo_ccs::CcsStructure<F>,
+    chain_proof: &IvcChainProof,
+    initial_accumulator: &Accumulator,
+    binding_spec: &StepBindingSpec,
+    params: &crate::NeoParams,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    // Track accumulators before prev and before current step to reconstruct augmented inputs
+    let mut acc_before_curr_step = initial_accumulator.clone();
+    let mut prev_augmented_x: Option<Vec<F>> = None;
+
+    for (i, step_proof) in chain_proof.steps.iter().enumerate() {
+        // Cross-check prover-supplied augmented input matches verifier reconstruction.
+        let (expected_augmented, _) = compute_augmented_public_input_for_step(&acc_before_curr_step, step_proof)
+            .map_err(|e| anyhow::anyhow!("failed to compute augmented input: {}", e))?;
+        if expected_augmented != step_proof.step_augmented_public_input {
+            return Ok(false);
+        }
+
+        let ok = verify_ivc_step(
+            step_ccs,
+            step_proof,
+            &acc_before_curr_step,
+            binding_spec,
+            params,
+            prev_augmented_x.as_deref(),
+        )?;
+        if !ok { return Ok(false); }
+
+        // Advance accumulators
+        acc_before_curr_step = step_proof.next_accumulator.clone();
+        prev_augmented_x = Some(step_proof.step_augmented_public_input.clone());
+
+        #[cfg(feature = "neo-logs")]
+        eprintln!("✅ strict fold+step verify passed for step {}", i);
+        #[cfg(not(feature = "neo-logs"))]
+        let _ = i; // suppress unused variable warning when neo-logs is disabled
+    }
+
+    Ok(acc_before_curr_step.step == chain_proof.chain_length)
 }

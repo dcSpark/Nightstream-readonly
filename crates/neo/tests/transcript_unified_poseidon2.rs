@@ -5,34 +5,7 @@
 use neo::F;
 use neo::ivc::create_step_digest;
 use neo_ccs::crypto::poseidon2_goldilocks as p2;
-use p3_goldilocks::Goldilocks;
-use p3_symmetric::Permutation;
-use p3_field::{PrimeField64, PrimeCharacteristicRing};
-
-#[allow(dead_code)]
-fn manual_step_digest(step_data: &[F]) -> [u8; 32] {
-    let perm = p2::permutation();
-    let mut st = [Goldilocks::ZERO; p2::WIDTH];
-    let mut absorbed = 0usize;
-    const RATE: usize = p2::RATE;
-    let mut absorb = |x: Goldilocks| {
-        if absorbed == RATE { st = perm.permute(st); absorbed = 0; }
-        st[absorbed] = x; absorbed += 1;
-    };
-    for &b in b"neo/ivc/step-digest/v1|poseidon2-goldilocks-w12-cap4" {
-        absorb(Goldilocks::from_u64(b as u64));
-    }
-    absorb(Goldilocks::from_u64(step_data.len() as u64));
-    for &f in step_data {
-        absorb(Goldilocks::from_u64(f.as_canonical_u64()));
-    }
-    st = perm.permute(st);
-    let mut out = [0u8; 32];
-    for i in 0..4 {
-        out[i*8..(i+1)*8].copy_from_slice(&st[i].as_canonical_u64().to_le_bytes());
-    }
-    out
-}
+use p3_field::PrimeCharacteristicRing;
 
 #[test] 
 fn ivc_step_digest_uses_unified_poseidon2_parameters() {

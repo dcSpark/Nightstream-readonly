@@ -107,6 +107,7 @@ fn build_step_witness(prev_x: u64, delta: u64) -> Vec<F> {
 }
 
 /// Helper to run a complete IVC chain and return metrics
+/// This is used to test the IVC chain and its components.
 #[derive(Clone)]
 #[allow(dead_code)]
 struct IvcChainMetrics {

@@ -1,4 +1,4 @@
-use neo_fold::{verify_folding_proof, FoldingProof};
+use neo_fold::{verify_folding_proof_with_spartan, FoldingProof};
 use neo_fold::{pi_ccs::PiCcsProof, pi_rlc::PiRlcProof, pi_dec::PiDecProof};
 use neo_ccs::{CcsStructure, Mat, McsInstance, MeInstance, SparsePoly, Term};
 use neo_ajtai::{Commitment as Cmt, setup as ajtai_setup, set_global_pp};
@@ -83,7 +83,8 @@ fn verify_shortcircuit_single_instance() {
     let output_digits = vec![me_ccs.clone()];
 
     let proof = FoldingProof {
-        pi_ccs_proof: PiCcsProof { sumcheck_rounds: vec![], header_digest: [0u8; 32], vjs: vec![] },
+        pi_ccs_proof: PiCcsProof { sumcheck_rounds: vec![], header_digest: [0u8; 32] },
+        pi_ccs_inputs: vec![McsInstance { c: inst.c.clone(), x: inst.x.clone(), m_in: inst.m_in }],
         pi_ccs_outputs: vec![me_ccs],
         pi_rlc_proof: PiRlcProof {
             rho_elems: vec![],
@@ -93,7 +94,7 @@ fn verify_shortcircuit_single_instance() {
     };
 
     let dummy_bundle = dummy_proof_bundle();
-    let ok = verify_folding_proof(&params, &s, &[inst], &output_digits, &proof, &dummy_bundle).unwrap();
+    let ok = verify_folding_proof_with_spartan(&params, &s, &[inst], &output_digits, &proof, &dummy_bundle).unwrap();
     assert!(!ok, "single-instance bypass was removed for security - should now fail");
 }
 
@@ -148,7 +149,8 @@ fn verify_multi_instance_zero_commitments_dec_present() {
     let (rho_elems, t_bound) = derive_rhos(&params, &s, insts.len());
 
     let proof = FoldingProof {
-        pi_ccs_proof: PiCcsProof { sumcheck_rounds: vec![], header_digest: [0u8; 32], vjs: vec![] },
+        pi_ccs_proof: PiCcsProof { sumcheck_rounds: vec![], header_digest: [0u8; 32] },
+        pi_ccs_inputs: insts.iter().map(|inst| McsInstance { c: inst.c.clone(), x: inst.x.clone(), m_in: inst.m_in }).collect(),
         pi_ccs_outputs: vec![me0, me1],
         pi_rlc_proof: PiRlcProof {
             rho_elems,
@@ -162,7 +164,7 @@ fn verify_multi_instance_zero_commitments_dec_present() {
     };
 
     let dummy_bundle = dummy_proof_bundle();
-    let ok = verify_folding_proof(&params, &s, &insts, &digits, &proof, &dummy_bundle).unwrap();
+    let ok = verify_folding_proof_with_spartan(&params, &s, &insts, &digits, &proof, &dummy_bundle).unwrap();
     assert!(!ok, "multi-instance with dummy proof data should fail verification");
 }
 
@@ -214,7 +216,8 @@ fn verify_rejects_when_rho_mismatch() {
     }
 
     let proof = FoldingProof {
-        pi_ccs_proof: PiCcsProof { sumcheck_rounds: vec![], header_digest: [0u8; 32], vjs: vec![] },
+        pi_ccs_proof: PiCcsProof { sumcheck_rounds: vec![], header_digest: [0u8; 32] },
+        pi_ccs_inputs: insts.iter().map(|inst| McsInstance { c: inst.c.clone(), x: inst.x.clone(), m_in: inst.m_in }).collect(),
         pi_ccs_outputs: vec![me0, me1],
         pi_rlc_proof: PiRlcProof {
             rho_elems,
@@ -228,7 +231,7 @@ fn verify_rejects_when_rho_mismatch() {
     };
 
     let dummy_bundle = dummy_proof_bundle();
-    let ok = verify_folding_proof(&params, &s, &insts, &digits, &proof, &dummy_bundle).unwrap();
+    let ok = verify_folding_proof_with_spartan(&params, &s, &insts, &digits, &proof, &dummy_bundle).unwrap();
     assert!(!ok, "must reject when ρ are not transcript-derived");
 }
 
@@ -280,7 +283,8 @@ fn verify_rejects_when_range_base_mismatches() {
     }
 
     let proof = FoldingProof {
-        pi_ccs_proof: PiCcsProof { sumcheck_rounds: vec![], header_digest: [0u8; 32], vjs: vec![] },
+        pi_ccs_proof: PiCcsProof { sumcheck_rounds: vec![], header_digest: [0u8; 32] },
+        pi_ccs_inputs: insts.iter().map(|inst| McsInstance { c: inst.c.clone(), x: inst.x.clone(), m_in: inst.m_in }).collect(),
         pi_ccs_outputs: vec![me0, me1],
         pi_rlc_proof: PiRlcProof {
             rho_elems,
@@ -294,7 +298,7 @@ fn verify_rejects_when_range_base_mismatches() {
     };
 
     let dummy_bundle = dummy_proof_bundle();
-    let ok = verify_folding_proof(&params, &s, &insts, &digits, &proof, &dummy_bundle).unwrap();
+    let ok = verify_folding_proof_with_spartan(&params, &s, &insts, &digits, &proof, &dummy_bundle).unwrap();
     assert!(!ok, "DEC must reject when the encoded base differs");
 }
 
@@ -323,7 +327,8 @@ fn verify_rejects_spartan_bundle_mismatch() {
     let output_digits = vec![me_ccs.clone()];
     
     let proof = FoldingProof {
-        pi_ccs_proof: PiCcsProof { sumcheck_rounds: vec![], header_digest: [0u8; 32], vjs: vec![] },
+        pi_ccs_proof: PiCcsProof { sumcheck_rounds: vec![], header_digest: [0u8; 32] },
+        pi_ccs_inputs: vec![McsInstance { c: inst.c.clone(), x: inst.x.clone(), m_in: inst.m_in }],
         pi_ccs_outputs: vec![me_ccs],
         pi_rlc_proof: PiRlcProof {
             rho_elems: vec![],
@@ -342,6 +347,6 @@ fn verify_rejects_spartan_bundle_mismatch() {
     );
     
     // Should fail due to public IO mismatch (anti-replay protection)
-    let ok = verify_folding_proof(&params, &s, &[inst], &output_digits, &proof, &mismatched_bundle).unwrap();
+    let ok = verify_folding_proof_with_spartan(&params, &s, &[inst], &output_digits, &proof, &mismatched_bundle).unwrap();
     assert!(!ok, "verification should fail when Spartan bundle public IO doesn't match current instance");
 }

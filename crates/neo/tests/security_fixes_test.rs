@@ -297,6 +297,29 @@ fn test_c_step_coords_tampering_detection() {
         Ok(step_result) => {
             println!("   ✅ Valid proof succeeded as expected");
             
+            // First verify the valid proof should succeed
+            println!("   Testing valid proof verification...");
+            let valid_verify_result = verify_ivc_step(
+                &step_ccs,
+                &step_result.proof,
+                &prev_accumulator,
+                &binding_spec,
+                &params,
+                None,
+            );
+            
+            match valid_verify_result {
+                Ok(true) => {
+                    println!("   ✅ Valid proof verification succeeded as expected");
+                }
+                Ok(false) => {
+                    panic!("❌ Valid proof verification failed - this indicates a bug in the IVC implementation");
+                }
+                Err(e) => {
+                    panic!("❌ Valid proof verification errored: {} - this indicates a bug in the IVC implementation", e);
+                }
+            }
+            
             // Test 2: Try to tamper with c_step_coords in the proof
             println!("   Testing tampered c_step_coords...");
             let mut tampered_proof = step_result.proof.clone();
@@ -311,6 +334,8 @@ fn test_c_step_coords_tampering_detection() {
                     &tampered_proof,
                     &prev_accumulator,
                     &binding_spec,
+                    &params,
+                    None,
                 );
                 
                 match verify_result {
