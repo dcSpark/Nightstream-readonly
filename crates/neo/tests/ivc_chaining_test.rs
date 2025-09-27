@@ -1,7 +1,6 @@
 use anyhow::Result;
 use neo::{NeoParams, F};
-use neo::ivc::StepBindingSpec;
-use neo::ivc_chain;
+use neo::ivc::{StepBindingSpec, IvcStepInput, prove_ivc_step_chained, Accumulator, IvcProof};
 use neo_ccs::{r1cs_to_ccs, CcsStructure, Mat};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
@@ -57,36 +56,69 @@ fn test_ivc_chaining_not_self_folding() -> Result<()> {
         const1_witness_index: 0,
     };
     
-    // Initialize IVC chain
-    let initial_y = vec![F::ZERO]; // Start with 0
-    let mut state = ivc_chain::State::new(params, step_ccs, initial_y, binding_spec)?;
+    // Manual chained IVC proving (replaces ivc_chain)
+    let mut acc = Accumulator { c_z_digest: [0u8;32], c_coords: vec![], y_compact: vec![F::ZERO], step: 0 };
+    let mut proofs: Vec<IvcProof> = Vec::new();
+    let mut prev_me = None;
+    let mut prev_me_wit = None;
+    let mut prev_lhs = None;
     
     // Step 0: 0 + 5 = 5
     let step0_witness = build_increment_witness(0, 5);
     let step0_public_input = vec![F::from_u64(5)]; // delta=5
-    state = ivc_chain::step(state, &step0_public_input, &step0_witness)?;
-    println!("✅ Step 0: {} + 5 = {}", 0, state.accumulator.y_compact[0].as_canonical_u64());
+    {
+        let y_step = step0_witness[3..=3].to_vec();
+        let input = IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &step0_witness, prev_accumulator: &acc, step: 0, public_input: Some(&step0_public_input), y_step: &y_step, binding_spec: &binding_spec, transcript_only_app_inputs: false, prev_augmented_x: None };
+        let (res, me, wit, lhs) = prove_ivc_step_chained(
+            input,
+            prev_me.take(),
+            prev_me_wit.take(),
+            prev_lhs.take(),
+        ).map_err(|e| anyhow::anyhow!("prove_ivc_step_chained failed: {}", e))?;
+        acc = res.proof.next_accumulator.clone(); proofs.push(res.proof); prev_me=Some(me); prev_me_wit=Some(wit); prev_lhs=Some(lhs);
+    }
+    println!("✅ Step 0: {} + 5 = {}", 0, acc.y_compact[0].as_canonical_u64());
     
     // Step 1: 5 + 3 = 8
     let step1_witness = build_increment_witness(5, 3);
     let step1_public_input = vec![F::from_u64(3)]; // delta=3
-    state = ivc_chain::step(state, &step1_public_input, &step1_witness)?;
-    println!("✅ Step 1: {} + 3 = {}", 5, state.accumulator.y_compact[0].as_canonical_u64());
+    {
+        let y_step = step1_witness[3..=3].to_vec();
+        let input = IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &step1_witness, prev_accumulator: &acc, step: 1, public_input: Some(&step1_public_input), y_step: &y_step, binding_spec: &binding_spec, transcript_only_app_inputs: false, prev_augmented_x: proofs.last().map(|p| p.step_augmented_public_input.as_slice()) };
+        let (res, me, wit, lhs) = prove_ivc_step_chained(
+            input,
+            prev_me.take(),
+            prev_me_wit.take(),
+            prev_lhs.take(),
+        ).map_err(|e| anyhow::anyhow!("prove_ivc_step_chained failed: {}", e))?;
+        acc = res.proof.next_accumulator.clone(); proofs.push(res.proof); prev_me=Some(me); prev_me_wit=Some(wit); prev_lhs=Some(lhs);
+    }
+    println!("✅ Step 1: {} + 3 = {}", 5, acc.y_compact[0].as_canonical_u64());
     
     // Step 2: 8 + 2 = 10
     let step2_witness = build_increment_witness(8, 2);
     let step2_public_input = vec![F::from_u64(2)]; // delta=2
-    state = ivc_chain::step(state, &step2_public_input, &step2_witness)?;
-    println!("✅ Step 2: {} + 2 = {}", 8, state.accumulator.y_compact[0].as_canonical_u64());
+    {
+        let y_step = step2_witness[3..=3].to_vec();
+        let input = IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &step2_witness, prev_accumulator: &acc, step: 2, public_input: Some(&step2_public_input), y_step: &y_step, binding_spec: &binding_spec, transcript_only_app_inputs: false, prev_augmented_x: proofs.last().map(|p| p.step_augmented_public_input.as_slice()) };
+        let (res, _me, _wit, _lhs) = prove_ivc_step_chained(
+            input,
+            prev_me.take(),
+            prev_me_wit.take(),
+            prev_lhs.take(),
+        ).map_err(|e| anyhow::anyhow!("prove_ivc_step_chained failed: {}", e))?;
+        acc = res.proof.next_accumulator.clone(); proofs.push(res.proof);
+    }
+    println!("✅ Step 2: {} + 2 = {}", 8, acc.y_compact[0].as_canonical_u64());
     
     // CRITICAL TEST: Verify that each step's ρ (folding randomness) is different
     // If we're folding with itself, the ρ values would be computed from identical instances
     // and could be the same. If we're properly chaining, they should be different.
-    assert!(state.ivc_proofs.len() >= 3, "Should have at least 3 IVC proofs");
+    assert!(proofs.len() >= 3, "Should have at least 3 IVC proofs");
     
-    let rho_0 = state.ivc_proofs[0].step_rho;
-    let rho_1 = state.ivc_proofs[1].step_rho;
-    let rho_2 = state.ivc_proofs[2].step_rho;
+    let rho_0 = proofs[0].step_rho;
+    let rho_1 = proofs[1].step_rho;
+    let rho_2 = proofs[2].step_rho;
     
     println!("🔍 Folding randomness values:");
     println!("   Step 0 ρ: {:?}", rho_0);
@@ -101,9 +133,9 @@ fn test_ivc_chaining_not_self_folding() -> Result<()> {
     
     // CRITICAL TEST: Verify that the accumulator digest evolves properly
     // If we're folding with itself, the digest evolution would be broken
-    let digest_0 = state.ivc_proofs[0].next_accumulator.c_z_digest;
-    let digest_1 = state.ivc_proofs[1].next_accumulator.c_z_digest;
-    let digest_2 = state.ivc_proofs[2].next_accumulator.c_z_digest;
+    let digest_0 = proofs[0].next_accumulator.c_z_digest;
+    let digest_1 = proofs[1].next_accumulator.c_z_digest;
+    let digest_2 = proofs[2].next_accumulator.c_z_digest;
     
     println!("🔍 Accumulator digest evolution:");
     println!("   Step 0 digest: {:02x?}", &digest_0[..8]);
@@ -117,9 +149,9 @@ fn test_ivc_chaining_not_self_folding() -> Result<()> {
     
     // CRITICAL TEST: Verify that the commitment coordinates evolve properly
     // If we're folding with itself, the commitment evolution would be broken
-    let coords_0_len = state.ivc_proofs[0].next_accumulator.c_coords.len();
-    let coords_1_len = state.ivc_proofs[1].next_accumulator.c_coords.len();
-    let coords_2_len = state.ivc_proofs[2].next_accumulator.c_coords.len();
+    let coords_0_len = proofs[0].next_accumulator.c_coords.len();
+    let coords_1_len = proofs[1].next_accumulator.c_coords.len();
+    let coords_2_len = proofs[2].next_accumulator.c_coords.len();
     
     println!("🔍 Commitment coordinate evolution:");
     println!("   Step 0 coords length: {}", coords_0_len);
@@ -132,9 +164,9 @@ fn test_ivc_chaining_not_self_folding() -> Result<()> {
     
     // But the actual coordinate values should be different (evolving commitment)
     if coords_0_len > 0 && coords_1_len > 0 && coords_2_len > 0 {
-        let coords_0 = &state.ivc_proofs[0].next_accumulator.c_coords;
-        let coords_1 = &state.ivc_proofs[1].next_accumulator.c_coords;
-        let coords_2 = &state.ivc_proofs[2].next_accumulator.c_coords;
+        let coords_0 = &proofs[0].next_accumulator.c_coords;
+        let coords_1 = &proofs[1].next_accumulator.c_coords;
+        let coords_2 = &proofs[2].next_accumulator.c_coords;
         
         assert_ne!(coords_0, coords_1, "Step 0 and Step 1 should have different commitment coordinates");
         assert_ne!(coords_1, coords_2, "Step 1 and Step 2 should have different commitment coordinates");
@@ -148,7 +180,7 @@ fn test_ivc_chaining_not_self_folding() -> Result<()> {
     // Therefore: y_final = Σ rho_i * next_x_i, where next_x_i evolves as prev_x + delta_i over F
     let mut expected_y = F::ZERO;
     let mut app_x = F::ZERO; // initial prev_x = 0
-    for (i, proof) in state.ivc_proofs.iter().enumerate() {
+    for (i, proof) in proofs.iter().enumerate() {
         // App input (delta) is the last element of step_x
         let delta = proof.step_public_input.last().copied().expect("step_public_input not empty");
         app_x += delta;               // next_x = prev_x + delta
@@ -158,7 +190,7 @@ fn test_ivc_chaining_not_self_folding() -> Result<()> {
         println!("   Accumulate step {}: expected_y += rho*next_x = {:?}", i, (rho * next_x).as_canonical_u64());
     }
 
-    let final_result_f = state.accumulator.y_compact[0];
+    let final_result_f = acc.y_compact[0];
     assert_eq!(final_result_f, expected_y, 
                "Final IVC y should equal Σ rho_i*delta_i; got {:?} vs {:?}", 
                final_result_f.as_canonical_u64(), expected_y.as_canonical_u64());

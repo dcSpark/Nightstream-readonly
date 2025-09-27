@@ -31,18 +31,25 @@ fn ivc_linking_rejects_mismatched_prev_augmented_x() -> anyhow::Result<()> {
         const1_witness_index: 0,
     };
 
-    // Build a small two-step chain via ivc_chain
+    // Build a small two-step chain via manual chained proving
     let y0 = vec![F::from_u64(10)];
-    let mut state = neo::ivc_chain::State::new(params.clone(), step_ccs.clone(), y0.clone(), binding.clone())?;
-    // Two steps with simple witnesses: [1, y_step]
-    state = neo::ivc_chain::step(state, &[], &[F::ONE, F::from_u64(3)])?;
-    state = neo::ivc_chain::step(state, &[], &[F::ONE, F::from_u64(5)])?;
+    let mut acc = neo::ivc::Accumulator { c_z_digest: [0u8;32], c_coords: vec![], y_compact: y0.clone(), step: 0 };
+    let mut proofs: Vec<neo::ivc::IvcProof> = Vec::new();
+    let mut prev_lhs: Option<(neo_ccs::McsInstance<neo_ajtai::Commitment, F>, neo_ccs::McsWitness<F>)> = None;
+    for (i, w) in [
+        vec![F::ONE, F::from_u64(3)],
+        vec![F::ONE, F::from_u64(5)],
+    ].into_iter().enumerate() {
+        let y_step = w[1..=y_len].to_vec();
+        let input = neo::ivc::IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &w, prev_accumulator: &acc, step: i as u64, public_input: Some(&[]), y_step: &y_step, binding_spec: &binding, transcript_only_app_inputs: false, prev_augmented_x: proofs.last().map(|p| p.step_augmented_public_input.as_slice()) };
+        let (res, _me, _wit, lhs_next) = neo::ivc::prove_ivc_step_chained(input, None, None, prev_lhs.take())
+            .map_err(|e| anyhow::anyhow!("prove_ivc_step_chained failed: {}", e))?;
+        acc = res.proof.next_accumulator.clone();
+        proofs.push(res.proof);
+        prev_lhs = Some(lhs_next);
+    }
 
-    let mut chain = neo::ivc::IvcChainProof {
-        steps: state.ivc_proofs.clone(),
-        final_accumulator: state.accumulator.clone(),
-        chain_length: state.ivc_proofs.len() as u64,
-    };
+    let mut chain = neo::ivc::IvcChainProof { steps: proofs.clone(), final_accumulator: acc.clone(), chain_length: proofs.len() as u64 };
 
     // Tamper: mutate step 1's prev_step_augmented_public_input (linking LHS)
     assert!(chain.steps.len() >= 2);
@@ -107,18 +114,25 @@ fn ivc_linking_accepts_matched_prev_augmented_x() -> anyhow::Result<()> {
         const1_witness_index: 0,
     };
 
-    // Build a small two-step chain via ivc_chain
+    // Build a small two-step chain via manual chained proving
     let y0 = vec![F::from_u64(10)];
-    let mut state = neo::ivc_chain::State::new(params.clone(), step_ccs.clone(), y0.clone(), binding.clone())?;
-    // Two steps with simple witnesses: [1, y_step]
-    state = neo::ivc_chain::step(state, &[], &[F::ONE, F::from_u64(3)])?;
-    state = neo::ivc_chain::step(state, &[], &[F::ONE, F::from_u64(5)])?;
+    let mut acc = neo::ivc::Accumulator { c_z_digest: [0u8;32], c_coords: vec![], y_compact: y0.clone(), step: 0 };
+    let mut proofs: Vec<neo::ivc::IvcProof> = Vec::new();
+    let mut prev_lhs: Option<(neo_ccs::McsInstance<neo_ajtai::Commitment, F>, neo_ccs::McsWitness<F>)> = None;
+    for (i, w) in [
+        vec![F::ONE, F::from_u64(3)],
+        vec![F::ONE, F::from_u64(5)],
+    ].into_iter().enumerate() {
+        let y_step = w[1..=y_len].to_vec();
+        let input = neo::ivc::IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &w, prev_accumulator: &acc, step: i as u64, public_input: Some(&[]), y_step: &y_step, binding_spec: &binding, transcript_only_app_inputs: false, prev_augmented_x: proofs.last().map(|p| p.step_augmented_public_input.as_slice()) };
+        let (res, _me, _wit, lhs_next) = neo::ivc::prove_ivc_step_chained(input, None, None, prev_lhs.take())
+            .map_err(|e| anyhow::anyhow!("prove_ivc_step_chained failed: {}", e))?;
+        acc = res.proof.next_accumulator.clone();
+        proofs.push(res.proof);
+        prev_lhs = Some(lhs_next);
+    }
 
-    let chain = neo::ivc::IvcChainProof {
-        steps: state.ivc_proofs.clone(),
-        final_accumulator: state.accumulator.clone(),
-        chain_length: state.ivc_proofs.len() as u64,
-    };
+    let chain = neo::ivc::IvcChainProof { steps: proofs.clone(), final_accumulator: acc.clone(), chain_length: proofs.len() as u64 };
 
     // Assert positive property: for non-base step (index 1),
     // prev_step_augmented_public_input must equal previous step's step_augmented_public_input

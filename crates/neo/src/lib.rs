@@ -170,8 +170,6 @@ pub use nivc::{
     verify_nivc_chain, NivcFinalizeOptions, finalize_nivc_chain_with_options, finalize_nivc_chain,
 };
 
-/// Chain-style step/verify wrapper API for examples
-pub mod ivc_chain;
 
 /// Counts and bookkeeping for public results embedded in the proof.
 /// Backwards-compatible: all fields have defaults for older proofs.

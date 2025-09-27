@@ -5,7 +5,7 @@
 //! might not appear in simpler unit tests.
 
 use anyhow::Result;
-use neo::{NeoParams, F, ivc_chain};
+use neo::{NeoParams, F, NivcProgram, NivcState, NivcStepSpec};
 use neo_ccs::{r1cs_to_ccs, Mat, CcsStructure};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
@@ -100,7 +100,8 @@ fn test_fibonacci_integration() -> Result<()> {
     };
     
     let initial_y_compact = vec![F::ONE]; // Start with F(1) = 1 (only track one value)
-    let mut state = ivc_chain::State::new(params, step_ccs, initial_y_compact, binding_spec)?;
+    let program = NivcProgram::new(vec![NivcStepSpec { ccs: step_ccs, binding: binding_spec }]);
+    let mut state = NivcState::new(params.clone(), program.clone(), initial_y_compact)?;
     
     let num_steps = 5;
     let mut current_a = 1u64;
@@ -110,8 +111,8 @@ fn test_fibonacci_integration() -> Result<()> {
         let witness = build_fibonacci_step_witness(current_a, current_b);
         let io: &[F] = &[];
         
-        state = ivc_chain::step(state, io, &witness)
-            .map_err(|e| anyhow::anyhow!("IVC step {} proving failed: {}", step_i, e))?;
+        state.step(0, io, &witness)
+            .map_err(|e| anyhow::anyhow!("NIVC step {} proving failed: {}", step_i, e))?;
         
         let next_a = current_b;
         let next_b = add_mod_p(current_a, current_b);
@@ -123,13 +124,14 @@ fn test_fibonacci_integration() -> Result<()> {
     }
     
     // Save accumulator state before finalization (which consumes the state)
-    let accumulator_commitment = state.accumulator.y_compact[0].as_canonical_u64();
+    let accumulator_commitment = state.acc.global_y[0].as_canonical_u64();
     
     // Step 6: Generate final SNARK proof (like fib_folding.rs)
     println!("\n🔄 Step 6: Generating Final SNARK Layer proof...");
     let final_snark_start = std::time::Instant::now();
     
-    let (final_proof, final_ccs, final_public_input) = ivc_chain::finalize_and_prove(state)?
+    let chain = state.into_proof();
+    let (final_proof, final_ccs, final_public_input) = neo::finalize_nivc_chain_with_options(&program, &params, chain, neo::NivcFinalizeOptions { embed_ivc_ev: false })?
         .ok_or_else(|| anyhow::anyhow!("No steps to finalize"))?;
     
     let final_snark_time = final_snark_start.elapsed();

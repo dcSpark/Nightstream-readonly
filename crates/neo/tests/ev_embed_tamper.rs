@@ -1,8 +1,7 @@
 // EV embedding tamper tests - using secure public-ρ EV path
 
 use anyhow::Result;
-use neo::{F, NeoParams};
-use neo::ivc_chain;
+use neo::{F, NeoParams, NivcProgram, NivcState, NivcStepSpec, NivcFinalizeOptions};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 
@@ -44,22 +43,20 @@ fn ev_embedding_public_io_tamper_detected() -> Result<()> {
         const1_witness_index: 0,
     };
 
-    // Start state with y_len = 1
-    let mut state = ivc_chain::State::new(params.clone(), step_ccs.clone(), vec![F::ONE], binding)?;
-
-    // One IVC step
-    state = ivc_chain::step(state, &[], &build_step_witness(1, 1))?;
+    // Build NIVC program (single lane) and run one step
+    let program = NivcProgram::new(vec![NivcStepSpec { ccs: step_ccs.clone(), binding }]);
+    let mut st = NivcState::new(params.clone(), program.clone(), vec![F::ONE])?;
+    st.step(0, &[], &build_step_witness(1, 1))?;
+    let chain = st.into_proof();
 
     // Finalize without EV for baseline
-    let (proof_noev, _, _) = ivc_chain::finalize_and_prove_with_options(
-        state.clone(),
-        ivc_chain::FinalizeOptions { embed_ivc_ev: false },
+    let (proof_noev, _, _) = neo::finalize_nivc_chain_with_options(
+        &program, &params, chain.clone(), NivcFinalizeOptions { embed_ivc_ev: false }
     )?.expect("expected a proof");
 
     // Finalize with EV embedded
-    let (proof_ev, _final_ccs, final_public_input) = ivc_chain::finalize_and_prove_with_options(
-        state,
-        ivc_chain::FinalizeOptions { embed_ivc_ev: true },
+    let (proof_ev, _final_ccs, final_public_input) = neo::finalize_nivc_chain_with_options(
+        &program, &params, chain, NivcFinalizeOptions { embed_ivc_ev: true }
     )?.expect("expected a proof");
 
     // EV changes public IO (extra y_prev||y_next||rho before padding) — content must differ

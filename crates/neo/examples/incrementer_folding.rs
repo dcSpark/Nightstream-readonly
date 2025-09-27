@@ -1,25 +1,21 @@
-//! Simple step/verify API over Neo IVC
+//! Simple incrementer using NIVC (non-uniform IVC)
 //!
-//! This example shows a minimal API similar to Nova-style step recursion:
-//!   step(state, io, witness) -> state
-//!   verify(state, io) -> bool
+//! This example shows a minimal API similar to Nova-style step recursion but
+//! implemented via the new NIVC driver:
+//!   st.step(0, io, witness)
+//!   finalize_nivc_chain_with_options(program, params, st.into_proof(), ...)
 //!
 //! We implement a trivial incrementer: state x -> x+1 each step.
 //!
-//! Usage: cargo run -p neo --example ivc_every_policy
+//! Usage: cargo run -p neo --example incrementer_folding
 
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use neo::{F, NeoParams};
 use p3_field::PrimeField64;
-use neo::ivc::{
-    Accumulator,
-    LastNExtractor,
-    prove_ivc_step_with_extractor,
-    StepBindingSpec,
-};
-use neo::ivc_chain;
+use neo::ivc::StepBindingSpec;
+use neo::{NivcProgram, NivcState, NivcStepSpec, NivcFinalizeOptions};
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
 use anyhow::Result;
@@ -127,20 +123,16 @@ fn main() -> Result<()> {
     let params_time = params_start.elapsed();
 
     // Binding spec for witness layout: [1, prev_x, delta, next_x]
-    let binding_spec = neo::ivc::StepBindingSpec {
+    let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],                // next_x at index 3
         x_witness_indices: vec![2],             // bind delta (public input) to witness position 2
         y_prev_witness_indices: vec![],         // No binding to EV y_prev (they're different values!)
         const1_witness_index: 0,
     };
 
-    // Initial accumulator (per-step IVC, not batching)
-    let mut accumulator = Accumulator {
-        c_z_digest: [0u8; 32],
-        c_coords: vec![],
-        y_compact: vec![F::ZERO],
-        step: 0,
-    };
+    // NIVC program and state (single lane)
+    let program = NivcProgram::new(vec![NivcStepSpec { ccs: step_ccs.clone(), binding: binding_spec.clone() }]);
+    let mut st = NivcState::new(params.clone(), program.clone(), vec![F::ZERO])?;
 
     // Run steps: x -> x+1
     let num_steps = env::args()
@@ -151,8 +143,7 @@ fn main() -> Result<()> {
     println!("Running {num_steps} increment steps (per-step Nova IVC)...");
     let steps_start = Instant::now();
     let mut x = 0u64;
-    let extractor = LastNExtractor { n: 1 };
-    let mut ivc_proofs = Vec::new(); // Collect proofs for Stage 5
+    // NIVC path doesn't require collecting per-step IVC proofs here
     
     for step_i in 0..num_steps {
         // choose a public delta per step (vary 1..=3 for demo)
@@ -160,70 +151,30 @@ fn main() -> Result<()> {
         let wit = build_increment_witness(x, delta);
         // supply delta as per-step public input X
         let io = [F::from_u64(delta)];
-        // Prove one step (REAL Nova folding). No per-step SNARK compression by default.
-        let step_res = prove_ivc_step_with_extractor(
-            &params,
-            &step_ccs,
-            &wit,
-            &accumulator,
-            accumulator.step,
-            Some(&io),
-            &extractor,
-            &binding_spec,
-        )
-        .expect("IVC step proving failed");
-
-        // Carry accumulator forward and collect proof for Stage 5
-        accumulator = step_res.proof.next_accumulator.clone();
-        ivc_proofs.push(step_res.proof);
+        // NIVC step (lane 0)
+        st.step(0, &io, &wit).expect("NIVC step proving failed");
         x += delta;
     }
     let steps_time = steps_start.elapsed();
 
-    println!("\n✅ All steps completed with per-step Nova folding.");
+    let final_step_count = st.acc.step;
+    let final_global_y = st.acc.global_y.clone();
+    println!("\n✅ All steps completed with NIVC folding.");
     println!("Final accumulator contains cryptographically verified result:");
-    println!("  - Step count: {}", accumulator.step);
-    println!("  - Compact output: {:?}", accumulator.y_compact);
-    println!("  - Commitment digest: {:?}", &accumulator.c_z_digest[..8]);
+    println!("  - Step count: {}", final_step_count);
+    println!("  - Compact output: {:?}", final_global_y);
     println!("  - Final computation result: {}", x);
     
     // **STAGE 5: Final SNARK Layer** - Generate succinct proof from accumulated ME instances
     println!("\n🔄 Stage 5: Generating Final SNARK Layer proof...");
     let final_snark_start = Instant::now();
     
-    // Use the chained API to generate the final SNARK proof
-    // First, create a temporary state and populate it with the IVC proofs
-    let binding_spec = StepBindingSpec {
-        y_step_offsets: vec![3],        // Extract next_x from witness position 3
-        x_witness_indices: vec![2],     // Bind delta (public input) to witness position 2
-        y_prev_witness_indices: vec![], // No binding to EV y_prev (they're different values!)
-        const1_witness_index: 0,        // Constant 1 at witness position 0
-    };
-    
-    let mut temp_state = ivc_chain::State::new(params.clone(), step_ccs.clone(), vec![F::ZERO], binding_spec)
-        .expect("Failed to create IVC chain state");
-    
-    // Add all IVC proofs to the state
-    for proof in &ivc_proofs {
-        temp_state.ivc_proofs.push(proof.clone());
-    }
-    
-    // Extract running ME from the final proof (if available)
-    if let Some(final_proof) = ivc_proofs.last() {
-        if let (Some(me_instances), Some(me_witnesses)) = (&final_proof.me_instances, &final_proof.digit_witnesses) {
-            if let (Some(final_me), Some(final_wit)) = (me_instances.last(), me_witnesses.last()) {
-                temp_state.set_running_me(final_me.clone(), final_wit.clone());
-            }
-        }
-    }
-    
-    // Generate final proof using chained API (embed IVC EV)
-    let result = ivc_chain::finalize_and_prove_with_options(
-        temp_state,
-        neo::ivc_chain::FinalizeOptions { embed_ivc_ev: true },
+    // Generate final proof using NIVC finalize (embed IVC EV)
+    let chain = st.into_proof();
+    let (final_proof, final_augmented_ccs, final_public_input) = neo::finalize_nivc_chain_with_options(
+        &program, &params, chain, NivcFinalizeOptions { embed_ivc_ev: true }
     )
-        .expect("Failed to finalize and prove");
-    let (final_proof, final_augmented_ccs, final_public_input) = result
+        .expect("Failed to finalize and prove")
         .expect("No steps to finalize");
     
     let final_snark_time = final_snark_start.elapsed();
@@ -364,7 +315,7 @@ fn main() -> Result<()> {
     println!("  Step CCS Constraints:   {:>8}", step_ccs.n);  
     println!("  Step CCS Variables:     {:>8}", step_ccs.m);
     println!("  Step CCS Matrices:      {:>8}", step_ccs.matrices.len());
-    println!("  Final Accumulator Step: {:>8}", accumulator.step);
+    println!("  Final Accumulator Step: {:>8}", final_step_count);
     println!();
     
     println!("Performance Metrics:");

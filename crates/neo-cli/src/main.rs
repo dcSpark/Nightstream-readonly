@@ -3,9 +3,8 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use neo::{NeoParams, CcsStructure, F};
-use neo::ivc::{LastNExtractor, StepBindingSpec};
-use neo::ivc_chain;
+use neo::{NeoParams, CcsStructure, F, NivcProgram, NivcState, NivcStepSpec};
+use neo::ivc::StepBindingSpec;
 use neo_ccs::{r1cs_to_ccs, Mat};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use std::fs;
@@ -216,12 +215,15 @@ fn cmd_gen(n: usize, out: PathBuf, bundle_vk: bool, emit_vk: bool) -> Result<()>
     // Initialize IVC chain state
     let mut initial_y = vec![F::ZERO; y_len]; // [i=0, a=0, b=1] initial Fibonacci state
     initial_y[2] = F::ONE; // b = 1
-    let mut state = ivc_chain::State::new(params.clone(), step_ccs.clone(), initial_y, binding_spec)?;
+    // Build a NIVC program with a single lane (Fibonacci step)
+    let program = NivcProgram::new(vec![NivcStepSpec { ccs: step_ccs.clone(), binding: binding_spec }]);
+    // Initialize NIVC state
+    let mut state = NivcState::new(params.clone(), program.clone(), initial_y)?;
     let build_time = build_start.elapsed();
 
     // Execute IVC steps
     let ivc_start = std::time::Instant::now();
-    let _extractor = LastNExtractor { n: y_len };
+    // NIVC does local extraction based on binding; no external extractor needed
     let mut fib_state = FibState::new();
     
     println!("🔄 Executing {} Fibonacci IVC steps...", n);
@@ -231,7 +233,7 @@ fn cmd_gen(n: usize, out: PathBuf, bundle_vk: bool, emit_vk: bool) -> Result<()>
         // No step_x for this example (empty vec)
         let step_x = vec![];
         
-        state = ivc_chain::step(state, &step_x, &witness)?;
+        state.step(0, &step_x, &witness)?;
         fib_state = next_state;
         
         // Progress indicator every 50 steps
@@ -262,10 +264,9 @@ fn cmd_gen(n: usize, out: PathBuf, bundle_vk: bool, emit_vk: bool) -> Result<()>
 
     // Generate final SNARK proof
     let prove_start = std::time::Instant::now();
-    let result = ivc_chain::finalize_and_prove_with_options(
-        state,
-        neo::ivc_chain::FinalizeOptions { embed_ivc_ev: true },
-    )?;
+    // Convert to NIVC chain and generate final SNARK
+    let chain = state.into_proof();
+    let result = neo::finalize_nivc_chain_with_options(&program, &params, chain, neo::NivcFinalizeOptions { embed_ivc_ev: true })?;
     let prove_time = prove_start.elapsed();
 
     let (proof, final_ccs, final_public_input) = result.ok_or_else(|| {

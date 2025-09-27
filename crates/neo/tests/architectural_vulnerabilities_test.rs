@@ -21,7 +21,7 @@ use neo::{NeoParams, F, ivc::{
     create_step_digest,
     rho_from_transcript,
 }};
-use neo::ivc_chain;
+use neo::{NivcProgram, NivcStepSpec, NivcFinalizeOptions};
 use neo_ccs::{r1cs_to_ccs, Mat, CcsStructure};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
@@ -161,33 +161,27 @@ fn test_vulnerability_folding_chain_duplication() -> Result<()> {
     let y_prev = &prev_acc.y_compact;
     let y_next = &final_step.next_accumulator.y_compact;
     let _final_public_input = build_final_snark_public_input(&step_x, rho, y_prev, y_next);
-    // Use chained API instead of removed prove_ivc_final_snark
-    // Create a temporary state to generate the final proof
-    let binding_spec = StepBindingSpec {
-        y_step_offsets: vec![3],        
-        x_witness_indices: vec![2],
-        y_prev_witness_indices: vec![1],
-        const1_witness_index: 0,
-    };
-    let mut temp_state = ivc_chain::State::new(params.clone(), step_ccs.clone(), vec![F::ZERO], binding_spec)?;
-    
-    // Add all the IVC proofs to the state and set the running ME from the final proof
-    for proof in &ivc_proofs {
-        temp_state.ivc_proofs.push(proof.clone());
-    }
-    
-    // Extract running ME from the final proof (if available)
-    if let Some(final_proof) = ivc_proofs.last() {
-        if let (Some(me_instances), Some(me_witnesses)) = (&final_proof.me_instances, &final_proof.digit_witnesses) {
-            if let (Some(final_me), Some(final_wit)) = (me_instances.last(), me_witnesses.last()) {
-                temp_state.set_running_me(final_me.clone(), final_wit.clone());
-            }
+    // Build NIVC program and synthetic chain from IVC proofs
+    let binding_spec = StepBindingSpec { y_step_offsets: vec![3], x_witness_indices: vec![2], y_prev_witness_indices: vec![1], const1_witness_index: 0 };
+    let program = NivcProgram::new(vec![NivcStepSpec { ccs: step_ccs.clone(), binding: binding_spec }]);
+    let steps: Vec<neo::NivcStepProof> = ivc_proofs
+        .iter()
+        .map(|p| neo::NivcStepProof { which_type: 0, step_io: p.step_public_input.clone(), inner: p.clone() })
+        .collect();
+    let mut acc = neo::nivc::NivcAccumulators::new(1, y_next.clone());
+    if let (Some(meis), Some(wits)) = (&final_step.me_instances, &final_step.digit_witnesses) {
+        if let (Some(me), Some(wit)) = (meis.last(), wits.last()) {
+            acc.lanes[0].me = Some(me.clone());
+            acc.lanes[0].wit = Some(wit.clone());
         }
     }
-    
-    // Generate final proof using chained API
-    let result = ivc_chain::finalize_and_prove(temp_state)?;
-    let (final_proof, final_augmented_ccs, final_public_input_actual) = result
+    acc.lanes[0].c_coords = final_step.next_accumulator.c_coords.clone();
+    acc.lanes[0].c_digest = final_step.next_accumulator.c_z_digest;
+    acc.step = final_step.step + 1;
+    let chain = neo::NivcChainProof { steps, final_acc: acc };
+
+    // Generate final proof
+    let (final_proof, final_augmented_ccs, final_public_input_actual) = neo::finalize_nivc_chain_with_options(&program, &params, chain, NivcFinalizeOptions { embed_ivc_ev: false })?
         .ok_or_else(|| anyhow::anyhow!("No steps to finalize"))?;
     
     // Verify the proof with the correct full chain result
@@ -288,22 +282,27 @@ fn test_vulnerability_final_snark_public_input_format() -> Result<()> {
         y_prev_witness_indices: vec![1],
         const1_witness_index: 0,
     };
-    let mut temp_state = ivc_chain::State::new(params.clone(), step_ccs.clone(), vec![F::ZERO], temp_binding_spec)?;
-    for proof in &ivc_proofs {
-        temp_state.ivc_proofs.push(proof.clone());
-    }
-    
-    // Extract running ME from the final proof (if available)
-    if let Some(final_proof) = ivc_proofs.last() {
-        if let (Some(me_instances), Some(me_witnesses)) = (&final_proof.me_instances, &final_proof.digit_witnesses) {
-            if let (Some(final_me), Some(final_wit)) = (me_instances.last(), me_witnesses.last()) {
-                temp_state.set_running_me(final_me.clone(), final_wit.clone());
-            }
+    // Build a synthetic NIVC chain and finalize
+    let program = NivcProgram::new(vec![NivcStepSpec { ccs: step_ccs.clone(), binding: temp_binding_spec }]);
+    let steps: Vec<neo::NivcStepProof> = ivc_proofs
+        .iter()
+        .map(|p| neo::NivcStepProof { which_type: 0, step_io: p.step_public_input.clone(), inner: p.clone() })
+        .collect();
+    let last = ivc_proofs.last().unwrap();
+    let mut acc = neo::nivc::NivcAccumulators::new(1, last.next_accumulator.y_compact.clone());
+    if let (Some(meis), Some(wits)) = (&last.me_instances, &last.digit_witnesses) {
+        if let (Some(me), Some(wit)) = (meis.last(), wits.last()) {
+            acc.lanes[0].me = Some(me.clone());
+            acc.lanes[0].wit = Some(wit.clone());
         }
     }
-    
-    // The chained API will generate the correct public input format, so test verification with wrong format
-    match ivc_chain::finalize_and_prove(temp_state) {
+    acc.lanes[0].c_coords = last.next_accumulator.c_coords.clone();
+    acc.lanes[0].c_digest = last.next_accumulator.c_z_digest;
+    acc.step = last.step + 1;
+    let chain = neo::NivcChainProof { steps, final_acc: acc };
+
+    // The NIVC finalize generates the correct augmented public input; now test wrong-format rejection
+    match neo::finalize_nivc_chain_with_options(&program, &params, chain, NivcFinalizeOptions { embed_ivc_ev: false }) {
         Ok(Some((final_proof, final_augmented_ccs, correct_public_input))) => {
             // Test that verification fails with wrong format but succeeds with correct format
             let is_valid_wrong = neo::verify(&final_augmented_ccs, &wrong_format_input, &final_proof)
