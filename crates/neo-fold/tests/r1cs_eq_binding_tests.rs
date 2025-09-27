@@ -1,5 +1,5 @@
 use neo_fold::pi_ccs::{pi_ccs_prove, pi_ccs_verify};
-use neo_fold::{transcript::FoldTranscript};
+use neo_transcript::{Poseidon2Transcript, Transcript};
 use neo_ccs::{CcsStructure, Mat, SparsePoly, Term, McsInstance, McsWitness};
 use neo_ajtai::{AjtaiSModule, setup as ajtai_setup, set_global_pp, decomp_b, DecompStyle};
 use neo_ccs::SModuleHomomorphism; // for AjtaiSModule::commit
@@ -56,11 +56,11 @@ fn r1cs_normalization_detects_and_verifies() {
 
     // Prove and verify Pi-CCS
     let l = AjtaiSModule::from_global().expect("PP");
-    let mut tr = FoldTranscript::default();
+    let mut tr = Poseidon2Transcript::new(b"neo/fold");
     let (outs, proof) = pi_ccs_prove(&mut tr, &params, &s, &[inst.clone()], &[wit], &l).expect("prove");
 
     // Fresh transcript for verify
-    let mut tr_v = FoldTranscript::default();
+    let mut tr_v = Poseidon2Transcript::new(b"neo/fold");
     let ok = pi_ccs_verify(&mut tr_v, &params, &s, &[inst], &outs, &proof).expect("verify call");
     assert!(ok, "eq-binding path should accept scaled/permuted R1CS");
 }
@@ -87,7 +87,7 @@ fn r1cs_terminal_fails_on_y_scalar_tamper() {
     let inst = McsInstance { c, x, m_in: 1 };
     let wit  = McsWitness { w, Z: z_mat };
 
-    let mut tr = FoldTranscript::default();
+    let mut tr = Poseidon2Transcript::new(b"neo/fold");
     let (mut outs, proof) = pi_ccs_prove(&mut tr, &params, &s, &[inst.clone()], &[wit], &l).expect("prove");
 
     // Tamper terminal scalars: this breaks running_sum == eq*Σ α (A·B − C)
@@ -97,7 +97,7 @@ fn r1cs_terminal_fails_on_y_scalar_tamper() {
         }
     }
 
-    let mut tr_v = FoldTranscript::default();
+    let mut tr_v = Poseidon2Transcript::new(b"neo/fold");
     let ok = pi_ccs_verify(&mut tr_v, &params, &s, &[inst], &outs, &proof).expect("verify");
     assert!(!ok, "eq-binding terminal must reject tampered y_scalars");
 }

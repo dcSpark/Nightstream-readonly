@@ -6,7 +6,7 @@
 //! 3. Binds extension policy to transcript for FS soundness
 //! 4. Different policies produce different transcript digests
 
-use neo_fold::transcript::FoldTranscript;
+use neo_transcript::{Poseidon2Transcript, Transcript};
 use neo_params::NeoParams;
 
 #[test]
@@ -63,15 +63,17 @@ fn transcript_binding_changes_with_policy_parameters() {
     // Test that different extension policies produce different transcript digests
     
     // Create two transcripts with different circuit parameters
-    let mut tr1 = FoldTranscript::new(b"extension_test_1");
-    let mut tr2 = FoldTranscript::new(b"extension_test_1"); // Same seed
+    let mut tr1 = Poseidon2Transcript::new(b"extension_test_1");
+    let mut tr2 = Poseidon2Transcript::new(b"extension_test_1"); // Same seed
     
-    // Bind different extension policies
-    tr1.absorb_ccs_header(64, 2, 127, 4, 2, 10);  // Policy 1
-    tr2.absorb_ccs_header(64, 2, 127, 8, 2, 5);   // Policy 2 (different ell, slack)
+    // Bind different extension policies (mirror pi_ccs header framing)
+    tr1.append_message(b"neo/ccs/header/v1", b"");
+    tr1.append_u64s(b"ccs/header", &[64, 2, 127, 4, 2, 10]);
+    tr2.append_message(b"neo/ccs/header/v1", b"");
+    tr2.append_u64s(b"ccs/header", &[64, 2, 127, 8, 2, 5]);
     
-    let digest1 = tr1.state_digest();
-    let digest2 = tr2.state_digest();
+    let digest1 = tr1.digest32();
+    let digest2 = tr2.digest32();
     
     assert_ne!(digest1, digest2, 
                "Different extension policies must produce different transcript digests");
@@ -84,14 +86,15 @@ fn transcript_binding_changes_with_policy_parameters() {
 #[test]
 fn transcript_binding_is_deterministic() {
     // Test that the same policy parameters always produce the same digest
-    let create_bound_transcript = |seed: &[u8]| {
-        let mut tr = FoldTranscript::new(seed);
-        tr.absorb_ccs_header(64, 2, 127, 6, 3, 8);
-        tr.state_digest()
+    let create_bound_transcript = || {
+        let mut tr = Poseidon2Transcript::new(b"deterministic_test");
+        tr.append_message(b"neo/ccs/header/v1", b"");
+        tr.append_u64s(b"ccs/header", &[64, 2, 127, 6, 3, 8]);
+        tr.digest32()
     };
-    
-    let digest1 = create_bound_transcript(b"deterministic_test");
-    let digest2 = create_bound_transcript(b"deterministic_test");
+
+    let digest1 = create_bound_transcript();
+    let digest2 = create_bound_transcript();
     
     assert_eq!(digest1, digest2,
                "Same policy parameters must produce deterministic transcript digest");

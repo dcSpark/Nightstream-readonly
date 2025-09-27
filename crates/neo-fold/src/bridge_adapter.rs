@@ -12,7 +12,7 @@ use neo_ccs::{MeInstance, MeWitness};
 use neo_math::{F, K, KExtensions};
 use p3_field::PrimeField64;
 
-use crate::transcript::FoldTranscript;
+use neo_transcript::{Poseidon2Transcript, Transcript};
 
 /// Split K=F_{q^2} into base-field limbs (re, im).
 #[inline]
@@ -48,41 +48,41 @@ pub fn modern_to_legacy_instance(
         r_point.push(im);
     }
 
-    // Header digest: bind to the SAME Poseidon2 family via FoldTranscript
-    let mut tr = FoldTranscript::new(b"neo/bridge/v2");
-    tr.absorb_u64(&[
+    // Header digest: bind using neo-transcript Poseidon2 transcript
+    let mut tr = Poseidon2Transcript::new(b"neo/bridge/v2");
+    tr.append_u64s(b"params", &[
         params.q,               // modulus identifier
         params.lambda as u64,   // target bits
         params.s as u64,        // extension degree (v1: 2)
         params.b as u64,        // base
         params.B as u64,        // big base
     ]);
-    tr.absorb_f(&c_coords);
-    tr.absorb_u64(&[modern.m_in as u64]);
+    tr.append_fields(b"c_coords", &c_coords);
+    tr.append_u64s(b"m_in", &[modern.m_in as u64]);
     
     // CRITICAL SECURITY: Absorb X matrix for additional binding
     // While X = L_x(Z) is deterministically derivable from Z (via commitment c),
     // absorbing X provides defense-in-depth against potential edge cases
-    tr.absorb_f(modern.X.as_slice());
+    tr.append_fields(b"X", modern.X.as_slice());
     
     // CRITICAL SECURITY: Absorb actual values, not just shapes
-    tr.absorb_u64(&[modern.y.len() as u64, modern.r.len() as u64]);
+    tr.append_u64s(b"yr_lens", &[modern.y.len() as u64, modern.r.len() as u64]);
     
     // Bind to actual y outputs (evaluation results)
     for yj in &modern.y {
         for &yk in yj {
             let [re, im] = k_to_coeffs(&yk);
-            tr.absorb_f(&[re, im]);
+            tr.append_fields(b"y", &[re, im]);
         }
     }
     
     // CRITICAL FIX: Bind to actual r values (evaluation point)
     for &ri in &modern.r {
         let [re, im] = k_to_coeffs(&ri);
-        tr.absorb_f(&[re, im]);
+        tr.append_fields(b"r", &[re, im]);
     }
     
-    let header_digest = tr.state_digest();
+    let header_digest = tr.digest32();
 
     neo_ccs::MEInstance {
         c_step_coords: vec![],

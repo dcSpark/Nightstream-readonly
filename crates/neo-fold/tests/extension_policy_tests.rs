@@ -6,7 +6,7 @@
 #![allow(non_snake_case)] // Allow mathematical notation
 
 use neo_fold::{
-    transcript::FoldTranscript,
+    
     pi_ccs::{pi_ccs_prove, pi_ccs_verify},
     error::PiCcsError,
 };
@@ -14,6 +14,7 @@ use neo_ccs::{CcsStructure, McsInstance, McsWitness, Mat, SparsePoly, Term};
 use neo_ajtai::{setup, commit, Commitment};
 use neo_math::F;
 use neo_params::NeoParams;
+use neo_transcript::Transcript;
 use p3_field::PrimeCharacteristicRing;
 use rand::rng;
 
@@ -69,7 +70,7 @@ fn test_extension_policy_validation_in_protocol() {
         Z: witness_matrix,
     };
     
-    let mut transcript = FoldTranscript::new(b"extension_policy_test");
+    let mut transcript = neo_transcript::Poseidon2Transcript::new(b"extension_policy_test");
     
     // This should succeed as the circuit is small and linear
     let result = pi_ccs_prove(
@@ -86,7 +87,7 @@ fn test_extension_policy_validation_in_protocol() {
             println!("  ✅ Small circuit passed extension policy validation");
             
             // Verify that verification also passes extension policy check
-            let mut verify_transcript = FoldTranscript::new(b"extension_policy_test");
+            let mut verify_transcript = neo_transcript::Poseidon2Transcript::new(b"extension_policy_test");
             let verify_result = pi_ccs_verify(
                 &mut verify_transcript,
                 &params,
@@ -166,7 +167,7 @@ fn test_extension_policy_rejects_high_degree() {
         Z: witness_matrix,
     };
     
-    let mut transcript = FoldTranscript::new(b"high_degree_test");
+    let mut transcript = neo_transcript::Poseidon2Transcript::new(b"high_degree_test");
     
     let result = pi_ccs_prove(
         &mut transcript,

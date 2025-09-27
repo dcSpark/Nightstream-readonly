@@ -9,10 +9,8 @@
 
 #![allow(non_snake_case)] // Allow mathematical notation like X, T, B
 
-use neo_fold::{
-    transcript::FoldTranscript,
-    pi_rlc::{pi_rlc_prove, pi_rlc_verify, PiRlcProof},
-};
+use neo_fold::pi_rlc::{pi_rlc_prove, pi_rlc_verify, PiRlcProof};
+use neo_transcript::{Poseidon2Transcript, Transcript};
 use neo_ccs::{CcsStructure, McsInstance, McsWitness, MeInstance, Mat, SparsePoly, Term};
 use neo_ajtai::{setup, commit, Commitment};
 use neo_math::{F, K, SAction, cf_inv};
@@ -78,12 +76,11 @@ fn create_test_me_instances(count: usize) -> Vec<MeInstance<Commitment, F, K>> {
 fn test_strong_sampling_invertibility() {
     println!("🔍 Testing strong sampling invertibility guarantees...");
     
-    let mut transcript = FoldTranscript::new(b"test_strong_sampling");
-    let mut challenger = transcript.challenger();
+    let mut transcript = Poseidon2Transcript::new(b"test_strong_sampling");
     
     // Test multiple samples to ensure invertibility
     for k in 2..=5 {
-        let result = sample_kplus1_invertible(&mut challenger, &DEFAULT_STRONGSET, k);
+        let result = sample_kplus1_invertible(&mut transcript, &DEFAULT_STRONGSET, k);
         assert!(result.is_ok(), "Strong sampling failed for k={}", k);
         
         let (rhos, T_bound) = result.unwrap();
@@ -105,7 +102,7 @@ fn test_strong_sampling_invertibility() {
 fn test_rlc_guard_constraint_enforcement() {
     println!("🔍 Testing RLC guard constraint enforcement...");
     
-    let mut transcript = FoldTranscript::new(b"test_guard_constraint");
+    let mut transcript = Poseidon2Transcript::new(b"test_guard_constraint");
     let params = NeoParams::goldilocks_127();
     
     // Create test ME instances
@@ -251,30 +248,30 @@ fn test_transcript_binding_consistency() {
     };
     
     // Test 1: Same transcript should produce same challenges
-    let mut transcript1 = FoldTranscript::new(b"test_binding");
-    let mut transcript2 = FoldTranscript::new(b"test_binding"); // Same seed
+    let mut transcript1 = Poseidon2Transcript::new(b"test_binding");
+    let mut transcript2 = Poseidon2Transcript::new(b"test_binding"); // Same seed
     
     // Add extension policy binding to both transcripts
-    transcript1.absorb_bytes(b"neo/params/v1");
-    transcript1.absorb_u64(&[params.q, params.lambda as u64, params.s as u64]);
+    transcript1.append_message(b"neo/params/v1", b"");
+    transcript1.append_u64s(b"p", &[params.q, params.lambda as u64, params.s as u64]);
     
-    transcript2.absorb_bytes(b"neo/params/v1");
-    transcript2.absorb_u64(&[params.q, params.lambda as u64, params.s as u64]);
+    transcript2.append_message(b"neo/params/v1", b"");
+    transcript2.append_u64s(b"p", &[params.q, params.lambda as u64, params.s as u64]);
     
     // Sample challenges from both
-    let challenge1 = transcript1.challenge_f();
-    let challenge2 = transcript2.challenge_f();
+    let challenge1 = transcript1.challenge_field(b"chal/f");
+    let challenge2 = transcript2.challenge_field(b"chal/f");
     
     // Same parameters should produce same challenges
     assert_eq!(challenge1, challenge2, "Same parameters should produce same transcript challenges");
     println!("  ✅ Consistent transcript binding with same parameters");
     
     // Test 2: Different parameters should produce different challenges
-    let mut transcript3 = FoldTranscript::new(b"test_binding");
-    transcript3.absorb_bytes(b"neo/params/v1");
-    transcript3.absorb_u64(&[params.q + 1, params.lambda as u64, params.s as u64]); // Different q
+    let mut transcript3 = Poseidon2Transcript::new(b"test_binding");
+    transcript3.append_message(b"neo/params/v1", b"");
+    transcript3.append_u64s(b"p", &[params.q + 1, params.lambda as u64, params.s as u64]); // Different q
     
-    let challenge3 = transcript3.challenge_f();
+    let challenge3 = transcript3.challenge_field(b"chal/f");
     assert_ne!(challenge1, challenge3, "Different parameters should produce different challenges");
     
     println!("  ✅ Transcript binding differential test completed");
@@ -309,19 +306,19 @@ fn test_extension_policy_binding() {
     };
     
     // Test transcript binding with different parameters
-    let mut transcript1 = FoldTranscript::new(b"extension_policy");
-    let mut transcript2 = FoldTranscript::new(b"extension_policy");
+    let mut transcript1 = Poseidon2Transcript::new(b"extension_policy");
+    let mut transcript2 = Poseidon2Transcript::new(b"extension_policy");
     
     // Bind different parameters to transcripts
-    transcript1.absorb_bytes(b"neo/params/v1");
-    transcript1.absorb_u64(&[params1.q, params1.lambda as u64, params1.s as u64]);
+    transcript1.append_message(b"neo/params/v1", b"");
+    transcript1.append_u64s(b"p", &[params1.q, params1.lambda as u64, params1.s as u64]);
     
-    transcript2.absorb_bytes(b"neo/params/v1");
-    transcript2.absorb_u64(&[params2.q, params2.lambda as u64, params2.s as u64]);
+    transcript2.append_message(b"neo/params/v1", b"");
+    transcript2.append_u64s(b"p", &[params2.q, params2.lambda as u64, params2.s as u64]);
     
     // Get state digests
-    let digest1 = transcript1.state_digest();
-    let digest2 = transcript2.state_digest();
+    let digest1 = transcript1.digest32();
+    let digest2 = transcript2.digest32();
     
     // Different parameters should produce different transcript states
     // (Note: current implementation returns placeholder [0u8; 32], so this would be equal)
@@ -330,8 +327,8 @@ fn test_extension_policy_binding() {
     println!("  Extension policy digest 2: {:?}", &digest2[..8]);
     
     // Test that challenges are different with different parameters
-    let challenge1 = transcript1.challenge_f();
-    let challenge2 = transcript2.challenge_f();
+    let challenge1 = transcript1.challenge_field(b"chal/f");
+    let challenge2 = transcript2.challenge_field(b"chal/f");
     
     assert_ne!(challenge1, challenge2,
         "Different extension policy parameters should produce different challenges");
@@ -346,13 +343,13 @@ fn test_rlc_verification_consistency() {
     let me_instances = create_test_me_instances(3); // k+1 instances
     
     // Generate proof
-    let mut transcript_prove = FoldTranscript::new(b"rlc_consistency");
+    let mut transcript_prove = Poseidon2Transcript::new(b"rlc_consistency");
     let prove_result = pi_rlc_prove(&mut transcript_prove, &params, &me_instances);
     
     match prove_result {
         Ok((combined_me, proof)) => {
             // Verify with same transcript seed
-            let mut transcript_verify = FoldTranscript::new(b"rlc_consistency");
+            let mut transcript_verify = Poseidon2Transcript::new(b"rlc_consistency");
             let verify_result = pi_rlc_verify(
                 &mut transcript_verify, 
                 &params, 
@@ -400,7 +397,7 @@ fn test_malformed_proof_rejection() {
             },
         };
         
-        let mut transcript = FoldTranscript::new(b"malformed_test");
+        let mut transcript = Poseidon2Transcript::new(b"malformed_test");
         let result = pi_rlc_verify(
             &mut transcript,
             &params,
@@ -431,7 +428,7 @@ fn test_empty_instance_rejection() {
     let params = NeoParams::goldilocks_127();
     let empty_instances = vec![];
     
-    let mut transcript = FoldTranscript::new(b"empty_test");
+    let mut transcript = Poseidon2Transcript::new(b"empty_test");
     let result = pi_rlc_prove(&mut transcript, &params, &empty_instances);
     
     // Should reject empty instance list

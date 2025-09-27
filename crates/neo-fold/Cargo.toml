@@ -28,6 +28,7 @@ thiserror = { workspace = true }
 bincode = { workspace = true }
 rayon = { workspace = true }
 blake3 = "1.5"
+neo-transcript = { path = "../neo-transcript" }
 
 [dev-dependencies]
 criterion = { workspace = true }

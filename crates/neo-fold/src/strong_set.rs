@@ -8,7 +8,7 @@
 //!
 //! Reference: Neo paper §§3.4, 4.5. (file-cited externally)
 
-use crate::transcript::FoldTranscript;
+use neo_transcript::Transcript;
 use p3_field::PrimeField64;
 
 /// Public, stable labels for Fiat–Shamir.
@@ -42,7 +42,7 @@ impl<S: Clone> StrongSamplingSet<S> {
 
     /// Sample exactly k challenges ρ_i ∈ C by FS with bias-free rejection sampling.
     /// Uses rejection sampling to eliminate modulo bias when reducing to index range.
-    pub fn sample_k(&self, t: &mut FoldTranscript, label: &[u8], k: usize) -> Vec<S> {
+    pub fn sample_k<T: Transcript>(&self, t: &mut T, label: &[u8], k: usize) -> Vec<S> {
         let n = self.elems.len() as u64;
         assert!(n > 0, "Strong set cannot be empty");
         
@@ -58,17 +58,18 @@ impl<S: Clone> StrongSamplingSet<S> {
         
         for i in 0..k {
             // Use our transcript's challenge mechanism with domain separation
-            t.absorb_bytes(&[label, b"/rho/", &(i as u64).to_le_bytes()].concat());
+            t.append_message(b"neo/rlc/label", label);
+            t.append_message(b"rho/index", &(i as u64).to_le_bytes());
             // Rejection sampling to avoid modulo bias
             loop {
-                let f = t.challenge_f().as_canonical_u64(); // uniform in [0, q)
+                let f = t.challenge_field(b"chal/f").as_canonical_u64(); // uniform in [0, q)
                 if f < bound {
                     let idx = (f % n) as usize;
                     out.push(self.elems[idx].clone());
                     break;
                 }
                 // If rejected, absorb a salt and try again to get fresh randomness
-                t.absorb_bytes(b"/rejection/");
+                t.append_message(b"rejection", b"");
             }
         }
         out

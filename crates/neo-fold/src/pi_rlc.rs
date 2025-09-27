@@ -5,7 +5,7 @@
 
 #![allow(non_snake_case)] // Allow mathematical notation like X, T, B
 
-use crate::transcript::{FoldTranscript, Domain};
+use neo_transcript::{Transcript, Poseidon2Transcript, labels as tr_labels};
 use crate::error::PiRlcError;
 use neo_ccs::{MeInstance, Mat};
 use neo_ajtai::{s_lincomb, Commitment as Cmt};
@@ -37,18 +37,14 @@ pub struct GuardParams {
 
 /// Prove Π_RLC: combine k+1 ME instances to k instances  
 pub fn pi_rlc_prove(
-    tr: &mut FoldTranscript,
+    tr: &mut Poseidon2Transcript,
     params: &neo_params::NeoParams,
     me_list: &[MeInstance<Cmt, F, K>],
 ) -> Result<(MeInstance<Cmt, F, K>, PiRlcProof), PiRlcError> {
     // === Domain separation & extension policy binding ===
-    tr.domain(Domain::Rlc);
-    tr.absorb_bytes(b"neo/params/v1");
-    tr.absorb_u64(&[
-        params.q, params.lambda as u64,
-        me_list.len() as u64,
-        params.s as u64,
-    ]);
+    tr.append_message(tr_labels::PI_RLC, b"");
+    tr.append_message(b"neo/params/v1", b"");
+    tr.append_u64s(b"params", &[params.q, params.lambda as u64, me_list.len() as u64, params.s as u64]);
     
     // === Validate inputs ===
     if me_list.is_empty() {
@@ -63,8 +59,7 @@ pub fn pi_rlc_prove(
     let (d, m_in) = (first_me.X.rows(), first_me.X.cols());
     
     // === Sample ρ_i ∈ S with strong sampling ===
-    let mut challenger = tr.challenger();
-    let (rhos, T_bound) = sample_kplus1_invertible(&mut challenger, &DEFAULT_STRONGSET, me_list.len())
+    let (rhos, T_bound) = sample_kplus1_invertible(tr, &DEFAULT_STRONGSET, me_list.len())
         .map_err(|e| PiRlcError::SamplingFailed(e.to_string()))?;
     
     // === Enforce guard constraint: (k+1)T(b-1) < B ===
@@ -170,7 +165,7 @@ pub fn pi_rlc_prove(
 
 /// Verify Π_RLC combination proof
 pub fn pi_rlc_verify(
-    tr: &mut FoldTranscript,
+    tr: &mut Poseidon2Transcript,
     params: &neo_params::NeoParams,
     input_me_list: &[MeInstance<Cmt, F, K>],
     _output_me: &MeInstance<Cmt, F, K>,
@@ -190,17 +185,12 @@ pub fn pi_rlc_verify(
     }
     
     // Bind same extension policy parameters as prover
-    tr.domain(Domain::Rlc);
-    tr.absorb_bytes(b"neo/params/v1");
-    tr.absorb_u64(&[
-        params.q, params.lambda as u64,
-        input_me_list.len() as u64,
-        params.s as u64,
-    ]);
+    tr.append_message(tr_labels::PI_RLC, b"");
+    tr.append_message(b"neo/params/v1", b"");
+    tr.append_u64s(b"params", &[params.q, params.lambda as u64, input_me_list.len() as u64, params.s as u64]);
     
     // === Re-derive ρ rotations deterministically ===
-    let mut challenger = tr.challenger();
-    let (expected_rhos, expected_T) = match sample_kplus1_invertible(&mut challenger, &DEFAULT_STRONGSET, input_me_list.len()) {
+    let (expected_rhos, expected_T) = match sample_kplus1_invertible(tr, &DEFAULT_STRONGSET, input_me_list.len()) {
         Ok(result) => result,
         Err(_) => return Ok(false),
     };
@@ -333,4 +323,3 @@ pub fn pi_rlc_verify(
     // All verifications passed: guard, c', X', y', and y_scalars are all correct
     Ok(true)
 }
-

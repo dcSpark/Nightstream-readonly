@@ -14,9 +14,7 @@ rand = "0.9"
 p3-field = "0.3.0"
 p3-goldilocks = { version = "0.3.0", default-features = false }
 p3-matrix = "0.3.0"
-p3-challenger = "0.3.0"
-p3-poseidon2 = "0.3.0"
-p3-symmetric = "0.3.0"
 
 # Local arithmetic (Fq, ring, rotations)
 neo-math = { path = "../neo-math" }
+neo-transcript = { path = "../neo-transcript" }

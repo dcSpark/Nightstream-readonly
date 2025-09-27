@@ -8,7 +8,7 @@
 
 #![allow(non_snake_case)] // Allow mathematical notation like X, T, B
 
-use crate::transcript::{FoldTranscript, Domain};
+use neo_transcript::{Transcript, Poseidon2Transcript, labels as tr_labels};
 use neo_ajtai::{split_b, s_lincomb, assert_range_b, Commitment as Cmt, DecompStyle};
 use neo_ccs::{CcsStructure, MeInstance, MeWitness, Mat, utils::{tensor_point, mat_vec_mul_fk}};
 use neo_ccs::traits::SModuleHomomorphism;
@@ -107,7 +107,7 @@ pub fn verify_recomposition_k(
 /// This decomposes a large-base ME instance into multiple small-base instances.
 /// Uses neo-ajtai verified openings to ensure cryptographic soundness.
 pub fn pi_dec<L: SModuleHomomorphism<F, Cmt>>(
-    tr: &mut FoldTranscript,
+    tr: &mut Poseidon2Transcript,
     params: &neo_params::NeoParams,
     me_B: &MeInstance<Cmt, F, K>,
     wit_B: &MeWitness<F>, // Witness Z' for the large-base claim (prover-side)
@@ -116,7 +116,7 @@ pub fn pi_dec<L: SModuleHomomorphism<F, Cmt>>(
 ) -> Result<(Vec<MeInstance<Cmt, F, K>>, Vec<MeWitness<F>>, PiDecProof), PiDecError> {
     
     // === Domain separation ===
-    tr.domain(Domain::Dec);
+    tr.append_message(tr_labels::PI_DEC, b"");
     
     let d = wit_B.Z.rows();
     let m = wit_B.Z.cols();
@@ -301,7 +301,7 @@ pub fn pi_dec<L: SModuleHomomorphism<F, Cmt>>(
 
 /// Verify a Π_DEC proof
 pub fn pi_dec_verify<L: SModuleHomomorphism<F, Cmt>>(
-    tr: &mut FoldTranscript,
+    tr: &mut Poseidon2Transcript,
     params: &neo_params::NeoParams,
     input_me: &MeInstance<Cmt, F, K>,
     output_me_list: &[MeInstance<Cmt, F, K>],
@@ -309,31 +309,31 @@ pub fn pi_dec_verify<L: SModuleHomomorphism<F, Cmt>>(
     l: &L,
 ) -> Result<bool, PiDecError> {
     
-    tr.domain(Domain::Dec);
+    tr.append_message(tr_labels::PI_DEC, b"");
     
     // SECURITY: Absorb public objects into transcript to prevent malleability
     // Absorb parent ME instance data
-    tr.absorb_bytes(b"parent_commitment_tag");
+    tr.append_message(b"parent_commitment_tag", b"");
     // For commitment, we absorb its serialized representation 
     // TODO: Add commitment-specific absorption method to transcript if needed
     
     // Absorb parent X matrix
-    tr.absorb_bytes(b"parent_X_tag");
+    tr.append_message(b"parent_X_tag", b"");
     let x_flat: Vec<F> = input_me.X.as_slice().to_vec(); 
-    tr.absorb_f(&x_flat);
+    tr.append_fields(b"parent_X", &x_flat);
     
     // Absorb m_in
-    tr.absorb_u64(&[input_me.m_in as u64]);
+    tr.append_u64s(b"m_in", &[input_me.m_in as u64]);
     
     // Absorb digest for binding
-    tr.absorb_bytes(&input_me.fold_digest);
+    tr.append_message(b"fold_digest", &input_me.fold_digest);
     
     // Absorb output digit ME instances' X values  
     for (_i, me_digit) in output_me_list.iter().enumerate() {
-        tr.absorb_bytes(b"digit_X_tag");
+        tr.append_message(b"digit_X_tag", b"");
         let digit_x_flat: Vec<F> = me_digit.X.as_slice().to_vec();
-        tr.absorb_f(&digit_x_flat);
-        tr.absorb_bytes(&me_digit.fold_digest);
+        tr.append_fields(b"digit_X", &digit_x_flat);
+        tr.append_message(b"digit_fold_digest", &me_digit.fold_digest);
     }
     
     let k = params.k as usize;
@@ -350,7 +350,7 @@ pub fn pi_dec_verify<L: SModuleHomomorphism<F, Cmt>>(
         }
         
         // SECURITY: Absorb digit commitments into transcript to prevent malleability  
-        tr.absorb_bytes(b"digit_commitments_tag");
+        tr.append_message(b"digit_commitments_tag", b"");
         for (_i, _c_i) in digit_commitments.iter().enumerate() {
             // TODO: Add commitment-specific absorption if needed
             // For now, the structural binding via recomposition verification provides security
@@ -579,7 +579,7 @@ mod tests {
     fn test_pi_dec_validation() {
         // Test basic input validation
         let params = NeoParams::goldilocks_127();
-        let mut tr = FoldTranscript::new(b"test_dec");
+        let mut tr = neo_transcript::Poseidon2Transcript::new(b"test_dec");
         
         // Empty witness should fail
         let empty_me = dummy_me_instance_B();

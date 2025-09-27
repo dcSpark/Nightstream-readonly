@@ -12,7 +12,7 @@
 
 pub mod error;
 /// Poseidon2 transcript for Fiat-Shamir
-pub mod transcript;
+// Transcript is provided by neo-transcript crate (Poseidon2 backend)
 /// Strong sampling set infrastructure for challenges
 pub mod strong_set;
 /// Π_RLC verifier: Random Linear Combination verification
@@ -30,7 +30,7 @@ pub mod bridge_adapter;
 
 // Re-export main types
 pub use error::{FoldingError, PiCcsError, PiRlcError, PiDecError};
-pub use transcript::{FoldTranscript, Domain};
+use neo_transcript::{Poseidon2Transcript, Transcript};
 pub use strong_set::{StrongSamplingSet, VerificationError, ds};
 pub use verify_linear::{verify_linear_rlc, verify_linear_rlc as verify_linear};
 pub use pi_ccs::{pi_ccs_prove, pi_ccs_verify, PiCcsProof, eval_tie_constraints, eval_range_decomp_constraints};  
@@ -136,7 +136,7 @@ pub fn fold_ccs_instances(
         .collect();
 
     // One transcript shared end-to-end
-    let mut tr = FoldTranscript::default();
+    let mut tr = Poseidon2Transcript::new(b"neo/fold");
 
     // 1) Π_CCS: k+1 MCS → k+1 ME(b,L)
     let (me_list, pi_ccs_proof) =
@@ -144,7 +144,7 @@ pub fn fold_ccs_instances(
 
     #[cfg(debug_assertions)]
     {
-        let mut tr_check = FoldTranscript::default();
+            let mut tr_check = Poseidon2Transcript::new(b"neo/fold");
         match pi_ccs::pi_ccs_verify(&mut tr_check, params, structure, instances, &me_list, &pi_ccs_proof) {
             Ok(ok) => eprintln!("[DEBUG] Prover self-check Pi-CCS verify: {}", ok),
             Err(e) => eprintln!("[DEBUG] Prover self-check Pi-CCS verify error: {}", e),
@@ -230,7 +230,7 @@ pub fn verify_folding_proof(
     }
 
     // One shared transcript
-    let mut tr = FoldTranscript::default();
+    let mut tr = Poseidon2Transcript::new(b"neo/fold");
 
     // 1) Π_CCS rounds & r-binding FOR THE Π_CCS OUTPUTS
     let ok_ccs = pi_ccs::pi_ccs_verify(

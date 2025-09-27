@@ -15,7 +15,7 @@ use neo_ccs::{CcsStructure, Mat};
 use neo_ccs::crypto::poseidon2_goldilocks as p2;
 use p3_symmetric::Permutation;
 use subtle::ConstantTimeEq;
-use neo_fold::{FoldTranscript, pi_ccs_verify, pi_rlc_verify, pi_dec_verify};
+use neo_fold::{pi_ccs_verify, pi_rlc_verify, pi_dec_verify};
 use neo_ajtai::AjtaiSModule;
 // Centralized transcript
 use neo_transcript::{Transcript, Poseidon2Transcript};
@@ -2530,7 +2530,7 @@ pub fn verify_ivc_step_folding(
     }
 
     // 2) Verify Pi-CCS against those instances.
-    let mut tr = FoldTranscript::default();
+    let mut tr = Poseidon2Transcript::new(b"neo/fold");
     let ok_ccs = pi_ccs_verify(
         &mut tr,
         params,

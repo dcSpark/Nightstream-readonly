@@ -7,10 +7,11 @@
 #![allow(non_snake_case)]
 
 use neo_fold::{
-    FoldTranscript, pi_ccs::{pi_ccs_prove, pi_ccs_verify, eval_tie_constraints},
+    pi_ccs::{pi_ccs_prove, pi_ccs_verify, eval_tie_constraints},
     pi_rlc::{pi_rlc_prove, pi_rlc_verify},
     pi_dec::{pi_dec, pi_dec_verify},
 };
+use neo_transcript::Transcript;
 use neo_ccs::{
     Mat, SparsePoly, Term,
     relations::{McsInstance, McsWitness},
@@ -195,20 +196,20 @@ fn folding_roundtrip_accepts() {
     }
 
     // Π_CCS (prove + verify)
-    let mut tr_p = FoldTranscript::default();
+    let mut tr_p = neo_transcript::Poseidon2Transcript::new(b"neo/fold");
     let (me_list, pi_ccs_proof) = pi_ccs_prove(&mut tr_p, &params, &s, &instances, &witnesses, &l)
         .expect("pi_ccs_prove");
 
-    let mut tr_v = FoldTranscript::default();
+    let mut tr_v = neo_transcript::Poseidon2Transcript::new(b"neo/fold");
     let ok_ccs = neo_fold::pi_ccs::pi_ccs_verify(&mut tr_v, &params, &s, &instances, &me_list, &pi_ccs_proof)
         .expect("pi_ccs_verify");
     assert!(ok_ccs, "Π_CCS verification must accept");
 
     // Π_RLC (prove + verify)
-    let mut tr_rlc_p = FoldTranscript::default();
+    let mut tr_rlc_p = neo_transcript::Poseidon2Transcript::new(b"neo/fold");
     let (me_B, pi_rlc_proof) = pi_rlc_prove(&mut tr_rlc_p, &params, &me_list).expect("pi_rlc_prove");
 
-    let mut tr_rlc_v = FoldTranscript::default();
+    let mut tr_rlc_v = neo_transcript::Poseidon2Transcript::new(b"neo/fold");
     let ok_rlc = pi_rlc_verify(&mut tr_rlc_v, &params, &me_list, &me_B, &pi_rlc_proof).expect("pi_rlc_verify");
     assert!(ok_rlc, "Π_RLC verification must accept");
 
@@ -231,7 +232,7 @@ fn folding_roundtrip_accepts() {
     let me_B_wit = neo_ccs::MeWitness { Z: Z_prime };
 
     // Π_DEC (prove + verify)
-    let mut tr_dec_p = FoldTranscript::default();
+    let mut tr_dec_p = neo_transcript::Poseidon2Transcript::new(b"neo/fold");
     let (digits, digit_wits, pi_dec_proof) =
         pi_dec(&mut tr_dec_p, &params, &me_B, &me_B_wit, &s, &l).expect("pi_dec");
 
@@ -382,7 +383,7 @@ fn folding_roundtrip_accepts() {
     
     println!("🎯 All manual verification steps passed! Now calling pi_dec_verify...");
     
-    let mut tr_dec_v = FoldTranscript::default();
+    let mut tr_dec_v = neo_transcript::Poseidon2Transcript::new(b"neo/fold");
     let ok_dec = pi_dec_verify(&mut tr_dec_v, &params, &me_B, &digits, &pi_dec_proof, &l)
         .expect("pi_dec_verify");
     
@@ -425,7 +426,7 @@ fn pi_ccs_detects_y_scalar_tamper() {
     let witnesses = vec![wit0];
 
     // Π_CCS
-    let mut tr_p = FoldTranscript::default();
+    let mut tr_p = neo_transcript::Poseidon2Transcript::new(b"neo/fold");
     let (mut me_list, proof) = pi_ccs_prove(&mut tr_p, &params, &s, &instances, &witnesses, &l)
         .expect("pi_ccs_prove(single)");
 
@@ -436,7 +437,7 @@ fn pi_ccs_detects_y_scalar_tamper() {
         }
     }
 
-    let mut tr_v = FoldTranscript::default();
+    let mut tr_v = neo_transcript::Poseidon2Transcript::new(b"neo/fold");
     let ok = pi_ccs_verify(&mut tr_v, &params, &s, &instances, &me_list, &proof)
         .expect("pi_ccs_verify");
     assert!(!ok, "Π_CCS must reject when y_scalars are tampered");
@@ -458,12 +459,12 @@ fn pi_dec_detects_digit_x_tamper() {
     let witnesses = vec![wit0, wit1, wit2];
 
     // Π_CCS
-    let mut tr_p = FoldTranscript::default();
+    let mut tr_p = neo_transcript::Poseidon2Transcript::new(b"neo/fold");
     let (me_list, _) = pi_ccs_prove(&mut tr_p, &params, &s, &instances, &witnesses, &l)
         .expect("pi_ccs_prove");
 
     // Π_RLC
-    let mut tr_rlc_p = FoldTranscript::default();
+    let mut tr_rlc_p = neo_transcript::Poseidon2Transcript::new(b"neo/fold");
     let (me_B, pi_rlc_proof) = pi_rlc_prove(&mut tr_rlc_p, &params, &me_list).expect("pi_rlc_prove");
 
     // Parent witness Z' as in fold_ccs_instances
@@ -481,7 +482,7 @@ fn pi_dec_detects_digit_x_tamper() {
     let me_B_wit = neo_ccs::MeWitness { Z: Z_prime };
 
     // Π_DEC
-    let mut tr_dec_p = FoldTranscript::default();
+    let mut tr_dec_p = neo_transcript::Poseidon2Transcript::new(b"neo/fold");
     let (mut digits, _digit_wits, proof_dec) = pi_dec(&mut tr_dec_p, &params, &me_B, &me_B_wit, &s, &l)
         .expect("pi_dec");
 
@@ -493,7 +494,7 @@ fn pi_dec_detects_digit_x_tamper() {
     }
 
     // Verify must FAIL
-    let mut tr_dec_v = FoldTranscript::default();
+    let mut tr_dec_v = neo_transcript::Poseidon2Transcript::new(b"neo/fold");
     let ok = pi_dec_verify(&mut tr_dec_v, &params, &me_B, &digits, &proof_dec, &l)
         .expect("pi_dec_verify");
     assert!(!ok, "Π_DEC must reject tampered digit X");
