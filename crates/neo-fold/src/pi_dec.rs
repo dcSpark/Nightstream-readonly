@@ -314,8 +314,8 @@ pub fn pi_dec_verify<L: SModuleHomomorphism<F, Cmt>>(
     // SECURITY: Absorb public objects into transcript to prevent malleability
     // Absorb parent ME instance data
     tr.append_message(b"parent_commitment_tag", b"");
-    // For commitment, we absorb its serialized representation 
-    // TODO: Add commitment-specific absorption method to transcript if needed
+    // Bind parent commitment coordinates (canonical serialization)
+    tr.append_fields(b"parent_commitment", &input_me.c.data);
     
     // Absorb parent X matrix
     tr.append_message(b"parent_X_tag", b"");
@@ -351,9 +351,9 @@ pub fn pi_dec_verify<L: SModuleHomomorphism<F, Cmt>>(
         
         // SECURITY: Absorb digit commitments into transcript to prevent malleability  
         tr.append_message(b"digit_commitments_tag", b"");
-        for (_i, _c_i) in digit_commitments.iter().enumerate() {
-            // TODO: Add commitment-specific absorption if needed
-            // For now, the structural binding via recomposition verification provides security
+        for (i, c_i) in digit_commitments.iter().enumerate() {
+            tr.append_u64s(b"digit_index", &[i as u64]);
+            tr.append_fields(b"digit_commitment", &c_i.data);
         }
         
         // Verify c = Σ b^i · c_i using neo-ajtai verified opening

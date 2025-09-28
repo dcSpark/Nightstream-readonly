@@ -33,8 +33,7 @@ pub use crate::me_to_r1cs::{CommitEvoEmbed, IvcLinkageInputs};
 use anyhow::Result;
 use neo_ccs::{MEInstance, MEWitness};
 use p3_field::{PrimeField64, PrimeCharacteristicRing};
-use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
-use p3_symmetric::Permutation;
+use neo_ccs::crypto::poseidon2_goldilocks as p2; // unified Poseidon2 (w=12, r=8, cap=4)
 use spartan2::spartan::{R1CSSNARK, SpartanVerifierKey};
 // Arc not needed for this file - it's used in me_to_r1cs
 use spartan2::traits::snark::R1CSSNARKTrait;
@@ -67,64 +66,16 @@ fn compute_blake3_digest_v1(data: &[u8], domain_separator: &[u8]) -> [u8; 32] {
 /// Compute Poseidon2 digest using proper sponge construction (V2 format)
 /// This follows standard sponge practice: absorb/pad/squeeze with proper rate limiting
 fn compute_poseidon2_digest_v2(data: &[u8], domain_separator: &[u8]) -> [u8; 32] {
-    use once_cell::sync::Lazy;
-    
-    // SECURITY: Use canonical Poseidon2 parameters instead of RNG-derived ones
-    // This ensures parameter stability across library versions and builds
-    static POSEIDON2: Lazy<Poseidon2Goldilocks<16>> = Lazy::new(|| {
-        // Use deterministic RNG for stable parameters across builds
-        use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
-        let mut rng = ChaCha8Rng::seed_from_u64(0x504F534549444F4E); // "POSEIDON" in hex
-        Poseidon2Goldilocks::<16>::new_from_rng_128(&mut rng)
-    });
-    
-    const RATE: usize = 12;  // Safe rate for Poseidon2 with width 16
-    const WIDTH: usize = 16;
-    
-    let poseidon2 = &*POSEIDON2;
-    let mut state = [Goldilocks::ZERO; WIDTH];
-    
-    // Convert input to field elements
-    let mut input = Vec::<Goldilocks>::new();
-    
-    // Domain separation first
-    for chunk in domain_separator.chunks(8) {
-        let mut bytes = [0u8; 8];
-        bytes[..chunk.len()].copy_from_slice(chunk);
-        input.push(Goldilocks::from_u64(u64::from_le_bytes(bytes)));
-    }
-    
-    // Then data
-    for chunk in data.chunks(8) {
-        let mut bytes = [0u8; 8];
-        bytes[..chunk.len()].copy_from_slice(chunk);
-        input.push(Goldilocks::from_u64(u64::from_le_bytes(bytes)));
-    }
-    
-    // Sponge absorb phase with proper rate limiting
-    let mut i = 0;
-    while i < input.len() {
-        let take = core::cmp::min(RATE, input.len() - i);
-        for j in 0..take {
-            state[j] += input[i + j];
-        }
-        i += take;
-        if take == RATE {
-            poseidon2.permute_mut(&mut state);
-        }
-    }
-    
-    // 10* padding: absorb 1 then zeros, then permute
-    state[0] += Goldilocks::ONE;
-    poseidon2.permute_mut(&mut state);
-    
-    // Squeeze phase: extract first 4 field elements as 32-byte digest
-    let mut digest = [0u8; 32];
-    for k in 0..4 {
-        digest[k*8..(k+1)*8].copy_from_slice(&state[k].as_canonical_u64().to_le_bytes());
-    }
-    
-    digest
+    // PRODUCTION: Use unified Poseidon2 over Goldilocks (WIDTH=12, RATE=8, CAP=4)
+    // Domain-separate by hashing domain||data with packed-bytes + length framing
+    let mut bytes = Vec::with_capacity(domain_separator.len() + data.len());
+    bytes.extend_from_slice(domain_separator);
+    bytes.extend_from_slice(data);
+
+    let digest_fields = p2::poseidon2_hash_packed_bytes(&bytes);
+    let mut out = [0u8; 32];
+    for i in 0..p2::DIGEST_LEN { out[i*8..(i+1)*8].copy_from_slice(&digest_fields[i].as_canonical_u64().to_le_bytes()); }
+    out
 }
 
 /// Compute digest with version detection for backward compatibility

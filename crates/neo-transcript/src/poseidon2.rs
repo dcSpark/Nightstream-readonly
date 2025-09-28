@@ -81,18 +81,11 @@ impl Transcript for Poseidon2Transcript {
     }
 
     fn challenge_field(&mut self, label: &'static [u8]) -> F {
-        // Append the label once, then rejection sample until non-zero
-        // to obtain a uniform element from F\{0}.
+        // Uniform over F (including zero).
         self.append_message(b"chal/label", label);
-        loop {
-            // gate + permute
-            self.absorb_elem(Goldilocks::ONE);
-            self.permute();
-            let limb = self.st[0].as_canonical_u64();
-            if limb != 0 {
-                return F::from_u64(limb);
-            }
-        }
+        self.absorb_elem(Goldilocks::ONE);
+        self.permute();
+        F::from_u64(self.st[0].as_canonical_u64())
     }
 
     fn fork(&self, scope: &'static [u8]) -> Self {
@@ -139,6 +132,16 @@ impl TranscriptProtocol for Poseidon2Transcript {
 
 // Convenience helpers (not in the Transcript trait for minimal surface)
 impl Poseidon2Transcript {
+    pub fn challenge_nonzero_field(&mut self, label: &'static [u8]) -> F {
+        // Rejection sampling to obtain an element in F\{0}.
+        self.append_message(b"chal/label", label);
+        loop {
+            self.absorb_elem(Goldilocks::ONE);
+            self.permute();
+            let x = F::from_u64(self.st[0].as_canonical_u64());
+            if x != F::ZERO { return x; }
+        }
+    }
     pub fn append_u64s(&mut self, label: &'static [u8], us: &[u64]) {
         for &b in label { self.absorb_elem(Goldilocks::from_u64(b as u64)); }
         self.absorb_elem(Goldilocks::from_u64(us.len() as u64));
