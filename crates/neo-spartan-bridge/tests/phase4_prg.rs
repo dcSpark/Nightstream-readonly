@@ -38,6 +38,8 @@ fn prg_rows_deterministic_and_ip_defined() {
 fn prg_mode_end_to_end_lean_proof() {
     use neo_ccs::{MEInstance, MEWitness};
 
+    // Enable PRG-derived Ajtai rows inside the circuit
+    std::env::set_var("NEO_ENABLE_PRG_ROWS", "1");
     // Enable the in-circuit RLC guard for this test
     std::env::set_var("NEO_ENABLE_RLC_GUARD", "1");
 
