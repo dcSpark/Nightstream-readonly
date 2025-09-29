@@ -38,6 +38,8 @@ use spartan2::provider::GoldilocksMerkleMleEngine as E;
 use spartan2::spartan::{R1CSSNARK, SpartanProverKey, SpartanVerifierKey};
 use spartan2::traits::{circuit::SpartanCircuit, Engine, pcs::PCSEngineTrait, snark::R1CSSNARKTrait};
 use std::sync::Arc;
+// Pi-CCS helpers (host-side reference operations used for witness hints)
+// use crate::pi_ccs_embed as piccs; // not needed in lite Pi-CCS path
 
 // Real Spartan2 SNARK uses circuits directly, not R1CS shapes
 // (the R1CS conversion happens internally)
@@ -861,108 +863,156 @@ impl SpartanCircuit<E> for MeCircuit {
             n_constraints += 1;
         }
 
-        // (C) Pi-CCS terminal check: reconstruct weights from CCS and r, enforce equality per digit
+        // (C) Pi-CCS terminal check (STRICT): compute χ_r over K (F^2), v = M^T·χ_r (Re), then enforce w = v·b^r
         if let Some(pi) = &self.pi_ccs {
             let d = neo_math::ring::D;
-            // Strict shape checks to avoid unconstrained witness tails
             let k = pi.matrices.len();
             let m_w = self.wit.weight_vectors.len();
-
-            // Select which weight vectors to use for the Pi-CCS check.
-            // Accept either exactly k vectors, or 2k vectors (Re/Im pairs).
-            // In the 2k case, pick the even indices (Re components): [0, 2, 4, ...].
-            let w_subset_indices: Vec<usize> = if m_w == k {
-                (0..k).collect()
-            } else if m_w == 2 * k {
-                (0..k).map(|j| 2 * j).collect()
-            } else {
-                eprintln!(
-                    "[PI-CCS-DIAG] Unsupported weight vector count: matrices.len()={} but weight_vectors.len()={} (want k or 2k)",
-                    k, m_w
-                );
+            // Use either k (Re) or 2k (Re/Im pairs); constrain Re lane only
+            let w_subset_indices: Vec<usize> = if m_w == k { (0..k).collect() } else if m_w == 2 * k { (0..k).map(|j| 2*j).collect() } else {
+                eprintln!("[PI-CCS] Unsupported weight vector count: matrices.len()={} weight_vectors.len()={}", k, m_w);
                 return Err(SynthesisError::AssignmentMissing);
             };
+            let w_subset: Vec<&Vec<neo_math::F>> = w_subset_indices.iter().map(|&idx| &self.wit.weight_vectors[idx]).collect();
 
-            // Borrow the selected vectors
-            let w_subset: Vec<&Vec<neo_math::F>> = w_subset_indices
-                .iter()
-                .map(|&idx| &self.wit.weight_vectors[idx])
-                .collect();
-            // Prepare r variables (bind to constants)
-            let mut r_vars: Vec<AllocatedNum<<E as Engine>::Scalar>> = Vec::with_capacity(self.me.r_point.len());
-            for (i, &rt) in self.me.r_point.iter().enumerate() {
-                let r_val = <E as Engine>::Scalar::from(rt.as_canonical_u64());
-                let r_var = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_r_{}", i)), || Ok(r_val))?;
-                // Enforce r_var == r_val
-                cs.enforce(
-                    || format!("pi_ccs_r_bind_{}", i),
-                    |lc| lc + r_var.get_variable(),
-                    |lc| lc + CS::one(),
-                    |lc| lc + (r_val, CS::one()),
-                );
-                r_vars.push(r_var);
+            // r is stored as (re0, im0, re1, im1, ...)
+            let n_rows = pi.matrices.first().map(|m| m.rows).unwrap_or(0);
+            let mut ell_needed = 0usize; while (1usize << ell_needed) < n_rows { ell_needed += 1; }
+            let limbs = self.me.r_point.len();
+            if limbs % 2 != 0 { eprintln!("[PI-CCS] r_point has odd length {}", limbs); return Err(SynthesisError::AssignmentMissing); }
+            let pairs_avail = limbs / 2;
+            if pairs_avail != ell_needed {
+                eprintln!("[PI-CCS] r pairs {} != ceil(log2 n_rows) {} (n_rows={})", pairs_avail, ell_needed, n_rows);
+                return Err(SynthesisError::AssignmentMissing);
             }
-            // Precompute (1 - r_t) vars
-            let mut one_minus_r: Vec<AllocatedNum<<E as Engine>::Scalar>> = Vec::with_capacity(r_vars.len());
-            for (i, r) in r_vars.iter().enumerate() {
-                let one = <E as Engine>::Scalar::ONE;
-                let om = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_one_minus_r_{}", i)), || {
-                    Ok(one - r.get_value().ok_or(SynthesisError::AssignmentMissing)?)
-                })?;
-                // Enforce r + (1-r) = 1
-                cs.enforce(
-                    || format!("pi_ccs_one_minus_r_link_{}", i),
-                    |lc| lc + r.get_variable() + om.get_variable(),
-                    |lc| lc + CS::one(),
-                    |lc| lc + CS::one(),
-                );
-                one_minus_r.push(om);
+            // Allocate r limbs and their complements
+            let mut r_re = Vec::with_capacity(ell_needed);
+            let mut r_im = Vec::with_capacity(ell_needed);
+            let mut one_minus_re = Vec::with_capacity(ell_needed);
+            let mut neg_im = Vec::with_capacity(ell_needed);
+            for t in 0..ell_needed {
+                let re_val = <E as Engine>::Scalar::from(self.me.r_point[2*t].as_canonical_u64());
+                let im_val = <E as Engine>::Scalar::from(self.me.r_point[2*t+1].as_canonical_u64());
+                let re = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_r_re_{}", t)), || Ok(re_val))?;
+                let im = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_r_im_{}", t)), || Ok(im_val))?;
+                cs.enforce(|| format!("pi_ccs_r_re_bind_{}", t), |lc| lc + re.get_variable(), |lc| lc + CS::one(), |lc| lc + (re_val, CS::one())); n_constraints += 1;
+                cs.enforce(|| format!("pi_ccs_r_im_bind_{}", t), |lc| lc + im.get_variable(), |lc| lc + CS::one(), |lc| lc + (im_val, CS::one())); n_constraints += 1;
+                let om_re = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_one_minus_re_{}", t)), || Ok(<E as Engine>::Scalar::ONE - re_val))?;
+                let ni = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_neg_im_{}", t)), || Ok(-im_val))?;
+                cs.enforce(|| format!("pi_ccs_re_plus_om_eq1_{}", t), |lc| lc + re.get_variable() + om_re.get_variable(), |lc| lc + CS::one(), |lc| lc + CS::one()); n_constraints += 1;
+                cs.enforce(|| format!("pi_ccs_im_plus_neg_eq0_{}", t), |lc| lc + im.get_variable() + ni.get_variable(), |lc| lc + CS::one(), |lc| lc); n_constraints += 1;
+                r_re.push(re); r_im.push(im); one_minus_re.push(om_re); neg_im.push(ni);
             }
-
-            // Powers of b as constants
+            // Compute χ_r over K for first n_rows indices
+            let mut chi_re = Vec::with_capacity(n_rows);
+            let mut chi_im = Vec::with_capacity(n_rows);
+            for i in 0..n_rows {
+                let bit0 = (i & 1) == 1;
+                let mut acc_re = if bit0 { r_re[0].clone() } else { one_minus_re[0].clone() };
+                let mut acc_im = if bit0 { r_im[0].clone() } else { neg_im[0].clone() };
+                // Link first term
+                let acc_re0 = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_chi_re_first_{}", i)), || acc_re.get_value().ok_or(SynthesisError::AssignmentMissing))?;
+                let acc_im0 = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_chi_im_first_{}", i)), || acc_im.get_value().ok_or(SynthesisError::AssignmentMissing))?;
+                cs.enforce(|| format!("pi_ccs_chi_re_first_link_{}", i), |lc| lc + acc_re0.get_variable(), |lc| lc + CS::one(), |lc| lc + acc_re.get_variable()); n_constraints += 1;
+                cs.enforce(|| format!("pi_ccs_chi_im_first_link_{}", i), |lc| lc + acc_im0.get_variable(), |lc| lc + CS::one(), |lc| lc + acc_im.get_variable()); n_constraints += 1;
+                acc_re = acc_re0; acc_im = acc_im0;
+                for t in 1..ell_needed {
+                    let bit = ((i >> t) & 1) == 1;
+                    let tr = if bit { &r_re[t] } else { &one_minus_re[t] };
+                    let ti = if bit { &r_im[t] } else { &neg_im[t] };
+                    // (acc_re, acc_im) *= (tr, ti)
+                    let tmp1 = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_mul_rr_{}_{}", i, t)), || {
+                        Ok(acc_re.get_value().ok_or(SynthesisError::AssignmentMissing)? * tr.get_value().ok_or(SynthesisError::AssignmentMissing)?)
+                    })?;
+                    cs.enforce(|| format!("pi_ccs_mul_rr_link_{}_{}", i, t), |lc| lc + acc_re.get_variable(), |lc| lc + tr.get_variable(), |lc| lc + tmp1.get_variable()); n_constraints += 1;
+                    let tmp2 = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_mul_ii_{}_{}", i, t)), || {
+                        Ok(acc_im.get_value().ok_or(SynthesisError::AssignmentMissing)? * ti.get_value().ok_or(SynthesisError::AssignmentMissing)?)
+                    })?;
+                    cs.enforce(|| format!("pi_ccs_mul_ii_link_{}_{}", i, t), |lc| lc + acc_im.get_variable(), |lc| lc + ti.get_variable(), |lc| lc + tmp2.get_variable()); n_constraints += 1;
+                    let new_re = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_new_re_{}_{}", i, t)), || {
+                        Ok(tmp1.get_value().ok_or(SynthesisError::AssignmentMissing)? - tmp2.get_value().ok_or(SynthesisError::AssignmentMissing)?)
+                    })?;
+                    cs.enforce(|| format!("pi_ccs_new_re_link_{}_{}", i, t), |lc| lc + new_re.get_variable(), |lc| lc + CS::one(), |lc| lc + tmp1.get_variable() + (-<E as Engine>::Scalar::ONE, tmp2.get_variable())); n_constraints += 1;
+                    let tmp3 = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_mul_ri_{}_{}", i, t)), || {
+                        Ok(acc_re.get_value().ok_or(SynthesisError::AssignmentMissing)? * ti.get_value().ok_or(SynthesisError::AssignmentMissing)?)
+                    })?;
+                    cs.enforce(|| format!("pi_ccs_mul_ri_link_{}_{}", i, t), |lc| lc + acc_re.get_variable(), |lc| lc + ti.get_variable(), |lc| lc + tmp3.get_variable()); n_constraints += 1;
+                    let tmp4 = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_mul_ir_{}_{}", i, t)), || {
+                        Ok(acc_im.get_value().ok_or(SynthesisError::AssignmentMissing)? * tr.get_value().ok_or(SynthesisError::AssignmentMissing)?)
+                    })?;
+                    cs.enforce(|| format!("pi_ccs_mul_ir_link_{}_{}", i, t), |lc| lc + acc_im.get_variable(), |lc| lc + tr.get_variable(), |lc| lc + tmp4.get_variable()); n_constraints += 1;
+                    let new_im = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_new_im_{}_{}", i, t)), || {
+                        Ok(tmp3.get_value().ok_or(SynthesisError::AssignmentMissing)? + tmp4.get_value().ok_or(SynthesisError::AssignmentMissing)?)
+                    })?;
+                    cs.enforce(|| format!("pi_ccs_new_im_link_{}_{}", i, t), |lc| lc + new_im.get_variable(), |lc| lc + CS::one(), |lc| lc + tmp3.get_variable() + ( <E as Engine>::Scalar::ONE, tmp4.get_variable())); n_constraints += 1;
+                    acc_re = new_re; acc_im = new_im;
+                }
+                chi_re.push(acc_re); chi_im.push(acc_im);
+            }
+            // Build v = M^T·χ_r (Re) and tie digits
             let base_b = <E as Engine>::Scalar::from(self.me.base_b as u64);
             let mut pow_b = vec![<E as Engine>::Scalar::ONE; d];
             for i in 1..d { pow_b[i] = pow_b[i-1] * base_b; }
-
             for (j, mj) in pi.matrices.iter().enumerate() {
-                // Ensure the corresponding weight vector has exact expected length cols*d
-                let expected_w_len = mj.cols * d;
+                // group by column
+                let mut by_col: Vec<Vec<(usize, neo_math::F)>> = vec![Vec::new(); mj.cols];
+                for &(r_idx, c_idx, a) in &mj.entries { by_col[c_idx as usize].push((r_idx as usize, a)); }
+                // compute host hint for v_c from r_point (K arithmetic) to satisfy alloc
+                let r_pairs: Vec<(neo_math::F, neo_math::F)> = (0..ell_needed).map(|t| (self.me.r_point[2*t], self.me.r_point[2*t+1])).collect();
+                let mut v_vars = Vec::with_capacity(mj.cols);
+                for c in 0..mj.cols {
+                    let mut v_acc = neo_math::F::ZERO;
+                    for (r_i, a) in &by_col[c] {
+                        // compute χ_re_host[r_i]
+                        let mut re = neo_math::F::ONE; let mut im = neo_math::F::ZERO;
+                        for t in 0..ell_needed {
+                            let (rt_re, rt_im) = r_pairs[t];
+                            let bit = ((r_i >> t) & 1) == 1;
+                            let tr = if bit { rt_re } else { neo_math::F::ONE - rt_re };
+                            let ti = if bit { rt_im } else { -rt_im };
+                            let new_re = re * tr - im * ti; let new_im = re * ti + im * tr; re = new_re; im = new_im;
+                        }
+                        v_acc += *a * re;
+                    }
+                    let v_hint = <E as Engine>::Scalar::from(v_acc.as_canonical_u64());
+                    let v_re = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_v_re_{}_{}", j, c)), || Ok(v_hint))?;
+                    // v_re linkage to in-circuit χ_r
+                    if j == 0 && (c == 0 || c + 1 == mj.cols) {
+                        let mut exp = <E as Engine>::Scalar::ZERO;
+                        let mut ok_all = true;
+                        for (r_i, a) in &by_col[c] {
+                            let a_s = <E as Engine>::Scalar::from(a.as_canonical_u64());
+                            if let Some(re_v) = chi_re[*r_i].get_value() {
+                                exp += a_s * re_v;
+                            } else { ok_all = false; break; }
+                        }
+                        if ok_all {
+                            eprintln!("[PI-CCS-DIAG] j={}, c={} v_hint={} exp={}", j, c, v_hint.to_canonical_u64(), exp.to_canonical_u64());
+                        }
+                    }
+                    cs.enforce(|| format!("pi_ccs_v_re_link_{}_{}", j, c), |lc| lc + v_re.get_variable(), |lc| lc + CS::one(), |mut lc| {
+                        for (r_i, a) in &by_col[c] {
+                            let a_s = <E as Engine>::Scalar::from(a.as_canonical_u64());
+                            lc = lc + (a_s, chi_re[*r_i].get_variable());
+                        }
+                        lc
+                    }); n_constraints += 1;
+                    v_vars.push(v_re);
+                }
+                // tie digits
                 let wj = w_subset[j];
-                if wj.len() != expected_w_len {
-                    eprintln!(
-                        "[PI-CCS-DIAG] weight_vectors[{}].len()={} != cols*d={}*{}={}",
-                        j, wj.len(), mj.cols, d, expected_w_len
-                    );
-                    return Err(SynthesisError::AssignmentMissing);
-                }
-                // LITE CHECK: Enforce base-power structure only to avoid K-extension mismatch.
-                // Bind v_c directly to the r=0 digit and enforce other digits follow b^r scaling.
-                let m_cols = mj.cols;
-                let mut v_vars: Vec<AllocatedNum<<E as Engine>::Scalar>> = Vec::with_capacity(m_cols);
-                for c in 0..m_cols {
-                    let idx0 = c * d + 0;
-                    let w0 = <E as Engine>::Scalar::from(wj[idx0].as_canonical_u64());
-                    let v_c = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_v_{}_{}", j, c)), || Ok(w0))?;
-                    // Bind v_c == w0 (r=0 limb)
-                    cs.enforce(
-                        || format!("pi_ccs_v_bind_{}_{}", j, c),
-                        |lc| lc + v_c.get_variable(),
-                        |lc| lc + CS::one(),
-                        |lc| lc + (w0, CS::one()),
-                    );
-                    v_vars.push(v_c);
-                }
-
-                // Enforce weight vectors match v_c * b^r per digit
-                for c in 0..m_cols { for r in 0..d {
-                    let idx = c * d + r;
-                    let w_const = <E as Engine>::Scalar::from(wj[idx].as_canonical_u64());
-                    cs.enforce(
-                        || format!("pi_ccs_w_match_{}_{}_{}", j, c, r),
-                        |lc| lc + v_vars[c].get_variable(),
-                        |lc| lc + (pow_b[r], CS::one()),
-                        |lc| lc + (w_const, CS::one()),
-                    );
+                let expected_w_len = mj.cols * d;
+                if wj.len() != expected_w_len { eprintln!("[PI-CCS] w_j length {} != cols*d {}*{}", wj.len(), mj.cols, d); return Err(SynthesisError::AssignmentMissing); }
+                for c in 0..mj.cols { for r in 0..d {
+                    let idx = c*d + r; let w_const = <E as Engine>::Scalar::from(wj[idx].as_canonical_u64());
+                    // Debug sample: print tie parity for a few entries
+                    if j == 0 && (c == 0 || c + 1 == mj.cols) && r < 3 {
+                        if let Some(vv) = v_vars[c].get_value() {
+                            let lhs = vv * pow_b[r];
+                            eprintln!("[PI-CCS-DIAG tie] c={} r={} lhs={} rhs={}", c, r, lhs.to_canonical_u64(), w_const.to_canonical_u64());
+                        }
+                    }
+                    cs.enforce(|| format!("pi_ccs_w_tie_{}_{}_{}", j, c, r), |lc| lc + v_vars[c].get_variable(), |lc| lc + (pow_b[r], CS::one()), |lc| lc + (w_const, CS::one())); n_constraints += 1;
                 }}
             }
         }
@@ -978,25 +1028,6 @@ impl SpartanCircuit<E> for MeCircuit {
         }
 
         // All witness variables are now allocated as REST with power-of-2 length
-
-        // --- Ensure TOTAL number of constraints is a power of two (Hash‑MLE requirement)
-        let total_constraints_so_far = n_constraints;
-        let want_constraints = if total_constraints_so_far <= 1 { 1 } else { total_constraints_so_far.next_power_of_two() };
-        let need_to_add = want_constraints - total_constraints_so_far;
-        if need_to_add > 0 {
-            // Add 1*1 = 1 tautologies using CS::one()
-            for i in 0..need_to_add {
-                cs.enforce(
-                    || format!("pad_const_tautology_{i}"),
-                    |lc| lc + CS::one(),
-                    |lc| lc + CS::one(),
-                    |lc| lc + CS::one(),
-                );
-            }
-            eprintln!("🔧 synthesize(): padded constraints {} → {} (total with shared = {})", total_constraints_so_far, want_constraints, want_constraints);
-        } else {
-            eprintln!("ℹ️  synthesize(): constraints = {} (total with shared = {} - power-of-two OK)", n_constraints, total_constraints_so_far);
-        }
 
         // CRITICAL FIX: Create public inputs via inputize() for transcript fork compatibility
         // This replaces the old public_values() method approach
@@ -1317,6 +1348,25 @@ impl SpartanCircuit<E> for MeCircuit {
             }
         }
         
+        // --- Ensure TOTAL number of constraints is a power of two (Hash‑MLE requirement)
+        let total_constraints_so_far = n_constraints;
+        let want_constraints = if total_constraints_so_far <= 1 { 1 } else { total_constraints_so_far.next_power_of_two() };
+        let need_to_add = want_constraints - total_constraints_so_far;
+        if need_to_add > 0 {
+            // Add 1*1 = 1 tautologies using CS::one()
+            for i in 0..need_to_add {
+                cs.enforce(
+                    || format!("pad_const_tautology_{i}"),
+                    |lc| lc + CS::one(),
+                    |lc| lc + CS::one(),
+                    |lc| lc + CS::one(),
+                );
+            }
+            eprintln!("🔧 synthesize(): padded constraints {} → {} (total with shared = {})", total_constraints_so_far, want_constraints, want_constraints);
+        } else {
+            eprintln!("ℹ️  synthesize(): constraints = {} (total with shared = {} - power-of-two OK)", n_constraints, total_constraints_so_far);
+        }
+
         // 5) Pad to power-of-2 BEFORE digest - CRITICAL: match encode_bridge_io_header() order
         let mut current_count_without_digest = self.me.c_coords.len()
             + self.me.y_outputs.len()
@@ -1381,6 +1431,7 @@ pub fn prove_me_snark_with_pp(
     pp: Option<std::sync::Arc<neo_ajtai::PP<neo_math::Rq>>>,
     ev: Option<IvcEvEmbed>,
 ) -> Result<(Vec<u8>, Vec<<E as Engine>::Scalar>, Arc<SpartanVerifierKey<E>>), SpartanError> {
+    let pp_for_publics = pp.clone();
     let circuit = MeCircuit::new(me.clone(), wit.clone(), pp, me.header_digest).with_ev(ev);
     
     // Assert PCS width is correct for Hash-MLE (binary hypercube)
@@ -1458,7 +1509,7 @@ pub fn prove_me_snark_with_pp(
     // via public IO changes. They expect proving to succeed and verification to fail externally.
     // Instead, deterministically reconstruct the circuit's public values for binding/debugging.
     let public_outputs = {
-    let circuit_for_publics = MeCircuit::new(me.clone(), wit.clone(), None, me.header_digest);
+    let circuit_for_publics = MeCircuit::new(me.clone(), wit.clone(), pp_for_publics, me.header_digest);
         circuit_for_publics
             .public_values()
             .map_err(|e| SpartanError::SynthesisError { reason: format!("public_values() failed: {e}") })?
@@ -1507,6 +1558,7 @@ pub fn prove_me_snark_with_pp_and_ivc(
     let linkage_for_prove = linkage.clone();
     let pi_ccs_for_prove = pi_ccs.clone();
 
+    let pp_for_publics = pp.clone();
     let circuit = MeCircuit::new(me.clone(), wit.clone(), pp, me.header_digest)
         .with_ev(ev_for_prove)
         .with_commit(commit_for_prove)
@@ -1532,7 +1584,7 @@ pub fn prove_me_snark_with_pp_and_ivc(
     // Recompute public values deterministically using the SAME embedding config
     // as the proving circuit to avoid any drift between prep/prove/publics.
     let public_outputs = {
-        let circuit_for_publics = MeCircuit::new(me.clone(), wit.clone(), None, me.header_digest)
+        let circuit_for_publics = MeCircuit::new(me.clone(), wit.clone(), pp_for_publics, me.header_digest)
             .with_ev(ev)
             .with_commit(commit)
             .with_linkage(linkage)

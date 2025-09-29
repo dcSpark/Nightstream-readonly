@@ -374,19 +374,13 @@ pub fn finalize_nivc_chain_with_options(
         }
     };
 
-    // Bridge adapter: modern → legacy
-    // Select the binding target for Ajtai rows in the final SNARK.
-    // - When embedding EV checks, bind to c_next (accumulator commitment) and enforce
-    //   commitment evolution in-circuit.
-    // - Otherwise (no EV embedding), bind directly to the step-only commitment (c_step),
-    //   which matches the witness Z used to build the ME instance.
+    // Bridge adapter: modern → legacy — always bind to the step-only commitment (c_step),
+    // which matches the witness Z used to build the ME instance. EV constraints enforce
+    // commitment evolution separately, so keeping instance/witness consistent here avoids
+    // prover/verify drift.
     let mut me_for_bridge = final_me.clone();
     {
-        let (label, coords) = if opts.embed_ivc_ev {
-            ("accumulator c_next", &last.inner.next_accumulator.c_coords)
-        } else {
-            ("step commitment c_step", &last.inner.c_step_coords)
-        };
+        let (label, coords) = ("step commitment c_step", &last.inner.c_step_coords);
         eprintln!(
             "[FIXUP] modern.c.data <= {} (len {} -> {})",
             label,
@@ -748,8 +742,9 @@ pub fn finalize_nivc_chain_with_options(
         // Bind header digest to legacy ME used for proving
         #[allow(deprecated)]
         { legacy_me.header_digest = context_digest; }
+
         // Build Pi-CCS embed from augmented_ccs matrices (sparse triplets).
-        // Default-on when EV embedding is enabled.
+        // Default: ENABLED
         let pi_ccs_embed_opt = {
             use neo_spartan_bridge::{CcsCsr, PiCcsEmbed};
             let mut mats = Vec::with_capacity(augmented_ccs.matrices.len());
@@ -765,6 +760,193 @@ pub fn finalize_nivc_chain_with_options(
             }
             Some(PiCcsEmbed { matrices: mats })
         };
+
+        // Optional: host-side Pi-CCS preflight to detect mismatches (behind env)
+        if std::env::var("NEO_PI_CCS_PREFLIGHT").ok().as_deref() == Some("1") {
+            use neo_spartan_bridge::pi_ccs_embed as piccs;
+            // Rebuild the same CSR bundle as above
+            let mut mats = Vec::with_capacity(augmented_ccs.matrices.len());
+            for mj in &augmented_ccs.matrices {
+                let rows = mj.rows();
+                let cols = mj.cols();
+                let mut entries = Vec::new();
+                for r in 0..rows { for c in 0..cols {
+                    let a = mj[(r, c)];
+                    if a != F::ZERO { entries.push((r as u32, c as u32, a)); }
+                }}
+                mats.push(piccs::CcsCsr { rows, cols, entries });
+            }
+
+            #[allow(deprecated)]
+            let (_r_bits, d, base_b_u64, provided_is_2lane) = {
+                // Use Re lane of r over K
+                let ell = legacy_me.r_point.len() / 2;
+                let _r_bits: Vec<F> = (0..ell).map(|t| legacy_me.r_point[2*t]).collect();
+                // Canonical digit count (avoid padded z influence)
+                let d = neo_math::ring::D;
+                let base_b_u64 = legacy_me.base_b;
+                let provided_is_2lane = legacy_wit.weight_vectors.len() == 2 * mats.len();
+                (_r_bits, d, base_b_u64, provided_is_2lane)
+            };
+            let base_b = F::from_u64(base_b_u64 as u64);
+            let n_rows = augmented_ccs.matrices[0].rows();
+
+            // Compute gold weights using K-arithmetic χ_r via Gray-code tensor point,
+            // then take Re lane to match the in-circuit Pi-CCS behavior.
+            let mut ell_needed = 0usize; while (1usize << ell_needed) < n_rows { ell_needed += 1; }
+            #[allow(deprecated)]
+            let pairs_avail = legacy_me.r_point.len() / 2;
+            anyhow::ensure!(pairs_avail == ell_needed, "r pairs {} != ceil(log2 n_rows) {} (n_rows={})", pairs_avail, ell_needed, n_rows);
+            // Build r in K^ell
+            let r_vec_k: Vec<neo_math::K> = {
+                let mut out = Vec::with_capacity(ell_needed);
+                #[allow(deprecated)]
+                for t in 0..ell_needed {
+                    let re = legacy_me.r_point[2*t];
+                    let im = legacy_me.r_point[2*t+1];
+                    out.push(neo_math::field::from_complex(re, im));
+                }
+                out
+            };
+            // χ_r in K^n (Gray-code order), then restrict to first n_rows
+            let chi_full_k: Vec<neo_math::K> = neo_ccs::utils::tensor_point::<neo_math::K>(&r_vec_k);
+            anyhow::ensure!(chi_full_k.len() >= n_rows, "chi length {} < n_rows {}", chi_full_k.len(), n_rows);
+            let chi_k = &chi_full_k[..n_rows];
+            let pow_b = piccs::pow_table(base_b, d);
+
+            let mut gold: Vec<Vec<F>> = Vec::with_capacity(mats.len());
+            for mj in &mats {
+                // group entries by column
+                let mut by_col: Vec<Vec<(usize, F)>> = vec![Vec::new(); mj.cols];
+                for &(r_idx, c_idx, a) in &mj.entries { by_col[c_idx as usize].push((r_idx as usize, a)); }
+                // compute v_re per column using K chi
+                let mut v_re = vec![F::ZERO; mj.cols];
+                for c in 0..mj.cols {
+                    let mut acc_re = F::ZERO;
+                    for (r_i, a) in &by_col[c] {
+                        let chi = chi_k[*r_i];
+                        let chi_re = chi.real();
+                        acc_re += *a * chi_re;
+                    }
+                    v_re[c] = acc_re;
+                }
+                // expand to digit weights w_re (column-major)
+                let mut w_re = vec![F::ZERO; d * mj.cols];
+                for c in 0..mj.cols { for r in 0..d { let idx = c*d + r; w_re[idx] = v_re[c] * pow_b[r]; } }
+                gold.push(w_re);
+            }
+
+            let mut bad = 0usize;
+            for j in 0..gold.len() {
+                #[allow(deprecated)]
+                let provided: &[F] = if provided_is_2lane { &legacy_wit.weight_vectors[2*j] } else { &legacy_wit.weight_vectors[j] };
+                if provided.len() != gold[j].len() || provided != &gold[j][..] {
+                    eprintln!(
+                        "[PI-CCS PREFLIGHT] mismatch at j={} (len gold={} provided={})",
+                        j, gold[j].len(), provided.len()
+                    );
+                    bad += 1;
+                    // print a couple sample entries for quick diagnosis
+                    for idx in [0usize, 1, d.saturating_sub(1)].iter().copied().filter(|&x| x < gold[j].len()) {
+                        eprintln!(
+                            "  gold[{}] = {}, provided = {}",
+                            idx,
+                            gold[j][idx].as_canonical_u64(),
+                            provided[idx].as_canonical_u64()
+                        );
+                    }
+                }
+            }
+            anyhow::ensure!(bad == 0, "Pi-CCS preflight failed: {} of {} vectors differ", bad, gold.len());
+            eprintln!("[PI-CCS PREFLIGHT] OK: {} vectors match", gold.len());
+        }
+
+        // Canonicalize weight vectors to Pi‑CCS definition to avoid inconsistencies
+        {
+            use neo_math::F as FF;
+            use neo_spartan_bridge::pi_ccs_embed as piccs;
+
+            // Rebuild CSR bundle for convenience
+            let mut mats = Vec::with_capacity(augmented_ccs.matrices.len());
+            for mj in &augmented_ccs.matrices {
+                let rows = mj.rows();
+                let cols = mj.cols();
+                let mut entries = Vec::new();
+                for r in 0..rows { for c in 0..cols {
+                    let a = mj[(r, c)];
+                    if a != F::ZERO { entries.push((r as u32, c as u32, a)); }
+                }}
+                mats.push(piccs::CcsCsr { rows, cols, entries });
+            }
+
+            // Dimensions
+            let n_rows = mats.first().map(|m| m.rows).unwrap_or(0);
+            let _m_cols = mats.first().map(|m| m.cols).unwrap_or(0);
+            let d = neo_math::ring::D;
+            // r in K as pairs
+            #[allow(deprecated)]
+            let pairs_avail = legacy_me.r_point.len() / 2;
+            let mut ell_needed = 0usize; while (1usize << ell_needed) < n_rows { ell_needed += 1; }
+            anyhow::ensure!(pairs_avail == ell_needed, "r pairs {} != ceil(log2 n_rows) {} (n_rows={})", pairs_avail, ell_needed, n_rows);
+            #[allow(deprecated)]
+            let r_pairs: Vec<(FF, FF)> = (0..ell_needed).map(|t| (legacy_me.r_point[2*t], legacy_me.r_point[2*t+1])).collect();
+            #[allow(deprecated)]
+            let base_b = FF::from_u64(legacy_me.base_b as u64);
+            let pow_b = piccs::pow_table(base_b, d);
+
+            // Helper: compute chi(row_index) over K using r_pairs
+            let compute_chi = |row_i: usize| -> (FF, FF) {
+                let mut re = FF::ONE; let mut im = FF::ZERO;
+                let mut mask = row_i;
+                for t in 0..ell_needed {
+                    let (rt_re, rt_im) = r_pairs[t];
+                    let bit = (mask & 1) == 1;
+                    let tr = if bit { rt_re } else { FF::ONE - rt_re };
+                    let ti = if bit { rt_im } else { -rt_im };
+                    let new_re = re * tr - im * ti;
+                    let new_im = re * ti + im * tr;
+                    re = new_re; im = new_im; mask >>= 1;
+                }
+                (re, im)
+            };
+
+            // For each matrix, compute v_re/v_im, then expand to weights and interleave (Re, Im)
+            let mut new_weights: Vec<Vec<FF>> = Vec::with_capacity(2 * mats.len());
+            for (j, mj) in mats.iter().enumerate() {
+                // group entries by column
+                let mut by_col: Vec<Vec<(usize, FF)>> = vec![Vec::new(); mj.cols];
+                for &(r_idx, c_idx, a) in &mj.entries { by_col[c_idx as usize].push((r_idx as usize, a)); }
+                // compute v per column
+                let mut v_re = vec![FF::ZERO; mj.cols];
+                let mut v_im = vec![FF::ZERO; mj.cols];
+                for c in 0..mj.cols {
+                    let mut acc_re = FF::ZERO; let mut acc_im = FF::ZERO;
+                    for (r_i, a) in &by_col[c] {
+                        let (chi_re, chi_im) = compute_chi(*r_i);
+                        acc_re += *a * chi_re;
+                        acc_im += *a * chi_im;
+                    }
+                    v_re[c] = acc_re; v_im[c] = acc_im;
+                }
+                // expand to digit weights (column-major layout c*d + r)
+                let mut w_re = vec![FF::ZERO; d * mj.cols];
+                let mut w_im = vec![FF::ZERO; d * mj.cols];
+                for c in 0..mj.cols { for r in 0..d { let idx = c*d + r; w_re[idx] = v_re[c] * pow_b[r]; w_im[idx] = v_im[c] * pow_b[r]; } }
+                // interleave into witness order: Re_j, Im_j
+                new_weights.push(w_re);
+                new_weights.push(w_im);
+                if j == 0 {
+                    // small diagnostics for first and last column
+                    if mj.cols > 0 {
+                        let c0 = 0usize; let c1 = mj.cols - 1;
+                        eprintln!("[PI-CCS-DIAG] j=0, c={} v_re={} v_im={} (sample)", c0, v_re[c0].as_canonical_u64(), v_im[c0].as_canonical_u64());
+                        eprintln!("[PI-CCS-DIAG] j=0, c={} v_re={} v_im={} (sample)", c1, v_re[c1].as_canonical_u64(), v_im[c1].as_canonical_u64());
+                    }
+                }
+            }
+            #[allow(deprecated)]
+            { legacy_wit.weight_vectors = new_weights; }
+        }
 
         // Guard A: Cheap parity check between encoder and circuit public IO (debug only)
         if cfg!(debug_assertions) {
