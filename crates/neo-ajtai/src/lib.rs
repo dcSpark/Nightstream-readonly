@@ -23,6 +23,7 @@ mod types;
 pub mod util;
 mod decomp;
 mod commit;
+pub mod prg;
 
 pub mod s_module;
 

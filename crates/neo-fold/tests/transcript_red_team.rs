@@ -1,38 +1,38 @@
 // crates/neo-fold/tests/transcript_red_team.rs
-use neo_fold::transcript::{FoldTranscript, Domain};
+use neo_transcript::{Poseidon2Transcript, labels as tr_labels, Transcript};
 
 #[test]
 fn domain_separation_is_binding() {
-    let mut t1 = FoldTranscript::new(b"test1");
-    let mut t2 = FoldTranscript::new(b"test2");
+    let mut t1 = Poseidon2Transcript::new(b"test1");
+    let mut t2 = Poseidon2Transcript::new(b"test2");
 
-    t1.domain(Domain::CCS);
-    t1.absorb_u64(&[1,2,3]);
+    t1.append_message(tr_labels::PI_CCS, b"");
+    t1.append_u64s(b"u", &[1,2,3]);
 
-    t2.domain(Domain::Rlc); // different domain, same payload
-    t2.absorb_u64(&[1,2,3]);
+    t2.append_message(tr_labels::PI_RLC, b""); // different domain, same payload
+    t2.append_u64s(b"u", &[1,2,3]);
 
-    let c1 = t1.challenge_f();
-    let c2 = t2.challenge_f();
+    let c1 = t1.challenge_field(b"chal/f");
+    let c2 = t2.challenge_field(b"chal/f");
     assert_ne!(c1, c2, "different domains must yield different challenges");
 }
 
 #[test]
 fn order_matters_in_transcript() {
-    let mut t1 = FoldTranscript::new(b"order_test1");
-    let mut t2 = FoldTranscript::new(b"order_test2");
+    let mut t1 = Poseidon2Transcript::new(b"order_test1");
+    let mut t2 = Poseidon2Transcript::new(b"order_test2");
 
-    t1.domain(Domain::CCS);
-    t1.absorb_u64(&[42]);
-    t1.domain(Domain::Dec);
-    t1.absorb_u64(&[7]);
+    t1.append_message(tr_labels::PI_CCS, b"");
+    t1.append_u64s(b"u", &[42]);
+    t1.append_message(tr_labels::PI_DEC, b"");
+    t1.append_u64s(b"u", &[7]);
 
-    t2.domain(Domain::Dec);
-    t2.absorb_u64(&[7]);
-    t2.domain(Domain::CCS);
-    t2.absorb_u64(&[42]);
+    t2.append_message(tr_labels::PI_DEC, b"");
+    t2.append_u64s(b"u", &[7]);
+    t2.append_message(tr_labels::PI_CCS, b"");
+    t2.append_u64s(b"u", &[42]);
 
-    let c1 = t1.challenge_f();
-    let c2 = t2.challenge_f();
+    let c1 = t1.challenge_field(b"chal/f");
+    let c2 = t2.challenge_field(b"chal/f");
     assert_ne!(c1, c2, "challenge must bind to message ordering");
 }

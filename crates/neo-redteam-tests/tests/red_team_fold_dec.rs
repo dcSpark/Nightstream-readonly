@@ -8,7 +8,8 @@
 #![cfg(feature = "redteam")]
 #![allow(non_snake_case)] // Allow mathematical notation like X_parent
 
-use neo_fold::{fold_ccs_instances, pi_dec::pi_dec_verify, transcript::FoldTranscript};
+use neo_fold::{fold_ccs_instances, pi_dec::pi_dec_verify};
+use neo_transcript::{Poseidon2Transcript, Transcript};
 use neo_ccs::{CcsStructure, Mat, SparsePoly, Term, McsInstance, McsWitness, MeInstance};
 use neo_params::NeoParams;
 use neo_math::{F, K, ring::D, Rq, cf_inv};
@@ -151,7 +152,8 @@ fn rt2_digit_commitment_tamper_must_fail_recomposition() {
         neo_ajtai::Commitment::zeros(original_commitment.d, original_commitment.kappa);
 
     let l = neo_ajtai::AjtaiSModule::from_global().expect("AjtaiSModule");
-    let ok = pi_dec_verify(&mut FoldTranscript::default(),
+    let mut tr = Poseidon2Transcript::new(b"redteam");
+    let ok = pi_dec_verify(&mut tr,
                            &params, &parent, &digits, &bad_proof.pi_dec_proof, &l).expect("verify");
     assert!(!ok, "DEC must fail when c ≠ Σ b^i · c_i");
 }
@@ -168,7 +170,8 @@ fn rt11_wrong_r_on_digit_must_fail() {
     digits[0].r[0] = K::from(F::from_u64(7));
 
     let l = neo_ajtai::AjtaiSModule::from_global().expect("AjtaiSModule");
-    let ok = pi_dec_verify(&mut FoldTranscript::default(),
+    let mut tr = Poseidon2Transcript::new(b"redteam");
+    let ok = pi_dec_verify(&mut tr,
                            &params, &parent, &digits, &proof.pi_dec_proof, &l).expect("verify");
     assert!(!ok, "DEC must fail when a digit's r differs from the parent r");
 }
@@ -186,7 +189,8 @@ fn rt8_base_mismatch_in_verify_must_fail() {
     let params2 = NeoParams::goldilocks_autotuned_s2(3, 2, 4);
 
     let l = neo_ajtai::AjtaiSModule::from_global().expect("AjtaiSModule");
-    let ok = pi_dec_verify(&mut FoldTranscript::default(),
+    let mut tr = Poseidon2Transcript::new(b"redteam");
+    let ok = pi_dec_verify(&mut tr,
                            &params2, &parent, &digits, &proof.pi_dec_proof, &l).expect("verify");
     assert!(!ok, "DEC must fail when verifier's base b differs (recomposition checks break)");
 }

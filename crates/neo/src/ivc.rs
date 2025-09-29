@@ -9,17 +9,19 @@
 
 use crate::F;
 use p3_field::PrimeField64;
-use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
+use p3_goldilocks::Goldilocks;
 use p3_field::PrimeCharacteristicRing;
 use neo_ccs::{CcsStructure, Mat};
 use neo_ccs::crypto::poseidon2_goldilocks as p2;
 use p3_symmetric::Permutation;
 use subtle::ConstantTimeEq;
-use neo_fold::{FoldTranscript, pi_ccs_verify, pi_rlc_verify, pi_dec_verify};
+use neo_fold::{pi_ccs_verify, pi_rlc_verify, pi_dec_verify};
 use neo_ajtai::AjtaiSModule;
+// Centralized transcript
+use neo_transcript::{Transcript, Poseidon2Transcript};
+use neo_transcript::labels as tr_labels;
 
-/// Domain tag for IVC transcript, tied to Poseidon2 configuration
-const IVC_DOMAIN_TAG: &[u8] = b"neo/ivc/ev/v1|poseidon2-goldilocks-w12-cap4";
+// (moved) Domain tags now live in neo-transcript::labels
 
 /// Feature-gated debug logging for Neo
 #[allow(unused_macros)]
@@ -146,10 +148,16 @@ pub struct IvcStepInput<'a> {
     pub public_input: Option<&'a [F]>,
     /// **REAL per-step contribution used by Nova EV**: y_next = y_prev + ρ * y_step
     /// This is the actual step output that gets folded (NOT a placeholder)
-    /// Fixes the "folding with itself" issue Las identified
     pub y_step: &'a [F],
     /// **SECURITY**: Trusted binding specification (NOT from prover!)
     pub binding_spec: &'a StepBindingSpec,
+    /// If true, app inputs in step_x are transcript-only and are NOT read from the witness.
+    /// In this mode, `x_witness_indices` may be empty even when step_x has app inputs (NIVC).
+    pub transcript_only_app_inputs: bool,
+    /// Optional: the previous step's augmented public input [step_x || ρ || y_prev || y_next].
+    /// If provided, it is propagated into the proof's `prev_step_augmented_public_input` to
+    /// ensure exact chaining linkage.
+    pub prev_augmented_x: Option<&'a [F]>,
 }
 
 /// Trait for extracting y_step values from step computations
@@ -191,6 +199,32 @@ impl StepOutputExtractor for IndexExtractor {
     }
 }
 
+/// Build a canonical zero MCS instance for a given shape (m_in, m_step) to start a fold chain.
+///
+/// This avoids the unsound base case where the prover folded the step with itself.
+fn zero_mcs_instance_for_shape(
+    m_in: usize,
+    m_step: usize,
+) -> anyhow::Result<(neo_ccs::McsInstance<neo_ajtai::Commitment, F>, neo_ccs::McsWitness<F>)> {
+    let d = neo_math::ring::D;
+    anyhow::ensure!(m_step >= m_in, "zero_mcs_instance_for_shape: m_step < m_in ({} < {})", m_step, m_in);
+
+    // Construct a zero Ajtai commitment directly; avoid PP setup/commit computation.
+    // Derive kappa from any registered Ajtai PP if available to avoid drift; fallback to 16.
+    let kappa = neo_ajtai::get_global_pp().map(|pp| pp.kappa).unwrap_or(16usize);
+    let c_zero = neo_ajtai::Commitment::zeros(d, kappa);
+
+    let w_len = m_step - m_in;
+    let x_zero = vec![F::ZERO; m_in];
+    let w_zero = vec![F::ZERO; w_len];
+    let z_zero = neo_ccs::Mat::zero(d, m_step, F::ZERO);
+
+    Ok((
+        neo_ccs::McsInstance { c: c_zero, x: x_zero, m_in },
+        neo_ccs::McsWitness::<F> { w: w_zero, Z: z_zero },
+    ))
+}
+
 /// IVC chain proof containing multiple steps
 #[derive(Clone)]
 pub struct IvcChainProof {
@@ -218,265 +252,48 @@ pub struct BindingMetadata<'a> {
 }
 
 /// Domain separation tags for transcript operations
-pub enum DomainTag {
-    TranscriptInit,
-    AbsorbBytes, 
-    AbsorbFields,
-    BindCommitment,
-    BindDigestCompat,
-    SampleChallenge,
-    StepDigest,
-    RhoDerivation,
-    CommitDigest,
-}
-
-fn domain_tag_bytes(tag: DomainTag) -> &'static [u8] {
-    match tag {
-        DomainTag::TranscriptInit => b"neo/ivc/transcript/init/v1",
-        DomainTag::AbsorbBytes => b"neo/ivc/transcript/absorb_bytes/v1", 
-        DomainTag::AbsorbFields => b"neo/ivc/transcript/absorb_fields/v1",
-        DomainTag::BindCommitment => b"neo/ivc/transcript/bind_commitment/full/v1",
-        DomainTag::BindDigestCompat => b"neo/ivc/transcript/bind_commitment/digest_compat/v1",
-        DomainTag::SampleChallenge => b"neo/ivc/transcript/sample_challenge/v1",
-        DomainTag::StepDigest => b"neo/ivc/step_digest/v1",
-        DomainTag::RhoDerivation => b"neo/ivc/rho_derivation/v1",
-        DomainTag::CommitDigest => b"neo/ivc/commit_digest/v1",
-    }
-}
-
-/// Convert bytes to field element with domain separation (using Poseidon2 - ZK-friendly!)
-#[allow(unused_assignments)]
-pub fn field_from_bytes(domain_tag: DomainTag, bytes: &[u8]) -> F {
-    // Use unified Poseidon2 from production module 
-    let poseidon2 = p2::permutation();
-    
-    const RATE: usize = p2::RATE;
-    let mut st = [Goldilocks::ZERO; p2::WIDTH];
-    let mut absorbed = 0;
-    
-    // Helper macro (same pattern as existing functions)
-    macro_rules! absorb_elem {
-        ($val:expr) => {
-            if absorbed >= RATE {
-                st = poseidon2.permute(st);
-                absorbed = 0;
-            }
-            st[absorbed] = $val;
-            absorbed += 1;
-        };
-    }
-    
-    // Absorb domain tag  
-    let domain_bytes = domain_tag_bytes(domain_tag);
-    for &byte in domain_bytes {
-        absorb_elem!(Goldilocks::from_u64(byte as u64));
-    }
-    
-    // Absorb input bytes
-    for &byte in bytes {
-        absorb_elem!(Goldilocks::from_u64(byte as u64));
-    }
-    
-    // Pad + final permutation (domain separation / end-of-input)
-    absorb_elem!(Goldilocks::ONE);
-    st = poseidon2.permute(st);
-    st[0]
-}
-
-/// Full Poseidon2 transcript for IVC (replaces simplified hash)
-pub struct Poseidon2IvcTranscript {
-    poseidon2: &'static Poseidon2Goldilocks<{ p2::WIDTH }>, // Store reference, not owned value
-    state: [Goldilocks; p2::WIDTH],
-    absorbed: usize,
-}
-
-impl Poseidon2IvcTranscript {
-    /// Create new transcript with domain separation for IVC
-    pub fn new() -> Self {
-        // Use unified Poseidon2 from production module 
-        let mut transcript = Self {
-            poseidon2: p2::permutation(), // No clone - store the reference directly
-            state: [Goldilocks::ZERO; p2::WIDTH],
-            absorbed: 0,
-        };
-        
-        // Domain separate for IVC transcript initialization
-        let init_tag = field_from_bytes(DomainTag::TranscriptInit, b"");
-        transcript.absorb_element(init_tag);
-        
-        transcript
-    }
-    
-    /// Internal helper to absorb a single field element
-    fn absorb_element(&mut self, elem: F) {
-        const RATE: usize = p2::RATE;
-        if self.absorbed >= RATE {
-            self.state = self.poseidon2.permute(self.state);
-            self.absorbed = 0;
-        }
-        self.state[self.absorbed] = elem;
-        self.absorbed += 1;
-    }
-    
-    /// Absorb raw bytes with length prefixing and domain separation  
-    pub fn absorb_bytes(&mut self, label: &str, bytes: &[u8]) {
-        let label_fe = field_from_bytes(DomainTag::AbsorbBytes, label.as_bytes());
-        let len_fe = F::from_u64(bytes.len() as u64);
-        
-        self.absorb_element(label_fe);
-        self.absorb_element(len_fe);
-        
-        // Absorb bytes individually (compatible with existing pattern)
-        for &byte in bytes {
-            self.absorb_element(Goldilocks::from_u64(byte as u64));
-        }
-    }
-    
-    /// Absorb field elements directly
-    pub fn absorb_fields(&mut self, label: &str, elements: &[F]) {
-        let label_fe = field_from_bytes(DomainTag::AbsorbFields, label.as_bytes());
-        let len_fe = F::from_u64(elements.len() as u64);
-        
-        self.absorb_element(label_fe);
-        self.absorb_element(len_fe);
-        
-        for &elem in elements {
-            self.absorb_element(elem);
-        }
-    }
-    
-    /// Sample a challenge from the transcript
-    pub fn challenge(&mut self, label: &str) -> F {
-        let label_fe = field_from_bytes(DomainTag::SampleChallenge, label.as_bytes());
-        self.absorb_element(label_fe);
-        
-        // Squeeze: permute and return first element
-        self.state = self.poseidon2.permute(self.state);
-        self.absorbed = 1; // First element is "consumed"
-        self.state[0]
-    }
-    
-    /// Extract 32-byte digest from current state  
-    pub fn digest(&mut self) -> [u8; 32] {
-        // Final permutation
-        self.state = self.poseidon2.permute(self.state);
-        
-        let mut digest = [0u8; 32];
-        // Use first 4 field elements (4 * 8 = 32 bytes)
-        for i in 0..4 {
-            let bytes = self.state[i].as_canonical_u64().to_le_bytes();
-            digest[i*8..(i+1)*8].copy_from_slice(&bytes);
-        }
-        
-        digest
-    }
-}
-
-/// Bind commitment with full data (not just digest) - PRODUCTION VERSION
-pub fn bind_commitment_full(
-    transcript: &mut Poseidon2IvcTranscript,
-    label: &str, 
-    commitment: &Commitment,
-    metadata: Option<BindingMetadata<'_>>,
-) {
-    // Domain separation for binding operation
-    let bind_tag = field_from_bytes(DomainTag::BindCommitment, b"");
-    let label_fe = field_from_bytes(DomainTag::BindCommitment, label.as_bytes()); 
-    transcript.absorb_fields("bind/tag", &[bind_tag, label_fe]);
-    
-    // Bind domain and length
-    transcript.absorb_bytes("bind/domain", commitment.domain.as_bytes());
-    transcript.absorb_fields("bind/len", &[F::from_u64(commitment.bytes.len() as u64)]);
-    
-    // Bind actual commitment bytes  
-    transcript.absorb_bytes("bind/bytes", &commitment.bytes);
-    
-    // Bind optional metadata
-    if let Some(meta) = metadata {
-        let len = F::from_u64(meta.kv_pairs.len() as u64);
-        transcript.absorb_fields("bind/meta_len", &[len]);
-        
-        for (key, value) in meta.kv_pairs {
-            transcript.absorb_bytes("bind/meta/key", key.as_bytes());
-            
-            // Split u128 into two u64 values for field absorption
-            let lo = *value as u64;
-            let hi = (*value >> 64) as u64;
-            transcript.absorb_fields("bind/meta/val", &[
-                F::from_u64(lo),
-                F::from_u64(hi),
-            ]);
-        }
-    }
-}
+// Old local transcript helpers removed in favor of neo-transcript
 
 /// Deterministic Poseidon2 domain-separated hash to derive folding challenge ρ
 /// Uses the same Poseidon2 configuration as context_digest_v1 for consistency
 #[allow(unused_assignments)]
 pub fn rho_from_transcript(prev_acc: &Accumulator, step_digest: [u8; 32], c_step_coords: &[F]) -> (F, [u8; 32]) {
-    // Use same parameters as context_digest_v1 but different domain separation
-    const RATE: usize = p2::RATE;
-    
-    let poseidon2 = p2::permutation();
+    // Use centralized Merlin-style transcript (Poseidon2 backend)
+    #[cfg(feature = "fs-guard")]
+    neo_transcript::fs_guard::reset("rho/actual");
 
-    let mut st = [Goldilocks::ZERO; p2::WIDTH];
-    let mut absorbed = 0;
+    let mut tr = Poseidon2Transcript::new(b"neo/ivc");
+    tr.append_fields(tr_labels::STEP, &[F::from_u64(prev_acc.step)]);
+    tr.append_message(tr_labels::ACC_DIGEST, &prev_acc.c_z_digest);
+    tr.append_fields(b"acc/y", &prev_acc.y_compact);
+    tr.append_message(tr_labels::STEP_DIGEST, &step_digest);
+    tr.append_fields(tr_labels::COMMIT_COORDS, c_step_coords);
+    let rho = tr.challenge_nonzero_field(tr_labels::CHAL_RHO);
+    let dig = tr.digest32();
 
-    // Helper macro to avoid borrow checker issues
-    macro_rules! absorb_elem {
-        ($val:expr) => {
-            if absorbed >= RATE {
-                st = poseidon2.permute(st);
-                absorbed = 0;
-            }
-            st[absorbed] = $val;
-            absorbed += 1;
-        };
-    }
-
-    // Domain separation for IVC transcript
-    for &byte in IVC_DOMAIN_TAG {
-        absorb_elem!(Goldilocks::from_u64(byte as u64));
-    }
-    
-    absorb_elem!(Goldilocks::from_u64(prev_acc.step));
-    
-    for &b in &prev_acc.c_z_digest {
-        absorb_elem!(Goldilocks::from_u64(b as u64));
-    }
-    
-    for y in &prev_acc.y_compact {
-        absorb_elem!(Goldilocks::from_u64(y.as_canonical_u64()));
-    }
-    
-    for &b in &step_digest {
-        absorb_elem!(Goldilocks::from_u64(b as u64));
-    }
-    
-    // SECURITY FIX: Absorb step commitment coordinates before deriving ρ
-    // This ensures both sides of the linear combination c_next = c_prev + ρ·c_step are fixed
-    for &coord in c_step_coords {
-        absorb_elem!(Goldilocks::from_u64(coord.as_canonical_u64()));
+    #[cfg(feature = "fs-guard")]
+    {
+        use neo_transcript::fs_guard as guard;
+        let actual = guard::take();
+        guard::reset("rho/spec");
+        // SPEC: explicit replay (kept in sync with intended API)
+        let mut tr_s = Poseidon2Transcript::new(b"neo/ivc");
+        tr_s.append_fields(tr_labels::STEP, &[F::from_u64(prev_acc.step)]);
+        tr_s.append_message(tr_labels::ACC_DIGEST, &prev_acc.c_z_digest);
+        tr_s.append_fields(b"acc/y", &prev_acc.y_compact);
+        tr_s.append_message(tr_labels::STEP_DIGEST, &step_digest);
+        tr_s.append_fields(tr_labels::COMMIT_COORDS, c_step_coords);
+        let _ = tr_s.challenge_nonzero_field(tr_labels::CHAL_RHO);
+        let _ = tr_s.digest32();
+        let spec = guard::take();
+        if let Some((i, s, a)) = guard::first_mismatch(&spec, &actual) {
+            panic!(
+                "FS drift in rho_from_transcript at #{}: spec(op={},label={:?},len={}) vs actual(op={},label={:?},len={})",
+                i, s.op, s.label, s.len, a.op, a.label, a.len
+            );
+        }
     }
 
-    // Pad + squeeze ρ (first field element after permutation)
-    absorb_elem!(Goldilocks::ONE);
-    st = poseidon2.permute(st);
-    
-    // Defense-in-depth: map away from degenerate values
-    let mut rho_raw = st[0];
-    if rho_raw == Goldilocks::ZERO { 
-        rho_raw = Goldilocks::ONE; 
-    }
-    let rho_u64 = rho_raw.as_canonical_u64();
-    let rho = F::from_u64(rho_u64);
-
-    // Return also a 32-byte transcript digest for binding this step
-    let mut dig = [0u8; 32];
-    for i in 0..4 {
-        dig[i*8..(i+1)*8].copy_from_slice(&st[i].as_canonical_u64().to_le_bytes());
-    }
-    
     (rho, dig)
 }
 
@@ -806,7 +623,12 @@ pub fn create_step_digest(step_data: &[F]) -> [u8; 32] {
         absorb_elem!(Goldilocks::from_u64(f.as_canonical_u64()));
     }
     
-    // Final permutation and extract digest
+    // End-of-message marker and final permutation
+    if absorbed >= RATE {
+        st = poseidon2.permute(st);
+        absorbed = 0;
+    }
+    st[absorbed] = Goldilocks::ONE;
     st = poseidon2.permute(st);
     let mut digest = [0u8; 32];
     for (i, &elem) in st[..4].iter().enumerate() {
@@ -896,20 +718,29 @@ pub fn prove_ivc_step_with_extractor(
         public_input,
         y_step: &y_step,
         binding_spec, // Use TRUSTED binding specification
+        transcript_only_app_inputs: false,
+        prev_augmented_x: None,
     };
     
     prove_ivc_step(input)
 }
 
-/// Prove a single IVC step with proper chaining (accepts previous ME instance)
-/// 
-/// This version performs real Nova folding by accepting the previous folded ME instance
-/// and chaining it with the current step, avoiding duplication.
+/// Prove a single IVC step with proper chaining.
+///
+/// - Accepts previous folded ME instance (for Stage 5 compression continuity).
+/// - Accepts previous RHS MCS instance+witness, and returns the current RHS MCS to be
+///   used as the next LHS. This ensures exact X‑linkage across steps by construction.
 pub fn prove_ivc_step_chained(
     input: IvcStepInput,
     prev_me: Option<neo_ccs::MeInstance<neo_ajtai::Commitment, F, neo_math::K>>,
     prev_me_wit: Option<neo_ccs::MeWitness<F>>,
-) -> Result<(IvcStepResult, neo_ccs::MeInstance<neo_ajtai::Commitment, F, neo_math::K>, neo_ccs::MeWitness<F>), Box<dyn std::error::Error>> {
+    prev_lhs_mcs: Option<(neo_ccs::McsInstance<neo_ajtai::Commitment, F>, neo_ccs::McsWitness<F>)>,
+) -> Result<(
+    IvcStepResult,
+    neo_ccs::MeInstance<neo_ajtai::Commitment, F, neo_math::K>,
+    neo_ccs::MeWitness<F>,
+    (neo_ccs::McsInstance<neo_ajtai::Commitment, F>, neo_ccs::McsWitness<F>),
+), Box<dyn std::error::Error>> {
     // Proper chaining: fold previous (ME) with current (MCS) instead of self-folding
     // 1) Build step_x = [H(prev_acc) || app_inputs]
     let acc_digest_fields = compute_accumulator_digest_fields(&input.prev_accumulator)?;
@@ -936,7 +767,9 @@ pub fn prove_ivc_step_chained(
     let digest_len = compute_accumulator_digest_fields(&input.prev_accumulator)?.len();
     let app_len = step_x.len().saturating_sub(digest_len);
     let x_bind_len = input.binding_spec.x_witness_indices.len();
-    if app_len > 0 && x_bind_len == 0 {
+    // SECURITY: If there are app inputs in step_x, they must be bound to witness indices
+    // to prevent public input manipulation.
+    if app_len > 0 && x_bind_len == 0 && !input.transcript_only_app_inputs {
         return Err("SECURITY: x_witness_indices cannot be empty when step_x has app inputs; this would allow public input manipulation".into());
     }
     if x_bind_len > 0 && x_bind_len != app_len {
@@ -1001,7 +834,7 @@ pub fn prove_ivc_step_chained(
             rand::rng().fill_bytes(&mut seed);
             StdRng::from_seed(seed)
         };
-        let pp = crate::ajtai_setup(&mut rng, d, 16, m_final)?;
+        let pp = crate::ajtai_setup(&mut rng, d, input.params.kappa as usize, m_final)?;
         neo_ajtai::set_global_pp(pp).map_err(anyhow::Error::from)
     })?;
 
@@ -1093,7 +926,7 @@ pub fn prove_ivc_step_chained(
             rand::rng().fill_bytes(&mut seed);
             StdRng::from_seed(seed)
         };
-        let pp = crate::ajtai_setup(&mut rng, d, 16, m_step)?;
+        let pp = crate::ajtai_setup(&mut rng, d, input.params.kappa as usize, m_step)?;
         neo_ajtai::set_global_pp(pp).map_err(anyhow::Error::from)
     })?;
     
@@ -1160,7 +993,11 @@ pub fn prove_ivc_step_chained(
     };
 
     // 6) Reify previous ME→MCS, or create trivial zero instance (base case)
-    let (lhs_inst, lhs_wit) = match (prev_me, prev_me_wit) {
+    let (lhs_inst, lhs_wit) = if let Some((inst, wit)) = prev_lhs_mcs {
+        // Use exact previous RHS MCS as next LHS for strict linkage
+        (inst, wit)
+    } else {
+        match (prev_me, prev_me_wit) {
         (Some(me), Some(wit)) => {
             // Dimension checks for ME→MCS reification
             if wit.Z.rows() != d {
@@ -1193,26 +1030,10 @@ pub fn prove_ivc_step_chained(
             (inst, wit_mcs)
         }
         _ => {
-            // Base case (step 0): there is no previous ME instance to fold with.
-            //
-            // We set LHS = RHS (same commitment c, same public input X, same witness Z).
-            // Rationale and safety notes:
-            // - Sound CCS instance: Using the very same MCS instance on both sides guarantees
-            //   the Π_CCS prover/verify relation is satisfied for the base step without relying
-            //   on ad‑hoc zero assignments that may not satisfy non‑trivial CCS constraints.
-            // - Transcript binding remains intact: the transcript has already absorbed the CCS
-            //   header, the (c, X) instance data, and the polynomial description before sampling
-            //   challenges. Using identical instances aligns the verifier’s reconstruction with
-            //   the prover’s view at step 0.
-            // - No circularity: ρ is derived from a pre‑ρ commitment (Pattern B), then the full
-            //   augmented public input (which contains ρ, y_prev, y_next) is built. This keeps
-            //   Fiat–Shamir order consistent and avoids using any ρ‑dependent data inside the
-            //   commitment that produced ρ in the first place.
-            // - Later steps: for steps i>0, LHS is reified from the previous ME→MCS, so folding
-            //   proceeds as usual with two distinct inputs.
-            (step_mcs_inst.clone(), step_mcs_wit.clone())
+            // Base case (step 0): use a canonical zero running instance matching current shape.
+            zero_mcs_instance_for_shape(step_public_input.len(), m_step)?
         }
-    };
+    }};
 
     // DEBUG: Check if this is step 0 or later
     let is_first_step = input.prev_accumulator.step == 0;
@@ -1237,12 +1058,16 @@ pub fn prove_ivc_step_chained(
     }
     
     // 7) Fold prev-with-current using the production pipeline
+    // Record the exact LHS augmented input used inside Pi-CCS for robust linking checks.
+    // Do not trust/progate external prev_augmented_x here; the authoritative value is lhs_inst.x.
     let prev_augmented_public_input = lhs_inst.x.clone();
+    // Clone MCS witnesses for later recombination of parent witness
+    // (removed unused clones)
     let (mut me_instances, digit_witnesses, folding_proof) = neo_fold::fold_ccs_instances(
         input.params, 
         &step_augmented_ccs, 
-        &[lhs_inst, step_mcs_inst], 
-        &[lhs_wit,  step_mcs_wit]
+        &[lhs_inst.clone(), step_mcs_inst.clone()], 
+        &[lhs_wit.clone(),  step_mcs_wit.clone()]
     ).map_err(|e| format!("Nova folding failed: {}", e))?;
 
     // 🔒 SOUNDNESS: Populate ME instances with step commitment binding data
@@ -1338,7 +1163,13 @@ pub fn prove_ivc_step_chained(
         folding_proof: Some(folding_proof),
     };
 
-    Ok((IvcStepResult { proof: ivc_proof, next_state: y_next }, me_instances.last().unwrap().clone(), digit_witnesses.last().unwrap().clone()))
+    // Return next chaining state: carry latest digit ME (for Stage 5) and RHS MCS (for strict linkage)
+    Ok((
+        IvcStepResult { proof: ivc_proof, next_state: y_next },
+        me_instances.last().unwrap().clone(),
+        digit_witnesses.last().unwrap().clone(),
+        (step_mcs_inst, step_mcs_wit)
+    ))
 }
 
 
@@ -1348,8 +1179,8 @@ pub fn prove_ivc_step_chained(
 /// where you don't need to maintain chaining state between calls.
 /// For proper Nova chaining, use `prove_ivc_step_chained` directly.
 pub fn prove_ivc_step(input: IvcStepInput) -> Result<IvcStepResult, Box<dyn std::error::Error>> {
-    // Use the chained version with no previous ME instance (will fold with trivial zero instance)
-    let (result, _me, _wit) = prove_ivc_step_chained(input, None, None)?;
+    // Use the chained version with no previous ME instance (folds with canonical zero instance)
+    let (result, _me, _wit, _mcs) = prove_ivc_step_chained(input, None, None, None)?;
     Ok(result)
 }
 
@@ -1420,11 +1251,27 @@ pub fn verify_ivc_step(
     if step_public_input != ivc_proof.step_augmented_public_input {
         return Ok(false);
     }
+
+    // Base-case canonicalization: when there is no prior accumulator commitment and the caller
+    // did not thread a previous augmented x, require the LHS augmented x be the canonical zero vector
+    // of the correct shape. This removes transcript malleability at step 0 and matches
+    // zero_mcs_instance_for_shape.
+    if prev_accumulator.c_coords.is_empty() && prev_augmented_x.is_none() {
+        let x_lhs = &ivc_proof.prev_step_augmented_public_input;
+        let expected_len = step_x_len + 1 + 2 * y_len;
+        if x_lhs.len() != expected_len { return Ok(false); }
+        if !x_lhs.iter().all(|&f| f == F::ZERO) { return Ok(false); }
+    }
     
     // Compute full witness dimensions
     let mut full_step_z = step_public_input.clone();
     full_step_z.extend_from_slice(&step_witness_augmented);
-    let decomp_z = crate::decomp_b(&full_step_z, 2, neo_math::ring::D, crate::DecompStyle::Balanced);
+    let decomp_z = crate::decomp_b(
+        &full_step_z,
+        params.b, // use the same base as prover
+        neo_math::ring::D,
+        crate::DecompStyle::Balanced
+    );
     let m_step = decomp_z.len() / neo_math::ring::D;
     let d = neo_math::ring::D;
     
@@ -1440,7 +1287,7 @@ pub fn verify_ivc_step(
             rand::rng().fill_bytes(&mut seed);
             StdRng::from_seed(seed)
         };
-        let pp = crate::ajtai_setup(&mut rng, d, 16, m_step)?;
+        let pp = crate::ajtai_setup(&mut rng, d, params.kappa as usize, m_step)?;
         neo_ajtai::set_global_pp(pp).map_err(anyhow::Error::from)
     })?;
     
@@ -1619,13 +1466,18 @@ pub fn prove_ivc_chain(
 ) -> Result<IvcChainProof, Box<dyn std::error::Error>> {
     let mut current_accumulator = initial_accumulator;
     let mut step_proofs = Vec::with_capacity(step_inputs.len());
-    
+    // Carry the running ME instance across steps (proper chaining)
+    let mut prev_me: Option<neo_ccs::MeInstance<neo_ajtai::Commitment, F, neo_math::K>> = None;
+    let mut prev_me_wit: Option<neo_ccs::MeWitness<F>> = None;
+
+    // Strict linkage: carry RHS MCS instance/witness as next LHS across steps
+    let mut prev_lhs_mcs: Option<(neo_ccs::McsInstance<neo_ajtai::Commitment, F>, neo_ccs::McsWitness<F>)> = None;
+
     for (step_idx, step_input) in step_inputs.iter().enumerate() {
-        // FIXED: Extract REAL y_step from step computation using extractor
-        // This fixes the "folding with itself" issue Las identified
+        // Extract REAL y_step from the witness using a simple extractor
         let extractor = LastNExtractor { n: current_accumulator.y_compact.len() };
         let y_step = extractor.extract_y_step(&step_input.witness);
-        
+
         let ivc_step_input = IvcStepInput {
             params,
             step_ccs,
@@ -1634,24 +1486,35 @@ pub fn prove_ivc_chain(
             step: step_idx as u64,
             public_input: step_input.public_input.as_deref(),
             y_step: &y_step,
-            binding_spec,                    // Use required, trusted binding spec
+            binding_spec,
+            transcript_only_app_inputs: false,
+            prev_augmented_x: step_proofs.last().map(|p: &IvcProof| p.step_augmented_public_input.as_slice()),
         };
-        
-        let step_result = prove_ivc_step(ivc_step_input)?;
+
+        let (step_result, me_out, me_wit_out, lhs_next) =
+            prove_ivc_step_chained(ivc_step_input, prev_me.clone(), prev_me_wit.clone(), prev_lhs_mcs.clone())?;
+
+        prev_me = Some(me_out);
+        prev_me_wit = Some(me_wit_out);
+        prev_lhs_mcs = Some(lhs_next);
+
         current_accumulator = step_result.proof.next_accumulator.clone();
-        // Note: step_result.next_state contains computation results for this step
         step_proofs.push(step_result.proof);
     }
-    
-    Ok(IvcChainProof {
-        steps: step_proofs,
-        final_accumulator: current_accumulator,
-        chain_length: step_inputs.len() as u64,
-    })
+
+    Ok(IvcChainProof { steps: step_proofs, final_accumulator: current_accumulator, chain_length: step_inputs.len() as u64 })
 }
 
-/// Verify an entire IVC chain
-/// 
+/// Verify an entire IVC chain (strict)
+///
+/// Threads prev_augmented_x across steps and enforces per‑step folding verification
+/// (Π‑CCS/RLC/DEC) and linkage of augmented inputs (LHS=prev_augmented_x, RHS=reconstruction).
+/// This is the recommended and secure verifier.
+///
+/// Base-case policy: when no prior accumulator exists and no prev_augmented_x is provided,
+/// the verifier requires the LHS augmented input to be the canonical all‑zeros vector of the
+/// correct shape (matching `zero_mcs_instance_for_shape`).
+///
 /// **CRITICAL SECURITY**: `binding_spec` must come from a trusted source
 /// (circuit specification), NOT from the proof!
 pub fn verify_ivc_chain(
@@ -1661,24 +1524,33 @@ pub fn verify_ivc_chain(
     binding_spec: &StepBindingSpec,
     params: &crate::NeoParams,
 ) -> Result<bool, Box<dyn std::error::Error>> {
-    let mut current_accumulator = initial_accumulator.clone();
+    // Strict threading of prev_augmented_x and RHS reconstruction checks
+    let mut acc_before_curr_step = initial_accumulator.clone();
     let mut prev_augmented_x: Option<Vec<F>> = None;
-    
+
     for step_proof in &chain_proof.steps {
-        let is_valid = verify_ivc_step(step_ccs, step_proof, &current_accumulator, binding_spec, params, prev_augmented_x.as_deref())?;
-        if !is_valid {
-            return Ok(false);
-        }
-        current_accumulator = step_proof.next_accumulator.clone();
+        // Cross-check prover-supplied augmented input matches verifier reconstruction.
+        let (expected_augmented, _) = compute_augmented_public_input_for_step(&acc_before_curr_step, step_proof)
+            .map_err(|e| anyhow::anyhow!("failed to compute augmented input: {}", e))?;
+        if expected_augmented != step_proof.step_augmented_public_input { return Ok(false); }
+
+        // Enforce per-step verification (includes folding checks)
+        let ok = verify_ivc_step(
+            step_ccs,
+            step_proof,
+            &acc_before_curr_step,
+            binding_spec,
+            params,
+            prev_augmented_x.as_deref(),
+        )?;
+        if !ok { return Ok(false); }
+
+        // Advance and thread linkage
+        acc_before_curr_step = step_proof.next_accumulator.clone();
         prev_augmented_x = Some(step_proof.step_augmented_public_input.clone());
     }
-    
-    // Final consistency check
-    if current_accumulator.step != chain_proof.chain_length {
-        return Ok(false);
-    }
-    
-    Ok(true)
+
+    Ok(acc_before_curr_step.step == chain_proof.chain_length)
 }
 
 //=============================================================================
@@ -2343,13 +2215,16 @@ fn verify_commitment_evolution(
     let coords_ok = ct_eq_coords(&expected_next, next_coords);
     let digest_ok = ct_eq_bytes(&expected_digest, published_next_digest);
     if !coords_ok || !digest_ok {
-        println!("  commit coords eq: {}", coords_ok);
-        println!("  commit digest eq: {}", digest_ok);
-        println!("  prev.len={}, step.len={}, next.len={}", prev_coords.len(), c_step_coords.len(), next_coords.len());
-        let head = |v: &[F]| v.iter().take(4).map(|f| f.as_canonical_u64()).collect::<Vec<_>>();
-        println!("  prev head: {:?}", head(prev_coords));
-        println!("  step head: {:?}", head(c_step_coords));
-        println!("  next head: {:?}", head(next_coords));
+        #[cfg(feature = "neo-logs")]
+        {
+            println!("  commit coords eq: {}", coords_ok);
+            println!("  commit digest eq: {}", digest_ok);
+            println!("  prev.len={}, step.len={}, next.len={}", prev_coords.len(), c_step_coords.len(), next_coords.len());
+            let head = |v: &[F]| v.iter().take(4).map(|f| f.as_canonical_u64()).collect::<Vec<_>>();
+            println!("  prev head: {:?}", head(prev_coords));
+            println!("  step head: {:?}", head(c_step_coords));
+            println!("  next head: {:?}", head(next_coords));
+        }
     }
     coords_ok && digest_ok
 }
@@ -2380,7 +2255,7 @@ fn ct_eq_coords(a: &[F], b: &[F]) -> bool {
 // === Folding verification helpers ===============================================================
 
 /// Re-create the exact MCS instances the prover used in Pi-CCS (order: LHS, RHS).
-/// - LHS: commitment = proof.fold.pi_ccs_outputs[0].c; x = prev_step_x (or zeros on step 0); m_in = len(x)
+/// - LHS: commitment = proof.fold.pi_ccs_outputs[0].c; x = prev_step_x (or base-case x); m_in = len(x)
 /// - RHS: commitment = proof.fold.pi_ccs_outputs[1].c; x = current step_public_input; m_in = len(x)
 /// 
 /// Note: The MCS instances use the full augmented public input [step_x || ρ || y_prev || y_next] as their x vector.
@@ -2406,36 +2281,53 @@ pub fn recreate_mcs_instances_for_verification(
         .map_err(|e| e.to_string())?;
     let x_rhs_proof = ivc_proof.step_augmented_public_input.clone();
     if x_rhs_expected.len() != x_rhs_proof.len() || x_rhs_expected != x_rhs_proof {
+        #[cfg(feature = "neo-logs")]
+        {
+            eprintln!("❌ Augmented public input mismatch (RHS)");
+            eprintln!("   expected.len() = {}, proof.len() = {}", x_rhs_expected.len(), x_rhs_proof.len());
+            let head_e: Vec<_> = x_rhs_expected.iter().take(8).map(|f| f.as_canonical_u64()).collect();
+            let head_p: Vec<_> = x_rhs_proof.iter().take(8).map(|f| f.as_canonical_u64()).collect();
+            eprintln!("   expected head: {:?}", head_e);
+            eprintln!("   proof    head: {:?}", head_p);
+        }
         return Err("augmented public input mismatch between proof and verifier reconstruction".to_string());
     }
     let m_in = x_rhs_proof.len();
 
     let x_lhs_proof = ivc_proof.prev_step_augmented_public_input.clone();
     if x_lhs_proof.len() != m_in {
+        #[cfg(feature = "neo-logs")]
+        eprintln!("❌ prev_step_augmented_public_input length {} != m_in {}", x_lhs_proof.len(), m_in);
         return Err(format!(
             "prev_step_augmented_public_input length {} != current m_in {}",
             x_lhs_proof.len(), m_in
         ));
     }
-    // Only enforce the base-step augmented input shape when this is truly the first step
-    // (prev_acc.step == 0) and the caller didn't provide the previous augmented x.
-    // For later steps, if `prev_augmented_x` is None, we accept the proof-supplied
-    // `prev_step_augmented_public_input` without forcing the base-step (zeros) layout,
-    // because single-step verification cannot reconstruct the previous step's augmented input.
-    if prev_acc.step == 0 && prev_augmented_x.is_none() {
+    // Base-case (lane-aware): if this is the first use (no coords) and no prev_augmented_x provided,
+    // enforce canonical zero vector for LHS augmented x to match zero_mcs_instance_for_shape.
+    if prev_acc.c_coords.is_empty() && prev_augmented_x.is_none() {
         let step_x_len = ivc_proof.step_public_input.len();
         let y_len = ivc_proof.step_y_prev.len();
         if x_lhs_proof.len() != step_x_len + 1 + 2 * y_len {
+            #[cfg(feature = "neo-logs")]
+            eprintln!("❌ Initial step augmented input length mismatch: got {}, want {} (= step_x_len {} + 1 + 2*y_len {})",
+                      x_lhs_proof.len(), step_x_len + 1 + 2*y_len, step_x_len, y_len);
             return Err("unexpected prev augmented input length".to_string());
         }
-        let mut expected = vec![F::ZERO; x_lhs_proof.len()];
-        expected[step_x_len] = ivc_proof.step_rho;
-        expected[step_x_len + 1..step_x_len + 1 + y_len]
-            .copy_from_slice(&ivc_proof.step_y_prev);
-        expected[step_x_len + 1 + y_len..]
-            .copy_from_slice(&ivc_proof.step_y_next);
-        if expected != x_lhs_proof {
-            return Err("initial step augmented input mismatch".to_string());
+        if !x_lhs_proof.iter().all(|&f| f == F::ZERO) {
+            return Err("initial step augmented input must be zero vector".to_string());
+        }
+    } else if let Some(prev_ax) = prev_augmented_x {
+        if prev_ax != x_lhs_proof {
+            #[cfg(feature = "neo-logs")]
+            {
+                eprintln!("❌ Linking failed: provided prev_augmented_x != proof LHS augmented x");
+                let head_e: Vec<_> = prev_ax.iter().take(8).map(|f| f.as_canonical_u64()).collect();
+                let head_p: Vec<_> = x_lhs_proof.iter().take(8).map(|f| f.as_canonical_u64()).collect();
+                eprintln!("   prev head: {:?}", head_e);
+                eprintln!("   LHS  head: {:?}", head_p);
+            }
+            return Err("linking failed: LHS augmented input != previous step's augmented input".to_string());
         }
     }
     let x_lhs = x_lhs_proof;
@@ -2546,52 +2438,125 @@ pub fn verify_ivc_step_folding(
     prev_acc: &Accumulator,
     prev_augmented_x: Option<&[F]>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    #[cfg(feature = "neo-logs")]
+    {
+        println!("🔎 FOLD VERIFY: step {}", ivc_proof.step);
+        println!("   augmented_ccs: n={}, m={}", augmented_ccs.n, augmented_ccs.m);
+        println!("   prev_acc.step={}, y_len={}", prev_acc.step, prev_acc.y_compact.len());
+        if let Some(px) = prev_augmented_x { println!("   prev_augmented_x.len()={}", px.len()); }
+    }
     let folding = ivc_proof
         .folding_proof
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("IVC proof missing folding_proof"))?;
 
-    // 1) Recreate the two input MCS instances exactly as the prover used them.
-    let [lhs, rhs] = recreate_mcs_instances_for_verification(ivc_proof, prev_acc, prev_augmented_x)?;
-
+    // 1) Cross-check against stored Pi-CCS inputs, using RHS as the binding point.
     let stored_inputs = &folding.pi_ccs_inputs;
     if stored_inputs.len() != 2 {
         return Err(anyhow::anyhow!("folding proof missing pi_ccs_inputs").into());
     }
-    if stored_inputs[0].m_in != lhs.m_in
-        || stored_inputs[0].x != lhs.x
-        || stored_inputs[0].c.data != lhs.c.data
-    {
-        #[cfg(feature = "neo-logs")] {
-            eprintln!("  Pi-CCS input[0] mismatch: m_in {} vs {}", stored_inputs[0].m_in, lhs.m_in);
-            eprintln!("  x equal: {}", (stored_inputs[0].x == lhs.x));
-            eprintln!("  c equal: {}", (stored_inputs[0].c.data == lhs.c.data));
-        }
-        return Ok(false);
-    }
-    if stored_inputs[1].m_in != rhs.m_in
-        || stored_inputs[1].x != rhs.x
-        || stored_inputs[1].c.data != rhs.c.data
-    {
-        #[cfg(feature = "neo-logs")] {
-            eprintln!("  Pi-CCS input[1] mismatch: m_in {} vs {}", stored_inputs[1].m_in, rhs.m_in);
-            eprintln!("  x equal: {}", (stored_inputs[1].x == rhs.x));
-            eprintln!("  c equal: {}", (stored_inputs[1].c.data == rhs.c.data));
-        }
+
+    // Compute expected RHS augmented x and ensure it matches both the proof copy and stored input.
+    let (x_rhs_expected, _) = compute_augmented_public_input_for_step(prev_acc, ivc_proof)
+        .map_err(|e| anyhow::anyhow!("failed to compute augmented input: {}", e))?;
+    if x_rhs_expected != ivc_proof.step_augmented_public_input {
+        #[cfg(feature = "neo-logs")]
+        println!("❌ RHS augmented input mismatch vs proof copy");
         return Ok(false);
     }
 
-    #[cfg(feature = "neo-logs")]
-    {
-        eprintln!("🔍 FOLDING DEBUG: LHS x.len()={}, RHS x.len()={}", lhs.x.len(), rhs.x.len());
-        let lx = lhs.x.iter().take(6).map(|f| f.as_canonical_u64()).collect::<Vec<_>>();
-        let rx = rhs.x.iter().take(6).map(|f| f.as_canonical_u64()).collect::<Vec<_>>();
-        eprintln!("🔍 FOLDING DEBUG: LHS x head: {:?}", lx);
-        eprintln!("🔍 FOLDING DEBUG: RHS x head: {:?}", rx);
+    // LHS checks: now STRICT — enforce exact X equality and also bind to caller-provided prev_augmented_x when present.
+    // Ensure LHS/RHS shapes match.
+    if stored_inputs[0].m_in != stored_inputs[1].m_in {
+        #[cfg(feature = "neo-logs")]
+        println!("❌ LHS/RHS m_in mismatch: {} vs {}", stored_inputs[0].m_in, stored_inputs[1].m_in);
+        return Ok(false);
+    }
+    // Ensure LHS commitment matches the stored output commitment.
+    if stored_inputs[0].c.data != folding.pi_ccs_outputs[0].c.data {
+        #[cfg(feature = "neo-logs")]
+        println!("❌ LHS commitment mismatch vs stored output");
+        return Ok(false);
+    }
+
+    // Link LHS augmented input to the previous step.
+    let x_lhs_proof = ivc_proof.prev_step_augmented_public_input.clone();
+    let m_in = x_rhs_expected.len();
+    if x_lhs_proof.len() != m_in {
+        #[cfg(feature = "neo-logs")]
+        println!(
+            "❌ LHS augmented x length mismatch: got {}, want {}",
+            x_lhs_proof.len(), m_in
+        );
+        return Ok(false);
+    }
+    // Consider per-lane base case: first use of this running ME (coords empty) and no prev_augmented_x provided.
+    let is_lane_base_case = prev_acc.c_coords.is_empty();
+    if is_lane_base_case && prev_augmented_x.is_none() {
+        let step_x_len = ivc_proof.step_public_input.len();
+        let y_len = ivc_proof.step_y_prev.len();
+        if x_lhs_proof.len() != step_x_len + 1 + 2 * y_len {
+            #[cfg(feature = "neo-logs")]
+            println!(
+                "❌ Initial step augmented input length mismatch: got {}, want {} (= step_x_len {} + 1 + 2*y_len {})",
+                x_lhs_proof.len(), step_x_len + 1 + 2 * y_len, step_x_len, y_len
+            );
+            return Ok(false);
+        }
+        // Require canonical zero vector for base-case LHS augmented x (matches zero_mcs_instance_for_shape)
+        if !x_lhs_proof.iter().all(|&f| f == F::ZERO) { return Ok(false); }
+    } else if let Some(_px) = prev_augmented_x {
+        // Production strict: enforce provided prev_augmented_x linkage
+        let px = _px;
+        if px != x_lhs_proof.as_slice() {
+            #[cfg(feature = "neo-logs")]
+            println!("❌ Linking failed: prev_augmented_x != LHS augmented x");
+            return Ok(false);
+        }
+    }
+    // Bind to the LHS stored input inside Pi-CCS as well.
+    if stored_inputs[0].x != x_lhs_proof {
+        #[cfg(feature = "neo-logs")]
+        println!("❌ LHS x mismatch: stored != proof LHS augmented x");
+        return Ok(false);
+    }
+    if stored_inputs[0].m_in != x_lhs_proof.len() {
+        #[cfg(feature = "neo-logs")]
+        println!("❌ LHS m_in mismatch: {} vs {}", stored_inputs[0].m_in, x_lhs_proof.len());
+        return Ok(false);
+    }
+    // Note: Do not bind LHS Pi-CCS commitment to prev_acc.c_coords.
+    // The accumulator commitment evolves on step-only coordinates, whereas Pi-CCS
+    // commitments bind the full augmented z. Binding is enforced via:
+    //  - LHS x linkage (prev_augmented_x and proof copy),
+    //  - RHS reconstruction equality, and
+    //  - Pi-RLC and Pi-DEC checks tying digits to commitments.
+
+    // RHS checks: bind to expected augmented x and stored output commitment.
+    if stored_inputs[1].x != x_rhs_expected {
+        #[cfg(feature = "neo-logs")]
+        {
+            println!("❌ RHS x mismatch: stored != expected");
+            let ex: Vec<_> = x_rhs_expected.iter().take(6).map(|f| f.as_canonical_u64()).collect();
+            let sx: Vec<_> = stored_inputs[1].x.iter().take(6).map(|f| f.as_canonical_u64()).collect();
+            println!("   expected head: {:?}", ex);
+            println!("   stored   head: {:?}", sx);
+        }
+        return Ok(false);
+    }
+    if stored_inputs[1].m_in != x_rhs_expected.len() {
+        #[cfg(feature = "neo-logs")]
+        println!("❌ RHS m_in mismatch: {} vs {}", stored_inputs[1].m_in, x_rhs_expected.len());
+        return Ok(false);
+    }
+    if stored_inputs[1].c.data != folding.pi_ccs_outputs[1].c.data {
+        #[cfg(feature = "neo-logs")]
+        println!("❌ RHS commitment mismatch vs stored output");
+        return Ok(false);
     }
 
     // 2) Verify Pi-CCS against those instances.
-    let mut tr = FoldTranscript::default();
+    let mut tr = Poseidon2Transcript::new(b"neo/fold");
     let ok_ccs = pi_ccs_verify(
         &mut tr,
         params,
@@ -2601,7 +2566,7 @@ pub fn verify_ivc_step_folding(
         &folding.pi_ccs_proof,
     )?;
     #[cfg(feature = "neo-logs")]
-    eprintln!("🔍 FOLDING DEBUG: Pi-CCS verification result: {}", ok_ccs);
+    println!("   Pi-CCS verify: {}", ok_ccs);
     if !ok_ccs { return Ok(false); }
 
     // 3) Recombine digit MEs to the parent ME for Pi‑RLC and Pi‑DEC checks.
@@ -2619,6 +2584,8 @@ pub fn verify_ivc_step_folding(
         &me_parent,
         &folding.pi_rlc_proof,
     )?;
+    #[cfg(feature = "neo-logs")]
+    println!("   Pi-RLC verify: {}", ok_rlc);
     if !ok_rlc { return Ok(false); }
 
     // 5) Verify Pi‑DEC with the authentic Ajtai S-module.
@@ -2654,50 +2621,10 @@ pub fn verify_ivc_step_folding(
         &folding.pi_dec_proof,
         &l_real,
     )?;
+    #[cfg(feature = "neo-logs")]
+    println!("   Pi-DEC verify: {} (d_rows={}, m_cols={})", ok_dec, d_rows, m_cols);
     Ok(ok_dec)
 }
 
 
-/// Strict chain verification = your original chain checks + folding verification per step.
-/// This does not require any additional prover artifact beyond what you already carry in `IvcProof`.
-pub fn verify_ivc_chain_strict(
-    step_ccs: &neo_ccs::CcsStructure<F>,
-    chain_proof: &IvcChainProof,
-    initial_accumulator: &Accumulator,
-    binding_spec: &StepBindingSpec,
-    params: &crate::NeoParams,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    // Track accumulators before prev and before current step to reconstruct augmented inputs
-    let mut acc_before_curr_step = initial_accumulator.clone();
-    let mut prev_augmented_x: Option<Vec<F>> = None;
-
-    for (i, step_proof) in chain_proof.steps.iter().enumerate() {
-        // Cross-check prover-supplied augmented input matches verifier reconstruction.
-        let (expected_augmented, _) = compute_augmented_public_input_for_step(&acc_before_curr_step, step_proof)
-            .map_err(|e| anyhow::anyhow!("failed to compute augmented input: {}", e))?;
-        if expected_augmented != step_proof.step_augmented_public_input {
-            return Ok(false);
-        }
-
-        let ok = verify_ivc_step(
-            step_ccs,
-            step_proof,
-            &acc_before_curr_step,
-            binding_spec,
-            params,
-            prev_augmented_x.as_deref(),
-        )?;
-        if !ok { return Ok(false); }
-
-        // Advance accumulators
-        acc_before_curr_step = step_proof.next_accumulator.clone();
-        prev_augmented_x = Some(step_proof.step_augmented_public_input.clone());
-
-        #[cfg(feature = "neo-logs")]
-        eprintln!("✅ strict fold+step verify passed for step {}", i);
-        #[cfg(not(feature = "neo-logs"))]
-        let _ = i; // suppress unused variable warning when neo-logs is disabled
-    }
-
-    Ok(acc_before_curr_step.step == chain_proof.chain_length)
-}
+// (removed) verify_ivc_chain_strict: verify_ivc_chain is now strict

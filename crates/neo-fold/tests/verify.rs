@@ -33,26 +33,26 @@ fn tiny_ccs() -> CcsStructure<F> {
 }
 
 fn derive_rhos(params: &NeoParams, s: &CcsStructure<F>, input_count: usize) -> (Vec<[F; neo_math::D]>, u64) {
-    use neo_fold::transcript::{FoldTranscript, Domain};
+    use neo_transcript::{Poseidon2Transcript, Transcript, labels as tr_labels};
     use neo_challenge::sample_kplus1_invertible;
 
-    let mut tr = FoldTranscript::default();
+    let mut tr = Poseidon2Transcript::new(b"neo/fold");
 
     // Π_CCS header absorb (ell=0 with n=1)
     let ell = s.n.trailing_zeros() as u32;
     let d_sc = s.max_degree() as u32;
     let ext = params.extension_check(ell, d_sc).unwrap();
-    tr.domain(Domain::CCS);
-    tr.absorb_ccs_header(64, ext.s_supported, params.lambda, ell, d_sc, ext.slack_bits);
-    tr.absorb_bytes(b"neo/ccs/batch");
+    tr.append_message(tr_labels::PI_CCS, b"");
+    tr.append_message(b"neo/ccs/header/v1", b"");
+    tr.append_u64s(b"ccs/header", &[64, ext.s_supported as u64, params.lambda as u64, ell as u64, d_sc as u64, ext.slack_bits.unsigned_abs() as u64]);
+    tr.append_message(b"neo/ccs/batch", b"");
 
     // Π_RLC absorb
-    tr.domain(Domain::Rlc);
-    tr.absorb_bytes(b"neo/params/v1");
-    tr.absorb_u64(&[params.q, params.lambda as u64, input_count as u64, params.s as u64]);
+    tr.append_message(tr_labels::PI_RLC, b"");
+    tr.append_message(b"neo/params/v1", b"");
+    tr.append_u64s(b"params", &[params.q, params.lambda as u64, input_count as u64, params.s as u64]);
 
-    let mut ch = tr.challenger();
-    let (rhos, t_bound) = sample_kplus1_invertible(&mut ch, &neo_challenge::DEFAULT_STRONGSET, input_count).unwrap();
+    let (rhos, t_bound) = sample_kplus1_invertible(&mut tr, &neo_challenge::DEFAULT_STRONGSET, input_count).unwrap();
     let rho_arrs: Vec<[F; neo_math::D]> = rhos.iter().map(|rho| rho.coeffs.as_slice().try_into().unwrap()).collect();
     (rho_arrs, t_bound)
 }

@@ -8,8 +8,8 @@
 //!
 //! Reference: Neo paper §§3.4, 4.5. (file-cited externally)
 
-use crate::transcript::FoldTranscript;
-use p3_field::PrimeField64;
+use neo_transcript::Transcript;
+// use p3_field::PrimeField64; // no longer needed
 
 /// Public, stable labels for Fiat–Shamir.
 pub mod ds {
@@ -41,34 +41,28 @@ impl<S: Clone> StrongSamplingSet<S> {
     }
 
     /// Sample exactly k challenges ρ_i ∈ C by FS with bias-free rejection sampling.
-    /// Uses rejection sampling to eliminate modulo bias when reducing to index range.
-    pub fn sample_k(&self, t: &mut FoldTranscript, label: &[u8], k: usize) -> Vec<S> {
+    /// Uses the standard "threshold trick" on 64-bit output to avoid modulo bias.
+    pub fn sample_k<T: Transcript>(&self, t: &mut T, label: &[u8], k: usize) -> Vec<S> {
         let n = self.elems.len() as u64;
         assert!(n > 0, "Strong set cannot be empty");
-        
-        // SECURITY: Prevent infinite loop if set size exceeds field modulus
-        // CRITICAL FIX: Use field modulus, not u64::MAX, for proper bias correction
-        let q = neo_math::F::ORDER_U64; // challenge_f() returns values in [0, q)
-        assert!(n <= q, 
-            "Strong set size {} exceeds field modulus {}, would cause infinite rejection loop", 
-            n, q);
-        
         let mut out = Vec::with_capacity(k);
-        let bound = q - (q % n);        // largest multiple of n <= q
-        
+        // Unbiased rejection sampling using the "zone" method:
+        // zone = largest multiple of n that fits in u64
+        let zone: u64 = n * (u64::MAX / n);
+
         for i in 0..k {
-            // Use our transcript's challenge mechanism with domain separation
-            t.absorb_bytes(&[label, b"/rho/", &(i as u64).to_le_bytes()].concat());
-            // Rejection sampling to avoid modulo bias
+            t.append_message(b"neo/rlc/label", label);
+            t.append_message(b"rho/index", &(i as u64).to_le_bytes());
             loop {
-                let f = t.challenge_f().as_canonical_u64(); // uniform in [0, q)
-                if f < bound {
-                    let idx = (f % n) as usize;
+                let mut buf = [0u8; 8];
+                t.challenge_bytes(b"chal/u64", &mut buf);
+                let v = u64::from_le_bytes(buf);
+                if v < zone {
+                    let idx = (v % n) as usize;
                     out.push(self.elems[idx].clone());
                     break;
                 }
-                // If rejected, absorb a salt and try again to get fresh randomness
-                t.absorb_bytes(b"/rejection/");
+                t.append_message(b"rejection", b"");
             }
         }
         out

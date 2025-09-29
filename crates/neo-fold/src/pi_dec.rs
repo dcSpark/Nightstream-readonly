@@ -8,7 +8,7 @@
 
 #![allow(non_snake_case)] // Allow mathematical notation like X, T, B
 
-use crate::transcript::{FoldTranscript, Domain};
+use neo_transcript::{Transcript, Poseidon2Transcript, labels as tr_labels};
 use neo_ajtai::{split_b, s_lincomb, assert_range_b, Commitment as Cmt, DecompStyle};
 use neo_ccs::{CcsStructure, MeInstance, MeWitness, Mat, utils::{tensor_point, mat_vec_mul_fk}};
 use neo_ccs::traits::SModuleHomomorphism;
@@ -107,7 +107,7 @@ pub fn verify_recomposition_k(
 /// This decomposes a large-base ME instance into multiple small-base instances.
 /// Uses neo-ajtai verified openings to ensure cryptographic soundness.
 pub fn pi_dec<L: SModuleHomomorphism<F, Cmt>>(
-    tr: &mut FoldTranscript,
+    tr: &mut Poseidon2Transcript,
     params: &neo_params::NeoParams,
     me_B: &MeInstance<Cmt, F, K>,
     wit_B: &MeWitness<F>, // Witness Z' for the large-base claim (prover-side)
@@ -116,7 +116,17 @@ pub fn pi_dec<L: SModuleHomomorphism<F, Cmt>>(
 ) -> Result<(Vec<MeInstance<Cmt, F, K>>, Vec<MeWitness<F>>, PiDecProof), PiDecError> {
     
     // === Domain separation ===
-    tr.domain(Domain::Dec);
+    tr.append_message(tr_labels::PI_DEC, b"");
+    // Bind parent commitment exactly as verifier expects
+    tr.append_message(b"parent_commitment_tag", b"");
+    tr.append_fields(b"parent_commitment", &me_B.c.data);
+    // Restore additional transcript bindings to harden against malleability:
+    // parent X matrix, m_in, and fold digest.
+    tr.append_message(b"parent_x_tag", b"");
+    tr.append_u64s(b"parent_x_dims", &[me_B.X.rows() as u64, me_B.X.cols() as u64]);
+    tr.append_u64s(b"parent_m_in", &[me_B.m_in as u64]);
+    tr.append_fields(b"parent_x", me_B.X.as_slice());
+    tr.append_bytes_packed(b"parent_fold_digest", &me_B.fold_digest);
     
     let d = wit_B.Z.rows();
     let m = wit_B.Z.cols();
@@ -199,6 +209,8 @@ pub fn pi_dec<L: SModuleHomomorphism<F, Cmt>>(
         digit_commitments.push(c_i);
         range_proof_data.push(proof_data);
     }
+
+    // Do not absorb extra digit-X/fold-digest here; verifier does not absorb them at this stage.
     
     // === Verified opening: prove c = Σ b^i · c_i ===
     let recomposition_proof = verify_split_open(
@@ -207,6 +219,25 @@ pub fn pi_dec<L: SModuleHomomorphism<F, Cmt>>(
         b as u64,
         l, // Pass the S-module homomorphism for verification
     ).map_err(|e| PiDecError::VerifiedOpeningFailed(format!("recomposition failed: {e:?}")))?;
+
+    // Bind digit commitments with indices exactly as verifier does
+    tr.append_message(b"digit_commitments_tag", b"");
+    for (i, c_i) in digit_commitments.iter().enumerate() {
+        tr.append_u64s(b"digit_index", &[i as u64]);
+        tr.append_fields(b"digit_commitment", &c_i.data);
+    }
+
+    // Also bind per-digit X matrices and fold digests for parity with verifier
+    tr.append_message(b"digit_x_tag", b"");
+    for (i, wit) in digit_witnesses.iter().enumerate() {
+        // Recompute X_i deterministically as done below
+        let X_i = l.project_x(&wit.Z, me_B.m_in);
+        tr.append_u64s(b"digit_idx", &[i as u64]);
+        tr.append_u64s(b"digit_x_dims", &[X_i.rows() as u64, X_i.cols() as u64]);
+        tr.append_fields(b"digit_x", X_i.as_slice());
+        // All digits inherit parent's fold_digest; bind explicitly
+        tr.append_bytes_packed(b"digit_fold_digest", &me_B.fold_digest);
+    }
     
     // === Create k ME(b,L) instances ===
     let mut me_instances = Vec::with_capacity(k);
@@ -301,7 +332,7 @@ pub fn pi_dec<L: SModuleHomomorphism<F, Cmt>>(
 
 /// Verify a Π_DEC proof
 pub fn pi_dec_verify<L: SModuleHomomorphism<F, Cmt>>(
-    tr: &mut FoldTranscript,
+    tr: &mut Poseidon2Transcript,
     params: &neo_params::NeoParams,
     input_me: &MeInstance<Cmt, F, K>,
     output_me_list: &[MeInstance<Cmt, F, K>],
@@ -309,32 +340,16 @@ pub fn pi_dec_verify<L: SModuleHomomorphism<F, Cmt>>(
     l: &L,
 ) -> Result<bool, PiDecError> {
     
-    tr.domain(Domain::Dec);
-    
-    // SECURITY: Absorb public objects into transcript to prevent malleability
-    // Absorb parent ME instance data
-    tr.absorb_bytes(b"parent_commitment_tag");
-    // For commitment, we absorb its serialized representation 
-    // TODO: Add commitment-specific absorption method to transcript if needed
-    
-    // Absorb parent X matrix
-    tr.absorb_bytes(b"parent_X_tag");
-    let x_flat: Vec<F> = input_me.X.as_slice().to_vec(); 
-    tr.absorb_f(&x_flat);
-    
-    // Absorb m_in
-    tr.absorb_u64(&[input_me.m_in as u64]);
-    
-    // Absorb digest for binding
-    tr.absorb_bytes(&input_me.fold_digest);
-    
-    // Absorb output digit ME instances' X values  
-    for (_i, me_digit) in output_me_list.iter().enumerate() {
-        tr.absorb_bytes(b"digit_X_tag");
-        let digit_x_flat: Vec<F> = me_digit.X.as_slice().to_vec();
-        tr.absorb_f(&digit_x_flat);
-        tr.absorb_bytes(&me_digit.fold_digest);
-    }
+    tr.append_message(tr_labels::PI_DEC, b"");
+    // Bind parent ME commitment identically to prover
+    tr.append_message(b"parent_commitment_tag", b"");
+    tr.append_fields(b"parent_commitment", &input_me.c.data);
+    // Mirror prover-side bindings: parent X, m_in, and fold digest
+    tr.append_message(b"parent_x_tag", b"");
+    tr.append_u64s(b"parent_x_dims", &[input_me.X.rows() as u64, input_me.X.cols() as u64]);
+    tr.append_u64s(b"parent_m_in", &[input_me.m_in as u64]);
+    tr.append_fields(b"parent_x", input_me.X.as_slice());
+    tr.append_bytes_packed(b"parent_fold_digest", &input_me.fold_digest);
     
     let k = params.k as usize;
     let b = params.b;
@@ -349,11 +364,20 @@ pub fn pi_dec_verify<L: SModuleHomomorphism<F, Cmt>>(
             return Ok(false);
         }
         
-        // SECURITY: Absorb digit commitments into transcript to prevent malleability  
-        tr.absorb_bytes(b"digit_commitments_tag");
-        for (_i, _c_i) in digit_commitments.iter().enumerate() {
-            // TODO: Add commitment-specific absorption if needed
-            // For now, the structural binding via recomposition verification provides security
+        // SECURITY: Absorb digit commitments into transcript to prevent malleability
+        tr.append_message(b"digit_commitments_tag", b"");
+        for (i, c_i) in digit_commitments.iter().enumerate() {
+            tr.append_u64s(b"digit_index", &[i as u64]);
+            tr.append_fields(b"digit_commitment", &c_i.data);
+        }
+
+        // Mirror prover: bind per-digit X matrices and fold digests
+        tr.append_message(b"digit_x_tag", b"");
+        for (i, me_digit) in output_me_list.iter().enumerate() {
+            tr.append_u64s(b"digit_idx", &[i as u64]);
+            tr.append_u64s(b"digit_x_dims", &[me_digit.X.rows() as u64, me_digit.X.cols() as u64]);
+            tr.append_fields(b"digit_x", me_digit.X.as_slice());
+            tr.append_bytes_packed(b"digit_fold_digest", &me_digit.fold_digest);
         }
         
         // Verify c = Σ b^i · c_i using neo-ajtai verified opening
@@ -579,7 +603,7 @@ mod tests {
     fn test_pi_dec_validation() {
         // Test basic input validation
         let params = NeoParams::goldilocks_127();
-        let mut tr = FoldTranscript::new(b"test_dec");
+        let mut tr = neo_transcript::Poseidon2Transcript::new(b"test_dec");
         
         // Empty witness should fail
         let empty_me = dummy_me_instance_B();

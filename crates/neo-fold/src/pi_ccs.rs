@@ -5,7 +5,7 @@
 
 #![allow(non_snake_case)] // Allow mathematical notation like X, T, B
 
-use crate::transcript::{FoldTranscript, Domain};
+use neo_transcript::{Transcript, Poseidon2Transcript, labels as tr_labels};
 use crate::error::PiCcsError;
 use neo_ccs::{CcsStructure, McsInstance, McsWitness, MeInstance, Mat, MatRef, SparsePoly};
 use neo_ajtai::Commitment as Cmt;
@@ -257,20 +257,21 @@ fn pad_to_pow2_k(mut v: Vec<K>, ell: usize) -> Result<Vec<K>, PiCcsError> {
 
 /// Absorb sparse polynomial definition into transcript for soundness binding.
 /// This prevents a malicious prover from using different polynomials with the same matrix structure.
-fn absorb_sparse_polynomial(tr: &mut FoldTranscript, f: &SparsePoly<F>) {
+fn absorb_sparse_polynomial(tr: &mut Poseidon2Transcript, f: &SparsePoly<F>) {
     // Absorb polynomial structure
-    tr.absorb_bytes(b"neo/ccs/poly");
-    tr.absorb_u64(&[f.arity() as u64]);
-    tr.absorb_u64(&[f.terms().len() as u64]);
+    tr.append_message(b"neo/ccs/poly", b"");
+    tr.append_u64s(b"arity", &[f.arity() as u64]);
+    tr.append_u64s(b"terms_len", &[f.terms().len() as u64]);
     
     // Absorb each term: coefficient + exponents (sorted for determinism)
     let mut terms: Vec<_> = f.terms().iter().collect();
     terms.sort_by_key(|term| &term.exps); // deterministic ordering
     
     for term in terms {
-        tr.absorb_f(&[term.coeff]);
-        tr.absorb_u64(&term.exps.iter().map(|&e| e as u64).collect::<Vec<_>>());
-    }
+        tr.append_fields(b"coeff", &[term.coeff]);
+        let exps: Vec<u64> = term.exps.iter().map(|&e| e as u64).collect();
+        tr.append_u64s(b"exps", &exps);
+}
 }
 
 // Detect whether a CCS structure encodes an R1CS relation: t=3 and f(y)=y0*y1 - y2.
@@ -643,14 +644,14 @@ pub fn eval_tie_constraints(
 /// 
 /// Input: k+1 CCS instances, outputs k ME instances + proof
 pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
-    tr: &mut FoldTranscript,
+    tr: &mut Poseidon2Transcript,
     params: &neo_params::NeoParams,
     s: &CcsStructure<F>,
     mcs_list: &[McsInstance<Cmt, F>],
     witnesses: &[McsWitness<F>],
     l: &L, // we need L to check c = L(Z) and to compute X = L_x(Z)
 ) -> Result<(Vec<MeInstance<Cmt, F, K>>, PiCcsProof), PiCcsError> {
-    tr.domain(Domain::CCS);
+    tr.append_message(tr_labels::PI_CCS, b"");
 
     // --- Input & policy checks ---
     if mcs_list.is_empty() || mcs_list.len() != witnesses.len() {
@@ -674,7 +675,9 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
             ext.slack_bits, params.lambda
         )));
     }
-    tr.absorb_ccs_header(64, ext.s_supported, params.lambda, ell as u32, d_sc as u32, ext.slack_bits);
+    tr.append_message(b"neo/ccs/header/v1", b"");
+    tr.append_u64s(b"ccs/header", &[64, ext.s_supported as u64, params.lambda as u64, ell as u64, d_sc as u64, ext.slack_bits.unsigned_abs() as u64]);
+    tr.append_message(b"ccs/slack_sign", &[if ext.slack_bits >= 0 {1} else {0}]);
 
     // MAJOR OPTIMIZATION: Convert to CSR sparse format once for all operations
     // This enables O(nnz) operations instead of O(n*m) for our extremely sparse matrices  
@@ -761,13 +764,13 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
 
     // --- SECURITY: Absorb instance data BEFORE sampling challenges to prevent malleability ---
     let transcript_start = std::time::Instant::now();
-    tr.absorb_bytes(b"neo/ccs/instances");
-    tr.absorb_u64(&[s.n as u64, s.m as u64, s.t() as u64]);
+    tr.append_message(b"neo/ccs/instances", b"");
+    tr.append_u64s(b"dims", &[s.n as u64, s.m as u64, s.t() as u64]);
     // OPTIMIZATION: Absorb compact ZK-friendly digest instead of 500M+ field elements 
     // This reduces transcript absorption from ~51s to microseconds using Poseidon2
     let matrix_digest = digest_ccs_matrices(s);
     for &digest_elem in &matrix_digest {
-        tr.absorb_f(&[F::from_u64(digest_elem.as_canonical_u64())]);
+        tr.append_fields(b"mat_digest", &[F::from_u64(digest_elem.as_canonical_u64())]);
     }
     // CRITICAL: Absorb polynomial definition to prevent malicious polynomial substitution
     absorb_sparse_polynomial(tr, &s.f);
@@ -775,10 +778,10 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     // Absorb all instance data (commitment, public inputs, witness structure)
     for inst in mcs_list.iter() {
         // Absorb instance data that affects soundness
-        tr.absorb_f(&inst.x);
-        tr.absorb_u64(&[inst.m_in as u64]);
+        tr.append_fields(b"x", &inst.x);
+        tr.append_u64s(b"m_in", &[inst.m_in as u64]);
         // CRITICAL: Absorb commitment to prevent cross-instance attacks
-        tr.absorb_f(&inst.c.data);
+        tr.append_fields(b"c_data", &inst.c.data);
     }
     println!("🔧 [TIMING] Transcript absorption: {:.2}ms", 
              transcript_start.elapsed().as_secs_f64() * 1000.0);
@@ -786,12 +789,12 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     // --- Generate eq-binding vector and batching coefficients for composed polynomial Q ---
     let batching_start = std::time::Instant::now();
     // Eq-binding vector w sampled before batching (used only when t>=3)
-    tr.absorb_bytes(b"neo/ccs/eq");
-    let w_eq: Vec<K> = (0..ell).map(|_| tr.challenge_k()).collect();
-    tr.absorb_bytes(b"neo/ccs/batch");
+    tr.append_message(b"neo/ccs/eq", b"");
+    let w_eq: Vec<K> = (0..ell).map(|_| { let ch = tr.challenge_fields(b"chal/k", 2); neo_math::from_complex(ch[0], ch[1]) }).collect();
+    tr.append_message(b"neo/ccs/batch", b"");
     
     // α coefficients for CCS constraints (one per instance)
-    let alphas: Vec<K> = (0..insts.len()).map(|_| tr.challenge_k()).collect();
+    let alphas: Vec<K> = (0..insts.len()).map(|_| { let ch = tr.challenge_fields(b"chal/k", 2); neo_math::from_complex(ch[0], ch[1]) }).collect();
     
     let batch_coeffs = BatchingCoeffs { alphas };
     println!("🔧 [TIMING] Batching coefficients: {:.2}ms", 
@@ -884,7 +887,7 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     
     // CRITICAL SECURITY FIX: Generate fold_digest from final transcript state
     // This binds the ME instances to the exact folding proof and prevents re-binding attacks
-    let fold_digest = tr.state_digest();
+    let fold_digest = tr.digest32();
     
     let mut out_me = Vec::with_capacity(insts.len());
     for (inst_idx, inst) in insts.iter().enumerate() {
@@ -939,14 +942,14 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
 
 /// Verify Π_CCS: Check sum-check rounds AND the critical final claim Q(r) = 0
 pub fn pi_ccs_verify(
-    tr: &mut FoldTranscript,
+    tr: &mut Poseidon2Transcript,
     params: &neo_params::NeoParams,
     s: &CcsStructure<F>,
     mcs_list: &[McsInstance<Cmt, F>], // Now used for final Q(r) check
     out_me: &[MeInstance<Cmt, F, K>],
     proof: &PiCcsProof,
 ) -> Result<bool, PiCcsError> {
-    tr.domain(Domain::CCS);
+    tr.append_message(tr_labels::PI_CCS, b"");
     // >>> CHANGE #2: allow arbitrary n; compute ℓ from next power of two
     if s.n == 0 { return Err(PiCcsError::InvalidInput("n=0 not allowed".into())); }
     let n_pad = s.n.next_power_of_two();
@@ -955,34 +958,34 @@ pub fn pi_ccs_verify(
 
     let ext = params.extension_check(ell as u32, d_sc as u32)
         .map_err(|e| PiCcsError::ExtensionPolicyFailed(e.to_string()))?;
-    tr.absorb_ccs_header(64, ext.s_supported, params.lambda, ell as u32, d_sc as u32, ext.slack_bits);
+    tr.append_message(b"neo/ccs/header/v1", b"");
+    tr.append_u64s(b"ccs/header", &[64, ext.s_supported as u64, params.lambda as u64, ell as u64, d_sc as u64, ext.slack_bits.unsigned_abs() as u64]);
+    tr.append_message(b"ccs/slack_sign", &[if ext.slack_bits >= 0 {1} else {0}]);
 
     // --- SECURITY: Absorb instance data BEFORE sampling challenges (match prover) ---
-    tr.absorb_bytes(b"neo/ccs/instances");
-    tr.absorb_u64(&[s.n as u64, s.m as u64, s.t() as u64]);
+    tr.append_message(b"neo/ccs/instances", b"");
+    tr.append_u64s(b"dims", &[s.n as u64, s.m as u64, s.t() as u64]);
     // OPTIMIZATION: Absorb compact ZK-friendly digest instead of 500M+ field elements 
     // This reduces transcript absorption from ~51s to microseconds using Poseidon2
     let matrix_digest = digest_ccs_matrices(s);
-    for &digest_elem in &matrix_digest {
-        tr.absorb_f(&[F::from_u64(digest_elem.as_canonical_u64())]);
-    }
+    for &digest_elem in &matrix_digest { tr.append_fields(b"mat_digest", &[F::from_u64(digest_elem.as_canonical_u64())]); }
     // CRITICAL: Absorb polynomial definition to prevent malicious polynomial substitution
     absorb_sparse_polynomial(tr, &s.f);
     
     // Absorb all instance data (commitment, public inputs, witness structure)
     for inst in mcs_list.iter() {
         // Absorb instance data that affects soundness
-        tr.absorb_f(&inst.x);
-        tr.absorb_u64(&[inst.m_in as u64]);
+        tr.append_fields(b"x", &inst.x);
+        tr.append_u64s(b"m_in", &[inst.m_in as u64]);
         // CRITICAL: Absorb commitment to prevent cross-instance attacks
-        tr.absorb_f(&inst.c.data);
+        tr.append_fields(b"c_data", &inst.c.data);
     }
 
     // Re-derive the SAME eq-binding vector and batching coefficients as the prover
-    tr.absorb_bytes(b"neo/ccs/eq");
-    let w_eq: Vec<K> = (0..ell).map(|_| tr.challenge_k()).collect();
-    tr.absorb_bytes(b"neo/ccs/batch");
-    let alphas: Vec<K> = (0..mcs_list.len()).map(|_| tr.challenge_k()).collect();
+    tr.append_message(b"neo/ccs/eq", b"");
+    let w_eq: Vec<K> = (0..ell).map(|_| { let ch = tr.challenge_fields(b"chal/k", 2); neo_math::from_complex(ch[0], ch[1]) }).collect();
+    tr.append_message(b"neo/ccs/batch", b"");
+    let alphas: Vec<K> = (0..mcs_list.len()).map(|_| { let ch = tr.challenge_fields(b"chal/k", 2); neo_math::from_complex(ch[0], ch[1]) }).collect();
     
     let batch_coeffs = BatchingCoeffs { alphas };
 
@@ -1000,7 +1003,7 @@ pub fn pi_ccs_verify(
     // For trivial cases (ell = 0, no rounds), skip binding checks
     if !proof.sumcheck_rounds.is_empty() {
         // Derive digest exactly where the prover did (after sum-check rounds)
-        let digest = tr.state_digest();
+        let digest = tr.digest32();
         // Verify proof header matches transcript state
         if proof.header_digest != digest {
             eprintln!("❌ PI_CCS VERIFY: header digest mismatch (proof={:?}, verifier={:?})",

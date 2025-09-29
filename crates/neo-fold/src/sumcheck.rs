@@ -8,7 +8,8 @@
 //! absorb all coefficients under the label `neo/ccs/round`.
 
 use crate::error::PiCcsError;
-use crate::transcript::FoldTranscript;
+use neo_transcript::{Transcript, Poseidon2Transcript};
+use neo_math::KExtensions;
 use neo_math::K;
 use p3_field::{Field, PrimeCharacteristicRing};
 
@@ -87,7 +88,7 @@ fn effective_degree(coeffs: &[K]) -> usize {
 /// 
 /// For unique reconstruction, pass at least `d_sc+1` pairwise-distinct `sample_xs`.
 pub fn run_sumcheck(
-    tr: &mut FoldTranscript,
+    tr: &mut Poseidon2Transcript,
     oracle: &mut dyn RoundOracle,
     initial_sum: K,
     sample_xs: &[K],
@@ -143,11 +144,16 @@ pub fn run_sumcheck(
         }
 
         // Bind polynomial to transcript and sample r_i
-        tr.absorb_ext_as_base_fields_k(b"neo/ccs/round", coeffs[0]);
+        // absorb round coeffs as base-field limbs
+        let coeffs0 = coeffs[0].as_coeffs();
+        tr.append_message(b"neo/ccs/round", b"");
+        tr.append_fields(b"round/coeffs", &coeffs0);
         for c in coeffs.iter().skip(1) {
-            tr.absorb_ext_as_base_fields_k(b"neo/ccs/round", *c);
+            let cc = c.as_coeffs();
+            tr.append_fields(b"round/coeffs", &cc);
         }
-        let r_i = tr.challenge_k();
+        let ch = tr.challenge_fields(b"chal/k", 2);
+        let r_i = neo_math::from_complex(ch[0], ch[1]);
 
         running_sum = poly_eval_k(&coeffs, r_i);
         oracle.fold(r_i);
@@ -162,7 +168,7 @@ pub fn run_sumcheck(
 /// Verifier: check the provided round polynomials and derive the same r-vector.
 /// Returns (r, final_sum, ok).
 pub fn verify_sumcheck_rounds(
-    tr: &mut FoldTranscript,
+    tr: &mut Poseidon2Transcript,
     d_sc: usize,
     initial_sum: K,
     rounds: &[Vec<K>],
@@ -179,11 +185,14 @@ pub fn verify_sumcheck_rounds(
         if p0 + p1 != running_sum {
             return (Vec::new(), K::ZERO, false);
         }
-        tr.absorb_ext_as_base_fields_k(b"neo/ccs/round", coeffs[0]);
+        tr.append_message(b"neo/ccs/round", b"");
+        let c0 = coeffs[0].as_coeffs();
+        tr.append_fields(b"round/coeffs", &c0);
         for c in coeffs.iter().skip(1) {
-            tr.absorb_ext_as_base_fields_k(b"neo/ccs/round", *c);
+            tr.append_fields(b"round/coeffs", &c.as_coeffs());
         }
-        let r_i = tr.challenge_k();
+        let ch = tr.challenge_fields(b"chal/k", 2);
+        let r_i = neo_math::from_complex(ch[0], ch[1]);
         running_sum = poly_eval_k(coeffs, r_i);
         r.push(r_i);
     }
@@ -198,7 +207,7 @@ pub fn verify_sumcheck_rounds(
 /// - must contain distinct points
 /// - must include 0 and 1
 pub fn run_sumcheck_skip_eval_at_one(
-    tr: &mut FoldTranscript,
+    tr: &mut Poseidon2Transcript,
     oracle: &mut dyn RoundOracle,
     initial_sum: K,
     sample_xs_full: &[K],
@@ -279,9 +288,12 @@ pub fn run_sumcheck_skip_eval_at_one(
         }
 
         // Transcript binding
-        tr.absorb_ext_as_base_fields_k(b"neo/ccs/round", coeffs[0]);
-        for c in coeffs.iter().skip(1) { tr.absorb_ext_as_base_fields_k(b"neo/ccs/round", *c); }
-        let r_i = tr.challenge_k();
+        tr.append_message(b"neo/ccs/round", b"");
+        let c0 = coeffs[0].as_coeffs();
+        tr.append_fields(b"round/coeffs", &c0);
+        for c in coeffs.iter().skip(1) { tr.append_fields(b"round/coeffs", &c.as_coeffs()); }
+        let ch = tr.challenge_fields(b"chal/k", 2);
+        let r_i = neo_math::from_complex(ch[0], ch[1]);
 
         running_sum = poly_eval_k(&coeffs, r_i);
         oracle.fold(r_i);

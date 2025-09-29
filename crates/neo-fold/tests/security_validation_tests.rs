@@ -8,7 +8,7 @@
 //! - P0-3: Range verification moved from placeholders to cryptographic proofs
 //! - P0-4: Transcript binding across the folding-SNARK pipeline
 
-use neo_fold::transcript::FoldTranscript;
+use neo_transcript::{Poseidon2Transcript, Transcript};
 use neo_ccs::{MeInstance, Mat, traits::SModuleHomomorphism};
 use neo_ajtai::{setup, AjtaiSModule, set_global_pp};
 use std::sync::Arc;
@@ -22,7 +22,7 @@ use rand::rng;
 #[allow(non_snake_case)]
 fn test_p0_1_real_composed_polynomial_q_verification() {
     use neo_fold::pi_ccs::{pi_ccs_prove, pi_ccs_verify};
-    use neo_fold::transcript::FoldTranscript;
+    use neo_transcript::Poseidon2Transcript;
     use neo_ccs::{CcsStructure, McsInstance, McsWitness, Mat, SparsePoly, Term};
     
     // Create a simple CCS: z[0] + z[1] = z[2]
@@ -62,13 +62,13 @@ fn test_p0_1_real_composed_polynomial_q_verification() {
     let instance = McsInstance { c: commitment, x: vec![], m_in: witness.Z.cols() };
     
     // Test honest proof generation and verification
-    let mut prove_transcript = FoldTranscript::default();
+    let mut prove_transcript = Poseidon2Transcript::new(b"neo/fold");
     let prove_result = pi_ccs_prove(&mut prove_transcript, &params, &ccs, &[instance.clone()], &[witness], &ajtai);
     
     match prove_result {
         Ok((me_instances, proof)) => {
             // Verify the proof - this tests Q(r) = 0
-            let mut verify_transcript = FoldTranscript::default();
+            let mut verify_transcript = Poseidon2Transcript::new(b"neo/fold");
             let verify_result = pi_ccs_verify(&mut verify_transcript, &params, &ccs, &[instance], &me_instances, &proof);
             
             assert!(verify_result.is_ok(), "Honest proof verification should not error");
@@ -199,7 +199,7 @@ fn test_p0_3_range_verification_in_pi_ccs_not_placeholders() {
         range_proofs: vec![5, 6, 7, 8], // This should trigger warning, not verification
     };
     
-    let mut transcript = neo_fold::transcript::FoldTranscript::default();
+    let mut transcript = Poseidon2Transcript::new(b"neo/fold");
     
     // Test range proof handling - π_DEC should handle range proof data gracefully
     let result = pi_dec_verify(&mut transcript, &params, &parent_me, &digit_instances, &proof_with_range_data, &ajtai);
@@ -342,34 +342,34 @@ fn test_p0_4_fold_digest_binds_transcript_to_me_instances() {
 #[test]
 fn test_transcript_determinism_and_uniqueness() {
     // Create two identical transcripts
-    let mut tr1 = FoldTranscript::default();
-    let mut tr2 = FoldTranscript::default();
+    let mut tr1 = Poseidon2Transcript::new(b"neo/fold");
+    let mut tr2 = Poseidon2Transcript::new(b"neo/fold");
     
     // Same operations should produce same digest
-    tr1.absorb_bytes(b"test");
-    tr2.absorb_bytes(b"test");
-    let digest1 = tr1.state_digest();
-    let digest2 = tr2.state_digest();
+    tr1.append_message(b"bytes", b"test");
+    tr2.append_message(b"bytes", b"test");
+    let digest1 = tr1.digest32();
+    let digest2 = tr2.digest32();
     assert_eq!(digest1, digest2, "Same operations should produce same digest");
     
     // Different operations should produce different digests
-    let mut tr3 = FoldTranscript::default();
-    tr3.absorb_bytes(b"different");
-    let digest3 = tr3.state_digest();
+    let mut tr3 = Poseidon2Transcript::new(b"neo/fold");
+    tr3.append_message(b"bytes", b"different");
+    let digest3 = tr3.digest32();
     assert_ne!(digest1, digest3, "Different operations should produce different digests");
     
     // Test order sensitivity
-    let mut tr4 = FoldTranscript::default();
-    let mut tr5 = FoldTranscript::default();
+    let mut tr4 = Poseidon2Transcript::new(b"neo/fold");
+    let mut tr5 = Poseidon2Transcript::new(b"neo/fold");
     
-    tr4.absorb_bytes(b"first");
-    tr4.absorb_bytes(b"second");
+    tr4.append_message(b"bytes", b"first");
+    tr4.append_message(b"bytes", b"second");
     
-    tr5.absorb_bytes(b"second"); 
-    tr5.absorb_bytes(b"first");
+    tr5.append_message(b"bytes", b"second"); 
+    tr5.append_message(b"bytes", b"first");
     
-    let digest4 = tr4.state_digest();
-    let digest5 = tr5.state_digest();
+    let digest4 = tr4.digest32();
+    let digest5 = tr5.digest32();
     assert_ne!(digest4, digest5, "Different order should produce different digests");
 }
 

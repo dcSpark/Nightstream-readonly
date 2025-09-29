@@ -8,10 +8,8 @@
 
 #![allow(non_snake_case)] // Allow mathematical notation
 
-use neo_fold::{
-    transcript::FoldTranscript,
-    pi_dec::{pi_dec, pi_dec_verify, PiDecProof, PiDecError},
-};
+use neo_fold::pi_dec::{pi_dec, pi_dec_verify, PiDecProof, PiDecError};
+use neo_transcript::{Poseidon2Transcript, Transcript};
 use neo_ccs::{CcsStructure, MeInstance, MeWitness, Mat, SparsePoly, Term, traits::SModuleHomomorphism};
 use neo_ajtai::{setup, commit, Commitment};
 use neo_math::{F, K};
@@ -99,7 +97,7 @@ fn test_pi_dec_range_constraint_enforcement() {
     println!("🔍 Testing Π_DEC range constraint enforcement...");
     
     let params = NeoParams::goldilocks_127();
-    let mut transcript = FoldTranscript::new(b"test_pi_dec_range");
+    let mut transcript = Poseidon2Transcript::new(b"test_pi_dec_range");
     let ccs = create_test_ccs();
     let l = TestSModuleHom;
     
@@ -136,8 +134,8 @@ fn test_pi_dec_verification_consistency() {
     println!("🔍 Testing Π_DEC verification consistency...");
     
     let params = NeoParams::goldilocks_127();
-    let mut transcript_prove = FoldTranscript::new(b"test_pi_dec_verify");
-    let mut transcript_verify = FoldTranscript::new(b"test_pi_dec_verify");
+    let mut transcript_prove = Poseidon2Transcript::new(b"test_pi_dec_verify");
+    let mut transcript_verify = Poseidon2Transcript::new(b"test_pi_dec_verify");
     let ccs = create_test_ccs();
     let l = TestSModuleHom;
     
@@ -224,7 +222,7 @@ fn test_pi_dec_range_proof_validation() {
         range_proofs: valid_range_proofs,
     };
     
-    let mut transcript1 = FoldTranscript::new(b"range_test");
+    let mut transcript1 = Poseidon2Transcript::new(b"range_test");
     let result1 = pi_dec_verify(&mut transcript1, &params, &me_instance, &digit_instances, &valid_proof, &l);
     
     match result1 {
@@ -249,7 +247,7 @@ fn test_pi_dec_range_proof_validation() {
         range_proofs: invalid_range_proofs,
     };
     
-    let mut transcript2 = FoldTranscript::new(b"range_test");
+    let mut transcript2 = Poseidon2Transcript::new(b"range_test");
     let result2 = pi_dec_verify(&mut transcript2, &params, &me_instance, &digit_instances, &invalid_proof, &l);
     
     match result2 {
@@ -270,7 +268,7 @@ fn test_pi_dec_empty_input_rejection() {
     println!("🔍 Testing Π_DEC empty input rejection...");
     
     let params = NeoParams::goldilocks_127();
-    let mut transcript = FoldTranscript::new(b"test_empty_input");
+    let mut transcript = Poseidon2Transcript::new(b"test_empty_input");
     let ccs = create_test_ccs();
     let l = TestSModuleHom;
     
@@ -345,7 +343,7 @@ fn test_pi_dec_me_relation_consistency() {
         range_proofs: vec![],
     };
     
-    let mut transcript = FoldTranscript::new(b"consistency_test");
+    let mut transcript = Poseidon2Transcript::new(b"consistency_test");
     let result = pi_dec_verify(
         &mut transcript,
         &params,

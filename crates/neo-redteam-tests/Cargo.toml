@@ -19,6 +19,7 @@ neo-challenge = { path = "../neo-challenge" }
 neo-ccs = { path = "../neo-ccs" }
 neo-fold = { path = "../neo-fold" }
 neo-spartan-bridge = { path = "../neo-spartan-bridge" }
+neo-transcript = { path = "../neo-transcript" }
 rand = { workspace = true }
 anyhow = { workspace = true }
 p3-goldilocks = { workspace = true }

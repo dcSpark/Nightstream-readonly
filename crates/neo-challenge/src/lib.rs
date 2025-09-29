@@ -9,11 +9,11 @@
 mod metrics;
 
 use core::fmt::Debug;
-use p3_challenger::{CanObserve, CanSampleBits, FieldChallenger};
 use p3_field::{Field, PrimeCharacteristicRing};
 use p3_goldilocks::Goldilocks as Fq;
 use p3_matrix::dense::RowMajorMatrix;
 use serde::{Deserialize, Serialize};
+use neo_transcript::Transcript;
 use thiserror::Error;
 
 // Bring the rotation map from R_q to S ⊂ F_q^{d×d}.
@@ -68,14 +68,9 @@ pub enum ChallengeError {
 /// Domain-separated sampler for a single ρ = rot(a).
 ///
 /// `C` can be any `FieldChallenger<Fq>` (Poseidon2-based `DuplexChallenger` or hash-based `HashChallenger`).
-pub fn sample_rho<C>(chal: &mut C, cfg: &StrongSetConfig) -> Rho
-where
-    C: FieldChallenger<Fq> + CanObserve<u8> + CanSampleBits<usize>,
-{
-    // Domain separation.
-    for &b in cfg.domain_sep {
-        chal.observe(b);
-    }
+pub fn sample_rho<T: Transcript>(tr: &mut T, cfg: &StrongSetConfig) -> Rho {
+    // Domain separation
+    tr.append_message(b"neo/chal/domain", cfg.domain_sep);
 
     // Sample coefficients a_i ∈ [-H..H] mapped into F_q.
     let mut a = Vec::with_capacity(cfg.d);
@@ -85,11 +80,8 @@ where
     for _ in 0..cfg.d {
         // Use rejection sampling to avoid modulo bias
         let x = loop {
-            let candidate = chal.sample_bits(needed_bits);
-            if candidate < width {
-                break candidate;
-            }
-            // Reject and try again - this eliminates modulo bias
+            let candidate = sample_bits_from_tr(tr, needed_bits);
+            if candidate < width { break candidate; }
         };
         let z = (x as i32) - cfg.coeff_bound;
         a.push(int_to_fq(z));
@@ -102,20 +94,17 @@ where
 /// Sample k+1 elements ρ₁,...,ρ_{k+1} with **pairwise invertible differences**, resampling if needed (MUST).
 ///
 /// This is the object used by Π_RLC (paper §4.5). Returns also the computed **T** bound from `cfg`.
-pub fn sample_kplus1_invertible<C>(
-    chal: &mut C,
+pub fn sample_kplus1_invertible<T: Transcript>(
+    tr: &mut T,
     cfg: &StrongSetConfig,
     k_plus_one: usize,
-) -> Result<(Vec<Rho>, u64), ChallengeError>
-where
-    C: FieldChallenger<Fq> + CanObserve<u8> + CanSampleBits<usize>,
-{
+) -> Result<(Vec<Rho>, u64), ChallengeError> {
     let mut attempts = 0usize;
 
     loop {
         attempts += 1;
         // fresh batch of ρ's
-        let rhos: Vec<Rho> = (0..k_plus_one).map(|_| sample_rho(chal, cfg)).collect();
+        let rhos: Vec<Rho> = (0..k_plus_one).map(|_| sample_rho(tr, cfg)).collect();
 
         // Check pairwise invertibility: rot(a_i - a_j) invertible for all i≠j (Theorem 7 ⇒ rot linear; matrix invertibility ↔ ring invertibility).
         if all_pairwise_differences_invertible(&rhos, cfg.d) {
@@ -127,9 +116,7 @@ where
         }
 
         // Re-seed domain to avoid cycles; light domain bump.
-        for &b in b"neo.challenge.reroll" {
-            chal.observe(b);
-        }
+        tr.append_message(b"neo/chal/reroll", b"reroll");
     }
 }
 
@@ -147,6 +134,20 @@ fn int_to_fq(z: i32) -> Fq {
     } else {
         let neg = (-z) as u64;
         Fq::ZERO - Fq::from_u64(neg)
+    }
+}
+
+fn sample_bits_from_tr<T: Transcript>(tr: &mut T, bits: usize) -> usize {
+    let bytes_needed = (bits + 7) / 8;
+    let mut buf = vec![0u8; bytes_needed];
+    tr.challenge_bytes(b"neo/chal/bits", &mut buf);
+    let mut val: usize = 0;
+    for (i, b) in buf.iter().enumerate() { val |= (*b as usize) << (8 * i); }
+    if bits < usize::BITS as usize {
+        let mask: usize = if bits == 0 { 0 } else { (1usize << bits) - 1 };
+        val & mask
+    } else {
+        val
     }
 }
 

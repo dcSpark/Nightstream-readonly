@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use neo::{ivc, ivc_chain};
+use neo::ivc;
 use neo::{F, CcsStructure, NeoParams};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
@@ -42,7 +42,12 @@ fn fold_roundtrip_chain_ok() -> anyhow::Result<()> {
         const1_witness_index: 0,
     };
     let y0 = vec![F::from_u64(10), F::from_u64(20)];
-    let mut state = ivc_chain::State::new(params.clone(), step_ccs.clone(), y0.clone(), binding.clone())?;
+    // Manual chained proving (replaces ivc_chain)
+    let mut acc = ivc::Accumulator { c_z_digest: [0u8;32], c_coords: vec![], y_compact: y0.clone(), step: 0 };
+    let mut proofs: Vec<ivc::IvcProof> = Vec::new();
+    let mut prev_me = None;
+    let mut prev_me_wit = None;
+    let mut prev_lhs = None;
 
     // Prove 3 steps with arbitrary y_step embedded at offsets [1,2]
     let steps = [
@@ -50,14 +55,33 @@ fn fold_roundtrip_chain_ok() -> anyhow::Result<()> {
         vec![F::ONE, F::from_u64(7),  F::from_u64(1)],
         vec![F::ONE, F::from_u64(11), F::from_u64(2)],
     ];
-    for w in steps {
-        state = ivc_chain::step(state, &[], &w)?;
+    for (i, w) in steps.into_iter().enumerate() {
+        let y_step = w[1..=y_len].to_vec();
+        let input = ivc::IvcStepInput {
+            params: &params,
+            step_ccs: &step_ccs,
+            step_witness: &w,
+            prev_accumulator: &acc,
+            step: i as u64,
+            public_input: Some(&[]),
+            y_step: &y_step,
+            binding_spec: &binding,
+            transcript_only_app_inputs: false,
+            prev_augmented_x: proofs.last().map(|p| p.step_augmented_public_input.as_slice()),
+        };
+        let (res, me, wit, lhs_next) = ivc::prove_ivc_step_chained(
+            input,
+            prev_me.take(),
+            prev_me_wit.take(),
+            prev_lhs.take(),
+        ).map_err(|e| anyhow::anyhow!("prove_ivc_step_chained failed: {}", e))?;
+        acc = res.proof.next_accumulator.clone();
+        prev_me = Some(me);
+        prev_me_wit = Some(wit);
+        prev_lhs = Some(lhs_next);
+        proofs.push(res.proof);
     }
-    let chain = ivc::IvcChainProof {
-        steps: state.ivc_proofs.clone(),
-        final_accumulator: state.accumulator.clone(),
-        chain_length: state.ivc_proofs.len() as u64,
-    };
+    let chain = ivc::IvcChainProof { steps: proofs.clone(), final_accumulator: acc.clone(), chain_length: proofs.len() as u64 };
     let initial_acc = ivc::Accumulator {
         c_z_digest: [0u8; 32],
         c_coords: vec![],
@@ -66,7 +90,7 @@ fn fold_roundtrip_chain_ok() -> anyhow::Result<()> {
     };
 
     // Verify (strict: step checks + folding)
-    let ok = ivc::verify_ivc_chain_strict(
+    let ok = ivc::verify_ivc_chain(
         &step_ccs,
         &chain,
         &initial_acc,
@@ -121,9 +145,15 @@ fn fold_roundtrip_rejects_mutated_rhs_commitment() -> anyhow::Result<()> {
         const1_witness_index: 0,
     };
     let y0 = vec![F::from_u64(1)];
-    let mut state = ivc_chain::State::new(params.clone(), step_ccs.clone(), y0, binding.clone())?;
-    state = ivc_chain::step(state, &[], &[F::ONE, F::from_u64(7)])?;
-    let mut step_proof = state.ivc_proofs[0].clone();
+    // manual single-step proof
+    let acc = ivc::Accumulator { c_z_digest: [0u8;32], c_coords: vec![], y_compact: y0.clone(), step: 0 };
+    let w = vec![F::ONE, F::from_u64(7)];
+    let y_step = w[1..=y_len].to_vec();
+    let input = ivc::IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &w, prev_accumulator: &acc, step: 0, public_input: Some(&[]), y_step: &y_step, binding_spec: &binding, transcript_only_app_inputs: false, prev_augmented_x: None };
+    let (res, _, _, _) = ivc::prove_ivc_step_chained(input, None, None, None)
+        .map_err(|e| anyhow::anyhow!("prove_ivc_step_chained failed: {}", e))?;
+    let _acc_unused = res.proof.next_accumulator.clone();
+    let mut step_proof = res.proof.clone();
 
     // Corrupt the RHS commitment the verifier will absorb into Pi-CCS transcript
     if let Some(fold) = &mut step_proof.folding_proof {

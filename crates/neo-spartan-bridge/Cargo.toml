@@ -6,16 +6,21 @@ license = "Apache-2.0"
 
 [features]
 default = []
-debug-logs = []  # Available but not used by default
+# Forward neo-transcript debug logging so tests can enable transcript dumps on stable
+debug-logs = ["neo-transcript", "neo-transcript/debug-log"]  # Available but not used by default
 # Enable verbose logging for debugging (OFF by default for security - CWE-532)
 neo-logs = []
 # Expose testing utilities without making them part of the stable API
 testing = []
+# Dev-only toggles (e.g., env switch to disable constraints) — NEVER enable in production
+neo_dev_only = []
 
 [dependencies]
 once_cell = "1.19"
 dashmap = "5.5"
 blake3 = { workspace = true }
+# Bring in neo-transcript as optional so we can forward its debug-log feature for tests
+neo-transcript = { path = "../neo-transcript", optional = true }
 # Core utilities
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

@@ -4,7 +4,7 @@
 //! These tests ensure that the fixes work correctly and prevent regressions.
 
 use neo_fold::bridge_adapter::{modern_to_legacy_witness, modern_to_legacy_instance};
-use neo_fold::{FoldTranscript, Domain};
+use neo_transcript::{Poseidon2Transcript, Transcript, labels as tr_labels};
 use neo_ccs::{MeInstance, MeWitness, Mat};
 use neo_ajtai::setup;
 use neo_math::{F, K};
@@ -105,34 +105,34 @@ fn test_pi_dec_recomposition_correctness() {
 #[test] 
 fn test_transcript_deterministic_parameters() {
     // Create multiple transcripts with the same seed
-    let transcript1 = FoldTranscript::new(b"test_seed");
-    let transcript2 = FoldTranscript::new(b"test_seed");
+    let transcript1 = Poseidon2Transcript::new(b"test_seed");
+    let transcript2 = Poseidon2Transcript::new(b"test_seed");
     
     // Clone for separate operations
     let mut tr1 = transcript1;
     let mut tr2 = transcript2;
     
     // Apply identical operations
-    tr1.domain(Domain::CCS);
-    tr1.absorb_bytes(b"test_data");
-    tr1.absorb_f(&[F::ONE, F::from_u64(42)]);
+    tr1.append_message(tr_labels::PI_CCS, b"");
+    tr1.append_message(b"bytes", b"test_data");
+    tr1.append_fields(b"F", &[F::ONE, F::from_u64(42)]);
     
-    tr2.domain(Domain::CCS);  
-    tr2.absorb_bytes(b"test_data");
-    tr2.absorb_f(&[F::ONE, F::from_u64(42)]);
+    tr2.append_message(tr_labels::PI_CCS, b"");
+    tr2.append_message(b"bytes", b"test_data");
+    tr2.append_fields(b"F", &[F::ONE, F::from_u64(42)]);
     
     // Get state digests - should be identical
-    let digest1 = tr1.state_digest();
-    let digest2 = tr2.state_digest();
+    let digest1 = tr1.digest32();
+    let digest2 = tr2.digest32();
     
     assert_eq!(digest1, digest2, "Deterministic transcript parameters failed: different digests");
     
     // Test that different seeds produce different results  
-    let mut tr3 = FoldTranscript::new(b"different_seed");
-    tr3.domain(Domain::CCS);
-    tr3.absorb_bytes(b"test_data");
-    tr3.absorb_f(&[F::ONE, F::from_u64(42)]);
-    let digest3 = tr3.state_digest();
+    let mut tr3 = Poseidon2Transcript::new(b"different_seed");
+    tr3.append_message(tr_labels::PI_CCS, b"");
+    tr3.append_message(b"bytes", b"test_data");
+    tr3.append_fields(b"F", &[F::ONE, F::from_u64(42)]);
+    let digest3 = tr3.digest32();
     
     assert_ne!(digest1, digest3, "Different seeds should produce different digests");
 }
@@ -154,27 +154,31 @@ fn test_polynomial_absorption_affects_challenges() {
     ]);
     
     // Create transcripts and absorb different polynomials
-    let mut tr1 = FoldTranscript::new(b"poly_test");
-    tr1.absorb_bytes(b"neo/ccs/poly");
-    tr1.absorb_u64(&[poly1.arity() as u64]);
-    tr1.absorb_u64(&[poly1.terms().len() as u64]);
+    let mut tr1 = Poseidon2Transcript::new(b"poly_test");
+    tr1.append_message(b"neo/ccs/poly", b"");
+    tr1.append_u64s(b"arity", &[poly1.arity() as u64]);
+    tr1.append_u64s(b"terms_len", &[poly1.terms().len() as u64]);
     for term in poly1.terms() {
-        tr1.absorb_f(&[term.coeff]);
-        tr1.absorb_u64(&term.exps.iter().map(|&e| e as u64).collect::<Vec<_>>());
+        tr1.append_fields(b"coeff", &[term.coeff]);
+        let exps: Vec<u64> = term.exps.iter().map(|&e| e as u64).collect();
+        tr1.append_u64s(b"exps", &exps);
     }
     
-    let mut tr2 = FoldTranscript::new(b"poly_test");
-    tr2.absorb_bytes(b"neo/ccs/poly");
-    tr2.absorb_u64(&[poly2.arity() as u64]);
-    tr2.absorb_u64(&[poly2.terms().len() as u64]);
+    let mut tr2 = Poseidon2Transcript::new(b"poly_test");
+    tr2.append_message(b"neo/ccs/poly", b"");
+    tr2.append_u64s(b"arity", &[poly2.arity() as u64]);
+    tr2.append_u64s(b"terms_len", &[poly2.terms().len() as u64]);
     for term in poly2.terms() {
-        tr2.absorb_f(&[term.coeff]);
-        tr2.absorb_u64(&term.exps.iter().map(|&e| e as u64).collect::<Vec<_>>());
+        tr2.append_fields(b"coeff", &[term.coeff]);
+        let exps2: Vec<u64> = term.exps.iter().map(|&e| e as u64).collect();
+        tr2.append_u64s(b"exps", &exps2);
     }
     
     // Sample challenges - should be different
-    let challenge1 = tr1.challenge_k();
-    let challenge2 = tr2.challenge_k();
+    let ch1 = tr1.challenge_fields(b"chal/k", 2);
+    let ch2 = tr2.challenge_fields(b"chal/k", 2);
+    let challenge1 = neo_math::from_complex(ch1[0], ch1[1]);
+    let challenge2 = neo_math::from_complex(ch2[0], ch2[1]);
     
     assert_ne!(challenge1, challenge2, 
         "Different polynomials should produce different challenges");

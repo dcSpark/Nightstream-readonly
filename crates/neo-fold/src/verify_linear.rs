@@ -5,7 +5,7 @@
 //! accumulator to avoid relying on `Vec<K>: Add + Default`.
 
 use crate::strong_set::{StrongSamplingSet, VerificationError, ds};
-use crate::transcript::FoldTranscript;
+use neo_transcript::Poseidon2Transcript;
 use neo_math::K;
 use p3_field::PrimeCharacteristicRing;
 
@@ -17,7 +17,7 @@ use p3_field::PrimeCharacteristicRing;
 ///
 /// Uses explicit closures for zero/add operations to avoid trait bound issues.
 pub fn verify_linear_rlc<C, XM, S, FLeftC, FLeftX, FLeftY, FZeroC, FAddC, FZeroX, FAddX>(
-    transcript: &mut FoldTranscript,
+    transcript: &mut Poseidon2Transcript,
     strong_set: &StrongSamplingSet<S>,
     // Output
     c_out: &C,

@@ -1,5 +1,5 @@
 use neo_fold::sumcheck::{RoundOracle, run_sumcheck, run_sumcheck_skip_eval_at_one, verify_sumcheck_rounds};
-use neo_fold::transcript::FoldTranscript;
+use neo_transcript::{Poseidon2Transcript, Transcript};
 use neo_math::{F, K};
 use p3_field::PrimeCharacteristicRing;
 
@@ -14,7 +14,7 @@ impl RoundOracle for ZeroOracle {
 
 #[test]
 fn engine_accepts_zero_polynomial() {
-    let mut tr_p = FoldTranscript::default();
+    let mut tr_p = Poseidon2Transcript::new(b"sumcheck");
     let mut oracle = ZeroOracle { ell: 3, d: 2 };
     // sample points: 0, 1, 2 over K
     let xs: Vec<K> = (0..=2u64).map(|u| K::from(F::from_u64(u))).collect();
@@ -24,7 +24,7 @@ fn engine_accepts_zero_polynomial() {
     assert_eq!(out.rounds.len(), 3);
 
     // verifier recomputes the same r-vector and accepts
-    let mut tr_v = FoldTranscript::default();
+    let mut tr_v = Poseidon2Transcript::new(b"sumcheck");
     let (r, _sum, ok) = verify_sumcheck_rounds(&mut tr_v, 2, K::ZERO, &out.rounds);
     assert!(ok, "verifier should accept rounds for zero polynomial");
     assert_eq!(r.len(), 3);
@@ -61,7 +61,7 @@ impl RoundOracle for CountingOracle {
 
 #[test]
 fn zero_rounds_final_sum_equals_initial() {
-    let mut tr_p = FoldTranscript::default();
+    let mut tr_p = Poseidon2Transcript::new(b"sumcheck");
     let initial = K::from_u64(123);
     let mut oracle = CountingOracle { ell: 0, d: 1, folds: 0, cur_sum: initial, last_a: K::ZERO, last_b: K::ZERO };
     let xs: Vec<K> = (0..=1u64).map(|u| K::from(F::from_u64(u))).collect();
@@ -69,7 +69,7 @@ fn zero_rounds_final_sum_equals_initial() {
     assert_eq!(out.rounds.len(), 0);
     assert_eq!(out.final_sum, initial);
     assert_eq!(oracle.folds, 0);
-    let mut tr_v = FoldTranscript::default();
+    let mut tr_v = Poseidon2Transcript::new(b"sumcheck");
     let (_r, sum, ok) = verify_sumcheck_rounds(&mut tr_v, 1, initial, &out.rounds);
     assert!(ok);
     assert_eq!(sum, initial);
@@ -81,13 +81,13 @@ fn determinism_and_fold_count() {
     let xs: Vec<K> = (0..=2u64).map(|u| K::from(F::from_u64(u))).collect();
 
     // run #1
-    let mut tr1 = FoldTranscript::default();
+    let mut tr1 = Poseidon2Transcript::new(b"sumcheck");
     let mut o1 = CountingOracle { ell, d: 2, folds: 0, cur_sum: K::ZERO, last_a: K::ZERO, last_b: K::ZERO };
     let out1 = run_sumcheck(&mut tr1, &mut o1, K::ZERO, &xs).unwrap();
     assert_eq!(o1.folds, ell);
 
     // run #2: same inputs ⇒ identical rounds & challenges
-    let mut tr2 = FoldTranscript::default();
+    let mut tr2 = Poseidon2Transcript::new(b"sumcheck");
     let mut o2 = CountingOracle { ell, d: 2, folds: 0, cur_sum: K::ZERO, last_a: K::ZERO, last_b: K::ZERO };
     let out2 = run_sumcheck(&mut tr2, &mut o2, K::ZERO, &xs).unwrap();
 
@@ -95,9 +95,9 @@ fn determinism_and_fold_count() {
     assert_eq!(out1.challenges, out2.challenges);
 
     // verifier accepts both
-    let mut tr_v1 = FoldTranscript::default();
+    let mut tr_v1 = Poseidon2Transcript::new(b"sumcheck");
     let (_r1, _s1, ok1) = verify_sumcheck_rounds(&mut tr_v1, 2, K::ZERO, &out1.rounds);
-    let mut tr_v2 = FoldTranscript::default();
+    let mut tr_v2 = Poseidon2Transcript::new(b"sumcheck");
     let (_r2, _s2, ok2) = verify_sumcheck_rounds(&mut tr_v2, 2, K::ZERO, &out2.rounds);
     assert!(ok1 && ok2);
 }
@@ -111,7 +111,7 @@ fn rejects_wrong_eval_count() {
         fn evals_at(&mut self, xs: &[K]) -> Vec<K> { vec![K::ZERO; xs.len() - 1] }
         fn fold(&mut self, _r_i: K) {}
     }
-    let mut tr = FoldTranscript::default();
+    let mut tr = Poseidon2Transcript::new(b"sumcheck");
     let mut o = BadCount { ell: 1, d: 1 };
     let xs: Vec<K> = (0..=1u64).map(|u| K::from(F::from_u64(u))).collect();
     assert!(run_sumcheck(&mut tr, &mut o, K::ZERO, &xs).is_err());
@@ -128,7 +128,7 @@ fn rejects_p0_plus_p1_mismatch() {
         }
         fn fold(&mut self, _r_i: K) {}
     }
-    let mut tr = FoldTranscript::default();
+    let mut tr = Poseidon2Transcript::new(b"sumcheck");
     let mut o = BadPoly { ell: 1, d: 0 };
     let xs = vec![K::ZERO]; // degree 0 ⇒ one point
     assert!(run_sumcheck(&mut tr, &mut o, K::ZERO, &xs).is_err());
@@ -137,7 +137,7 @@ fn rejects_p0_plus_p1_mismatch() {
 #[test]
 fn verifier_rejects_tampered_coeffs() {
     // honest run
-    let mut tr_p = FoldTranscript::default();
+    let mut tr_p = Poseidon2Transcript::new(b"sumcheck");
     let mut oracle = CountingOracle { ell: 2, d: 1, folds: 0, cur_sum: K::ZERO, last_a: K::ZERO, last_b: K::ZERO };
     let xs: Vec<K> = (0..=1u64).map(|u| K::from(F::from_u64(u))).collect();
     let out = run_sumcheck(&mut tr_p, &mut oracle, K::ZERO, &xs).unwrap();
@@ -146,7 +146,7 @@ fn verifier_rejects_tampered_coeffs() {
     let mut tampered = out.rounds.clone();
     tampered[0][0] += K::ONE;
 
-    let mut tr_v = FoldTranscript::default();
+    let mut tr_v = Poseidon2Transcript::new(b"sumcheck");
     let (_r, _sum, ok) = verify_sumcheck_rounds(&mut tr_v, 1, K::ZERO, &tampered);
     assert!(!ok);
 }
@@ -155,7 +155,7 @@ fn verifier_rejects_tampered_coeffs() {
 fn verifier_rejects_degree_overflow() {
     // fabricate a round polynomial with degree 3 while d_sc == 2
     let rounds = vec![ vec![K::ZERO, K::ONE, K::ONE, K::ONE] ]; // len=4 ⇒ deg=3
-    let mut tr_v = FoldTranscript::default();
+    let mut tr_v = Poseidon2Transcript::new(b"sumcheck");
     let (_r, _sum, ok) = verify_sumcheck_rounds(&mut tr_v, 2, K::ZERO, &rounds);
     assert!(!ok);
 }
@@ -166,8 +166,8 @@ fn verifier_rejects_degree_overflow() {
 fn skip_eval_at_one_matches_baseline_quadratic_points() {
     let xs_full: Vec<K> = (0..=2u64).map(|u| K::from(F::from_u64(u))).collect();
 
-    let mut tr1 = FoldTranscript::default();
-    let mut tr2 = FoldTranscript::default();
+    let mut tr1 = Poseidon2Transcript::new(b"sumcheck");
+    let mut tr2 = Poseidon2Transcript::new(b"sumcheck");
 
     let mut o1 = CountingOracle { ell: 3, d: 2, folds: 0, cur_sum: K::ZERO, last_a: K::ZERO, last_b: K::ZERO };
     let mut o2 = CountingOracle { ell: 3, d: 2, folds: 0, cur_sum: K::ZERO, last_a: K::ZERO, last_b: K::ZERO };
@@ -179,8 +179,8 @@ fn skip_eval_at_one_matches_baseline_quadratic_points() {
     assert_eq!(out1.challenges, out2.challenges, "r-vector must match");
     assert_eq!(o1.folds, o2.folds, "same number of folds");
 
-    let mut tv1 = FoldTranscript::default();
-    let mut tv2 = FoldTranscript::default();
+    let mut tv1 = Poseidon2Transcript::new(b"sumcheck");
+    let mut tv2 = Poseidon2Transcript::new(b"sumcheck");
     let (_r1, _s1, ok1) = verify_sumcheck_rounds(&mut tv1, 2, K::ZERO, &out1.rounds);
     let (_r2, _s2, ok2) = verify_sumcheck_rounds(&mut tv2, 2, K::ZERO, &out2.rounds);
     assert!(ok1 && ok2);
@@ -189,12 +189,12 @@ fn skip_eval_at_one_matches_baseline_quadratic_points() {
 #[test]
 fn skip_eval_at_one_rejects_if_missing_zero_or_one() {
     let xs_missing_one = vec![K::from(F::from_u64(0)), K::from(F::from_u64(2))];
-    let mut tr = FoldTranscript::default();
+    let mut tr = Poseidon2Transcript::new(b"sumcheck");
     let mut o = CountingOracle { ell: 1, d: 2, folds: 0, cur_sum: K::ZERO, last_a: K::ZERO, last_b: K::ZERO };
     assert!(run_sumcheck_skip_eval_at_one(&mut tr, &mut o, K::ZERO, &xs_missing_one).is_err());
 
     let xs_missing_zero = vec![K::from(F::from_u64(1)), K::from(F::from_u64(2))];
-    let mut tr2 = FoldTranscript::default();
+    let mut tr2 = Poseidon2Transcript::new(b"sumcheck");
     let mut o2 = CountingOracle { ell: 1, d: 2, folds: 0, cur_sum: K::ZERO, last_a: K::ZERO, last_b: K::ZERO };
     assert!(run_sumcheck_skip_eval_at_one(&mut tr2, &mut o2, K::ZERO, &xs_missing_zero).is_err());
 }
@@ -203,7 +203,7 @@ fn skip_eval_at_one_rejects_if_missing_zero_or_one() {
 fn skip_eval_at_one_rejects_insufficient_points_for_degree_bound() {
     // d_sc = 2 but only two points {0,1}
     let xs_full = vec![K::ZERO, K::ONE];
-    let mut tr = FoldTranscript::default();
+    let mut tr = Poseidon2Transcript::new(b"sumcheck");
     let mut o = CountingOracle { ell: 1, d: 2, folds: 0, cur_sum: K::ZERO, last_a: K::ZERO, last_b: K::ZERO };
     assert!(run_sumcheck_skip_eval_at_one(&mut tr, &mut o, K::ZERO, &xs_full).is_err());
 }
@@ -224,7 +224,7 @@ impl RoundOracle for QuadOracleSkip {
 fn skip_eval_at_one_rejects_degree_overflow() {
     // 3 points allow interpolation to detect true degree 2 > d_bound=1
     let xs_full: Vec<K> = (0..=2u64).map(|u| K::from(F::from_u64(u))).collect();
-    let mut tr = FoldTranscript::default();
+    let mut tr = Poseidon2Transcript::new(b"sumcheck");
     let mut o = QuadOracleSkip { ell: 1, d_bound: 1 };
     assert!(run_sumcheck_skip_eval_at_one(&mut tr, &mut o, K::ZERO, &xs_full).is_err());
 }
@@ -232,7 +232,7 @@ fn skip_eval_at_one_rejects_degree_overflow() {
 #[test]
 fn duplicated_sample_points_are_rejected() {
     // Using ZeroOracle; engine should error out due to duplicate sample points
-    let mut tr = FoldTranscript::default();
+    let mut tr = Poseidon2Transcript::new(b"sumcheck");
     let mut o = ZeroOracle { ell: 1, d: 2 };
     let xs = vec![K::from(F::from_u64(0)), K::from(F::from_u64(0)), K::from(F::from_u64(1))];
     let res = run_sumcheck(&mut tr, &mut o, K::ZERO, &xs);
@@ -255,7 +255,7 @@ impl RoundOracle for QuadOracle {
 
 #[test]
 fn prover_degree_overflow_rejected_when_nodes_sufficient() {
-    let mut tr = FoldTranscript::default();
+    let mut tr = Poseidon2Transcript::new(b"sumcheck");
     let mut o = QuadOracle { ell: 1, d_bound: 1 };
     // 3 nodes ⇒ interpolation reveals true degree 2
     let xs: Vec<K> = (0..=2u64).map(|u| K::from(F::from_u64(u))).collect();
@@ -274,11 +274,11 @@ fn verifier_final_sum_matches_prover_final_sum() {
         fn fold(&mut self, _r: K) {}
     }
     let xs: Vec<K> = (0..=2u64).map(|u| K::from(F::from_u64(u))).collect();
-    let mut tr_p = FoldTranscript::default();
+    let mut tr_p = Poseidon2Transcript::new(b"sumcheck");
     let mut o = ZeroLin { ell: 4, d: 2 };
     let out = run_sumcheck(&mut tr_p, &mut o, K::ZERO, &xs).unwrap();
 
-    let mut tr_v = FoldTranscript::default();
+    let mut tr_v = Poseidon2Transcript::new(b"sumcheck");
     let (_r, v_sum, ok) = verify_sumcheck_rounds(&mut tr_v, 2, K::ZERO, &out.rounds);
     assert!(ok);
     assert_eq!(v_sum, out.final_sum, "verifier and prover must agree on final reduced claim");
@@ -288,7 +288,7 @@ fn verifier_final_sum_matches_prover_final_sum() {
 fn verifier_rejects_reordered_rounds() {
     // honest run with an oracle that maintains the invariant across rounds
     let xs: Vec<K> = (0..=1u64).map(|u| K::from(F::from_u64(u))).collect();
-    let mut tr_p = FoldTranscript::default();
+    let mut tr_p = Poseidon2Transcript::new(b"sumcheck");
     let mut o = CountingOracle { ell: 2, d: 1, folds: 0, cur_sum: K::ONE, last_a: K::ZERO, last_b: K::ZERO };
     let out = run_sumcheck(&mut tr_p, &mut o, K::ONE, &xs).unwrap();
 
@@ -296,7 +296,7 @@ fn verifier_rejects_reordered_rounds() {
     let mut tampered = out.rounds.clone();
     tampered.reverse();
 
-    let mut tr_v = FoldTranscript::default();
+    let mut tr_v = Poseidon2Transcript::new(b"sumcheck");
     let (_r, _s, ok) = verify_sumcheck_rounds(&mut tr_v, 1, K::ONE, &tampered);
     assert!(!ok, "reordering rounds must fail due to transcript/challenges mismatch");
 }

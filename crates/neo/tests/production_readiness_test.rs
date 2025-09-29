@@ -16,48 +16,50 @@
 use anyhow::Result;
 use std::time::Instant;
 use neo::{NeoParams, F, ivc::{prove_ivc_step_with_extractor, Accumulator, StepBindingSpec, LastNExtractor}};
-use neo::ivc_chain;
+use neo::{NivcProgram, NivcStepSpec, NivcFinalizeOptions};
 
 // Helper function to replace the removed prove_ivc_final_snark
 fn prove_ivc_final_snark_compat(
     params: &NeoParams,
     ivc_proofs: &[neo::ivc::IvcProof],
-    _final_public_input: &[F], // Ignored since chained API generates correct format
+    _final_public_input: &[F], // Ignored; NIVC finalize reconstructs format
 ) -> anyhow::Result<(neo::Proof, neo_ccs::CcsStructure<F>, Vec<F>)> {
     if ivc_proofs.is_empty() {
         return Err(anyhow::anyhow!("Cannot generate final SNARK from empty IVC chain"));
     }
-    
-    // Extract binding spec from the first proof (assuming all use same spec)
+
+    // Program/binding: single-lane program using the increment CCS
+    let step_ccs = build_increment_ccs();
     let binding_spec = StepBindingSpec {
-        y_step_offsets: vec![3],        
+        y_step_offsets: vec![3],
         x_witness_indices: vec![2],
-        y_prev_witness_indices: vec![], // No binding to EV y_prev (they're different values!)
+        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
-    
-    // Create temporary state and add proofs
-    let step_ccs = build_increment_ccs();
-    let mut temp_state = ivc_chain::State::new(params.clone(), step_ccs, vec![F::ZERO], binding_spec)?;
-    for proof in ivc_proofs {
-        temp_state.ivc_proofs.push(proof.clone());
-    }
-    
-    // Extract running ME from the final proof (if available)
-    if let Some(final_proof) = ivc_proofs.last() {
-        if let (Some(me_instances), Some(me_witnesses)) = (&final_proof.me_instances, &final_proof.digit_witnesses) {
-            if let (Some(final_me), Some(final_wit)) = (me_instances.last(), me_witnesses.last()) {
-                temp_state.set_running_me(final_me.clone(), final_wit.clone());
-            }
+    let program = NivcProgram::new(vec![NivcStepSpec { ccs: step_ccs, binding: binding_spec }]);
+
+    // Build a synthetic NIVC chain from IVC proofs
+    let steps: Vec<neo::NivcStepProof> = ivc_proofs
+        .iter()
+        .map(|p| neo::NivcStepProof { which_type: 0, step_io: p.step_public_input.clone(), inner: p.clone() })
+        .collect();
+    let last = ivc_proofs.last().unwrap();
+    let mut acc = neo::nivc::NivcAccumulators::new(1, last.next_accumulator.y_compact.clone());
+    // Carry final lane ME + witness and commitment data for final compression
+    if let (Some(meis), Some(wits)) = (&last.me_instances, &last.digit_witnesses) {
+        if let (Some(me), Some(wit)) = (meis.last(), wits.last()) {
+            acc.lanes[0].me = Some(me.clone());
+            acc.lanes[0].wit = Some(wit.clone());
         }
     }
-    
-    // Generate final proof
-    let result = ivc_chain::finalize_and_prove(temp_state)?;
-    let (final_proof, final_augmented_ccs, final_public_input) = result
+    acc.lanes[0].c_coords = last.next_accumulator.c_coords.clone();
+    acc.lanes[0].c_digest = last.next_accumulator.c_z_digest;
+    acc.step = last.step + 1;
+    let chain = neo::NivcChainProof { steps, final_acc: acc };
+
+    let (proof, aug_ccs, public_input) = neo::finalize_nivc_chain_with_options(&program, params, chain, NivcFinalizeOptions { embed_ivc_ev: false })?
         .ok_or_else(|| anyhow::anyhow!("No steps to finalize"))?;
-    
-    Ok((final_proof, final_augmented_ccs, final_public_input))
+    Ok((proof, aug_ccs, public_input))
 }
 use neo_ccs::{r1cs_to_ccs, Mat, CcsStructure};
 use p3_field::PrimeCharacteristicRing;
