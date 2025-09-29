@@ -954,6 +954,7 @@ dependencies = [
  "rand_chacha",
  "rayon",
  "serde",
+ "serial_test",
  "subtle",
  "tracing",
 ]

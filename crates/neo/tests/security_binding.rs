@@ -4,6 +4,7 @@
 //! (ccs, public_input) context and cannot be replayed for different contexts.
 
 use anyhow::Result;
+use serial_test::serial;
 use neo::{prove, verify, ProveInput, NeoParams, CcsStructure, F};
 use neo_ccs::{check_ccs_rowwise_zero, r1cs_to_ccs, Mat};
 use p3_field::PrimeCharacteristicRing;
@@ -276,11 +277,15 @@ fn rejects_wrong_ccs_or_public_input() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn rejects_tampered_public_io() -> Result<()> {
     let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
     let ccs = one_row_ccs_x_eq_x();
     let z = vec![F::ONE, F::from_u64(5)];
     let public_input: Vec<F> = vec![];
+
+    // Ensure VK registry starts clean for deterministic behavior
+    neo_spartan_bridge::clear_vk_registry();
 
     let proof = prove(ProveInput {
         params: &params,
@@ -306,6 +311,7 @@ fn rejects_tampered_public_io() -> Result<()> {
 }
 
 #[test]
+#[serial]
 fn fails_when_vk_registry_is_missing() -> Result<()> {
     let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
     let ccs = one_row_ccs_x_eq_x();

@@ -49,3 +49,4 @@ num_cpus = { workspace = true }
 num-bigint = "0.4"  # For examples only
 # Enable testing features for security tests
 neo-spartan-bridge = { path = "../neo-spartan-bridge", features = ["testing"] }
+serial_test = "3"
