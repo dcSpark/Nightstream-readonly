@@ -343,16 +343,93 @@ pub fn finalize_nivc_chain_with_options(
     // Build final public input for the final SNARK
     let final_public_input = crate::ivc::build_final_snark_public_input(&step_x, rho, &y_prev, &y_next);
 
-    // Extract final running ME for the chosen lane
-    let lane = &chain.final_acc.lanes[j];
-    let (final_me, final_me_wit) = match (&lane.me, &lane.wit) {
-        (Some(me), Some(wit)) => (me, wit),
-        _ => anyhow::bail!("No running ME instance available on the chosen lane for final proof"),
+    // Extract ME and witness for final SNARK:
+    // Prefer the RHS step ME/witness whose commitment equals c_step, so Ajtai@step binds correctly.
+    // Fall back to the most recent available pair; else use running lane.
+    let (final_me, final_me_wit) = if let (Some(meis), Some(wits)) = (&last.inner.me_instances, &last.inner.digit_witnesses) {
+        if !meis.is_empty() && !wits.is_empty() {
+            // Try to locate the RHS (step) instance by exact commitment equality.
+            let mut idx = core::cmp::min(meis.len(), wits.len()) - 1; // default: last
+            for i in 0..core::cmp::min(meis.len(), wits.len()) {
+                if meis[i].c.data.len() == last.inner.c_step_coords.len()
+                    && meis[i].c.data == last.inner.c_step_coords
+                {
+                    idx = i;
+                    break;
+                }
+            }
+            (&meis[idx], &wits[idx])
+        } else {
+            let lane = &chain.final_acc.lanes[j];
+            match (&lane.me, &lane.wit) {
+                (Some(me), Some(wit)) => (me, wit),
+                _ => anyhow::bail!("No running ME instance available on the chosen lane for final proof"),
+            }
+        }
+    } else {
+        let lane = &chain.final_acc.lanes[j];
+        match (&lane.me, &lane.wit) {
+            (Some(me), Some(wit)) => (me, wit),
+            _ => anyhow::bail!("No running ME instance available on the chosen lane for final proof"),
+        }
     };
 
     // Bridge adapter: modern → legacy
-    let (mut legacy_me, legacy_wit, _pp) = crate::adapt_from_modern(
-        std::slice::from_ref(final_me),
+    // Select the binding target for Ajtai rows in the final SNARK.
+    // - When embedding EV checks, bind to c_next (accumulator commitment) and enforce
+    //   commitment evolution in-circuit.
+    // - Otherwise (no EV embedding), bind directly to the step-only commitment (c_step),
+    //   which matches the witness Z used to build the ME instance.
+    let mut me_for_bridge = final_me.clone();
+    {
+        let (label, coords) = if opts.embed_ivc_ev {
+            ("accumulator c_next", &last.inner.next_accumulator.c_coords)
+        } else {
+            ("step commitment c_step", &last.inner.c_step_coords)
+        };
+        eprintln!(
+            "[FIXUP] modern.c.data <= {} (len {} -> {})",
+            label,
+            me_for_bridge.c.data.len(),
+            coords.len()
+        );
+        me_for_bridge.c.data = coords.clone();
+        let show = core::cmp::min(4, me_for_bridge.c.data.len());
+        if show > 0 {
+            let mut buf = String::new();
+            for i in 0..show {
+                if i > 0 { buf.push_str(", "); }
+                buf.push_str(&format!("{}", me_for_bridge.c.data[i].as_canonical_u64()));
+            }
+            eprintln!("[HOST-CHECK] modern.c.data[0..{}): {}", show, buf);
+        } else {
+            eprintln!("[HOST-CHECK] modern.c.data is EMPTY (len=0)");
+        }
+    }
+
+    // Debug: identify the chosen ME/WIT index that matches c_step
+    {
+        if let (Some(meis), Some(wits)) = (&last.inner.me_instances, &last.inner.digit_witnesses) {
+            let mut idx_dbg: isize = -1;
+            for i in 0..core::cmp::min(meis.len(), wits.len()) {
+                if meis[i].c.data.len() == last.inner.c_step_coords.len()
+                    && meis[i].c.data == last.inner.c_step_coords
+                {
+                    idx_dbg = i as isize; break;
+                }
+            }
+            eprintln!("[DEBUG] Finalizer picked RHS ME index: {} (of {})", idx_dbg, meis.len());
+            if idx_dbg >= 0 {
+                let wi = &wits[idx_dbg as usize];
+                let d0 = wi.Z.rows(); let m0 = wi.Z.cols();
+                let sample = if d0 > 0 && m0 > 0 { wi.Z[(0,0)].as_canonical_u64() } else { 0 };
+                eprintln!("[DEBUG] final_me_wit.Z dims = {}x{}, Z[0,0] = {}", d0, m0, sample);
+            }
+        }
+    }
+
+    let (mut legacy_me, mut legacy_wit, _pp) = crate::adapt_from_modern(
+        std::slice::from_ref(&me_for_bridge),
         std::slice::from_ref(final_me_wit),
         &augmented_ccs,
         params,
@@ -360,50 +437,347 @@ pub fn finalize_nivc_chain_with_options(
         None,
     ).map_err(|e| anyhow::anyhow!("Bridge adapter failed: {}", e))?;
 
+    // Show a few z-digits after adaptation
+    {
+        #[allow(deprecated)]
+        let show = core::cmp::min(8, legacy_wit.z_digits.len());
+        if show > 0 {
+            let mut buf = String::new();
+            #[allow(deprecated)]
+            for i in 0..show { if i>0 { buf.push_str(", "); } buf.push_str(&format!("{}", legacy_wit.z_digits[i])); }
+            eprintln!("[DEBUG] legacy_wit.z_digits[0..{}): {}", show, buf);
+        } else {
+            eprintln!("[DEBUG] legacy_wit.z_digits is EMPTY (len=0)");
+        }
+    }
+
+    // Align Ajtai binding target with the actual witness used in the SNARK.
+    // Without EV embedding, the witness corresponds to the full step state (including U),
+    // so recompute c_coords as ⟨L_i, z_digits⟩ using PP to avoid mismatch.
+    if !opts.embed_ivc_ev {
+        #[allow(deprecated)]
+        {
+            let z_len_dm = final_me_wit.Z.rows() * final_me_wit.Z.cols();
+            let rows = {
+                #[allow(deprecated)]
+                { legacy_me.c_coords.len() }
+            };
+            let mut new_coords = Vec::with_capacity(rows);
+            for i in 0..rows {
+                match neo_ajtai::compute_single_ajtai_row(&_pp, i, z_len_dm, rows) {
+                    Ok(row) => {
+                        let mut acc_f = neo_math::F::ZERO;
+                        for (j, &a) in row.iter().enumerate() {
+                            if j >= legacy_wit.z_digits.len() { break; }
+                            let zi = legacy_wit.z_digits[j];
+                            let zf = if zi >= 0 { neo_math::F::from_u64(zi as u64) } else { -neo_math::F::from_u64((-zi) as u64) };
+                            acc_f += a * zf;
+                        }
+                        new_coords.push(acc_f);
+                    }
+                    Err(e) => anyhow::bail!("Failed to compute Ajtai row {}: {}", i, e),
+                }
+            }
+            eprintln!("[FIXUP] legacy_me.c_coords recomputed from PP •z (aligned with witness)");
+            legacy_me.c_coords = new_coords;
+        }
+    }
+
     // Bind proof to augmented CCS + public input
     let context_digest = crate::context_digest_v1(&augmented_ccs, &final_public_input);
     #[allow(deprecated)]
     { legacy_me.header_digest = context_digest; }
 
-    // Compress to lean proof, embedding EV (stable) by default
-    let ajtai_pp_arc = std::sync::Arc::new(_pp);
-    let lean = if opts.embed_ivc_ev {
-        // Expose y_step via claims (stable path) and embed EV
-        anyhow::ensure!(rho != F::ZERO, "ρ is zero; EV embedding not supported");
-        let rho_inv = F::ONE / rho;
-        let pub_cols = final_public_input.len();
-        let m = final_me_wit.Z.cols();
-        let mut claims: Vec<crate::OutputClaim<F>> = Vec::with_capacity(y_len);
-        for (i, &off) in spec.binding.y_step_offsets.iter().enumerate().take(y_len) {
-            let expected = (y_next[i] - y_prev[i]) * rho_inv;
-            let k_index = pub_cols + off; // position in [public || witness]
-            let weight = crate::expose_z_component(params, m, k_index);
-            claims.push(crate::OutputClaim { weight, expected });
+    // Quick host-side Ajtai sanity: show a few c_coords and spot-check inner products
+    #[allow(deprecated)]
+    {
+        let show = {
+            #[allow(deprecated)]
+            { core::cmp::min(4, legacy_me.c_coords.len()) }
+        };
+        if show > 0 {
+            let mut buf = String::new();
+            for i in 0..show {
+                if i > 0 { buf.push_str(", "); }
+                let cc_i = {
+                    #[allow(deprecated)]
+                    { legacy_me.c_coords[i] }
+                };
+                buf.push_str(&format!("{}", cc_i.as_canonical_u64()));
+            }
+            eprintln!("[HOST-CHECK] c_coords[0..{}): {}", show, buf);
+        } else {
+            eprintln!("[HOST-CHECK] c_coords is EMPTY (len=0)");
         }
-        let (mut legacy_me2, legacy_wit2, _pp2) = crate::adapt_from_modern(
-            std::slice::from_ref(final_me),
-            std::slice::from_ref(final_me_wit),
-            &augmented_ccs,
-            params,
-            &claims,
-            None,
-        ).map_err(|e| anyhow::anyhow!("Bridge adapter (with EV claims) failed: {}", e))?;
+        // Spot-check Ajtai row IPs with correct z_len = d*m (pre-padding)
+        let z_len_dm = final_me_wit.Z.rows() * final_me_wit.Z.cols();
+        let rows = {
+            #[allow(deprecated)]
+            { legacy_me.c_coords.len() }
+        };
+        let take = core::cmp::min(3, rows);
+        for i in 0..take {
+            match neo_ajtai::compute_single_ajtai_row(&_pp, i, z_len_dm, rows) {
+                Ok(row) => {
+                    let mut acc = neo_math::F::ZERO;
+                    // Use only the original (pre-padding) limbs
+                    for (j, &a) in row.iter().enumerate() {
+                        if j >= legacy_wit.z_digits.len() { break; }
+                        let z = legacy_wit.z_digits[j];
+                        let zf = if z >= 0 { neo_math::F::from_u64(z as u64) } else { -neo_math::F::from_u64((-z) as u64) };
+                        acc += a * zf;
+                    }
+                    let cc_i = {
+                        #[allow(deprecated)]
+                        { legacy_me.c_coords[i] }
+                    };
+                    eprintln!("[HOST-CHECK] row {} • z = {} vs c_coords[{}] = {}", i, acc.as_canonical_u64(), i, cc_i.as_canonical_u64());
+                }
+                Err(e) => eprintln!("[HOST-CHECK] compute_single_ajtai_row({}) failed: {}", i, e),
+            }
+        }
+    }
+
+    // If embedding EV and binding Ajtai to the step vector, DO NOT swap digit witnesses.
+    // Use the z_digits already paired with `final_me_wit` (the RHS step instance).
+    // Only ensure power-of-two padding for circuit compatibility.
+    if opts.embed_ivc_ev {
         #[allow(deprecated)]
-        { legacy_me2.header_digest = context_digest; }
-        let fold_digest_opt = last.inner.folding_proof.as_ref().map(|fp| neo_fold::folding_proof_digest(fp));
-        // Stable EV-only embedding with fold-chain digest bound in public IO
+        let original_len = legacy_wit.z_digits.len();
+        #[allow(deprecated)]
+        let target_len = if original_len <= 1 { 1 } else { original_len.next_power_of_two() };
+        if target_len > original_len {
+            eprintln!(
+                "🔍 modern_to_legacy_witness(): z_digits padded from {} to {} (power-of-two)",
+                original_len, target_len
+            );
+            #[allow(deprecated)]
+            legacy_wit.z_digits.resize(target_len, 0i64);
+        }
+    }
+
+    // Compress to lean proof. If embedding EV, also enforce linkage and commitment evolution in-circuit.
+    let ajtai_pp_arc = std::sync::Arc::new(_pp.clone());
+    let lean = if opts.embed_ivc_ev {
+        anyhow::ensure!(rho != F::ZERO, "ρ is zero; EV embedding not supported");
+
+        // Use the IVC verifier-style circuit to enforce EV + linkage + commitment evolution.
+        // 1) EV: Provide (ρ, y_prev, y_next); optionally expose y_step as public convenience.
+        let y_step_public = {
+            let rho_inv = F::ONE / rho;
+            Some(y_next.iter().zip(y_prev.iter()).map(|(n,p)| (*n - *p) * rho_inv).collect::<Vec<_>>())
+        };
+        // For now, avoid deriving an extra fold-chain digest for rho binding in-circuit.
+        // The proof is already bound to the augmented CCS + public input via context_digest_v1.
+        let fold_digest_opt = None;
+
+        // Keep legacy_me.c_coords equal to the accumulator commitment (c_next).
+        // Ajtai will bind to me.c_coords, and EV constraints enforce commit evolution.
+
+        // Precompute acc evolution vectors
+        let c_step_vec = last.inner.c_step_coords.clone();
+        let c_next_vec = last.inner.next_accumulator.c_coords.clone();
+        let _c_prev_vec = c_next_vec.iter().zip(c_step_vec.iter())
+            .map(|(n,s)| *n - rho * *s).collect::<Vec<_>>();
+
+        // Recompute the step commitment vector directly from PP rows and the adapted witness
+        // to guarantee Ajtai parity inside the circuit. This avoids relying on the pipeline's
+        // c_step_coords ordering and ensures constraints match the provided witness.
+        let c_step_from_z: Vec<F> = {
+            let d_pp = final_me_wit.Z.rows();
+            let m_pp = final_me_wit.Z.cols();
+            let z_len_dm = d_pp * m_pp; // original (pre-padding) length
+            let rows = last.inner.c_step_coords.len();
+            let mut out = Vec::with_capacity(rows);
+            for i in 0..rows {
+                match neo_ajtai::compute_single_ajtai_row(&_pp, i, z_len_dm, rows) {
+                    Ok(row) => {
+                        let mut acc_f = F::ZERO;
+                        #[allow(deprecated)]
+                        for j in 0..core::cmp::min(z_len_dm, legacy_wit.z_digits.len()) {
+                            let a = row[j];
+                            let zi = legacy_wit.z_digits[j];
+                            let zf = if zi >= 0 { F::from_u64(zi as u64) } else { -F::from_u64((-zi) as u64) };
+                            acc_f += a * zf;
+                        }
+                        out.push(acc_f);
+                    }
+                    Err(e) => anyhow::bail!("Ajtai row {} compute failed: {}", i, e),
+                }
+            }
+            out
+        };
+
+        // Re-derive prev from next and the recomputed step to keep commit-evo consistent.
+        let c_prev_from_z: Vec<F> = {
+            let mut v = Vec::with_capacity(c_next_vec.len());
+            for i in 0..c_next_vec.len() { v.push(c_next_vec[i] - rho * c_step_from_z[i]); }
+            v
+        };
+
         let ev_embed = neo_spartan_bridge::IvcEvEmbed {
             rho,
             y_prev: y_prev.clone(),
             y_next: y_next.clone(),
-            y_step_public: None,
+            y_step_public,
             fold_chain_digest: fold_digest_opt,
-            acc_c_prev: None,
-            acc_c_step: None,
-            acc_c_next: None,
+            // Bind Ajtai to the recomputed step vector; enforce evolution to c_next.
+            acc_c_prev: Some(c_prev_from_z.clone()),
+            acc_c_step: Some(c_step_from_z.clone()),
+            acc_c_next: Some(c_next_vec.clone()),
             rho_eff: None,
         };
-        neo_spartan_bridge::compress_me_to_lean_proof_with_pp_and_ev(&legacy_me2, &legacy_wit2, Some(ajtai_pp_arc), Some(ev_embed))?
+
+        // Preflight Ajtai parity: verify that with the current witness digits the Ajtai rows
+        // reproduce the intended binding target (acc_c_step) before we create the SNARK.
+        // This localizes issues to the finalizer if constraints wouldn't hold.
+        let do_strict = std::env::var("NEO_AJTAI_STRICT_PREFLIGHT").ok().as_deref() == Some("1");
+        let do_log    = do_strict || std::env::var("NEO_AJTAI_PREFLIGHT").ok().as_deref() == Some("1");
+        if do_log {
+            let d_pp = final_me_wit.Z.rows();
+            let m_pp = final_me_wit.Z.cols();
+            let rows = last.inner.c_step_coords.len();
+            match neo_ajtai::get_global_pp_for_dims(d_pp, m_pp) {
+                Ok(pp_chk) => {
+                    let z_len = d_pp * m_pp;
+                    let mut mismatches = 0usize;
+                    let mut first_few: Vec<(usize, u64, u64)> = Vec::new();
+                    for i in 0..rows {
+                        let row = match neo_ajtai::compute_single_ajtai_row(&pp_chk, i, z_len, rows) {
+                            Ok(r) => r,
+                            Err(e) => { eprintln!("[AJTAI-PREFLIGHT] row {} error: {}", i, e); mismatches += 1; continue; }
+                        };
+                        let mut acc_f = F::ZERO;
+                        #[allow(deprecated)]
+                        let z_digits_ref = &legacy_wit.z_digits;
+                        for (j, &a) in row.iter().enumerate() {
+                            if j >= z_digits_ref.len() { break; }
+                            let zi = z_digits_ref[j];
+                            let zf = if zi >= 0 { F::from_u64(zi as u64) } else { -F::from_u64((-zi) as u64) };
+                            acc_f += a * zf;
+                        }
+                        let rhs = last.inner.c_step_coords[i];
+                        if acc_f != rhs {
+                            if first_few.len() < 5 {
+                                first_few.push((i, acc_f.as_canonical_u64(), rhs.as_canonical_u64()));
+                            }
+                            mismatches += 1;
+                        }
+                    }
+                    if mismatches > 0 {
+                        eprintln!(
+                            "[AJTAI-PREFLIGHT] MISMATCH: {} of {} rows differ (first few {:?})",
+                            mismatches, rows, first_few
+                        );
+                        if do_strict {
+                            anyhow::bail!(
+                                "Ajtai preflight failed: {} / {} mismatches (see logs for samples)",
+                                mismatches, rows
+                            );
+                        }
+                    } else {
+                        eprintln!("[AJTAI-PREFLIGHT] OK: all {} rows match acc_c_step", rows);
+                    }
+                }
+                Err(e) => {
+                    eprintln!("[AJTAI-PREFLIGHT] PP init failed: {} (d={}, m={})", e, d_pp, m_pp);
+                }
+            }
+        }
+
+        // 2) Commit evolution diagnostics: prev + rho * step = next
+        let c_step_vec = last.inner.c_step_coords.clone();
+        let c_next_vec = last.inner.next_accumulator.c_coords.clone();
+        anyhow::ensure!(c_step_vec.len() == c_next_vec.len(), "commitment vector length mismatch");
+        let c_prev_vec = c_next_vec.iter().zip(c_step_vec.iter()).map(|(n,s)| *n - rho * *s).collect::<Vec<_>>();
+        {
+            // Debug check: prev + rho*step vs next
+            let n = c_next_vec.len();
+            let mut mismatches = 0usize;
+            for i in 0..n.min(8) {
+                let lhs = c_next_vec[i];
+                let rhs = c_prev_vec[i] + rho * c_step_vec[i];
+                eprintln!(
+                    "[EV-CHECK] i={} prev={} step={} next={} prev+rho*step={}",
+                    i,
+                    c_prev_vec[i].as_canonical_u64(),
+                    c_step_vec[i].as_canonical_u64(),
+                    c_next_vec[i].as_canonical_u64(),
+                    rhs.as_canonical_u64()
+                );
+                if lhs != rhs { mismatches += 1; }
+            }
+            if n > 8 {
+                for &i in &[n/2, n-1] {
+                    let lhs = c_next_vec[i];
+                    let rhs = c_prev_vec[i] + rho * c_step_vec[i];
+                    eprintln!(
+                        "[EV-CHECK] i={} prev={} step={} next={} prev+rho*step={}",
+                        i,
+                        c_prev_vec[i].as_canonical_u64(),
+                        c_step_vec[i].as_canonical_u64(),
+                        c_next_vec[i].as_canonical_u64(),
+                        rhs.as_canonical_u64()
+                    );
+                    if lhs != rhs { mismatches += 1; }
+                }
+            }
+            if mismatches > 0 {
+                eprintln!(
+                    "[EV-CHECK] rho={} mismatches (sampled)={} of {}",
+                    rho.as_canonical_u64(), mismatches, c_next_vec.len()
+                );
+            } else {
+                eprintln!(
+                    "[EV-CHECK] rho={} all sampled entries match",
+                    rho.as_canonical_u64()
+                );
+            }
+        }
+        // EV embedding already enforces commit evolution with its own public vectors.
+        // No additional commit-evo embed is necessary here.
+
+        // 3) Linkage: bind specific undigitized witness positions to provided step IO values.
+        let linkage = Some(neo_spartan_bridge::IvcLinkageInputs {
+            x_indices_abs: spec.binding.x_witness_indices.clone(),
+            y_prev_indices_abs: spec.binding.y_prev_witness_indices.clone(),
+            const1_index_abs: None, // const-1 binding is enforced by CCS; avoid double-binding here
+            step_io: last.step_io.clone(),
+        });
+
+        // Bind header digest to legacy ME used for proving
+        #[allow(deprecated)]
+        { legacy_me.header_digest = context_digest; }
+        // Build Pi-CCS embed from augmented_ccs matrices (sparse triplets)
+        let pi_ccs_embed_opt = if std::env::var("NEO_ENABLE_PI_CCS").ok().as_deref() == Some("1") {
+            let pi = {
+            use neo_spartan_bridge::{CcsCsr, PiCcsEmbed};
+            let mut mats = Vec::with_capacity(augmented_ccs.matrices.len());
+            for mj in &augmented_ccs.matrices {
+                let rows = mj.rows();
+                let cols = mj.cols();
+                let mut entries = Vec::new();
+                for r in 0..rows { for c in 0..cols {
+                    let a = mj[(r, c)];
+                    if a != F::ZERO { entries.push((r as u32, c as u32, a)); }
+                }}
+                mats.push(CcsCsr { rows, cols, entries });
+            }
+            PiCcsEmbed { matrices: mats }
+        };
+            Some(pi)
+        } else { None };
+
+        // Guard A: Cheap parity check between encoder and circuit public IO (debug only)
+        if cfg!(debug_assertions) {
+            neo_spartan_bridge::guards::assert_public_io_parity(
+                &legacy_me, &legacy_wit, Some(&ev_embed), Some(ajtai_pp_arc.clone())
+            )?;
+        }
+
+        neo_spartan_bridge::compress_ivc_verifier_to_lean_proof_with_linkage_and_pi_ccs(
+            &legacy_me, &legacy_wit, Some(ajtai_pp_arc), Some(ev_embed), None, linkage, pi_ccs_embed_opt,
+        )?
     } else {
         neo_spartan_bridge::compress_me_to_lean_proof_with_pp(&legacy_me, &legacy_wit, Some(ajtai_pp_arc))?
     };

@@ -23,12 +23,17 @@
 mod types;
 pub mod hash_mle;
 pub mod me_to_r1cs;
+pub mod pi_ccs_embed;
+pub mod ajtai_prg;
+pub mod rlc_guard;
+pub mod guards;
 
 // Tests will be added in a separate PR to avoid compilation complexity
 
 pub use types::{ProofBundle, Proof};
 pub use crate::me_to_r1cs::IvcEvEmbed;
 pub use crate::me_to_r1cs::{CommitEvoEmbed, IvcLinkageInputs};
+pub use crate::pi_ccs_embed::{PiCcsEmbed, CcsCsr};
 
 use anyhow::Result;
 use neo_ccs::{MEInstance, MEWitness};
@@ -50,6 +55,14 @@ macro_rules! info  { ($($tt:tt)*) => {} }
 #[allow(unused_macros)] // May be used conditionally
 macro_rules! warn  { ($($tt:tt)*) => {} }
 
+#[inline]
+#[allow(dead_code)]
+fn scalars_to_le_bytes(xs: &[p3_goldilocks::Goldilocks]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(xs.len() * 8);
+    for x in xs { out.extend_from_slice(&x.as_canonical_u64().to_le_bytes()); }
+    out
+}
+
 /// Domain tags for different digest versions
 const VK_DIGEST_DOMAIN_V1: &[u8] = b"VK_DIGEST_V1";
 const VK_DIGEST_DOMAIN_V2: &[u8] = b"VK_DIGEST_V2_POSEIDON2";
@@ -67,9 +80,11 @@ fn compute_blake3_digest_v1(data: &[u8], domain_separator: &[u8]) -> [u8; 32] {
 /// This follows standard sponge practice: absorb/pad/squeeze with proper rate limiting
 fn compute_poseidon2_digest_v2(data: &[u8], domain_separator: &[u8]) -> [u8; 32] {
     // PRODUCTION: Use unified Poseidon2 over Goldilocks (WIDTH=12, RATE=8, CAP=4)
-    // Domain-separate by hashing domain||data with packed-bytes + length framing
-    let mut bytes = Vec::with_capacity(domain_separator.len() + data.len());
+    // Domain-separate by hashing len(domain)||domain||len(data)||data
+    let mut bytes = Vec::with_capacity(16 + domain_separator.len() + data.len());
+    bytes.extend_from_slice(&(domain_separator.len() as u64).to_le_bytes());
     bytes.extend_from_slice(domain_separator);
+    bytes.extend_from_slice(&(data.len() as u64).to_le_bytes());
     bytes.extend_from_slice(data);
 
     let digest_fields = p2::poseidon2_hash_packed_bytes(&bytes);
@@ -229,11 +244,15 @@ pub fn compress_me_to_spartan_with_pp(
     pp: Option<neo_ajtai::PP<neo_math::Rq>>
 ) -> Result<ProofBundle> {
     // SECURITY: Without Ajtai rows OR PP, c_coords is not bound to z_digits.
+    // Phase 4: if NEO_ENABLE_PRG_ROWS=1, the circuit derives rows from seed; otherwise, refuse.
     let has_ajtai_rows = wit.ajtai_rows.as_ref().map_or(false, |rows| !rows.is_empty());
     let has_pp = pp.is_some();
-    
-    if !has_ajtai_rows && !has_pp {
-        anyhow::bail!("AjtaiBindingMissing: witness.ajtai_rows is None/empty AND no PP provided; cannot bind c_coords to Z");
+    let enable_prg = std::env::var("NEO_ENABLE_PRG_ROWS").ok().as_deref() == Some("1");
+    if !has_ajtai_rows && !has_pp && !enable_prg {
+        anyhow::bail!(
+            "AjtaiBindingMissing: witness.ajtai_rows is None/empty AND no PP provided; \
+             set NEO_ENABLE_PRG_ROWS=1 to enable seeded PRG rows"
+        );
     }
 
     // SECURITY: Validate that c_coords are consistent with Ajtai commitment before SNARK generation
@@ -386,6 +405,7 @@ pub fn compress_me_to_spartan_with_pp(
     };
     
     let vk_bytes = serialize_vk_stable(&*vk_arc)?;
+    // Use canonical bridge IO encoder to keep prover/verify FS in lockstep
     let io = encode_bridge_io_header(me);
     Ok(ProofBundle::new_with_vk(proof_bytes, vk_bytes, io))
 }
@@ -711,20 +731,107 @@ pub fn compress_me_to_lean_proof_with_pp(
     };
 
     // SECURITY: Refuse to prove unbound circuits
+    // Phase-4: allow PRG-derived Ajtai rows when neither rows nor PP are supplied.
+    // The circuit already derives rows from the public seed (header_digest) in this case.
+    // We keep the explicit guard only for the legacy path; PRG-mode is safe and binds c_coords.
     let has_ajtai_rows = wit_norm.ajtai_rows.as_ref().map_or(false, |rows| !rows.is_empty());
     let has_pp = pp.is_some();
-    
-    if !has_ajtai_rows && !has_pp {
-        anyhow::bail!("AjtaiBindingMissing: witness.ajtai_rows is None/empty AND no PP provided; cannot bind c_coords to Z");
+    let enable_prg = std::env::var("NEO_ENABLE_PRG_ROWS").ok().as_deref() == Some("1");
+    if !has_ajtai_rows && !has_pp && !enable_prg {
+        anyhow::bail!(
+            "AjtaiBindingMissing: witness.ajtai_rows is None/empty AND no PP provided; \
+             set NEO_ENABLE_PRG_ROWS=1 to enable seeded PRG rows"
+        );
     }
     
+    // If PP is provided (streaming rows) and no materialized Ajtai rows were given,
+    // perform a strict host-side parity check: for every row i,
+    //   c_coords[i] == <row_i, z_digits>  (using original, unpadded row length)
+    if wit_norm.ajtai_rows.as_ref().map_or(true, |rows| rows.is_empty()) {
+        if let Some(pp_arc) = pp.as_ref() {
+            let d_pp = pp_arc.d;
+            let m_pp = pp_arc.m;
+            let z_len_dm = d_pp * m_pp;
+            let rows = me.c_coords.len();
+            for i in 0..rows {
+                let row = neo_ajtai::compute_single_ajtai_row(&*pp_arc, i, z_len_dm, rows)
+                    .map_err(|e| anyhow::anyhow!("Ajtai row compute failed at {}: {}", i, e))?;
+                let upto = core::cmp::min(row.len(), wit_norm.z_digits.len());
+                let mut acc = neo_math::F::ZERO;
+                for j in 0..upto {
+                    let zi = wit_norm.z_digits[j];
+                    let zf = if zi >= 0 { neo_math::F::from_u64(zi as u64) } else { -neo_math::F::from_u64((-zi) as u64) };
+                    acc += row[j] * zf;
+                }
+                if acc != me.c_coords[i] {
+                    anyhow::bail!(
+                        "AjtaiCommitmentInconsistent at row {}: computed {} vs claimed {}",
+                        i, acc.as_canonical_u64(), me.c_coords[i].as_canonical_u64()
+                    );
+                }
+            }
+        }
+    }
+
     // PERFORMANCE DEBUGGING: Export Spartan2 input data to JSON for external profiling
     if std::env::var("NEO_EXPORT_SPARTAN2_DATA").is_ok() {
         export_spartan2_data_to_json(me, &wit_norm)?;
     }
 
+    // HOST-SIDE SANITY: Verify ME evals w_j · z_digits == y_outputs before SNARK
+    // This catches any folding/transcript drift early with a clear error.
+    {
+        let z = &wit_norm.z_digits;
+        let m_eval = core::cmp::min(wit_norm.weight_vectors.len(), me.y_outputs.len());
+        let mut mismatches = 0usize;
+        for j in 0..m_eval {
+            let wj = &wit_norm.weight_vectors[j];
+            let upto = core::cmp::min(wj.len(), z.len());
+            let mut acc = neo_math::F::ZERO;
+            for k in 0..upto {
+                let zk = z[k];
+                let zf = if zk >= 0 { neo_math::F::from_u64(zk as u64) } else { -neo_math::F::from_u64((-zk) as u64) };
+                acc += wj[k] * zf;
+            }
+            if acc != me.y_outputs[j] {
+                mismatches += 1;
+                if mismatches <= 5 {
+                    eprintln!(
+                        "❌ [HOST ME-EVAL] j={} mismatch: lhs={} rhs={} (upto={}, w_len={}, z_len={})",
+                        j, acc.as_canonical_u64(), me.y_outputs[j].as_canonical_u64(), upto, wj.len(), z.len()
+                    );
+                    // If weight looks like a single-column recomposition (expose_z_component), try to recover k
+                    let mut first_nz: Option<usize> = None;
+                    for (idx, &wcoeff) in wj.iter().enumerate() {
+                        if wcoeff != neo_math::F::ZERO { first_nz = Some(idx); break; }
+                    }
+                    if let Some(idx0) = first_nz {
+                        let d = neo_math::ring::D;
+                        if d > 0 {
+                            let col_k = idx0 / d;
+                            // Recompose z[col_k] directly from z_digits
+                            let mut pow = neo_math::F::ONE;
+                            let b_f = neo_math::F::from_u64(me.base_b as u64);
+                            let mut rec = neo_math::F::ZERO;
+                            for r in 0..d {
+                                let zi = z[col_k * d + r];
+                                let zf = if zi >= 0 { neo_math::F::from_u64(zi as u64) } else { -neo_math::F::from_u64((-zi) as u64) };
+                                rec += zf * pow;
+                                pow *= b_f;
+                            }
+                            eprintln!("   [HOST ME-EVAL] recovered col k={} recomposed={} expected={}", col_k, rec.as_canonical_u64(), me.y_outputs[j].as_canonical_u64());
+                        }
+                    }
+                }
+            }
+        }
+        if mismatches > 0 {
+            anyhow::bail!("Host ME-eval check failed for {} of {} entries", mismatches, m_eval);
+        }
+    }
+
     // Prove using existing Spartan infrastructure
-    let snark_result = me_to_r1cs::prove_me_snark_with_pp(me, &wit_norm, pp, None);
+    let snark_result = me_to_r1cs::prove_me_snark_with_pp(me, &wit_norm, pp.clone(), None);
     let (proof_bytes, _public_outputs, vk_arc) = match snark_result {
         Ok(result) => {
             eprintln!("✅ SNARK generation successful!");
@@ -737,7 +844,7 @@ pub fn compress_me_to_lean_proof_with_pp(
     };
     
     // Generate circuit fingerprint
-    let circuit = me_to_r1cs::MeCircuit::new(me.clone(), wit_norm, None, me.header_digest);
+    let circuit = me_to_r1cs::MeCircuit::new(me.clone(), wit_norm, pp, me.header_digest);
     let circuit_key_obj = me_to_r1cs::CircuitKey::from_circuit(&circuit);
     let circuit_key: [u8; 32] = circuit_key_obj.into_bytes(); // Convert to [u8; 32]
     
@@ -769,6 +876,16 @@ pub fn compress_me_to_lean_proof_with_pp(
     // Create lean proof (NO VK INSIDE!)
     let proof = Proof::new(circuit_key, vk_digest, public_io_bytes, proof_bytes);
     
+    // Optional self-verify in debug/dev to catch drift at the source
+    #[cfg(all(debug_assertions, feature = "neo_dev_only"))]
+    if std::env::var("NEO_SELF_VERIFY").ok().as_deref() == Some("1") {
+        match verify_lean_proof(&proof) {
+            Ok(true)  => eprintln!("🧪 self-verify: OK"),
+            Ok(false) => panic!("🛑 self-verify: verification returned false"),
+            Err(e)    => panic!("🛑 self-verify: verifier error: {e:?}"),
+        }
+    }
+
     info!("Created lean proof: {} bytes (vs ~51MB with VK)", 
              proof.total_size());
     
@@ -796,13 +913,13 @@ pub fn compress_me_to_lean_proof_with_pp_and_ev(
     let has_pp = pp.is_some();
     if !has_ajtai_rows && !has_pp { anyhow::bail!("AjtaiBindingMissing: witness.ajtai_rows is None/empty AND no PP provided; cannot bind c_coords to Z"); }
 
-    let snark_result = me_to_r1cs::prove_me_snark_with_pp(me, &wit_norm, pp, ev.clone());
+    let snark_result = me_to_r1cs::prove_me_snark_with_pp(me, &wit_norm, pp.clone(), ev.clone());
     let (proof_bytes, _public_outputs, vk_arc) = match snark_result {
         Ok(result) => { eprintln!("✅ SNARK generation successful!"); result }
         Err(e) => { eprintln!("🚨 SNARK generation failed: {:?}", e); return Err(anyhow::Error::msg(format!("Spartan2 SNARK failed: {}", e))); }
     };
 
-    let circuit = me_to_r1cs::MeCircuit::new(me.clone(), wit_norm, None, me.header_digest).with_ev(ev.clone());
+    let circuit = me_to_r1cs::MeCircuit::new(me.clone(), wit_norm, pp, me.header_digest).with_ev(ev.clone());
     let circuit_key_obj = me_to_r1cs::CircuitKey::from_circuit(&circuit);
     let circuit_key: [u8; 32] = circuit_key_obj.into_bytes();
 
@@ -812,6 +929,16 @@ pub fn compress_me_to_lean_proof_with_pp_and_ev(
 
     let public_io_bytes = encode_bridge_io_header_with_ev(me, ev.as_ref());
     let proof = Proof::new(circuit_key, vk_digest, public_io_bytes, proof_bytes);
+    
+    // Optional self-verify in debug/dev to catch drift at the source
+    #[cfg(all(debug_assertions, feature = "neo_dev_only"))]
+    if std::env::var("NEO_SELF_VERIFY").ok().as_deref() == Some("1") {
+        match verify_lean_proof(&proof) {
+            Ok(true)  => eprintln!("🧪 self-verify: OK"),
+            Ok(false) => panic!("🛑 self-verify: verification returned false"),
+            Err(e)    => panic!("🛑 self-verify: verifier error: {e:?}"),
+        }
+    }
     info!("Created lean proof (with EV): {} bytes", proof.total_size());
     Ok(proof)
 }
@@ -825,12 +952,36 @@ pub fn compress_ivc_verifier_to_lean_proof_with_linkage(
     commit: Option<crate::me_to_r1cs::CommitEvoEmbed>,
     linkage: Option<crate::me_to_r1cs::IvcLinkageInputs>,
 ) -> anyhow::Result<Proof> {
+    // Refuse to prove if commitment coords are empty or all zero (unbound)
+    if me.c_coords.is_empty() || me.c_coords.iter().all(|&x| x == neo_math::F::ZERO) {
+        anyhow::bail!("Bridge: me.c_coords are empty/all-zero; refusing to prove unbound commitment.");
+    }
+    // Optional strict parity: EV's acc_c_next must equal public c_coords
+    if let Some(ev) = &ev {
+        if let Some(c_next) = &ev.acc_c_next {
+            if c_next.len() == me.c_coords.len() {
+                // Only require parity when Ajtai is expected to bind to c_next
+                let expect_parity = ev.acc_c_step.is_none();
+                if expect_parity {
+                    let strict = std::env::var("NEO_STRICT_IO_PARITY").ok().as_deref() == Some("1");
+                    if strict {
+                        assert_eq!(&me.c_coords, c_next, "EV acc_c_next must equal public c_coords when binding to c_next");
+                    } else if &me.c_coords != c_next {
+                        eprintln!("[WARN] EV acc_c_next != public c_coords (len = {})", c_next.len());
+                    }
+                }
+            }
+        }
+    }
     // Prove using extended MeCircuit
-    let (proof_bytes, _public_outputs, vk_arc) = me_to_r1cs::prove_me_snark_with_pp_and_ivc(me, wit, pp, ev.clone(), commit, linkage)
+    let (proof_bytes, _public_outputs, vk_arc) = me_to_r1cs::prove_me_snark_with_pp_and_ivc(me, wit, pp.clone(), ev.clone(), commit.clone(), linkage.clone(), None)
         .map_err(|e| anyhow::anyhow!("IVC verifier SNARK failed: {}", e))?;
 
-    // Circuit fingerprint
-    let circuit = me_to_r1cs::MeCircuit::new(me.clone(), wit.clone(), None, me.header_digest).with_ev(ev.clone());
+    // Circuit fingerprint (must include EV + commit + linkage presence)
+    let circuit = me_to_r1cs::MeCircuit::new(me.clone(), wit.clone(), pp, me.header_digest)
+        .with_ev(ev.clone())
+        .with_commit(commit.clone())
+        .with_linkage(linkage.clone());
     let circuit_key_obj = me_to_r1cs::CircuitKey::from_circuit(&circuit);
     let circuit_key: [u8; 32] = circuit_key_obj.into_bytes();
 
@@ -839,7 +990,100 @@ pub fn compress_ivc_verifier_to_lean_proof_with_linkage(
     let vk_digest: [u8; 32] = compute_vk_digest(&vk_bytes, 2);
     register_vk(circuit_key, vk_arc.clone());
 
-    // Encode public IO with EV header when present
+    // Use canonical encoder to avoid prover/verifier FS drift
+    let public_io_bytes = encode_bridge_io_header_with_ev(me, ev.as_ref());
+    let proof = Proof::new(circuit_key, vk_digest, public_io_bytes, proof_bytes);
+    
+    // Optional self-verify in debug/dev to catch drift at the source
+    #[cfg(all(debug_assertions, feature = "neo_dev_only"))]
+    if std::env::var("NEO_SELF_VERIFY").ok().as_deref() == Some("1") {
+        match verify_lean_proof(&proof) {
+            Ok(true)  => eprintln!("🧪 self-verify: OK"),
+            Ok(false) => panic!("🛑 self-verify: verification returned false"),
+            Err(e)    => panic!("🛑 self-verify: verifier error: {e:?}"),
+        }
+    }
+    Ok(proof)
+}
+
+/// Compress using the IVC verifier-style circuit with EV + linkage + commit-evo + Pi-CCS embeddings.
+pub fn compress_ivc_verifier_to_lean_proof_with_linkage_and_pi_ccs(
+    me: &neo_ccs::MEInstance,
+    wit: &neo_ccs::MEWitness,
+    pp: Option<std::sync::Arc<neo_ajtai::PP<neo_math::Rq>>>,
+    ev: Option<crate::me_to_r1cs::IvcEvEmbed>,
+    commit: Option<crate::me_to_r1cs::CommitEvoEmbed>,
+    linkage: Option<crate::me_to_r1cs::IvcLinkageInputs>,
+    pi_ccs: Option<crate::pi_ccs_embed::PiCcsEmbed>,
+) -> anyhow::Result<Proof> {
+    if me.c_coords.is_empty() || me.c_coords.iter().all(|&x| x == neo_math::F::ZERO) {
+        anyhow::bail!("Bridge: me.c_coords are empty/all-zero; refusing to prove unbound commitment.");
+    }
+    if let Some(ev) = &ev {
+        if let Some(c_next) = &ev.acc_c_next {
+            if c_next.len() == me.c_coords.len() {
+                // Only require parity when Ajtai is expected to bind to c_next
+                let expect_parity = ev.acc_c_step.is_none();
+                let strict = std::env::var("NEO_STRICT_IO_PARITY").ok().as_deref() == Some("1");
+                if expect_parity && strict {
+                    assert_eq!(&me.c_coords, c_next, "EV acc_c_next must equal public c_coords (commit-evo parity)");
+                } else if expect_parity && &me.c_coords != c_next {
+                    eprintln!("[WARN] EV acc_c_next != public c_coords (len = {})", c_next.len());
+                }
+            }
+        }
+    }
+    // Host-side diagnostic: show first few c_coords passed into the bridge
+    if !me.c_coords.is_empty() {
+        let show = core::cmp::min(4, me.c_coords.len());
+        let mut buf = String::new();
+        for i in 0..show {
+            if i > 0 { buf.push_str(", "); }
+            buf.push_str(&format!("{}", me.c_coords[i].as_canonical_u64()));
+        }
+        eprintln!("[BRIDGE] me.c_coords[0..{}): {}", show, buf);
+    } else {
+        eprintln!("[BRIDGE] me.c_coords is EMPTY (len=0)");
+    }
+    let (proof_bytes, _public_outputs, vk_arc) = me_to_r1cs::prove_me_snark_with_pp_and_ivc(
+        me, wit, pp.clone(), ev.clone(), commit.clone(), linkage.clone(), pi_ccs.clone()
+    ).map_err(|e| anyhow::anyhow!("IVC verifier SNARK (with Pi-CCS) failed: {}", e))?;
+
+    // Optional self-verify to catch drift immediately (debug aid).
+    #[cfg(all(debug_assertions, feature = "neo_dev_only"))]
+    if std::env::var("NEO_SELF_VERIFY").ok().as_deref() == Some("1") {
+        match bincode::deserialize::<spartan2::spartan::R1CSSNARK<E>>(&proof_bytes) {
+            Ok(snark) => {
+                match snark.verify(&*vk_arc) {
+                    Ok(pubs) => {
+                        eprintln!("[SELF-VERIFY] SNARK verify OK. public scalars = {}", pubs.len());
+                    }
+                    Err(e) => {
+                        panic!("🛑 self-verify: SNARK verify FAILED at source: {}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                panic!("🛑 self-verify: Proof deserialization failed: {}", e);
+            }
+        }
+    }
+
+    // Circuit fingerprint matches the configured embeddings
+    let circuit = me_to_r1cs::MeCircuit::new(me.clone(), wit.clone(), pp, me.header_digest)
+        .with_ev(ev.clone())
+        .with_commit(commit)
+        .with_linkage(linkage)
+        .with_pi_ccs(pi_ccs);
+    let circuit_key_obj = me_to_r1cs::CircuitKey::from_circuit(&circuit);
+    let circuit_key: [u8; 32] = circuit_key_obj.into_bytes();
+
+    // VK digest + registry
+    let vk_bytes = serialize_vk_stable(&*vk_arc)?;
+    let vk_digest: [u8; 32] = compute_vk_digest(&vk_bytes, 2);
+    register_vk(circuit_key, vk_arc.clone());
+
+    // Use canonical encoder to avoid prover/verifier FS drift
     let public_io_bytes = encode_bridge_io_header_with_ev(me, ev.as_ref());
     let proof = Proof::new(circuit_key, vk_digest, public_io_bytes, proof_bytes);
     Ok(proof)

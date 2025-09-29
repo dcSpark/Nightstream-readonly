@@ -66,6 +66,9 @@ fn build_fibonacci_step_witness(a: u64, b: u64) -> Vec<F> {
 fn test_fibonacci_nivc_ev_embed_small() -> Result<()> {
     // Determinism for reproducible CI runs
     std::env::set_var("NEO_DETERMINISTIC", "1");
+    // Enforce strict public IO parity for EV embedding to fail fast on mismatches
+    std::env::set_var("NEO_STRICT_IO_PARITY", "1");
+    // Note: Do NOT force RLC identity when testing EV embedding; it breaks commit-evo parity.
 
     // Params and CCS
     let params = NeoParams::goldilocks_small_circuits();

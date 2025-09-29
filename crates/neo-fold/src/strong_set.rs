@@ -41,12 +41,14 @@ impl<S: Clone> StrongSamplingSet<S> {
     }
 
     /// Sample exactly k challenges ρ_i ∈ C by FS with bias-free rejection sampling.
-    /// Uses rejection against the largest multiple of n that fits in u64 to avoid modulo bias.
+    /// Uses the standard "threshold trick" on 64-bit output to avoid modulo bias.
     pub fn sample_k<T: Transcript>(&self, t: &mut T, label: &[u8], k: usize) -> Vec<S> {
         let n = self.elems.len() as u64;
         assert!(n > 0, "Strong set cannot be empty");
         let mut out = Vec::with_capacity(k);
-        let bound: u64 = (u64::MAX / n) * n; // largest multiple of n ≤ 2^64-1
+        // Unbiased rejection sampling using the "zone" method:
+        // zone = largest multiple of n that fits in u64
+        let zone: u64 = n * (u64::MAX / n);
 
         for i in 0..k {
             t.append_message(b"neo/rlc/label", label);
@@ -55,7 +57,7 @@ impl<S: Clone> StrongSamplingSet<S> {
                 let mut buf = [0u8; 8];
                 t.challenge_bytes(b"chal/u64", &mut buf);
                 let v = u64::from_le_bytes(buf);
-                if v < bound {
+                if v < zone {
                     let idx = (v % n) as usize;
                     out.push(self.elems[idx].clone());
                     break;

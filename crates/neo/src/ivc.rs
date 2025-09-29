@@ -259,15 +259,41 @@ pub struct BindingMetadata<'a> {
 #[allow(unused_assignments)]
 pub fn rho_from_transcript(prev_acc: &Accumulator, step_digest: [u8; 32], c_step_coords: &[F]) -> (F, [u8; 32]) {
     // Use centralized Merlin-style transcript (Poseidon2 backend)
+    #[cfg(feature = "fs-guard")]
+    neo_transcript::fs_guard::reset("rho/actual");
+
     let mut tr = Poseidon2Transcript::new(b"neo/ivc");
     tr.append_fields(tr_labels::STEP, &[F::from_u64(prev_acc.step)]);
     tr.append_message(tr_labels::ACC_DIGEST, &prev_acc.c_z_digest);
     tr.append_fields(b"acc/y", &prev_acc.y_compact);
     tr.append_message(tr_labels::STEP_DIGEST, &step_digest);
     tr.append_fields(tr_labels::COMMIT_COORDS, c_step_coords);
-    let mut rho = tr.challenge_field(tr_labels::CHAL_RHO);
-    if rho == F::ZERO { rho = F::ONE; }
+    let rho = tr.challenge_nonzero_field(tr_labels::CHAL_RHO);
     let dig = tr.digest32();
+
+    #[cfg(feature = "fs-guard")]
+    {
+        use neo_transcript::fs_guard as guard;
+        let actual = guard::take();
+        guard::reset("rho/spec");
+        // SPEC: explicit replay (kept in sync with intended API)
+        let mut tr_s = Poseidon2Transcript::new(b"neo/ivc");
+        tr_s.append_fields(tr_labels::STEP, &[F::from_u64(prev_acc.step)]);
+        tr_s.append_message(tr_labels::ACC_DIGEST, &prev_acc.c_z_digest);
+        tr_s.append_fields(b"acc/y", &prev_acc.y_compact);
+        tr_s.append_message(tr_labels::STEP_DIGEST, &step_digest);
+        tr_s.append_fields(tr_labels::COMMIT_COORDS, c_step_coords);
+        let _ = tr_s.challenge_nonzero_field(tr_labels::CHAL_RHO);
+        let _ = tr_s.digest32();
+        let spec = guard::take();
+        if let Some((i, s, a)) = guard::first_mismatch(&spec, &actual) {
+            panic!(
+                "FS drift in rho_from_transcript at #{}: spec(op={},label={:?},len={}) vs actual(op={},label={:?},len={})",
+                i, s.op, s.label, s.len, a.op, a.label, a.len
+            );
+        }
+    }
+
     (rho, dig)
 }
 

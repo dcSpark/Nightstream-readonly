@@ -117,6 +117,9 @@ pub fn pi_dec<L: SModuleHomomorphism<F, Cmt>>(
     
     // === Domain separation ===
     tr.append_message(tr_labels::PI_DEC, b"");
+    // Bind parent commitment exactly as verifier expects
+    tr.append_message(b"parent_commitment_tag", b"");
+    tr.append_fields(b"parent_commitment", &me_B.c.data);
     
     let d = wit_B.Z.rows();
     let m = wit_B.Z.cols();
@@ -199,6 +202,8 @@ pub fn pi_dec<L: SModuleHomomorphism<F, Cmt>>(
         digit_commitments.push(c_i);
         range_proof_data.push(proof_data);
     }
+
+    // Do not absorb extra digit-X/fold-digest here; verifier does not absorb them at this stage.
     
     // === Verified opening: prove c = Σ b^i · c_i ===
     let recomposition_proof = verify_split_open(
@@ -207,6 +212,13 @@ pub fn pi_dec<L: SModuleHomomorphism<F, Cmt>>(
         b as u64,
         l, // Pass the S-module homomorphism for verification
     ).map_err(|e| PiDecError::VerifiedOpeningFailed(format!("recomposition failed: {e:?}")))?;
+
+    // Bind digit commitments with indices exactly as verifier does
+    tr.append_message(b"digit_commitments_tag", b"");
+    for (i, c_i) in digit_commitments.iter().enumerate() {
+        tr.append_u64s(b"digit_index", &[i as u64]);
+        tr.append_fields(b"digit_commitment", &c_i.data);
+    }
     
     // === Create k ME(b,L) instances ===
     let mut me_instances = Vec::with_capacity(k);
@@ -310,31 +322,9 @@ pub fn pi_dec_verify<L: SModuleHomomorphism<F, Cmt>>(
 ) -> Result<bool, PiDecError> {
     
     tr.append_message(tr_labels::PI_DEC, b"");
-    
-    // SECURITY: Absorb public objects into transcript to prevent malleability
-    // Absorb parent ME instance data
+    // Bind parent ME commitment identically to prover
     tr.append_message(b"parent_commitment_tag", b"");
-    // Bind parent commitment coordinates (canonical serialization)
     tr.append_fields(b"parent_commitment", &input_me.c.data);
-    
-    // Absorb parent X matrix
-    tr.append_message(b"parent_X_tag", b"");
-    let x_flat: Vec<F> = input_me.X.as_slice().to_vec(); 
-    tr.append_fields(b"parent_X", &x_flat);
-    
-    // Absorb m_in
-    tr.append_u64s(b"m_in", &[input_me.m_in as u64]);
-    
-    // Absorb digest for binding
-    tr.append_message(b"fold_digest", &input_me.fold_digest);
-    
-    // Absorb output digit ME instances' X values  
-    for (_i, me_digit) in output_me_list.iter().enumerate() {
-        tr.append_message(b"digit_X_tag", b"");
-        let digit_x_flat: Vec<F> = me_digit.X.as_slice().to_vec();
-        tr.append_fields(b"digit_X", &digit_x_flat);
-        tr.append_message(b"digit_fold_digest", &me_digit.fold_digest);
-    }
     
     let k = params.k as usize;
     let b = params.b;
@@ -349,7 +339,7 @@ pub fn pi_dec_verify<L: SModuleHomomorphism<F, Cmt>>(
             return Ok(false);
         }
         
-        // SECURITY: Absorb digit commitments into transcript to prevent malleability  
+        // SECURITY: Absorb digit commitments into transcript to prevent malleability
         tr.append_message(b"digit_commitments_tag", b"");
         for (i, c_i) in digit_commitments.iter().enumerate() {
             tr.append_u64s(b"digit_index", &[i as u64]);

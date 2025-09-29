@@ -53,6 +53,8 @@ impl Transcript for Poseidon2Transcript {
         for &b in msg { self.absorb_elem(Goldilocks::from_u64(b as u64)); }
         #[cfg(feature = "debug-log")]
         self.log.push(crate::debug::Event::new("append_message", label, msg.len(), &self.st));
+        #[cfg(feature = "fs-guard")]
+        crate::fs_guard::record(crate::debug::Event::new("append_message", label, msg.len(), &self.st));
     }
 
     fn append_fields(&mut self, label: &'static [u8], fs: &[F]) {
@@ -61,6 +63,8 @@ impl Transcript for Poseidon2Transcript {
         for &x in fs { self.absorb_elem(Goldilocks::from_u64(x.as_canonical_u64())); }
         #[cfg(feature = "debug-log")]
         self.log.push(crate::debug::Event::new("append_fields", label, fs.len(), &self.st));
+        #[cfg(feature = "fs-guard")]
+        crate::fs_guard::record(crate::debug::Event::new("append_fields", label, fs.len(), &self.st));
     }
 
     fn challenge_bytes(&mut self, label: &'static [u8], out: &mut [u8]) {
@@ -78,6 +82,12 @@ impl Transcript for Poseidon2Transcript {
                 if produced >= out.len() { break; }
             }
         }
+        #[cfg(feature = "debug-log")]
+        if std::env::var("NEO_TRANSCRIPT_DUMP").ok().as_deref() == Some("1") {
+            self.dump_and_clear("challenge_bytes");
+        }
+        #[cfg(feature = "fs-guard")]
+        crate::fs_guard::record(crate::debug::Event::new("challenge_bytes", label, out.len(), &self.st));
     }
 
     fn challenge_field(&mut self, label: &'static [u8]) -> F {
@@ -85,7 +95,14 @@ impl Transcript for Poseidon2Transcript {
         self.append_message(b"chal/label", label);
         self.absorb_elem(Goldilocks::ONE);
         self.permute();
-        F::from_u64(self.st[0].as_canonical_u64())
+        let out = F::from_u64(self.st[0].as_canonical_u64());
+        #[cfg(feature = "debug-log")]
+        if std::env::var("NEO_TRANSCRIPT_DUMP").ok().as_deref() == Some("1") {
+            self.dump_and_clear("challenge_field");
+        }
+        #[cfg(feature = "fs-guard")]
+        crate::fs_guard::record(crate::debug::Event::new("challenge_field", label, 1, &self.st));
+        out
     }
 
     fn fork(&self, scope: &'static [u8]) -> Self {
@@ -101,6 +118,12 @@ impl Transcript for Poseidon2Transcript {
         for i in 0..4 { out[i*8..(i+1)*8].copy_from_slice(&self.st[i].as_canonical_u64().to_le_bytes()); }
         #[cfg(feature = "debug-log")]
         self.log.push(crate::debug::Event::new("digest32", b"", 0, &self.st));
+        #[cfg(feature = "debug-log")]
+        if std::env::var("NEO_TRANSCRIPT_DUMP").ok().as_deref() == Some("1") {
+            self.dump_and_clear("digest32");
+        }
+        #[cfg(feature = "fs-guard")]
+        crate::fs_guard::record(crate::debug::Event::new("digest32", b"", 0, &self.st));
         out
     }
 }
@@ -174,6 +197,10 @@ impl Poseidon2Transcript {
                 out.push(F::from_u64(self.st[i].as_canonical_u64()));
             }
         }
+        #[cfg(feature = "debug-log")]
+        if std::env::var("NEO_TRANSCRIPT_DUMP").ok().as_deref() == Some("1") {
+            self.dump_and_clear("challenge_fields");
+        }
         out
     }
 
@@ -181,5 +208,23 @@ impl Poseidon2Transcript {
         let mut out = vec![0u8; len];
         self.challenge_bytes(label, &mut out);
         out
+    }
+
+    #[cfg(feature = "debug-log")]
+    pub fn dump_and_clear(&mut self, ctx: &str) {
+        let tag = std::env::var("NEO_TRANSCRIPT_TAG").ok();
+        if let Some(tag) = tag.as_deref() {
+            eprintln!("--- [{}] Transcript dump [{}] ---", tag, ctx);
+        } else {
+            eprintln!("--- Transcript dump [{}] ---", ctx);
+        }
+        for (i, ev) in self.log.iter().enumerate() {
+            let label = String::from_utf8_lossy(ev.label);
+            eprintln!(
+                "[{:04}] op={} label=\"{}\" len={} st0..3=[{}, {}, {}, {}]",
+                i, ev.op, label, ev.len, ev.st_prefix[0], ev.st_prefix[1], ev.st_prefix[2], ev.st_prefix[3]
+            );
+        }
+        self.log.clear();
     }
 }

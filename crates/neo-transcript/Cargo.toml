@@ -7,6 +7,7 @@ edition = "2021"
 default = ["std"]
 std = []
 debug-log = []
+fs-guard = ["debug-log"]
 
 [dependencies]
 p3-field = { workspace = true }

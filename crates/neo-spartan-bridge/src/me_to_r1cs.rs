@@ -113,6 +113,55 @@ impl CircuitKey {
                 state.push(Goldilocks::from_u64(coeff.as_canonical_u64()));
             }
         }
+
+        // CRITICAL: If Ajtai rows are computed from PP (streaming), fingerprint PP
+        // Otherwise VK caching can collide across different PPs with identical sizes.
+        if let Some(pp_arc) = &circuit.pp {
+            use neo_ccs::crypto::poseidon2_goldilocks as p2;
+            state.push(Goldilocks::from_u64(0x5050)); // 'PP' tag
+            state.push(Goldilocks::from_u64(pp_arc.kappa as u64));
+            state.push(Goldilocks::from_u64(pp_arc.m as u64));
+            state.push(Goldilocks::from_u64(pp_arc.d as u64));
+
+            // Compute a compact Poseidon2 digest over all ring coefficients in row-major order
+            let mut bytes = Vec::new();
+            bytes.extend_from_slice(&pp_arc.kappa.to_le_bytes());
+            bytes.extend_from_slice(&pp_arc.m.to_le_bytes());
+            bytes.extend_from_slice(&pp_arc.d.to_le_bytes());
+            for row in &pp_arc.m_rows {
+                // each element is an Rq with D coefficients (Goldilocks field)
+                for rq in row {
+                    // cf(a): [F; D] is accessible via ring::cf, but Rq type is in neo_math::ring::Rq([F;D])
+                    // We rely on Debug/serialization stability by using field_coeffs() helper
+                    let coeffs = rq.field_coeffs();
+                    for c in coeffs { bytes.extend_from_slice(&c.as_canonical_u64().to_le_bytes()); }
+                }
+            }
+            let digest = p2::poseidon2_hash_packed_bytes(&bytes);
+            for i in 0..p2::DIGEST_LEN { state.push(digest[i]); }
+        } else {
+            state.push(Goldilocks::from_u64(0));
+        }
+
+        // RLC GUARD FINGERPRINT: include presence and a digest over c_step_coords (avoid huge keys)
+        let rlc_guard_on = std::env::var("NEO_ENABLE_RLC_GUARD").ok().as_deref() == Some("1")
+            && !circuit.me.c_step_coords.is_empty()
+            && circuit.me.c_step_coords.len() == circuit.me.c_coords.len();
+        state.push(Goldilocks::from_u64(if rlc_guard_on { 1 } else { 0 }));
+        if rlc_guard_on {
+            use neo_ccs::crypto::poseidon2_goldilocks as p2;
+            state.push(Goldilocks::from_u64(circuit.me.c_step_coords.len() as u64));
+            let mut bytes = Vec::with_capacity(8 + circuit.me.c_step_coords.len() * 8);
+            bytes.extend_from_slice(&(circuit.me.c_step_coords.len() as u64).to_le_bytes());
+            for &c in &circuit.me.c_step_coords { bytes.extend_from_slice(&c.as_canonical_u64().to_le_bytes()); }
+            let h = p2::poseidon2_hash_packed_bytes(&bytes);
+            for k in 0..p2::DIGEST_LEN { state.push(h[k]); }
+        }
+
+        // Ajtai binding mode fingerprint: 0 = bind to me.c_coords (c_next), 1 = bind to acc_c_step
+        let ajtai_mode = if circuit.ev.as_ref().and_then(|e| e.acc_c_step.as_ref()).is_some() { 1u64 } else { 0u64 };
+        state.push(Goldilocks::from_u64(0x414A54)); // 'AJT'
+        state.push(Goldilocks::from_u64(ajtai_mode));
         
         // CIRCUIT STRUCTURE ONLY: Hash counts/lengths that affect circuit shape,
         // but NOT the values of public inputs (c_coords, y_outputs, r_point, fold_digest).
@@ -129,7 +178,51 @@ impl CircuitKey {
         } else {
             state.push(Goldilocks::from_u64(0));
         }
+
+        // Include presence of COMMIT-EVO embedding (affects constraints)
+        if let Some(_c) = &circuit.commit {
+            state.push(Goldilocks::from_u64(0x434D45)); // tag 'CME'
+            state.push(Goldilocks::from_u64(circuit.me.c_coords.len() as u64));
+        } else {
+            state.push(Goldilocks::from_u64(0));
+        }
+
+        // Include presence of LINKAGE embedding (affects constraints)
+        if let Some(link) = &circuit.linkage {
+            state.push(Goldilocks::from_u64(0x4C4B47)); // tag 'LKG'
+            state.push(Goldilocks::from_u64(link.x_indices_abs.len() as u64));
+            state.push(Goldilocks::from_u64(link.y_prev_indices_abs.len() as u64));
+            state.push(Goldilocks::from_u64(link.const1_index_abs.map(|_| 1).unwrap_or(0) as u64));
+        } else {
+            state.push(Goldilocks::from_u64(0));
+        }
         
+        // Include presence + content of Pi-CCS embedding (affects constraints)
+        if let Some(pi) = &circuit.pi_ccs {
+            use neo_ccs::crypto::poseidon2_goldilocks as p2;
+            state.push(Goldilocks::from_u64(0x504943)); // 'PIC'
+            state.push(Goldilocks::from_u64(pi.matrices.len() as u64));
+            for (j, mj) in pi.matrices.iter().enumerate() {
+                state.push(Goldilocks::from_u64(mj.rows as u64));
+                state.push(Goldilocks::from_u64(mj.cols as u64));
+                state.push(Goldilocks::from_u64(mj.entries.len() as u64));
+                // Hash triplets for determinism
+                let mut bytes = Vec::with_capacity(24 + mj.entries.len() * (8 + 8 + 8));
+                bytes.extend_from_slice(&u64::try_from(j).unwrap_or(0).to_le_bytes());
+                bytes.extend_from_slice(&(mj.rows as u64).to_le_bytes());
+                bytes.extend_from_slice(&(mj.cols as u64).to_le_bytes());
+                for &(r, c, a) in &mj.entries {
+                    bytes.extend_from_slice(&(r as u64).to_le_bytes());
+                    bytes.extend_from_slice(&(c as u64).to_le_bytes());
+                    bytes.extend_from_slice(&a.as_canonical_u64().to_le_bytes());
+                }
+                let h = p2::poseidon2_hash_packed_bytes(&bytes);
+                for k in 0..p2::DIGEST_LEN { state.push(h[k]); }
+            }
+        } else {
+            state.push(Goldilocks::from_u64(0));
+        }
+
         // CRITICAL: Include header digest (fold_digest) as it affects circuit behavior
         // Different header digests create different circuits that need different keys
         for chunk in circuit.fold_digest.chunks(8) {
@@ -218,11 +311,13 @@ pub struct MeCircuit {
     pub commit: Option<CommitEvoEmbed>,
     /// Optional linkage inputs
     pub linkage: Option<IvcLinkageInputs>,
+    /// Optional Pi-CCS embedding (CCS matrices for terminal check)
+    pub pi_ccs: Option<crate::pi_ccs_embed::PiCcsEmbed>,
 }
 
 impl MeCircuit {
     pub fn new(me: MEInstance, wit: MEWitness, pp: Option<std::sync::Arc<AjtaiPP<neo_math::Rq>>>, fold_digest: [u8; 32]) -> Self {
-        Self { me, wit, pp, fold_digest, ev: None, commit: None, linkage: None }
+        Self { me, wit, pp, fold_digest, ev: None, commit: None, linkage: None, pi_ccs: None }
     }
 
     pub fn with_ev(mut self, ev: Option<IvcEvEmbed>) -> Self {
@@ -237,6 +332,11 @@ impl MeCircuit {
 
     pub fn with_linkage(mut self, linkage: Option<IvcLinkageInputs>) -> Self {
         self.linkage = linkage;
+        self
+    }
+
+    pub fn with_pi_ccs(mut self, pi: Option<crate::pi_ccs_embed::PiCcsEmbed>) -> Self {
+        self.pi_ccs = pi;
         self
     }
 
@@ -356,11 +456,12 @@ impl SpartanCircuit<E> for MeCircuit {
         _challenges: Option<&[<E as Engine>::Scalar]>,
     ) -> Result<(), SynthesisError> {
         // SECURITY: refuse to synthesize an unbound circuit
+        // Phase-4: PRG-derived rows are a valid Ajtai binding when c_coords are present.
         let has_ajtai_rows = self.wit.ajtai_rows.as_ref().map_or(false, |r| !r.is_empty());
         let has_pp = self.pp.is_some();
-        
-        if !has_ajtai_rows && !has_pp {
-            eprintln!("❌ SECURITY: Ajtai rows missing AND no PP provided; refusing to synthesize unbound circuit.");
+        let has_prg_binding = (!has_ajtai_rows && !has_pp) && !self.me.c_coords.is_empty();
+        if !has_ajtai_rows && !has_pp && !has_prg_binding {
+            eprintln!("❌ SECURITY: No Ajtai rows/PP and no c_coords for PRG binding; refusing to synthesize unbound circuit.");
             return Err(SynthesisError::AssignmentMissing);
         }
 
@@ -385,6 +486,11 @@ impl SpartanCircuit<E> for MeCircuit {
         
         // 2) Pad REST (only REST) to a power-of-two for Hash-MLE
         let orig_rest = z_vars.len();
+        // Debug: show first few witness digits
+        for i in 0..core::cmp::min(6, orig_rest) {
+            let zi = self.wit.z_digits[i];
+            eprintln!("[Z-DIGITS] i={} val={}", i, zi);
+        }
         let target_rest = if orig_rest <= 1 { 1 } else { orig_rest.next_power_of_two() };
         for i in orig_rest..target_rest {
             z_vars.push(AllocatedNum::alloc(cs.namespace(|| format!("REST_Z_pad[{i}]")), 
@@ -518,7 +624,24 @@ impl SpartanCircuit<E> for MeCircuit {
             }
         }
 
-        // (A) Ajtai binding: <L_i, Z> = c_i  (rows are constants in v1)
+        // (A) Ajtai binding target selection (Option B):
+        // If EV is present and provides acc_c_step, bind Ajtai to the step vector.
+        // Otherwise, bind to the public c_next (me.c_coords) as before.
+        let (binding_name, ajtai_rhs): (&'static str, &[neo_math::F]) = if let Some(ev) = &self.ev {
+            if let Some(step) = &ev.acc_c_step {
+                ("acc_c_step", step.as_slice())
+            } else {
+                ("me.c_coords", &self.me.c_coords[..])
+            }
+        } else {
+            ("me.c_coords", &self.me.c_coords[..])
+        };
+        eprintln!("[AJTAI] binding target = {}", binding_name);
+        assert_eq!(
+            ajtai_rhs.len(), self.me.c_coords.len(),
+            "Ajtai RHS len mismatch ({} vs rows={})",
+            ajtai_rhs.len(), self.me.c_coords.len()
+        );
         // Use streaming approach if ajtai_rows is None but PP is available
         if let Some(rows) = &self.wit.ajtai_rows {
             // Traditional approach: use pre-materialized rows
@@ -526,7 +649,7 @@ impl SpartanCircuit<E> for MeCircuit {
             for i in 0..n {
                 let row = &rows[i];
                 let upto = core::cmp::min(row.len(), z_vars.len());
-                let c_scalar = <E as Engine>::Scalar::from(self.me.c_coords[i].as_canonical_u64());
+                let c_scalar = <E as Engine>::Scalar::from(ajtai_rhs[i].as_canonical_u64());
 
                 // 🔧 DEBUG: Compute expected LHS value for constraint debugging
                 let mut expected_lhs = <E as Engine>::Scalar::ZERO;
@@ -541,9 +664,9 @@ impl SpartanCircuit<E> for MeCircuit {
                     };
                     expected_lhs += row_coeff * z_val;
                 }
-                #[cfg(feature = "debug-logs")]
-                eprintln!("🔍 Ajtai constraint {}: computed LHS = {}, expected RHS = {}", 
-                    i, expected_lhs.to_canonical_u64(), c_scalar.to_canonical_u64());
+                if i < 3 || i + 1 == n || i == n / 2 {
+                    eprintln!("[AJTAI-CHECK rows] i={} lhs={} rhs={}", i, expected_lhs.to_canonical_u64(), c_scalar.to_canonical_u64());
+                }
 
                 cs.enforce(
                     || format!("ajtai_bind_{i}"),
@@ -582,7 +705,7 @@ impl SpartanCircuit<E> for MeCircuit {
                 }
                 
                 let upto = core::cmp::min(row.len(), z_vars.len());
-                let c_scalar = <E as Engine>::Scalar::from(self.me.c_coords[i].as_canonical_u64());
+                let c_scalar = <E as Engine>::Scalar::from(ajtai_rhs[i].as_canonical_u64());
 
                 // 🔧 DEBUG: Compute expected LHS value for constraint debugging
                 let mut expected_lhs = <E as Engine>::Scalar::ZERO;
@@ -597,9 +720,9 @@ impl SpartanCircuit<E> for MeCircuit {
                     };
                     expected_lhs += row_coeff * z_val;
                 }
-                #[cfg(feature = "debug-logs")]
-                eprintln!("🔍 Ajtai STREAMING constraint {}: computed LHS = {}, expected RHS = {}", 
-                    i, expected_lhs.to_canonical_u64(), c_scalar.to_canonical_u64());
+                if i < 3 || i + 1 == n || i == n / 2 {
+                    eprintln!("[AJTAI-CHECK stream] i={} lhs={} rhs={}", i, expected_lhs.to_canonical_u64(), c_scalar.to_canonical_u64());
+                }
 
                 cs.enforce(
                     || format!("ajtai_bind_streaming_{i}"),
@@ -612,6 +735,80 @@ impl SpartanCircuit<E> for MeCircuit {
                     },
                     |lc| lc + CS::one(),            // multiply by constant 1 (X side)
                     |lc| lc + (c_scalar, CS::one()),// right side also uses constant 1
+                );
+                n_constraints += 1;
+            }
+        } else {
+            // PRG fallback (Phase 4): derive Ajtai rows from public seed (header_digest)
+            let seed = self.fold_digest;
+            let rows = self.me.c_coords.len();
+            let z_len = z_vars.len();
+            for i in 0..rows {
+                let row = crate::ajtai_prg::expand_row_from_seed(seed, i as u32, z_len);
+                let rhs = <E as Engine>::Scalar::from(ajtai_rhs[i].as_canonical_u64());
+                cs.enforce(
+                    || format!("ajtai_bind_prg_{}", i),
+                    |lc| {
+                        let mut lc = lc;
+                        for j in 0..z_len {
+                            let a = <E as Engine>::Scalar::from(row[j].as_canonical_u64());
+                            lc = lc + (a, z_vars[j].get_variable());
+                        }
+                        lc
+                    },
+                    |lc| lc + CS::one(),
+                    |lc| lc + (rhs, CS::one()),
+                );
+                n_constraints += 1;
+            }
+        }
+
+        // Optional: RLC guard tying c_step_coords to Ajtai rows via transcript-derived coefficients.
+        // Enabled when env NEO_ENABLE_RLC_GUARD=1 and lengths match.
+        if std::env::var("NEO_ENABLE_RLC_GUARD").ok().as_deref() == Some("1") {
+            let n = self.me.c_coords.len();
+            if !self.me.c_step_coords.is_empty() && self.me.c_step_coords.len() == n {
+                let seed = self.fold_digest;
+                // Derive coefficients from public data (seed, c_step_coords)
+                let coeffs = crate::rlc_guard::derive_rlc_coefficients(seed, &self.me.c_step_coords, n);
+                // Aggregate PRG rows: G[j] = Σ_i coeffs[i] * row_i[j]
+                let z_len = z_vars.len();
+                let mut g = vec![<E as Engine>::Scalar::ZERO; z_len];
+                for i in 0..n {
+                    let row = crate::ajtai_prg::expand_row_from_seed(seed, i as u32, z_len);
+                    let rho_i = <E as Engine>::Scalar::from(coeffs[i].as_canonical_u64());
+                    for j in 0..z_len {
+                        g[j] += rho_i * <E as Engine>::Scalar::from(row[j].as_canonical_u64());
+                    }
+                }
+                // RHS: Σ_i coeffs[i] * c_step_coords[i]
+                let mut rhs_s = <E as Engine>::Scalar::ZERO;
+                for i in 0..n {
+                    rhs_s += <E as Engine>::Scalar::from(coeffs[i].as_canonical_u64())
+                        * <E as Engine>::Scalar::from(self.me.c_step_coords[i].as_canonical_u64());
+                }
+                // LHS (constant form via c_coords): Σ_i coeffs[i] * c_coords[i]
+                let mut lhs_const = <E as Engine>::Scalar::ZERO;
+                for i in 0..n {
+                    lhs_const += <E as Engine>::Scalar::from(coeffs[i].as_canonical_u64())
+                        * <E as Engine>::Scalar::from(self.me.c_coords[i].as_canonical_u64());
+                }
+                eprintln!(
+                    "[RLC-GUARD] active: n={}, z_len={}, lhs={} rhs={} (first coeff={}, first c_step={})",
+                    n, z_len, lhs_const.to_canonical_u64(), rhs_s.to_canonical_u64(),
+                    coeffs.get(0).map(|c| c.as_canonical_u64()).unwrap_or(0),
+                    self.me.c_step_coords.get(0).map(|c| c.as_canonical_u64()).unwrap_or(0)
+                );
+                // Enforce single inner-product equality: <G, z> = RHS
+                cs.enforce(
+                    || "rlc_guard_aggregated",
+                    |lc| {
+                        let mut lc = lc;
+                        for j in 0..z_len { lc = lc + (g[j], z_vars[j].get_variable()); }
+                        lc
+                    },
+                    |lc| lc + CS::one(),
+                    |lc| lc + (rhs_s, CS::one()),
                 );
                 n_constraints += 1;
             }
@@ -640,9 +837,14 @@ impl SpartanCircuit<E> for MeCircuit {
                 };
                 expected_lhs += w_coeff * z_val;
             }
-            #[cfg(feature = "debug-logs")]
-            // eprintln!("🔍 ME constraint {}: computed LHS = {}, expected RHS = {}", 
-            //     j, expected_lhs.to_canonical_u64(), _y_scalar.to_canonical_u64());
+            if j < 2 && expected_lhs != _y_scalar {
+                if std::env::var("NEO_DEBUG_ME_EVAL").ok().as_deref() == Some("1") {
+                    eprintln!(
+                        "[ME-DIAG] me_eval_{} mismatch: lhs={} rhs={} (first two)",
+                        j, expected_lhs.to_canonical_u64(), _y_scalar.to_canonical_u64()
+                    );
+                }
+            }
 
             cs.enforce(
                 || format!("me_eval_{j}"),
@@ -659,10 +861,137 @@ impl SpartanCircuit<E> for MeCircuit {
             n_constraints += 1;
         }
 
+        // (C) Pi-CCS terminal check: reconstruct weights from CCS and r, enforce equality per digit
+        if let Some(pi) = &self.pi_ccs {
+            let d = neo_math::ring::D;
+            // Strict shape checks to avoid unconstrained witness tails
+            let m_w = self.wit.weight_vectors.len();
+            if pi.matrices.len() != m_w {
+                eprintln!(
+                    "[PI-CCS-DIAG] matrices.len()={} != weight_vectors.len()={}",
+                    pi.matrices.len(), m_w
+                );
+                return Err(SynthesisError::AssignmentMissing);
+            }
+            // Prepare r variables (bind to constants)
+            let mut r_vars: Vec<AllocatedNum<<E as Engine>::Scalar>> = Vec::with_capacity(self.me.r_point.len());
+            for (i, &rt) in self.me.r_point.iter().enumerate() {
+                let r_val = <E as Engine>::Scalar::from(rt.as_canonical_u64());
+                let r_var = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_r_{}", i)), || Ok(r_val))?;
+                // Enforce r_var == r_val
+                cs.enforce(
+                    || format!("pi_ccs_r_bind_{}", i),
+                    |lc| lc + r_var.get_variable(),
+                    |lc| lc + CS::one(),
+                    |lc| lc + (r_val, CS::one()),
+                );
+                r_vars.push(r_var);
+            }
+            // Precompute (1 - r_t) vars
+            let mut one_minus_r: Vec<AllocatedNum<<E as Engine>::Scalar>> = Vec::with_capacity(r_vars.len());
+            for (i, r) in r_vars.iter().enumerate() {
+                let one = <E as Engine>::Scalar::ONE;
+                let om = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_one_minus_r_{}", i)), || {
+                    Ok(one - r.get_value().ok_or(SynthesisError::AssignmentMissing)?)
+                })?;
+                // Enforce r + (1-r) = 1
+                cs.enforce(
+                    || format!("pi_ccs_one_minus_r_link_{}", i),
+                    |lc| lc + r.get_variable() + om.get_variable(),
+                    |lc| lc + CS::one(),
+                    |lc| lc + CS::one(),
+                );
+                one_minus_r.push(om);
+            }
+
+            // Powers of b as constants
+            let base_b = <E as Engine>::Scalar::from(self.me.base_b as u64);
+            let mut pow_b = vec![<E as Engine>::Scalar::ONE; d];
+            for i in 1..d { pow_b[i] = pow_b[i-1] * base_b; }
+
+            for (j, mj) in pi.matrices.iter().enumerate() {
+                // Ensure the corresponding weight vector has exact expected length cols*d
+                let expected_w_len = mj.cols * d;
+                let wj = &self.wit.weight_vectors[j];
+                if wj.len() != expected_w_len {
+                    eprintln!(
+                        "[PI-CCS-DIAG] weight_vectors[{}].len()={} != cols*d={}*{}={}",
+                        j, wj.len(), mj.cols, d, expected_w_len
+                    );
+                    return Err(SynthesisError::AssignmentMissing);
+                }
+                // Compute chi[row] variables by product over bits; reuse across columns
+                let mut chi_vars: Vec<AllocatedNum<<E as Engine>::Scalar>> = Vec::with_capacity(mj.rows);
+                for row in 0..mj.rows {
+                    // Build product term across bits
+                    let mut acc = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_chi_init_{}_{}", j, row)), || Ok(<E as Engine>::Scalar::ONE))?;
+                    // Enforce acc == 1
+                    cs.enforce(
+                        || format!("pi_ccs_chi_init_one_{}_{}", j, row),
+                        |lc| lc + acc.get_variable(),
+                        |lc| lc + CS::one(),
+                        |lc| lc + CS::one(),
+                    );
+                    for t in 0..r_vars.len() {
+                        let bit_is_one = ((row >> t) & 1) == 1;
+                        let term = if bit_is_one { r_vars[t].clone() } else { one_minus_r[t].clone() };
+                        let new_acc = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_chi_step_{}_{}_{}", j, row, t)), || {
+                            Ok(acc.get_value().ok_or(SynthesisError::AssignmentMissing)? * term.get_value().ok_or(SynthesisError::AssignmentMissing)?)
+                        })?;
+                        cs.enforce(
+                            || format!("pi_ccs_chi_mul_{}_{}_{}", j, row, t),
+                            |lc| lc + acc.get_variable(),
+                            |lc| lc + term.get_variable(),
+                            |lc| lc + new_acc.get_variable(),
+                        );
+                        acc = new_acc;
+                    }
+                    chi_vars.push(acc);
+                }
+
+                // For each column, compute v_c = sum_{rows} a_{row,col} * chi[row]
+                let m_cols = mj.cols;
+                let mut v_vars: Vec<AllocatedNum<<E as Engine>::Scalar>> = Vec::with_capacity(m_cols);
+                for c in 0..m_cols {
+                    let v_c = AllocatedNum::alloc(cs.namespace(|| format!("pi_ccs_v_{}_{}", j, c)), || Ok(<E as Engine>::Scalar::ZERO))?;
+                    // Enforce linear equality: (sum a*chi) * 1 = v_c
+                    cs.enforce(
+                        || format!("pi_ccs_v_lin_{}_{}", j, c),
+                        |lc| {
+                            let mut lc = lc;
+                            for &(r_idx, c_idx, a) in &mj.entries {
+                                if c_idx as usize == c {
+                                    let a_s = <E as Engine>::Scalar::from(a.as_canonical_u64());
+                                    lc = lc + (a_s, chi_vars[r_idx as usize].get_variable());
+                                }
+                            }
+                            lc
+                        },
+                        |lc| lc + CS::one(),
+                        |lc| lc + v_c.get_variable(),
+                    );
+                    v_vars.push(v_c);
+                }
+
+                // Enforce weight vectors match v_c * b^r per digit
+                for c in 0..m_cols { for r in 0..d {
+                    let idx = c * d + r;
+                    let w_const = <E as Engine>::Scalar::from(wj[idx].as_canonical_u64());
+                    cs.enforce(
+                        || format!("pi_ccs_w_match_{}_{}_{}", j, c, r),
+                        |lc| lc + v_vars[c].get_variable(),
+                        |lc| lc + (pow_b[r], CS::one()),
+                        |lc| lc + (w_const, CS::one()),
+                    );
+                }}
+            }
+        }
+
         // CRITICAL SECURITY: Reject vacuous circuits that have no binding to the statement
-        let has_ajtai_binding = has_ajtai_rows || has_pp;
-        if !has_ajtai_binding && self.wit.weight_vectors.is_empty()
-        {
+        // Phase-4: Treat PRG fallback (seeded rows) as a valid Ajtai binding when c_coords are present.
+        let has_prg_binding = (!has_ajtai_rows && !has_pp) && !self.me.c_coords.is_empty();
+        let has_ajtai_binding = has_ajtai_rows || has_pp || has_prg_binding;
+        if !has_ajtai_binding && self.wit.weight_vectors.is_empty() {
             eprintln!("❌ SECURITY VIOLATION: Cannot synthesize circuit with no Ajtai binding AND no ME constraints.");
             eprintln!("   This would create a vacuous proof with no binding to the statement.");
             return Err(SynthesisError::AssignmentMissing);
@@ -699,6 +1028,16 @@ impl SpartanCircuit<E> for MeCircuit {
             let c_alloc = AllocatedNum::alloc(cs.namespace(|| format!("c_coord_{}", i)), || Ok(c_val))?;
             let _ = c_alloc.inputize(cs.namespace(|| format!("public_c_{}", i)));
             c_public_vars.push(c_alloc);
+        }
+        // Diagnostic: echo first few c_coords as seen by the circuit
+        if !self.me.c_coords.is_empty() {
+            let show = core::cmp::min(4, self.me.c_coords.len());
+            let mut buf = String::new();
+            for i in 0..show {
+                if i > 0 { buf.push_str(", "); }
+                buf.push_str(&format!("{}", self.me.c_coords[i].as_canonical_u64()));
+            }
+            eprintln!("[C-PUBLIC] c_coords[0..{}): {}", show, buf);
         }
 
         // 2) y outputs — already flattened (K -> [F;2]) in adapter
@@ -740,14 +1079,41 @@ impl SpartanCircuit<E> for MeCircuit {
                 let _ = a.inputize(cs.namespace(|| format!("public_ivc_y_next_{}", i)));
                 y_next_vars.push(a);
             }
+            #[cfg(all(debug_assertions, feature = "neo_dev_only"))]
+            let disable_ev = std::env::var("NEO_DEBUG_DISABLE_EV").ok().as_deref() == Some("1");
+            #[cfg(not(all(debug_assertions, feature = "neo_dev_only")))]
+            let disable_ev = false;
             let rho_val = <E as Engine>::Scalar::from(ev.rho.as_canonical_u64());
             let rho_var = AllocatedNum::alloc(cs.namespace(|| "ivc_rho"), || Ok(rho_val))?;
             let _ = rho_var.inputize(cs.namespace(|| "public_ivc_rho"));
 
-            // Optional: fold chain digest limbs as public inputs (no constraints yet)
+            // Diagnostics for EV embedding
+            eprintln!(
+                "[EV-DIAG] y_len={}, rho={}, y_prev[0..2]={:?}, y_next[0..2]={:?}",
+                ev.y_next.len(), ev.rho.as_canonical_u64(),
+                ev.y_prev.iter().take(2).map(|f| f.as_canonical_u64()).collect::<Vec<_>>(),
+                ev.y_next.iter().take(2).map(|f| f.as_canonical_u64()).collect::<Vec<_>>()
+            );
+            if let Some(step_pub) = &ev.y_step_public {
+                let ysp: Vec<u64> = step_pub.iter().take(2).map(|f| f.as_canonical_u64()).collect();
+                eprintln!("[EV-DIAG] y_step_public[0..2]={:?}", ysp);
+                // Quick consistency check on host values
+                let mut mismatches = 0usize;
+                for k in 0..core::cmp::min(4, step_pub.len()) {
+                    let lhs = step_pub[k] * ev.rho;
+                    let rhs = ev.y_next.get(k).copied().unwrap_or(neo_math::F::ZERO)
+                        - ev.y_prev.get(k).copied().unwrap_or(neo_math::F::ZERO);
+                    if lhs != rhs { mismatches += 1; }
+                }
+                if mismatches > 0 {
+                    eprintln!("[EV-DIAG] y_step_public * rho != (y_next - y_prev) for {} of first 4 entries", mismatches);
+                }
+            }
+
+            // Optional: fold chain digest limbs as public inputs and bind to rho via Poseidon2
             if let Some(d) = &ev.fold_chain_digest {
                 for (i, chunk) in d.chunks(8).enumerate() {
-                    let limb = <E as Engine>::Scalar::from(u64::from_le_bytes([
+                    let limb_const = <E as Engine>::Scalar::from(u64::from_le_bytes([
                         chunk.get(0).copied().unwrap_or(0),
                         chunk.get(1).copied().unwrap_or(0),
                         chunk.get(2).copied().unwrap_or(0),
@@ -757,13 +1123,58 @@ impl SpartanCircuit<E> for MeCircuit {
                         chunk.get(6).copied().unwrap_or(0),
                         chunk.get(7).copied().unwrap_or(0),
                     ]));
-                    let limb_alloc = AllocatedNum::alloc(cs.namespace(|| format!("fold_chain_digest_{}", i)), || Ok(limb))?;
+                    let limb_alloc = AllocatedNum::alloc(cs.namespace(|| format!("fold_chain_digest_{}", i)), || Ok(limb_const))?;
+                    // Bind limb variable to constant, so it contributes to constraints
+                    cs.enforce(
+                        || format!("fold_chain_digest_bind_{}", i),
+                        |lc| lc + limb_alloc.get_variable(),
+                        |lc| lc + CS::one(),
+                        |lc| lc + (limb_const, CS::one()),
+                    );
                     let _ = limb_alloc.inputize(cs.namespace(|| format!("public_fold_chain_digest_{}", i)));
                 }
+
+                // Derive a non-zero challenge from the fold-chain digest and bind it to rho
+                // Domain tag chosen to be stable and independent: "neo/ev/rho_from_digest/v1"
+                let mut limbs: Vec<u64> = Vec::with_capacity(4 + 4 + 1);
+                for chunk in b"neo/ev/rho_from_digest/v1".chunks(8) {
+                    let mut b = [0u8; 8];
+                    b[..chunk.len()].copy_from_slice(chunk);
+                    limbs.push(u64::from_le_bytes(b));
+                }
+                for chunk in d.chunks(8) {
+                    let mut b = [0u8; 8];
+                    b[..chunk.len()].copy_from_slice(chunk);
+                    limbs.push(u64::from_le_bytes(b));
+                }
+                let packed: Vec<u8> = limbs.iter().flat_map(|&x| x.to_le_bytes()).collect();
+                let h = neo_ccs::crypto::poseidon2_goldilocks::poseidon2_hash_packed_bytes(&packed);
+                let mut rho_from_digest = <E as Engine>::Scalar::from(h[0].as_canonical_u64());
+                if rho_from_digest == <E as Engine>::Scalar::ZERO { rho_from_digest = <E as Engine>::Scalar::ONE; }
+                // Enforce rho_var == rho_from_digest
+                cs.enforce(
+                    || "ev_rho_bind_fold_chain_digest",
+                    |lc| lc + rho_var.get_variable(),
+                    |lc| lc + CS::one(),
+                    |lc| lc + (rho_from_digest, CS::one()),
+                );
             }
 
             // Optional accumulator commitment evolution inputs
             if let (Some(cprev), Some(cstep), Some(cnext)) = (&ev.acc_c_prev, &ev.acc_c_step, &ev.acc_c_next) {
+                // Diagnostics for commit-evo vectors (EV embedding)
+                eprintln!(
+                    "[EV-DIAG] acc_c_prev/step/next lens: {}/{}/{}",
+                    cprev.len(), cstep.len(), cnext.len()
+                );
+                let mut mm = 0usize;
+                for i in 0..core::cmp::min(4, core::cmp::min(cprev.len(), core::cmp::min(cstep.len(), cnext.len()))) {
+                    let lhs = cprev[i] + ev.rho * cstep[i];
+                    if lhs != cnext[i] { mm += 1; }
+                }
+                if mm > 0 {
+                    eprintln!("[EV-DIAG] acc commit-evo mismatch on {} of first 4 entries", mm);
+                }
                 // Inputize sequences
                 let mut cprev_vars = Vec::with_capacity(cprev.len());
                 let mut cstep_vars = Vec::with_capacity(cstep.len());
@@ -786,51 +1197,80 @@ impl SpartanCircuit<E> for MeCircuit {
                     let _ = a.inputize(cs.namespace(|| format!("public_acc_c_next_{}", i)));
                     cnext_vars.push(a);
                 }
-                let rho_eff_s = <E as Engine>::Scalar::from(ev.rho_eff.unwrap_or(ev.rho).as_canonical_u64());
-                // Enforce acc_c_next[i] = acc_c_prev[i] + rho_eff * acc_c_step[i]
-                let n = core::cmp::min(cprev_vars.len(), core::cmp::min(cstep_vars.len(), cnext_vars.len()));
-                for i in 0..n {
-                    cs.enforce(
-                        || format!("acc_commit_evo_{}", i),
-                        |lc| lc + cnext_vars[i].get_variable(),
-                        |lc| lc + CS::one(),
-                        |lc| lc + cprev_vars[i].get_variable() + (rho_eff_s, cstep_vars[i].get_variable()),
-                    );
+                if disable_ev {
+                    eprintln!("[EV-DIAG] acc commit-evo constraints disabled by NEO_DEBUG_DISABLE_EV=1");
+                } else {
+                    let rho_eff_s = <E as Engine>::Scalar::from(ev.rho_eff.unwrap_or(ev.rho).as_canonical_u64());
+                    // Enforce acc_c_next[i] = acc_c_prev[i] + rho_eff * acc_c_step[i]
+                    let n = core::cmp::min(cprev_vars.len(), core::cmp::min(cstep_vars.len(), cnext_vars.len()));
+                    for i in 0..n {
+                        cs.enforce(
+                            || format!("acc_commit_evo_{}", i),
+                            |lc| lc + cnext_vars[i].get_variable(),
+                            |lc| lc + CS::one(),
+                            |lc| lc + cprev_vars[i].get_variable() + (rho_eff_s, cstep_vars[i].get_variable()),
+                        );
+                    }
                 }
             }
             // Enforce for k in 0..y_len: (y_step[k]) * rho = (y_next[k] - y_prev[k])
-            let y_len = ev.y_next.len();
-            // Select y_step source: either provided public values (allocated privately), or tail of y_outputs
-            let mut y_step_vars: Vec<AllocatedNum<<E as Engine>::Scalar>> = Vec::with_capacity(y_len);
-            if let Some(step_pub) = &ev.y_step_public {
-                for (k, &vf) in step_pub.iter().enumerate().take(y_len) {
-                    let val = <E as Engine>::Scalar::from(vf.as_canonical_u64());
-                    let v = AllocatedNum::alloc(cs.namespace(|| format!("ivc_y_step_pub_{}", k)), || Ok(val))?;
-                    y_step_vars.push(v);
-                }
+            if disable_ev {
+                eprintln!("[EV-DIAG] y_step linkage constraints disabled by NEO_DEBUG_DISABLE_EV=1");
             } else {
-                let start = self.me.y_outputs.len().saturating_sub(y_len);
-                for k in 0..y_len { y_step_vars.push(y_public_vars[start + k].clone()); }
-            }
-            for k in 0..y_len {
-                let yn = &y_next_vars[k];
-                let yp = &y_prev_vars[k];
-                let y_step_var = &y_step_vars[k];
-                cs.enforce(
-                    || format!("ivc_ev_{}", k),
-                    |lc| lc + y_step_var.get_variable(),
-                    |lc| lc + rho_var.get_variable(),
-                    |lc| lc + yn.get_variable() - yp.get_variable(),
-                );
-                n_constraints += 1;
+                let y_len = ev.y_next.len();
+                // Select y_step source: either provided public values (allocated privately), or tail of y_outputs
+                let mut y_step_vars: Vec<AllocatedNum<<E as Engine>::Scalar>> = Vec::with_capacity(y_len);
+                if let Some(step_pub) = &ev.y_step_public {
+                    for (k, &vf) in step_pub.iter().enumerate().take(y_len) {
+                        let val = <E as Engine>::Scalar::from(vf.as_canonical_u64());
+                        let v = AllocatedNum::alloc(cs.namespace(|| format!("ivc_y_step_pub_{}", k)), || Ok(val))?;
+                        y_step_vars.push(v);
+                    }
+                } else {
+                    let start = self.me.y_outputs.len().saturating_sub(y_len);
+                    for k in 0..y_len { y_step_vars.push(y_public_vars[start + k].clone()); }
+                }
+                for k in 0..y_len {
+                    let yn = &y_next_vars[k];
+                    let yp = &y_prev_vars[k];
+                    let y_step_var = &y_step_vars[k];
+                    cs.enforce(
+                        || format!("ivc_ev_{}", k),
+                        |lc| lc + y_step_var.get_variable(),
+                        |lc| lc + rho_var.get_variable(),
+                        |lc| lc + yn.get_variable() - yp.get_variable(),
+                    );
+                    n_constraints += 1;
+                }
             }
         }
 
         // Optional linkage constraints (bind specific undigitized witness values)
         if let Some(link) = &self.linkage {
+            #[cfg(all(debug_assertions, feature = "neo_dev_only"))]
+            let disable_link = std::env::var("NEO_DEBUG_DISABLE_LINKAGE").ok().as_deref() == Some("1");
+            #[cfg(not(all(debug_assertions, feature = "neo_dev_only")))]
+            let disable_link = false;
             let d = neo_math::D;
             let mut pow_b: Vec<<E as Engine>::Scalar> = vec![<E as Engine>::Scalar::ONE; d];
             for r in 1..d { pow_b[r] = pow_b[r-1] * <E as Engine>::Scalar::from(self.me.base_b as u64); }
+            eprintln!("[LINK-DIAG] x_indices_abs={:?} y_prev_indices_abs={:?} const1={:?}", link.x_indices_abs, link.y_prev_indices_abs, link.const1_index_abs);
+            // Host-side diagnostic check for first few bindings
+            for (j, &idx) in link.x_indices_abs.iter().take(2).enumerate() {
+                let expected = link.step_io.get(j).copied().unwrap_or(neo_math::F::ZERO);
+                // reconstruct from witness digits if within bounds
+                let mut accum = <E as Engine>::Scalar::ZERO;
+                let upto = core::cmp::min(d, self.wit.z_digits.len().saturating_sub(idx * d));
+                for r in 0..upto {
+                    let z_i = self.wit.z_digits[idx * d + r];
+                    let z_s = if z_i >= 0 { <E as Engine>::Scalar::from(z_i as u64) } else { -<E as Engine>::Scalar::from((-z_i) as u64) };
+                    accum += pow_b[r] * z_s;
+                }
+                eprintln!("[LINK-DIAG] x_bind j={} idx={} expected={} recon={} (first few)", j, idx, expected.as_canonical_u64(), accum.to_canonical_u64());
+            }
+            if disable_link {
+                eprintln!("[LINK-DIAG] linkage constraints disabled by NEO_DEBUG_DISABLE_LINKAGE=1");
+            } else {
             let mut enforce_z_eq = |idx_abs: usize, expected_f: neo_math::F, tag: &str| -> Result<(), SynthesisError> {
                 let k = idx_abs;
                 let upto = core::cmp::min(d, z_vars.len().saturating_sub(k * d));
@@ -860,22 +1300,40 @@ impl SpartanCircuit<E> for MeCircuit {
                 enforce_z_eq(idx, expected, &format!("y_prev_{}", i))?;
             }
             if let Some(c1_idx) = link.const1_index_abs { enforce_z_eq(c1_idx, neo_math::F::ONE, "const1")?; }
+            }
         }
 
         // Optional commitment evolution constraints: c_next (public) equals c_prev + rho*c_step
         if let Some(commit) = &self.commit {
+            #[cfg(all(debug_assertions, feature = "neo_dev_only"))]
+            let disable_commit = std::env::var("NEO_DEBUG_DISABLE_COMMIT").ok().as_deref() == Some("1");
+            #[cfg(not(all(debug_assertions, feature = "neo_dev_only")))]
+            let disable_commit = false;
             let rho_s = <E as Engine>::Scalar::from(commit.rho.as_canonical_u64());
             let n = core::cmp::min(commit.c_prev.len(), core::cmp::min(commit.c_step.len(), c_public_vars.len()));
-            for i in 0..n {
-                let rhs_const = <E as Engine>::Scalar::from(commit.c_prev[i].as_canonical_u64())
-                    + rho_s * <E as Engine>::Scalar::from(commit.c_step[i].as_canonical_u64());
-                cs.enforce(
-                    || format!("commit_evo_{}", i),
-                    |lc| lc + c_public_vars[i].get_variable(),
-                    |lc| lc + CS::one(),
-                    |lc| lc + (rhs_const, CS::one()),
-                );
-                n_constraints += 1;
+            // Diagnostics for commit-evo public binding
+            eprintln!("[COMMIT-DIAG] commit-evo n={}, rho={}", n, commit.rho.as_canonical_u64());
+            for i in 0..core::cmp::min(4, n) {
+                let lhs = self.me.c_coords[i];
+                let rhs = commit.c_prev[i] + commit.rho * commit.c_step[i];
+                if lhs != rhs {
+                    eprintln!("[COMMIT-DIAG] mismatch at {}: lhs(c_next)={} rhs(c_prev+rho*c_step)={}", i, lhs.as_canonical_u64(), rhs.as_canonical_u64());
+                }
+            }
+            if disable_commit {
+                eprintln!("[COMMIT-DIAG] commit-evo constraints disabled by NEO_DEBUG_DISABLE_COMMIT=1");
+            } else {
+                for i in 0..n {
+                    let rhs_const = <E as Engine>::Scalar::from(commit.c_prev[i].as_canonical_u64())
+                        + rho_s * <E as Engine>::Scalar::from(commit.c_step[i].as_canonical_u64());
+                    cs.enforce(
+                        || format!("commit_evo_{}", i),
+                        |lc| lc + c_public_vars[i].get_variable(),
+                        |lc| lc + CS::one(),
+                        |lc| lc + (rhs_const, CS::one()),
+                    );
+                    n_constraints += 1;
+                }
             }
         }
         
@@ -1060,11 +1518,20 @@ pub fn prove_me_snark_with_pp_and_ivc(
     ev: Option<IvcEvEmbed>,
     commit: Option<CommitEvoEmbed>,
     linkage: Option<IvcLinkageInputs>,
+    pi_ccs: Option<crate::pi_ccs_embed::PiCcsEmbed>,
 ) -> Result<(Vec<u8>, Vec<<E as Engine>::Scalar>, Arc<SpartanVerifierKey<E>>), SpartanError> {
+    // Clone embedding options so we can reuse the exact same config
+    // for both proving and reconstructing public values.
+    let ev_for_prove = ev.clone();
+    let commit_for_prove = commit.clone();
+    let linkage_for_prove = linkage.clone();
+    let pi_ccs_for_prove = pi_ccs.clone();
+
     let circuit = MeCircuit::new(me.clone(), wit.clone(), pp, me.header_digest)
-        .with_ev(ev)
-        .with_commit(commit)
-        .with_linkage(linkage);
+        .with_ev(ev_for_prove)
+        .with_commit(commit_for_prove)
+        .with_linkage(linkage_for_prove)
+        .with_pi_ccs(pi_ccs_for_prove);
 
     // Normal cached proving path
     let circuit_key = CircuitKey::from_circuit(&circuit);
@@ -1082,9 +1549,14 @@ pub fn prove_me_snark_with_pp_and_ivc(
     let prep = R1CSSNARK::<E>::prep_prove(&pk, circuit.clone(), true)?;
     let snark_proof = R1CSSNARK::<E>::prove(&pk, circuit, &prep, false)?;
 
-    // Recompute public values deterministically (same layout function as normal)
+    // Recompute public values deterministically using the SAME embedding config
+    // as the proving circuit to avoid any drift between prep/prove/publics.
     let public_outputs = {
-        let circuit_for_publics = MeCircuit::new(me.clone(), wit.clone(), None, me.header_digest);
+        let circuit_for_publics = MeCircuit::new(me.clone(), wit.clone(), None, me.header_digest)
+            .with_ev(ev)
+            .with_commit(commit)
+            .with_linkage(linkage)
+            .with_pi_ccs(pi_ccs);
         circuit_for_publics
             .public_values()
             .map_err(|e| SpartanError::SynthesisError { reason: format!("public_values() failed: {e}") })?

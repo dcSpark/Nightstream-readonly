@@ -1142,6 +1142,7 @@ dependencies = [
  "neo-ajtai",
  "neo-ccs",
  "neo-math",
+ "neo-transcript",
  "once_cell",
  "p3-challenger",
  "p3-field",

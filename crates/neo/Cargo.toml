@@ -9,11 +9,15 @@ rust-version = "1.88"
 
 [features]
 default = []
-debug-logs = ["neo-spartan-bridge/debug-logs"]
+debug-logs = ["neo-spartan-bridge/debug-logs", "neo-transcript/debug-log"]
 # Enable comprehensive logging across all Neo components 
 neo-logs = ["neo-spartan-bridge/neo-logs", "neo-ccs/neo-logs", "neo-ajtai/neo-logs"]
 # Enable testing features across all Neo components
 testing = ["neo-spartan-bridge/testing", "neo-ccs/testing", "neo-ajtai/testing"]
+# Dev-only toggles (e.g., env switch to disable constraints) — NEVER enable in production
+neo_dev_only = ["neo-spartan-bridge/neo_dev_only"]
+# FS parity guard (CI/debug only): enables transcript event recording and checks
+fs-guard = ["neo-transcript/fs-guard"]
 
 [dependencies]
 anyhow = { workspace = true }

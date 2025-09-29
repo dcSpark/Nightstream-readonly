@@ -149,3 +149,95 @@ fn commit_evo_attack_fails_v1() {
     let ok = verify_lean_proof(&proof).unwrap_or(false);
     assert!(!ok, "verification must fail when commit evolution is false");
 }
+
+#[test]
+fn acc_vectors_public_io_flip_fails_v1() {
+    let (me, wit) = tiny_me_instance();
+    let rho = F::from_u64(3);
+    let y_prev = vec![F::from_u64(1), F::from_u64(2)];
+    let y_next = vec![F::from_u64(4), F::from_u64(8)];
+
+    // Consistent acc vectors
+    let c_prev = vec![F::from_u64(5), F::from_u64(6)];
+    let c_step = vec![F::from_u64(7), F::from_u64(8)];
+    let c_next = vec![c_prev[0] + rho * c_step[0], c_prev[1] + rho * c_step[1]];
+
+    let ev = IvcEvEmbed {
+        rho,
+        y_prev: y_prev.clone(),
+        y_next: y_next.clone(),
+        y_step_public: None,
+        fold_chain_digest: None,
+        acc_c_prev: Some(c_prev.clone()),
+        acc_c_step: Some(c_step.clone()),
+        acc_c_next: Some(c_next.clone()),
+        rho_eff: None,
+    };
+
+    let mut proof = neo_spartan_bridge::compress_ivc_verifier_to_lean_proof_with_linkage(&me, &wit, None, Some(ev), None, None)
+        .expect("prove");
+
+    // Locate acc_c_prev in public IO and flip a byte
+    let scalars_before_acc = me.c_coords.len() + me.y_outputs.len() + me.r_point.len()
+        + 1 /*base_b*/ + y_prev.len() + y_next.len() + 1 /*rho*/;
+    let byte_off = scalars_before_acc * 8;
+    assert!(proof.public_io_bytes.len() >= byte_off + 8, "public io too short");
+    proof.public_io_bytes[byte_off] ^= 0xA5;
+
+    let ok = neo_spartan_bridge::verify_lean_proof(&proof).unwrap_or(false);
+    assert!(!ok, "verification must fail when acc_c_prev limb is tampered in public IO");
+}
+
+#[test]
+fn fold_chain_digest_flip_fails_v1() {
+    let (me, wit) = tiny_me_instance();
+    let rho = F::from_u64(5);
+    let y_prev = vec![F::from_u64(2), F::from_u64(4)];
+    let y_next = vec![F::from_u64(12), F::from_u64(24)];
+    let fold_digest = [0x77u8; 32];
+
+    let ev = IvcEvEmbed {
+        rho,
+        y_prev: y_prev.clone(),
+        y_next: y_next.clone(),
+        y_step_public: None,
+        fold_chain_digest: Some(fold_digest),
+        acc_c_prev: None,
+        acc_c_step: None,
+        acc_c_next: None,
+        rho_eff: None,
+    };
+    let mut proof = compress_ivc_verifier_to_lean_proof_with_linkage(&me, &wit, None, Some(ev), None, None)
+        .expect("prove");
+
+    // Locate digest start and flip a byte
+    let scalars_before_digest = me.c_coords.len() + me.y_outputs.len() + me.r_point.len()
+        + 1 /*base_b*/ + y_prev.len() + y_next.len() + 1 /*rho*/;
+    let byte_off = scalars_before_digest * 8;
+    assert!(proof.public_io_bytes.len() >= byte_off + 1);
+    proof.public_io_bytes[byte_off] ^= 0xFF;
+
+    let ok = verify_lean_proof(&proof).unwrap_or(false);
+    assert!(!ok, "verification must fail when fold_chain_digest is tampered in public IO");
+}
+
+#[test]
+fn rho_flip_fails_v1() {
+    let (me, wit) = tiny_me_instance();
+    let rho = F::from_u64(9);
+    let y_prev = vec![F::from_u64(3)];
+    let y_next = vec![F::from_u64(12)];
+    let ev = IvcEvEmbed { rho, y_prev: y_prev.clone(), y_next: y_next.clone(), y_step_public: None,
+        fold_chain_digest: None, acc_c_prev: None, acc_c_step: None, acc_c_next: None, rho_eff: None };
+    let mut proof = compress_ivc_verifier_to_lean_proof_with_linkage(&me, &wit, None, Some(ev), None, None)
+        .expect("prove");
+
+    // Offset to rho scalar in EV public IO
+    let scalars_before_rho = me.c_coords.len() + me.y_outputs.len() + me.r_point.len() + 1 /*base_b*/
+        + y_prev.len() + y_next.len();
+    let byte_off = scalars_before_rho * 8;
+    proof.public_io_bytes[byte_off] ^= 0xA5;
+
+    let ok = verify_lean_proof(&proof).unwrap_or(false);
+    assert!(!ok, "verification must fail when rho is tampered in public IO");
+}

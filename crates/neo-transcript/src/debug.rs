@@ -1,3 +1,5 @@
+use p3_field::PrimeField64;
+
 #[derive(Clone, Debug)]
 pub struct Event {
     pub op: &'static str,
@@ -13,4 +15,3 @@ impl Event {
         Self { op, label, len, st_prefix }
     }
 }
-

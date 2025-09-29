@@ -6,6 +6,10 @@ authors = { workspace = true }
 
 [features]
 default = []
+# Test-only feature for deterministic shortcuts in small-unit tests
+testing = []
+# Forward neo-transcript debug logging so tests can enable transcript dumps on stable
+debug-logs = ["neo-transcript/debug-log"]
 # Note: dev feature removed - neo-spartan-bridge now uses Poseidon2-only (no dev mode)
 
 [dependencies]
