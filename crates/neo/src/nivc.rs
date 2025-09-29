@@ -322,7 +322,7 @@ pub fn finalize_nivc_chain_with_options(
     let spec = &program.steps[j];
 
     // Gather data from last step proof
-    let rho = if last.inner.step_rho != F::ZERO { last.inner.step_rho } else { F::ONE }; // fallback
+    let mut rho = if last.inner.step_rho != F::ZERO { last.inner.step_rho } else { F::ONE }; // fallback
     let y_prev = last.inner.step_y_prev.clone();
     let y_next = last.inner.step_y_next.clone();
     let step_x = last.inner.step_public_input.clone();
@@ -556,14 +556,34 @@ pub fn finalize_nivc_chain_with_options(
         anyhow::ensure!(rho != F::ZERO, "ρ is zero; EV embedding not supported");
 
         // Use the IVC verifier-style circuit to enforce EV + linkage + commitment evolution.
+        // SECURITY: optionally bind ρ to the fold-chain transcript digest (restores Fiat–Shamir soundness).
+        let fold_digest_opt = last.inner.folding_proof
+            .as_ref()
+            .map(|fp| neo_fold::folding_proof_digest(fp));
+        if let Some(d) = &fold_digest_opt {
+            // Mirror in-circuit binding: ρ = Poseidon2("neo/ev/rho_from_digest/v1" || digest), non-zero tweak
+            let mut limbs: Vec<u64> = Vec::new();
+            for chunk in b"neo/ev/rho_from_digest/v1".chunks(8) {
+                let mut b = [0u8; 8];
+                b[..chunk.len()].copy_from_slice(chunk);
+                limbs.push(u64::from_le_bytes(b));
+            }
+            for chunk in d.chunks(8) {
+                let mut b = [0u8; 8];
+                b[..chunk.len()].copy_from_slice(chunk);
+                limbs.push(u64::from_le_bytes(b));
+            }
+            let packed: Vec<u8> = limbs.iter().flat_map(|&x| x.to_le_bytes()).collect();
+            let h = neo_ccs::crypto::poseidon2_goldilocks::poseidon2_hash_packed_bytes(&packed);
+            let mut derived = F::from_u64(h[0].as_canonical_u64());
+            if derived == F::ZERO { derived = F::ONE; }
+            rho = derived;
+        }
         // 1) EV: Provide (ρ, y_prev, y_next); optionally expose y_step as public convenience.
         let y_step_public = {
             let rho_inv = F::ONE / rho;
             Some(y_next.iter().zip(y_prev.iter()).map(|(n,p)| (*n - *p) * rho_inv).collect::<Vec<_>>())
         };
-        // For now, avoid deriving an extra fold-chain digest for rho binding in-circuit.
-        // The proof is already bound to the augmented CCS + public input via context_digest_v1.
-        let fold_digest_opt = None;
 
         // Keep legacy_me.c_coords equal to the accumulator commitment (c_next).
         // Ajtai will bind to me.c_coords, and EV constraints enforce commit evolution.

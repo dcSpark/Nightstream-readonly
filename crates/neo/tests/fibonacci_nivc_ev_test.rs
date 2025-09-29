@@ -64,10 +64,13 @@ fn build_fibonacci_step_witness(a: u64, b: u64) -> Vec<F> {
 
 #[test]
 fn test_fibonacci_nivc_ev_embed_small() -> Result<()> {
+    // Ensure a clean VK registry so circuit key shape changes never hit stale VKs
+    neo_spartan_bridge::clear_vk_registry();
     // Determinism for reproducible CI runs
     std::env::set_var("NEO_DETERMINISTIC", "1");
     // Enforce strict public IO parity for EV embedding to fail fast on mismatches
     std::env::set_var("NEO_STRICT_IO_PARITY", "1");
+    // Keep full pipeline enabled (Pi-CCS on) to test integrated path
     // Note: Do NOT force RLC identity when testing EV embedding; it breaks commit-evo parity.
 
     // Params and CCS

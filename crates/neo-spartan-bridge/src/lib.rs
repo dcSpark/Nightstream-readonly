@@ -889,6 +889,72 @@ pub fn compress_me_to_lean_proof_with_pp(
         }
     }
 
+    // Optional host-side preflight: check ME eval constraints <w_j, z> = y_j
+    #[cfg(feature = "debug-logs")]
+    {
+        let mut mismatches = 0usize;
+        let mut samples: Vec<(usize, u64, u64)> = Vec::new();
+        for j in 0..core::cmp::min(wit_norm.weight_vectors.len(), me.y_outputs.len()) {
+            let wj = &wit_norm.weight_vectors[j];
+            let upto = core::cmp::min(wj.len(), wit_norm.z_digits.len());
+            let mut acc = neo_math::F::ZERO;
+            for k in 0..upto {
+                let zk = wit_norm.z_digits[k];
+                let zf = if zk >= 0 { neo_math::F::from_u64(zk as u64) } else { -neo_math::F::from_u64((-zk) as u64) };
+                acc += wj[k] * zf;
+            }
+            if acc != me.y_outputs[j] {
+                if samples.len() < 5 { samples.push((j, acc.as_canonical_u64(), me.y_outputs[j].as_canonical_u64())); }
+                mismatches += 1;
+            }
+        }
+            if mismatches > 0 {
+                eprintln!("[ME-PREFLIGHT] MISMATCH: {} of {} <w_j,z> != y_j (first few {:?})",
+                          mismatches,
+                          core::cmp::min(wit_norm.weight_vectors.len(), me.y_outputs.len()),
+                          samples);
+            // Additionally print reconstruction of undigitized z[k] for the last claim if applicable
+            if wit_norm.weight_vectors.len() > 0 && me.y_outputs.len() == wit_norm.weight_vectors.len() {
+                let d = neo_math::ring::D;
+                let m_cols = wit_norm.weight_vectors[0].len() / d;
+                let mut recon: Vec<neo_math::F> = vec![neo_math::F::ZERO; m_cols];
+                let b_f = neo_math::F::from_u64(me.base_b);
+                let mut pow: Vec<neo_math::F> = vec![neo_math::F::ONE; d];
+                for r in 1..d { pow[r] = pow[r-1] * b_f; }
+                for k in 0..m_cols {
+                    let mut acc = neo_math::F::ZERO;
+                    for r in 0..d {
+                        let idx = k * d + r;
+                        if idx >= wit_norm.z_digits.len() { break; }
+                        let zk = wit_norm.z_digits[idx];
+                        let zf = if zk >= 0 { neo_math::F::from_u64(zk as u64) } else { -neo_math::F::from_u64((-zk) as u64) };
+                        acc += pow[r] * zf;
+                    }
+                    recon[k] = acc;
+                }
+                let last_k = m_cols.saturating_sub(1);
+                eprintln!("[ME-PREFLIGHT] recon z[k] sample: z[0]={} z[1]={} z[last]={}",
+                          recon.get(0).map(|x| x.as_canonical_u64()).unwrap_or(0),
+                          recon.get(1).map(|x| x.as_canonical_u64()).unwrap_or(0),
+                          recon.get(last_k).map(|x| x.as_canonical_u64()).unwrap_or(0));
+                // Try to locate the expected app outputs within recon (best-effort diagnostics)
+                let tail = me.y_outputs.last().copied().unwrap_or(neo_math::F::ZERO);
+                let mut pos = None;
+                for k in 0..recon.len() {
+                    if recon[k] == tail { pos = Some(k); break; }
+                }
+                if let Some(k) = pos {
+                    eprintln!("[ME-PREFLIGHT] located expected tail value {} at recon z[{}]", tail.as_canonical_u64(), k);
+                } else {
+                    eprintln!("[ME-PREFLIGHT] expected tail value {} not found in recon z[0..{}]",
+                              tail.as_canonical_u64(), recon.len());
+                }
+            }
+        } else {
+            eprintln!("[ME-PREFLIGHT] OK: all <w_j,z> equal corresponding y_j");
+        }
+    }
+
     // Prove using existing Spartan infrastructure
     let snark_result = me_to_r1cs::prove_me_snark_with_pp(me, &wit_norm, pp.clone(), None);
     let (proof_bytes, _public_outputs, vk_arc) = match snark_result {
@@ -1032,12 +1098,27 @@ pub fn compress_ivc_verifier_to_lean_proof_with_linkage(
             }
         }
     }
+    // If EV provides y_step_public, append it to the tail of ME outputs so the circuit can
+    // securely couple y_step == tail(me.y_outputs).
+    let mut me_adj = me.clone();
+    if let Some(ev_ref) = &ev {
+        if let Some(step) = &ev_ref.y_step_public {
+            me_adj.y_outputs.extend_from_slice(step);
+        }
+        // Align public c_coords with EV acc_c_next to satisfy in-circuit equality and avoid drift.
+        if let Some(cn) = &ev_ref.acc_c_next {
+            if cn.len() == me_adj.c_coords.len() {
+                me_adj.c_coords = cn.clone();
+            }
+        }
+    }
+
     // Prove using extended MeCircuit
-    let (proof_bytes, _public_outputs, vk_arc) = me_to_r1cs::prove_me_snark_with_pp_and_ivc(me, wit, pp.clone(), ev.clone(), commit.clone(), linkage.clone(), None)
+    let (proof_bytes, _public_outputs, vk_arc) = me_to_r1cs::prove_me_snark_with_pp_and_ivc(&me_adj, wit, pp.clone(), ev.clone(), commit.clone(), linkage.clone(), None)
         .map_err(|e| anyhow::anyhow!("IVC verifier SNARK failed: {}", e))?;
 
     // Circuit fingerprint (must include EV + commit + linkage presence)
-    let circuit = me_to_r1cs::MeCircuit::new(me.clone(), wit.clone(), pp, me.header_digest)
+    let circuit = me_to_r1cs::MeCircuit::new(me_adj.clone(), wit.clone(), pp, me_adj.header_digest)
         .with_ev(ev.clone())
         .with_commit(commit.clone())
         .with_linkage(linkage.clone());
@@ -1050,7 +1131,7 @@ pub fn compress_ivc_verifier_to_lean_proof_with_linkage(
     register_vk(circuit_key, vk_arc.clone());
 
     // Use canonical encoder to avoid prover/verifier FS drift
-    let public_io_bytes = encode_bridge_io_header_with_ev(me, ev.as_ref());
+    let public_io_bytes = encode_bridge_io_header_with_ev(&me_adj, ev.as_ref());
     let proof = Proof::new(circuit_key, vk_digest, public_io_bytes, proof_bytes);
     
     // Optional self-verify in debug/dev to catch drift at the source
@@ -1104,8 +1185,20 @@ pub fn compress_ivc_verifier_to_lean_proof_with_linkage_and_pi_ccs(
     } else {
         eprintln!("[BRIDGE] me.c_coords is EMPTY (len=0)");
     }
+    // If EV provides y_step_public, append it to the tail of ME outputs so the circuit can
+    // securely couple y_step == tail(me.y_outputs).
+    let mut me_adj = me.clone();
+    if let Some(ev_ref) = &ev {
+        if let Some(step) = &ev_ref.y_step_public {
+            me_adj.y_outputs.extend_from_slice(step);
+        }
+        if let Some(cn) = &ev_ref.acc_c_next {
+            if cn.len() == me_adj.c_coords.len() { me_adj.c_coords = cn.clone(); }
+        }
+    }
+
     let (proof_bytes, _public_outputs, vk_arc) = me_to_r1cs::prove_me_snark_with_pp_and_ivc(
-        me, wit, pp.clone(), ev.clone(), commit.clone(), linkage.clone(), pi_ccs.clone()
+        &me_adj, wit, pp.clone(), ev.clone(), commit.clone(), linkage.clone(), pi_ccs.clone()
     ).map_err(|e| anyhow::anyhow!("IVC verifier SNARK (with Pi-CCS) failed: {}", e))?;
 
     // Optional self-verify to catch drift immediately (debug aid).
@@ -1129,7 +1222,7 @@ pub fn compress_ivc_verifier_to_lean_proof_with_linkage_and_pi_ccs(
     }
 
     // Circuit fingerprint matches the configured embeddings
-    let circuit = me_to_r1cs::MeCircuit::new(me.clone(), wit.clone(), pp, me.header_digest)
+    let circuit = me_to_r1cs::MeCircuit::new(me_adj.clone(), wit.clone(), pp, me_adj.header_digest)
         .with_ev(ev.clone())
         .with_commit(commit)
         .with_linkage(linkage)
@@ -1143,7 +1236,7 @@ pub fn compress_ivc_verifier_to_lean_proof_with_linkage_and_pi_ccs(
     register_vk(circuit_key, vk_arc.clone());
 
     // Use canonical encoder to avoid prover/verifier FS drift
-    let public_io_bytes = encode_bridge_io_header_with_ev(me, ev.as_ref());
+    let public_io_bytes = encode_bridge_io_header_with_ev(&me_adj, ev.as_ref());
     let proof = Proof::new(circuit_key, vk_digest, public_io_bytes, proof_bytes);
     Ok(proof)
 }

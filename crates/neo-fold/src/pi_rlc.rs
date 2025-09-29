@@ -72,10 +72,17 @@ pub fn pi_rlc_prove(
     #[cfg(not(feature = "testing"))]
     let test_identity = false;
 
-    #[cfg(all(debug_assertions, feature = "testing"))]
+    // Honor test-only override only when compiled with the `testing` feature.
+    // This prevents accidental weakening in production builds.
+    #[cfg(feature = "testing")]
     let force_identity = std::env::var("NEO_TEST_RLC_IDENTITY").ok().as_deref() == Some("1");
-    #[cfg(not(all(debug_assertions, feature = "testing")))]
-    let force_identity = false;
+    #[cfg(not(feature = "testing"))]
+    let force_identity = {
+        if std::env::var("NEO_TEST_RLC_IDENTITY").ok().as_deref() == Some("1") {
+            eprintln!("[WARN] NEO_TEST_RLC_IDENTITY=1 ignored (build missing 'testing' feature)");
+        }
+        false
+    };
     let (rhos, T_bound) = if test_identity || force_identity {
         // Derive dummy T bound from config for guard display; value not used.
         let cfg = DEFAULT_STRONGSET.clone();

@@ -75,7 +75,8 @@ fn ev_linkage_ok_v1() {
     let (me, wit) = tiny_me_instance();
     let rho = F::from_u64(5);
     let y_prev = vec![F::from_u64(10), F::from_u64(20)];
-    let y_step = vec![F::from_u64(1), F::from_u64(2)];
+    // Bind y_step to the tail of ME outputs (security linkage enabled)
+    let y_step = me.y_outputs.clone();
     let y_next = vec![y_prev[0] + rho * y_step[0], y_prev[1] + rho * y_step[1]];
 
     let ev = IvcEvEmbed {

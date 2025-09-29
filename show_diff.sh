@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Script to save diff between current changes and a base commit to a file
-# Usage: ./show_diff.sh [output_file] ["path1,path2,path3,..."] [base_commit]
+# Usage: ./show_diff.sh [output_file] ["path1,path2,path3,..."] [base_commit] [--no-tests]
 #
 # Examples:
 #   ./show_diff.sh                                    # Save all changes to 'git_diff.txt' (vs HEAD)
@@ -10,11 +10,43 @@
 #   ./show_diff.sh diff.txt "crates/neo-fold,neo-main/src"  # Save specific paths only (vs HEAD)
 #   ./show_diff.sh changes.txt "" "main"              # Save all changes vs main branch
 #   ./show_diff.sh changes.txt "src" "abc123"         # Save src/ changes vs commit abc123
+#   ./show_diff.sh changes.txt "" "HEAD" --no-tests   # Save all changes excluding test files
+#   ./show_diff.sh --no-tests                         # Save all changes excluding test files to 'git_diff.txt'
 
-# Default values
-output_file="${1:-git_diff.txt}"
-target_paths="${2:-}"
-base_commit="${3:-HEAD}"
+# Parse arguments and handle --no-tests flag
+no_tests=false
+args=()
+
+# Process all arguments to separate --no-tests from positional args
+for arg in "$@"; do
+    if [ "$arg" = "--no-tests" ]; then
+        no_tests=true
+    elif [ "$arg" = "--help" ] || [ "$arg" = "-h" ]; then
+        echo "Usage: $0 [output_file] [\"path1,path2,path3,...\"] [base_commit] [--no-tests]"
+        echo ""
+        echo "Examples:"
+        echo "  $0                                    # Save all changes to 'git_diff.txt' (vs HEAD)"
+        echo "  $0 my_changes.txt                     # Save all changes to 'my_changes.txt' (vs HEAD)"
+        echo "  $0 changes.txt \"src,tests\"            # Save only src/ and tests/ changes (vs HEAD)"
+        echo "  $0 diff.txt \"crates/neo-fold,neo-main/src\"  # Save specific paths only (vs HEAD)"
+        echo "  $0 changes.txt \"\" \"main\"              # Save all changes vs main branch"
+        echo "  $0 changes.txt \"src\" \"abc123\"         # Save src/ changes vs commit abc123"
+        echo "  $0 changes.txt \"\" \"HEAD\" --no-tests   # Save all changes excluding test files"
+        echo "  $0 --no-tests                         # Save all changes excluding test files to 'git_diff.txt'"
+        echo ""
+        echo "Options:"
+        echo "  --no-tests    Exclude files in test directories (/tests/, /test/, *_test.*, test_*)"
+        echo "  --help, -h    Show this help message"
+        exit 0
+    else
+        args+=("$arg")
+    fi
+done
+
+# Default values using processed arguments
+output_file="${args[0]:-git_diff.txt}"
+target_paths="${args[1]:-}"
+base_commit="${args[2]:-HEAD}"
 
 # Parse comma-separated paths into array
 if [ -n "$target_paths" ]; then
@@ -26,6 +58,16 @@ if [ -n "$target_paths" ]; then
 else
     paths=()
 fi
+
+# Function to filter out test files from a list of files
+filter_test_files() {
+    local files="$1"
+    if [ "$no_tests" = true ]; then
+        echo "$files" | grep -v '/tests/' | grep -v '/test/' | grep -v '_test\.' | grep -v 'test_'
+    else
+        echo "$files"
+    fi
+}
 
 # Remove existing output file
 rm -f "$output_file"
@@ -44,6 +86,9 @@ if [ "$base_commit" != "HEAD" ]; then
 fi
 if [ ${#paths[@]} -gt 0 ]; then
     echo "Including only specified paths: ${paths[*]}"
+fi
+if [ "$no_tests" = true ]; then
+    echo "Excluding test files (--no-tests flag active)"
 fi
 
 # Header
@@ -76,9 +121,35 @@ fi
     echo "Diff of Modified Files (against $base_commit)"
     echo "=============================================="
     if [ ${#paths[@]} -gt 0 ]; then
-        git diff $base_commit -- "${paths[@]}"
+        if [ "$no_tests" = true ]; then
+            # Get list of modified files, filter out test files, then get diff for remaining files
+            modified_files=$(git diff $base_commit --name-only -- "${paths[@]}")
+            filtered_files=$(filter_test_files "$modified_files")
+            if [ -n "$filtered_files" ]; then
+                echo "$filtered_files" | while IFS= read -r file; do
+                    if [ -n "$file" ]; then
+                        git diff $base_commit -- "$file"
+                    fi
+                done
+            fi
+        else
+            git diff $base_commit -- "${paths[@]}"
+        fi
     else
-        git diff $base_commit
+        if [ "$no_tests" = true ]; then
+            # Get list of all modified files, filter out test files, then get diff for remaining files
+            modified_files=$(git diff $base_commit --name-only)
+            filtered_files=$(filter_test_files "$modified_files")
+            if [ -n "$filtered_files" ]; then
+                echo "$filtered_files" | while IFS= read -r file; do
+                    if [ -n "$file" ]; then
+                        git diff $base_commit -- "$file"
+                    fi
+                done
+            fi
+        else
+            git diff $base_commit
+        fi
     fi
     echo ""
 } >> "$output_file"
@@ -114,6 +185,11 @@ fi
         untracked_files=$(git ls-files --others --exclude-standard)
     fi
     
+    # Apply test file filtering to untracked files
+    if [ "$no_tests" = true ] && [ -n "$untracked_files" ]; then
+        untracked_files=$(filter_test_files "$untracked_files")
+    fi
+    
     if [ -n "$untracked_files" ]; then
         echo "Untracked files found:"
         echo "$untracked_files"
@@ -147,9 +223,21 @@ fi
     echo "Summary"
     echo "=============================================="
     if [ ${#paths[@]} -gt 0 ]; then
-        modified_count=$(git diff $base_commit --name-only -- "${paths[@]}" | wc -l)
+        if [ "$no_tests" = true ]; then
+            modified_files=$(git diff $base_commit --name-only -- "${paths[@]}")
+            filtered_files=$(filter_test_files "$modified_files")
+            modified_count=$(echo "$filtered_files" | grep -c '^' 2>/dev/null || echo 0)
+        else
+            modified_count=$(git diff $base_commit --name-only -- "${paths[@]}" | wc -l)
+        fi
     else
-        modified_count=$(git diff $base_commit --name-only | wc -l)
+        if [ "$no_tests" = true ]; then
+            modified_files=$(git diff $base_commit --name-only)
+            filtered_files=$(filter_test_files "$modified_files")
+            modified_count=$(echo "$filtered_files" | grep -c '^' 2>/dev/null || echo 0)
+        else
+            modified_count=$(git diff $base_commit --name-only | wc -l)
+        fi
     fi
     
     untracked_count=0
@@ -175,6 +263,9 @@ fi
     echo "Untracked files: $untracked_count"
     if [ ${#paths[@]} -gt 0 ]; then
         echo "Filtered paths: ${paths[*]}"
+    fi
+    if [ "$no_tests" = true ]; then
+        echo "Test files excluded: --no-tests flag active"
     fi
     echo ""
     echo "File Statistics:"
