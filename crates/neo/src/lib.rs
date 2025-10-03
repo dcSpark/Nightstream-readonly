@@ -590,6 +590,15 @@ pub fn verify(ccs: &CcsStructure<F>, public_input: &[F], proof: &Proof) -> Resul
     }
     
     debug!("Proof context binding verified");
+
+    // VK must be present in the registry for lean verification; refuse to proceed otherwise.
+    // This avoids accidental implicit VK sourcing and enforces explicit VK lifecycle.
+    if neo_spartan_bridge::lookup_vk(&proof.circuit_key).is_none() {
+        anyhow::bail!(
+            "VK registry missing entry for circuit key {:02x?}; register VK or use verify_with_vk",
+            &proof.circuit_key[..8]
+        );
+    }
     
     // Optional sanity check: the convenience fields match meta
     anyhow::ensure!(

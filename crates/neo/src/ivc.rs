@@ -1433,15 +1433,18 @@ pub fn verify_ivc_step(
         return Ok(false);
     }
 
-    // Add folding proof verification
-    if is_valid && !(prev_accumulator.step == 0 && prev_augmented_x.is_none()) {
-        // 🔒 SECURITY: Bind folding verification to verifier‑reconstructed augmented CCS
-        let folding_ok = verify_ivc_step_folding(params, ivc_proof, &augmented_ccs_v, prev_accumulator, prev_augmented_x)?;
-        if !folding_ok {
-            #[cfg(feature = "neo-logs")]
-            eprintln!("❌ Folding proof verification failed");
-            return Ok(false);
-        }
+    // Always verify folding proof (Π‑CCS/Π‑RLC/Π‑DEC), including step 0
+    let folding_ok = verify_ivc_step_folding(
+        params,
+        ivc_proof,
+        &augmented_ccs_v,
+        prev_accumulator,
+        prev_augmented_x,
+    )?;
+    if !folding_ok {
+        #[cfg(feature = "neo-logs")]
+        eprintln!("❌ Folding proof verification failed");
+        return Ok(false);
     }
 
     if is_valid {
@@ -1822,6 +1825,8 @@ pub fn build_augmented_ccs_linked_with_rlc(
     let prev_bind_rows = if y_prev_witness_indices.is_empty() { 0 } else { y_len };
     let rlc_rows = if rlc_binder.is_some() { 1 } else { 0 };
     let total_rows = step_rows + ev_rows + x_bind_rows + prev_bind_rows + rlc_rows;
+    // Pad rows to next power-of-two to satisfy ME checks and tensor-point definition
+    let target_rows = total_rows.next_power_of_two();
 
     // Witness: [ step_witness || u ]
     let step_wit_cols = step_ccs.m;
@@ -1831,7 +1836,7 @@ pub fn build_augmented_ccs_linked_with_rlc(
 
     let mut combined_mats = Vec::new();
     for matrix_idx in 0..step_ccs.matrices.len() {
-        let mut data = vec![F::ZERO; total_rows * total_cols];
+        let mut data = vec![F::ZERO; target_rows * total_cols];
 
         // Copy step CCS at the top
         let step_matrix = &step_ccs.matrices[matrix_idx];
@@ -1937,7 +1942,8 @@ pub fn build_augmented_ccs_linked_with_rlc(
             }
         }
 
-        combined_mats.push(Mat::from_row_major(total_rows, total_cols, data));
+        // Remaining rows (from total_rows..target_rows) remain zero — they encode 0 == 0
+        combined_mats.push(Mat::from_row_major(target_rows, total_cols, data));
     }
 
     let f = step_ccs.f.clone();
@@ -2569,14 +2575,47 @@ pub fn verify_ivc_step_folding(
     println!("   Pi-CCS verify: {}", ok_ccs);
     if !ok_ccs { return Ok(false); }
 
-    // 3) Recombine digit MEs to the parent ME for Pi‑RLC and Pi‑DEC checks.
+    // 3) Tie check per digit: enforce y_j == Z · (M_j^T · χ_r),
+    //    and c == L(Z), X == L_x(Z) using the authentic Ajtai module for the digit shape.
+    {
+        let me_digits = ivc_proof
+            .me_instances
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("IVC proof missing digit ME instances"))?;
+        let wit_digits = ivc_proof
+            .digit_witnesses
+            .as_ref()
+            .ok_or_else(|| anyhow::anyhow!("IVC proof missing digit witnesses for tie check"))?;
+        if me_digits.len() != wit_digits.len() { return Ok(false); }
+
+        for (_i, (me_d, wit_d)) in me_digits.iter().zip(wit_digits.iter()).enumerate() {
+            let d_rows = wit_d.Z.rows();
+            let m_cols = wit_d.Z.cols();
+
+            // Ensure Ajtai PP available for this (d, m) to build S-module hom
+            let l = AjtaiSModule::from_global_for_dims(d_rows, m_cols)
+                .map_err(|_| anyhow::anyhow!("AjtaiSModule unavailable for tie check (d={}, m={})", d_rows, m_cols))?;
+
+            if let Err(_e) = neo_ccs::check_me_consistency(augmented_ccs, &l, me_d, wit_d) {
+                #[cfg(feature = "neo-logs")]
+                println!("❌ Tie check failed for digit: {}", _e);
+                return Ok(false);
+            }
+        }
+    }
+
+    // 4) Recombine digit MEs to the parent ME for Pi‑RLC and Pi‑DEC checks.
     let me_digits = ivc_proof
         .me_instances
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("IVC proof missing digit ME instances"))?;
     let me_parent = recombine_me_digits_to_parent_local(params, me_digits)?;
 
-    // 4) Verify Pi‑RLC.
+    // 4b) (Removed) Do not compare Π‑CCS RHS y_scalars with parent ME.
+    // The correct binding between Π‑CCS outputs and the recomposed parent holds via Π‑RLC verification,
+    // which checks the S‑linear combination for (c, X, y) and terminal scalars end‑to‑end.
+
+    // 5) Verify Pi‑RLC.
     let ok_rlc = pi_rlc_verify(
         &mut tr,
         params,
@@ -2588,7 +2627,7 @@ pub fn verify_ivc_step_folding(
     println!("   Pi-RLC verify: {}", ok_rlc);
     if !ok_rlc { return Ok(false); }
 
-    // 5) Verify Pi‑DEC with the authentic Ajtai S-module.
+    // 6) Verify Pi‑DEC with the authentic Ajtai S-module.
     // Use parent ME commitment dimensions to bind Ajtai PP shape (d, m).
     let d_rows = neo_math::D;
     let m_cols = me_parent.c.data.len() / d_rows;
@@ -2606,7 +2645,7 @@ pub fn verify_ivc_step_folding(
                     rand::rng().fill_bytes(&mut seed);
                     StdRng::from_seed(seed)
                 };
-                let pp = super::ajtai_setup(&mut rng, d_rows, 16, m_cols)?;
+                let pp = super::ajtai_setup(&mut rng, d_rows, params.kappa as usize, m_cols)?;
                 neo_ajtai::set_global_pp(pp).map_err(anyhow::Error::from)
             })?;
             AjtaiSModule::from_global_for_dims(d_rows, m_cols)
