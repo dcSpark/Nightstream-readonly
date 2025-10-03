@@ -71,3 +71,61 @@ fn ivc_unsat_step_witness_should_fail_verify() {
     assert!(!ok, "IVC verification accepted an unsatisfiable step witness");
 }
 
+#[test]
+fn ivc_proof_with_invalid_witness_from_generation() {
+    // This test generates a proof using an INVALID witness (one that doesn't satisfy
+    // the step CCS constraint). The prover will compute everything "honestly" from
+    // this invalid witness, so the digit witnesses will be consistent with the ME instances.
+    // However, the witness itself violates the CCS, so verification should reject it.
+    //
+    // For constraint: (z0 - z1) * z0 = 0
+    // Valid witness examples: [1, 1], [0, 0], [0, 5], etc.
+    // INVALID witness: [2, 5] -> (2 - 5) * 2 = -6 ≠ 0
+    
+    let step_ccs = tiny_r1cs_to_ccs();
+    let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
+
+    let prev_acc = Accumulator { c_z_digest: [0u8; 32], c_coords: vec![], y_compact: vec![], step: 0 };
+
+    let binding = StepBindingSpec {
+        y_step_offsets: vec![],
+        x_witness_indices: vec![],
+        y_prev_witness_indices: vec![],
+        const1_witness_index: 0,
+    };
+
+    // INVALID witness: [1, 7] doesn't satisfy (z0 - z1) * z0 = 0
+    // because (1 - 7) * 1 = -6 ≠ 0
+    // Note: First element is 1 to satisfy const-1 convention
+    let invalid_witness = vec![F::ONE, F::from_u64(7)];
+    let extractor = LastNExtractor { n: 0 };
+
+    // Prove with the INVALID witness
+    // The prover will compute digit witnesses, commitments, etc. consistently
+    // from this invalid witness, but the witness itself violates the CCS
+    let proof_res = prove_ivc_step_with_extractor(
+        &params,
+        &step_ccs,
+        &invalid_witness,  // <-- INVALID WITNESS HERE
+        &prev_acc,
+        prev_acc.step,
+        None,
+        &extractor,
+        &binding,
+    ).expect("Proving should complete (soundness check is in verify)");
+
+    // Verify should REJECT because the witness doesn't satisfy the CCS
+    let ok = verify_ivc_step(
+        &step_ccs,
+        &proof_res.proof,
+        &prev_acc,
+        &binding,
+        &params,
+        None,
+    ).expect("verify_ivc_step should not error");
+
+    // Expect rejection: even though digit witnesses are consistent with ME instances,
+    // the underlying witness violates the step CCS constraints
+    assert!(!ok, "IVC verification accepted a proof generated with an invalid witness!");
+}
+
