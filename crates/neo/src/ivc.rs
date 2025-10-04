@@ -2951,7 +2951,7 @@ pub fn verify_ivc_step_folding(
     eprintln!("[folding] stage=tie (r.len()={})", me_parent_tie.r.len());
     if let Err(_e) = tie_check_with_r(augmented_ccs, &me_parent_tie, &wit_parent, &me_parent_tie.r) {
         #[cfg(feature = "neo-logs")]
-        eprintln!("[folding] ❌ tie_with_r failed: {}", e);
+        eprintln!("[folding] ❌ tie_with_r failed: {}", _e);
         #[cfg(feature = "neo-logs")]
         eprintln!("[folding] debug: me_parent.y.len={} (t), y[0].len={} (D)", me_parent.y.len(), me_parent.y.get(0).map(|v| v.len()).unwrap_or(0));
         return Ok(false);
