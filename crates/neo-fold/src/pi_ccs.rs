@@ -1061,18 +1061,56 @@ pub fn pi_ccs_verify(
     if out_me.len() != mcs_list.len() {
         #[cfg(feature = "debug-logs")]
         eprintln!("[pi-ccs] out_me.len() {} != mcs_list.len() {}", out_me.len(), mcs_list.len());
-        return Ok(false);
+        return Err(PiCcsError::InvalidInput(format!(
+            "out_me.len() {} != mcs_list.len() {}", out_me.len(), mcs_list.len()
+        )));
     }
     for (i, (out, inp)) in out_me.iter().zip(mcs_list.iter()).enumerate() {
         #[cfg(not(feature = "debug-logs"))]
         let _ = i;
-        if out.c != inp.c { #[cfg(feature = "debug-logs")] eprintln!("[pi-ccs] output {} commitment mismatch vs input", i); return Ok(false); }
-        if out.m_in != inp.m_in { #[cfg(feature = "debug-logs")] eprintln!("[pi-ccs] output {} m_in {} != input m_in {}", i, out.m_in, inp.m_in); return Ok(false); }
+        if out.c != inp.c {
+            #[cfg(feature = "debug-logs")]
+            eprintln!("[pi-ccs] output {} commitment mismatch vs input", i);
+            return Err(PiCcsError::InvalidInput(format!("output[{}].c != input.c", i)));
+        }
+        if out.m_in != inp.m_in {
+            #[cfg(feature = "debug-logs")]
+            eprintln!("[pi-ccs] output {} m_in {} != input m_in {}", i, out.m_in, inp.m_in);
+            return Err(PiCcsError::InvalidInput(format!(
+                "output[{}].m_in {} != input.m_in {}", i, out.m_in, inp.m_in
+            )));
+        }
         
         // Shape/consistency checks: catch subtle mismatches before terminal verification
-        if out.X.rows() != neo_math::D { #[cfg(feature = "debug-logs")] eprintln!("[pi-ccs] out.X.rows {} != D {}", out.X.rows(), neo_math::D); return Ok(false); }
-        if out.X.cols() != inp.m_in { #[cfg(feature = "debug-logs")] eprintln!("[pi-ccs] out.X.cols {} != m_in {}", out.X.cols(), inp.m_in); return Ok(false); }
-        if out.y.len() != s.t() { #[cfg(feature = "debug-logs")] eprintln!("[pi-ccs] out.y.len {} != t {}", out.y.len(), s.t()); return Ok(false); } // Number of CCS matrices
+        if out.X.rows() != neo_math::D {
+            #[cfg(feature = "debug-logs")]
+            eprintln!("[pi-ccs] out.X.rows {} != D {}", out.X.rows(), neo_math::D);
+            return Err(PiCcsError::InvalidInput(format!(
+                "output[{}].X.rows {} != D {}", i, out.X.rows(), neo_math::D
+            )));
+        }
+        if out.X.cols() != inp.m_in {
+            #[cfg(feature = "debug-logs")]
+            eprintln!("[pi-ccs] out.X.cols {} != m_in {}", out.X.cols(), inp.m_in);
+            return Err(PiCcsError::InvalidInput(format!(
+                "output[{}].X.cols {} != m_in {}", i, out.X.cols(), inp.m_in
+            )));
+        }
+        if out.y.len() != s.t() {
+            #[cfg(feature = "debug-logs")]
+            eprintln!("[pi-ccs] out.y.len {} != t {}", out.y.len(), s.t());
+            return Err(PiCcsError::InvalidInput(format!(
+                "output[{}].y.len {} != t {}", i, out.y.len(), s.t()
+            )));
+        } // Number of CCS matrices
+        // Guard individual y[j] vector lengths
+        for (j, yj) in out.y.iter().enumerate() {
+            if yj.len() != neo_math::D {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "output[{}].y[{}].len {} != D {}", i, j, yj.len(), neo_math::D
+                )));
+            }
+        }
     }
 
     // === CRITICAL SUM-CHECK TERMINAL VERIFICATION ===
@@ -1101,7 +1139,13 @@ pub fn pi_ccs_verify(
         if running_sum != wr * expected { #[cfg(feature = "debug-logs")] eprintln!("[pi-ccs] terminal mismatch (R1CS): running_sum != wr*sum(a*b-c)"); return Ok(false); }
     } else {
         // Generic CCS
-        if !out_me.iter().all(|me| me.y_scalars.len() == s.t()) { return Ok(false); }
+        for (i, me) in out_me.iter().enumerate() {
+            if me.y_scalars.len() != s.t() {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "output[{}].y_scalars.len {} != t {}", i, me.y_scalars.len(), s.t()
+                )));
+            }
+        }
         let mut expected_q_r = K::ZERO;
         for (inst_idx, me_inst) in out_me.iter().enumerate() {
             let f_eval = s.f.eval_in_ext::<K>(&me_inst.y_scalars);

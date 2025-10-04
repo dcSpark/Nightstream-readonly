@@ -109,8 +109,9 @@ fn test_verify_rejects_proof_with_tampered_public_input() -> Result<()> {
         vjs_opt: None,
     })?;
     
-    // Verification should succeed with original context
-    let valid = verify(&ccs, &public_input, &proof)?;
+    // Verification should succeed with original context (use explicit VK bytes to avoid registry races)
+    let vk_bytes = neo_spartan_bridge::export_vk_bytes(&proof.circuit_key).expect("export vk");
+    let valid = neo::verify_with_vk(&ccs, &public_input, &proof, &vk_bytes)?;
     assert!(valid, "Proof should verify with original context");
     
     // Create tampered public input (add a field element)
@@ -166,8 +167,9 @@ fn test_verify_succeeds_with_correct_context() -> Result<()> {
         vjs_opt: None, 
     })?;
     
-    // Verification should succeed with exact same context
-    let valid = verify(&ccs, &public_input, &proof)?;
+    // Verification should succeed with exact same context (use explicit VK bytes)
+    let vk_bytes = neo_spartan_bridge::export_vk_bytes(&proof.circuit_key).expect("export vk");
+    let valid = neo::verify_with_vk(&ccs, &public_input, &proof, &vk_bytes)?;
     assert!(valid, "Proof should verify with correct matching context");
     
     Ok(())

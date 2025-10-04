@@ -94,8 +94,8 @@ fn verify_shortcircuit_single_instance() {
     };
 
     let dummy_bundle = dummy_proof_bundle();
-    let ok = verify_folding_proof_with_spartan(&params, &s, &[inst], &output_digits, &proof, &dummy_bundle).unwrap();
-    assert!(!ok, "single-instance bypass was removed for security - should now fail");
+    let res = verify_folding_proof_with_spartan(&params, &s, &[inst], &output_digits, &proof, &dummy_bundle);
+    assert!(res.is_err(), "single-instance bypass was removed for security - should now error");
 }
 
 #[test]
@@ -164,8 +164,8 @@ fn verify_multi_instance_zero_commitments_dec_present() {
     };
 
     let dummy_bundle = dummy_proof_bundle();
-    let ok = verify_folding_proof_with_spartan(&params, &s, &insts, &digits, &proof, &dummy_bundle).unwrap();
-    assert!(!ok, "multi-instance with dummy proof data should fail verification");
+    let res = verify_folding_proof_with_spartan(&params, &s, &insts, &digits, &proof, &dummy_bundle);
+    assert!(res.is_err(), "multi-instance with dummy proof data should error due to malformed outputs");
 }
 
 #[test]
@@ -231,8 +231,8 @@ fn verify_rejects_when_rho_mismatch() {
     };
 
     let dummy_bundle = dummy_proof_bundle();
-    let ok = verify_folding_proof_with_spartan(&params, &s, &insts, &digits, &proof, &dummy_bundle).unwrap();
-    assert!(!ok, "must reject when ρ are not transcript-derived");
+    let res = verify_folding_proof_with_spartan(&params, &s, &insts, &digits, &proof, &dummy_bundle);
+    assert!(res.is_err(), "must error when ρ are not transcript-derived or outputs malformed");
 }
 
 #[test]
@@ -298,8 +298,8 @@ fn verify_rejects_when_range_base_mismatches() {
     };
 
     let dummy_bundle = dummy_proof_bundle();
-    let ok = verify_folding_proof_with_spartan(&params, &s, &insts, &digits, &proof, &dummy_bundle).unwrap();
-    assert!(!ok, "DEC must reject when the encoded base differs");
+    let res = verify_folding_proof_with_spartan(&params, &s, &insts, &digits, &proof, &dummy_bundle);
+    assert!(res.is_err(), "DEC must report an error when the encoded base differs or outputs malformed");
 }
 
 #[test]
@@ -347,6 +347,6 @@ fn verify_rejects_spartan_bundle_mismatch() {
     );
     
     // Should fail due to public IO mismatch (anti-replay protection)
-    let ok = verify_folding_proof_with_spartan(&params, &s, &[inst], &output_digits, &proof, &mismatched_bundle).unwrap();
-    assert!(!ok, "verification should fail when Spartan bundle public IO doesn't match current instance");
+    let res = verify_folding_proof_with_spartan(&params, &s, &[inst], &output_digits, &proof, &mismatched_bundle);
+    assert!(res.is_err(), "verification should error when Spartan bundle public IO doesn't match current instance or outputs malformed");
 }
