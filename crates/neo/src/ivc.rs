@@ -42,6 +42,105 @@ macro_rules! neo_log {
     ($($arg:tt)*) => {};
 }
 
+// Build χ_r(i) over the prefix 0..n-1 using ell = r.len() (LSB-first bit order).
+#[inline]
+fn chi_r_prefix(r: &[neo_math::K], n: usize) -> Vec<neo_math::K> {
+    let ell = r.len();
+    let mut chi = vec![neo_math::K::ZERO; n];
+    for i in 0..n {
+        let mut w = neo_math::K::ONE;
+        let mut ii = i;
+        for k in 0..ell {
+            let rk = r[k];
+            let bit_is_one = (ii & 1) == 1;
+            let term = if bit_is_one { rk } else { neo_math::K::ONE - rk };
+            w *= term;
+            ii >>= 1;
+        }
+        chi[i] = w;
+    }
+    chi
+}
+
+// Robust tie check at verifier r: y_j ?= Z · (M_j^T · χ_r), supports any n (not just powers of two).
+fn tie_check_with_r(
+    s: &neo_ccs::CcsStructure<F>,
+    me_parent: &neo_ccs::MeInstance<neo_ajtai::Commitment, F, neo_math::K>,
+    wit_parent: &neo_ccs::MeWitness<F>,
+    r: &[neo_math::K],
+) -> Result<(), String> {
+    let d = neo_math::D;
+    let n = s.n;
+    let m = s.m;
+    let t = s.t() as usize;
+
+    if wit_parent.Z.rows() != d || wit_parent.Z.cols() != m {
+        return Err(format!(
+            "wit_parent.Z shape {}x{} != D x m ({} x {})",
+            wit_parent.Z.rows(), wit_parent.Z.cols(), d, m
+        ));
+    }
+    if me_parent.y.len() != t {
+        return Err(format!("me_parent.y len {} != t {}", me_parent.y.len(), t));
+    }
+    for (j, yj) in me_parent.y.iter().enumerate() {
+        if yj.len() != d {
+            return Err(format!("me_parent.y[{}] len {} != D {}", j, yj.len(), d));
+        }
+    }
+
+    let chi = chi_r_prefix(r, n);
+
+    for j in 0..t {
+        let mj = &s.matrices[j];
+        // v_j = M_j^T · χ_r  (size m)
+        let mut v_j: Vec<neo_math::K> = vec![neo_math::K::ZERO; m];
+        for i in 0..n {
+            let w_i = chi[i];
+            for col in 0..m {
+                let m_ij: F = mj[(i, col)];
+                if m_ij != F::ZERO { v_j[col] += neo_math::K::from(m_ij) * w_i; }
+            }
+        }
+        // y_pred = Z · v_j  (size D)
+        let mut y_pred: Vec<neo_math::K> = vec![neo_math::K::ZERO; d];
+        for row in 0..d {
+            let mut acc = neo_math::K::ZERO;
+            for col in 0..m {
+                let z_rc: F = wit_parent.Z[(row, col)];
+                if z_rc != F::ZERO { acc += neo_math::K::from(z_rc) * v_j[col]; }
+            }
+            y_pred[row] = acc;
+        }
+        if y_pred != me_parent.y[j] {
+            return Err(format!("tie mismatch on j={} (Z·(M_j^T·χ_r))", j));
+        }
+    }
+
+    // Also ensure X matches Z prefix (public slice), a cheap consistency guard.
+    let m_in = me_parent.m_in;
+    if me_parent.X.rows() != d || me_parent.X.cols() != m_in {
+        return Err("me_parent.X shape mismatch".into());
+    }
+    for row in 0..d { for col in 0..m_in {
+        if me_parent.X[(row, col)] != wit_parent.Z[(row, col)] {
+            return Err("X != Z[:, :m_in]".into());
+        }
+    }}
+
+    Ok(())
+}
+
+// Public test-only wrapper for integration tests.
+#[cfg(feature = "testing")]
+pub fn tie_check_with_r_public(
+    s: &neo_ccs::CcsStructure<F>,
+    me_parent: &neo_ccs::MeInstance<neo_ajtai::Commitment, F, neo_math::K>,
+    wit_parent: &neo_ccs::MeWitness<F>,
+    r: &[neo_math::K],
+) -> Result<(), String> {
+    tie_check_with_r(s, me_parent, wit_parent, r)
+}
 /// IVC Accumulator - the running state that gets folded at each step
 #[derive(Clone, Debug)]
 pub struct Accumulator {
@@ -212,19 +311,33 @@ impl StepOutputExtractor for IndexExtractor {
 fn zero_mcs_instance_for_shape(
     m_in: usize,
     m_step: usize,
+    const1_witness_index: Option<usize>,
 ) -> anyhow::Result<(neo_ccs::McsInstance<neo_ajtai::Commitment, F>, neo_ccs::McsWitness<F>)> {
     let d = neo_math::ring::D;
     anyhow::ensure!(m_step >= m_in, "zero_mcs_instance_for_shape: m_step < m_in ({} < {})", m_step, m_in);
 
     // Construct a zero Ajtai commitment directly; avoid PP setup/commit computation.
     // Derive kappa from any registered Ajtai PP if available to avoid drift; fallback to 16.
-    let kappa = neo_ajtai::get_global_pp().map(|pp| pp.kappa).unwrap_or(16usize);
-    let c_zero = neo_ajtai::Commitment::zeros(d, kappa);
-
+    let _kappa = neo_ajtai::get_global_pp().map(|pp| pp.kappa).unwrap_or(16usize);
     let w_len = m_step - m_in;
     let x_zero = vec![F::ZERO; m_in];
-    let w_zero = vec![F::ZERO; w_len];
-    let z_zero = neo_ccs::Mat::zero(d, m_step, F::ZERO);
+    let mut w_zero = vec![F::ZERO; w_len];
+    let mut z_zero = neo_ccs::Mat::zero(d, m_step, F::ZERO);
+    // Ensure the constant-1 witness column is actually 1 in the base-case Z
+    if let Some(idx) = const1_witness_index {
+        if idx < w_len {
+            // Column absolute index of const1 within z = [public || witness]
+            let col_abs = m_in + idx;
+            z_zero[(0, col_abs)] = F::ONE; // least-significant digit 1
+            // Ensure undigitized z has 1 at the const1 witness index
+            w_zero[idx] = F::ONE;
+        }
+    }
+
+    // Use actual commitment for the base-case Z to satisfy c = L(Z)
+    let l = neo_ajtai::AjtaiSModule::from_global_for_dims(d, m_step)
+        .map_err(|e| anyhow::anyhow!("AjtaiSModule unavailable for (d={}, m={}): {}", d, m_step, e))?;
+    let c_zero = l.commit(&z_zero);
 
     Ok((
         neo_ccs::McsInstance { c: c_zero, x: x_zero, m_in },
@@ -714,6 +827,7 @@ pub fn prove_ivc_step_with_extractor(
     let y_step = extractor.extract_y_step(step_witness);
     
     #[cfg(feature = "neo-logs")]
+    #[cfg(feature = "debug-logs")]
     println!("🎯 Extracted REAL y_step: {:?}", y_step.iter().map(|f| f.as_canonical_u64()).collect::<Vec<_>>());
     
     let input = IvcStepInput {
@@ -989,8 +1103,10 @@ pub fn prove_ivc_step_chained(
         m_in: step_public_input.len()
     };
     // DEBUG: Check consistency
+    #[cfg(feature = "debug-logs")]
     println!("🔍 DEBUG: full_step_z.len()={}, step_public_input.len()={}, full_witness_part.len()={}", 
              full_step_z.len(), step_public_input.len(), full_witness_part.len());
+    #[cfg(feature = "debug-logs")]
     println!("🔍 DEBUG: decomp_z.len()={}, d*m_step={}", 
              decomp_z.len(), d * m_step);
     
@@ -1038,28 +1154,35 @@ pub fn prove_ivc_step_chained(
         }
         _ => {
             // Base case (step 0): use a canonical zero running instance matching current shape.
-            zero_mcs_instance_for_shape(step_public_input.len(), m_step)?
+            zero_mcs_instance_for_shape(step_public_input.len(), m_step, Some(input.binding_spec.const1_witness_index))?
         }
     }};
 
     // DEBUG: Check if this is step 0 or later
     let is_first_step = input.prev_accumulator.step == 0;
-    println!("🔍 DEBUG: Step {}, is_first_step: {}", input.step, is_first_step);
-    println!("🔍 DEBUG: prev_accumulator.c_coords.len(): {}", input.prev_accumulator.c_coords.len());
-    println!("🔍 DEBUG: c_step_coords.len(): {}", c_step_coords.len());
-    println!("🔍 DEBUG: LHS instance commitment len: {}", lhs_inst.c.data.len());
-    println!("🔍 DEBUG: RHS instance commitment len: {}", step_mcs_inst.c.data.len());
-    println!("🔍 DEBUG: LHS witness Z shape: {}x{}", lhs_wit.Z.rows(), lhs_wit.Z.cols());
-    println!("🔍 DEBUG: RHS witness Z shape: {}x{}", step_mcs_wit.Z.rows(), step_mcs_wit.Z.cols());
+    #[cfg(feature = "debug-logs")]
+    {
+        println!("🔍 DEBUG: Step {}, is_first_step: {}", input.step, is_first_step);
+        println!("🔍 DEBUG: prev_accumulator.c_coords.len(): {}", input.prev_accumulator.c_coords.len());
+        println!("🔍 DEBUG: c_step_coords.len(): {}", c_step_coords.len());
+        println!("🔍 DEBUG: LHS instance commitment len: {}", lhs_inst.c.data.len());
+        println!("🔍 DEBUG: RHS instance commitment len: {}", step_mcs_inst.c.data.len());
+        println!("🔍 DEBUG: LHS witness Z shape: {}x{}", lhs_wit.Z.rows(), lhs_wit.Z.cols());
+        println!("🔍 DEBUG: RHS witness Z shape: {}x{}", step_mcs_wit.Z.rows(), step_mcs_wit.Z.cols());
+    }
     
     // DEBUG: Check if commitments are consistent
     if !is_first_step {
+        #[cfg(feature = "debug-logs")]
         println!("🔍 DEBUG: LHS commitment first 4 coords: {:?}", 
                  lhs_inst.c.data.iter().take(4).collect::<Vec<_>>());
+        #[cfg(feature = "debug-logs")]
         println!("🔍 DEBUG: RHS commitment first 4 coords: {:?}", 
                  step_mcs_inst.c.data.iter().take(4).collect::<Vec<_>>());
+        #[cfg(feature = "debug-logs")]
         println!("🔍 DEBUG: prev_accumulator.c_coords first 4: {:?}", 
                  input.prev_accumulator.c_coords.iter().take(4).collect::<Vec<_>>());
+        #[cfg(feature = "debug-logs")]
         println!("🔍 DEBUG: c_step_coords first 4: {:?}", 
                  c_step_coords.iter().take(4).collect::<Vec<_>>());
     }
@@ -1086,21 +1209,28 @@ pub fn prove_ivc_step_chained(
 
     // 8) Evolve accumulator commitment coordinates with ρ using the step-only commitment.
     // Pattern B: c_next = c_prev + ρ·c_step, where c_step = pre-ρ step commitment (no tail)
-    println!("🔍 DEBUG: About to evolve commitment, prev_coords.is_empty()={}", input.prev_accumulator.c_coords.is_empty());
-    println!("🔍 DEBUG: rho value: {:?}", rho.as_canonical_u64());
+    #[cfg(feature = "debug-logs")]
+    {
+        println!("🔍 DEBUG: About to evolve commitment, prev_coords.is_empty()={}", input.prev_accumulator.c_coords.is_empty());
+        println!("🔍 DEBUG: rho value: {:?}", rho.as_canonical_u64());
+    }
     let (c_coords_next, c_z_digest_next) = if input.prev_accumulator.c_coords.is_empty() {
+        #[cfg(feature = "debug-logs")]
         println!("🔍 DEBUG: First step, using c_step_coords directly");
         let digest = digest_commit_coords(&c_step_coords);
         (c_step_coords.clone(), digest)
     } else {
+        #[cfg(feature = "debug-logs")]
         println!("🔍 DEBUG: Evolving commitment: c_prev.len()={}, c_step.len()={}, rho={:?}", 
                  input.prev_accumulator.c_coords.len(), c_step_coords.len(), rho.as_canonical_u64());
         let result = evolve_commitment(&input.prev_accumulator.c_coords, &c_step_coords, rho)
             .map_err(|e| format!("commitment evolution failed: {}", e))?;
+        #[cfg(feature = "debug-logs")]
         println!("🔍 DEBUG: Commitment evolution completed successfully");
         result
     };
     
+    #[cfg(feature = "debug-logs")]
     println!("🔍 DEBUG: c_coords_next.len()={}", c_coords_next.len());
 
     let next_accumulator = Accumulator {
@@ -1387,6 +1517,8 @@ pub fn verify_ivc_step(
     };
     
     let is_valid = digest_valid && y_next_valid;
+    #[cfg(feature = "debug-logs")]
+    eprintln!("[ivc] digest_valid={}, y_next_valid={}", digest_valid, y_next_valid);
     // Bind result of digest and y_next checks
     
     #[cfg(feature = "neo-logs")]
@@ -1447,8 +1579,8 @@ pub fn verify_ivc_step(
         prev_augmented_x,
     )?;
     if !folding_ok {
-        #[cfg(feature = "neo-logs")]
-        eprintln!("❌ Folding proof verification failed");
+        #[cfg(feature = "debug-logs")]
+        eprintln!("[ivc] folding_ok=false");
         return Ok(false);
     }
 
@@ -2453,6 +2585,12 @@ fn recombine_digit_witnesses_to_parent_local(
     if digits.is_empty() { return Err("no digit witnesses".into()); }
     let d = digits[0].Z.rows();
     let m = digits[0].Z.cols();
+    if d != neo_math::D {
+        return Err(format!(
+            "digit witnesses have {} rows, expected D={}",
+            d, neo_math::D
+        ));
+    }
     for (i, dw) in digits.iter().enumerate() {
         if dw.Z.rows() != d || dw.Z.cols() != m {
             return Err(format!("digit_witness[{}] shape mismatch (want {}x{}, got {}x{})", i, d, m, dw.Z.rows(), dw.Z.cols()));
@@ -2478,6 +2616,7 @@ pub fn verify_ivc_step_folding(
     prev_acc: &Accumulator,
     prev_augmented_x: Option<&[F]>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
+    eprintln!("[folding] enter");
     #[cfg(feature = "neo-logs")]
     {
         println!("🔎 FOLD VERIFY: step {}", ivc_proof.step);
@@ -2491,8 +2630,10 @@ pub fn verify_ivc_step_folding(
         .ok_or_else(|| anyhow::anyhow!("IVC proof missing folding_proof"))?;
 
     // 1) Cross-check against stored Pi-CCS inputs, using RHS as the binding point.
+    eprintln!("[folding] stage=inputs");
     let stored_inputs = &folding.pi_ccs_inputs;
     if stored_inputs.len() != 2 {
+        eprintln!("[folding] early: pi_ccs_inputs.len() != 2");
         return Err(anyhow::anyhow!("folding proof missing pi_ccs_inputs").into());
     }
 
@@ -2500,19 +2641,19 @@ pub fn verify_ivc_step_folding(
     let (x_rhs_expected, _) = compute_augmented_public_input_for_step(prev_acc, ivc_proof)
         .map_err(|e| anyhow::anyhow!("failed to compute augmented input: {}", e))?;
     if x_rhs_expected != ivc_proof.step_augmented_public_input {
-        println!("[folding] ❌ RHS augmented input mismatch vs proof copy");
+        eprintln!("[folding] early: RHS augmented input mismatch vs proof copy");
         return Ok(false);
     }
 
     // LHS checks: now STRICT — enforce exact X equality and also bind to caller-provided prev_augmented_x when present.
     // Ensure LHS/RHS shapes match.
     if stored_inputs[0].m_in != stored_inputs[1].m_in {
-        println!("[folding] ❌ LHS/RHS m_in mismatch: {} vs {}", stored_inputs[0].m_in, stored_inputs[1].m_in);
+        eprintln!("[folding] early: LHS/RHS m_in mismatch");
         return Ok(false);
     }
     // Ensure LHS commitment matches the stored output commitment.
     if stored_inputs[0].c.data != folding.pi_ccs_outputs[0].c.data {
-        println!("[folding] ❌ LHS commitment mismatch vs stored output");
+        eprintln!("[folding] early: LHS commitment mismatch vs stored output");
         return Ok(false);
     }
 
@@ -2520,10 +2661,7 @@ pub fn verify_ivc_step_folding(
     let x_lhs_proof = ivc_proof.prev_step_augmented_public_input.clone();
     let m_in = x_rhs_expected.len();
     if x_lhs_proof.len() != m_in {
-        println!(
-            "[folding] ❌ LHS augmented x length mismatch: got {}, want {}",
-            x_lhs_proof.len(), m_in
-        );
+        eprintln!("[folding] early: LHS augmented x length mismatch");
         return Ok(false);
     }
     // Consider per-lane base case: first use of this running ME (coords empty) and no prev_augmented_x provided.
@@ -2532,31 +2670,26 @@ pub fn verify_ivc_step_folding(
         let step_x_len = ivc_proof.step_public_input.len();
         let y_len = ivc_proof.step_y_prev.len();
         if x_lhs_proof.len() != step_x_len + 1 + 2 * y_len {
-            println!(
-                "[folding] ❌ Initial step augmented input length mismatch: got {}, want {} (= step_x_len {} + 1 + 2*y_len {})",
-                x_lhs_proof.len(), step_x_len + 1 + 2 * y_len, step_x_len, y_len
-            );
+            eprintln!("[folding] early: base-case LHS augmented input length mismatch");
             return Ok(false);
         }
         // Require canonical zero vector for base-case LHS augmented x (matches zero_mcs_instance_for_shape)
-        if !x_lhs_proof.iter().all(|&f| f == F::ZERO) { println!("[folding] ❌ Base-case LHS augmented x not all zeros"); return Ok(false); }
+        if !x_lhs_proof.iter().all(|&f| f == F::ZERO) { eprintln!("[folding] early: base-case LHS augmented x not all zeros"); return Ok(false); }
     } else if let Some(_px) = prev_augmented_x {
         // Production strict: enforce provided prev_augmented_x linkage
         let px = _px;
         if px != x_lhs_proof.as_slice() {
-            println!("[folding] ❌ Linking failed: prev_augmented_x != LHS augmented x");
+            eprintln!("[folding] early: prev_augmented_x linkage mismatch");
             return Ok(false);
         }
     }
     // Bind to the LHS stored input inside Pi-CCS as well.
     if stored_inputs[0].x != x_lhs_proof {
-        #[cfg(feature = "neo-logs")]
-        println!("❌ LHS x mismatch: stored != proof LHS augmented x");
+        eprintln!("[folding] early: LHS stored x mismatch vs proof LHS augmented x");
         return Ok(false);
     }
     if stored_inputs[0].m_in != x_lhs_proof.len() {
-        #[cfg(feature = "neo-logs")]
-        println!("❌ LHS m_in mismatch: {} vs {}", stored_inputs[0].m_in, x_lhs_proof.len());
+        eprintln!("[folding] early: LHS m_in mismatch vs proof LHS augmented x len");
         return Ok(false);
     }
     // Note: Do not bind LHS Pi-CCS commitment to prev_acc.c_coords.
@@ -2568,23 +2701,45 @@ pub fn verify_ivc_step_folding(
 
     // RHS checks: bind to expected augmented x and stored output commitment.
     if stored_inputs[1].x != x_rhs_expected {
-        #[cfg(feature = "neo-logs")] println!("[folding] ❌ RHS x mismatch: stored != expected");
+        eprintln!("[folding] early: RHS x mismatch: stored != expected");
         let _ex: Vec<_> = x_rhs_expected.iter().take(6).map(|f| f.as_canonical_u64()).collect();
         let _sx: Vec<_> = stored_inputs[1].x.iter().take(6).map(|f| f.as_canonical_u64()).collect();
-        #[cfg(feature = "neo-logs")] println!("[folding]    expected head: {:?}", _ex);
-        #[cfg(feature = "neo-logs")] println!("[folding]    stored   head: {:?}", _sx);
+        eprintln!("[folding]    expected head: {:?}", _ex);
+        eprintln!("[folding]    stored   head: {:?}", _sx);
         return Ok(false);
     }
     if stored_inputs[1].m_in != x_rhs_expected.len() {
-        #[cfg(feature = "neo-logs")] println!("[folding] ❌ RHS m_in mismatch: {} vs {}", stored_inputs[1].m_in, x_rhs_expected.len());
+        eprintln!("[folding] early: RHS m_in mismatch vs expected len");
         return Ok(false);
     }
     if stored_inputs[1].c.data != folding.pi_ccs_outputs[1].c.data {
-        #[cfg(feature = "neo-logs")] println!("[folding] ❌ RHS commitment mismatch vs stored output");
+        eprintln!("[folding] early: RHS commitment mismatch vs stored output");
         return Ok(false);
     }
 
+    // Early hygiene guards before Pi-CCS: detect structural tampering and error out
+    {
+        if folding.pi_rlc_proof.rho_elems.len() != folding.pi_ccs_outputs.len() {
+            return Err(anyhow::anyhow!("rho count != Π‑CCS outputs").into());
+        }
+        let t = folding.pi_ccs_outputs.get(0).map(|m| m.y.len()).unwrap_or(0);
+        if t != augmented_ccs.t() {
+            return Err(anyhow::anyhow!("t mismatch: outputs.t != CCS.t").into());
+        }
+        for me in &folding.pi_ccs_outputs {
+            if me.y.len() != t {
+                return Err(anyhow::anyhow!("inconsistent t across Π‑CCS outputs").into());
+            }
+            for yj in &me.y {
+                if yj.len() != neo_math::D {
+                    return Err(anyhow::anyhow!("y[j] length != D").into());
+                }
+            }
+        }
+    }
+
     // 2) Verify Pi-CCS against those instances.
+    eprintln!("[folding] stage=pi-ccs");
     let mut tr = Poseidon2Transcript::new(b"neo/fold");
     let ok_ccs = pi_ccs_verify(
         &mut tr,
@@ -2601,16 +2756,18 @@ pub fn verify_ivc_step_folding(
     // 2b) (Skip) Intra-output y vs y_scalars check; rely on Π‑RLC/Π‑DEC path for scalar consistency.
 
     // 4) Recombine digit MEs to the parent ME for Pi‑RLC and Pi‑DEC checks.
+    eprintln!("[folding] stage=recombine-me");
     let me_digits = ivc_proof
         .me_instances
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("IVC proof missing digit ME instances"))?;
-    let me_parent = recombine_me_digits_to_parent_local(params, me_digits)?;
+    let mut me_parent = recombine_me_digits_to_parent_local(params, me_digits)?;
 
     // 4a) (No direct cross-link of RHS y_scalars to parent y_scalars here)
     //      Binding between Π‑CCS outputs and the recomposed parent is enforced by Π‑RLC and Π‑DEC.
 
     // 5) Verify Pi‑RLC.
+    eprintln!("[folding] stage=rlc");
     let ok_rlc = pi_rlc_verify(
         &mut tr,
         params,
@@ -2620,13 +2777,14 @@ pub fn verify_ivc_step_folding(
     )?;
     #[cfg(feature = "neo-logs")]
     println!("   Pi-RLC verify: {}", ok_rlc);
-    if !ok_rlc { return Ok(false); }
+    if !ok_rlc { eprintln!("[folding] rlc_verify=false"); return Ok(false); }
 
     // 6) Recombine digit witnesses to get true (d, m) for Ajtai S-module; then verify Π‑DEC.
     let wit_digits = ivc_proof
         .digit_witnesses
         .as_ref()
         .ok_or_else(|| anyhow::anyhow!("IVC proof missing digit witnesses for DEC and tie check"))?;
+    eprintln!("[folding] stage=recombine-wit");
     let wit_parent = recombine_digit_witnesses_to_parent_local(params, wit_digits)
         .map_err(|e| anyhow::anyhow!("recombine_digit_witnesses_to_parent failed: {}", e))?;
 
@@ -2670,22 +2828,23 @@ pub fn verify_ivc_step_folding(
             .me_instances
             .as_ref()
             .ok_or_else(|| anyhow::anyhow!("IVC proof missing digit ME instances for DEC and tie check"))?;
-        if me_digits.len() != wit_digits.len() { return Ok(false); }
+        if me_digits.len() != wit_digits.len() { eprintln!("[folding] early: digit me count != digit witness count"); return Ok(false); }
         for (_i, (dw, me_i)) in wit_digits.iter().zip(me_digits.iter()).enumerate() {
             let c_from_wit = l_real.commit(&dw.Z);
             if c_from_wit.data != me_i.c.data {
-                #[cfg(feature = "neo-logs")] eprintln!("❌ Digit witness-commit mismatch");
+                eprintln!("[folding] digit witness-commit mismatch");
                 return Ok(false);
             }
         }
         // Parent witness must also open to parent commitment after recombination.
         let c_parent_from_wit = l_real.commit(&wit_parent.Z);
         if c_parent_from_wit.data != me_parent.c.data {
-            #[cfg(feature = "neo-logs")] eprintln!("❌ Parent witness-commit mismatch after recombination");
+            eprintln!("[folding] parent witness-commit mismatch after recombination");
             return Ok(false);
         }
     }
 
+    eprintln!("[folding] stage=dec");
     let ok_dec = pi_dec_verify(
         &mut tr,
         params,
@@ -2696,24 +2855,36 @@ pub fn verify_ivc_step_folding(
     )?;
     #[cfg(feature = "neo-logs")]
     println!("   Pi-DEC verify: {} (d_rows={}, m_cols={})", ok_dec, d_rows, m_cols);
-    if !ok_dec { return Ok(false); }
+    if !ok_dec { eprintln!("[folding] dec_verify=false"); return Ok(false); }
+
+    // Derive the Π‑CCS transcript tail once; use r for tie and reuse for residual later.
+    eprintln!("[folding] stage=derive-tail");
+    let tail = pi_ccs_derive_transcript_tail(
+        params,
+        augmented_ccs,
+        stored_inputs,
+        &folding.pi_ccs_proof,
+    )
+    .map_err(|e| anyhow::anyhow!("failed to derive transcript tail: {}", e))?;
+    if me_parent.r.is_empty() || me_parent.r != tail.r {
+        me_parent.r = tail.r.clone();
+    }
 
     // 7) Parent-level tie check now that authentic Ajtai S-module is ensured by Π‑DEC path
-    if let Err(_e) = neo_ccs::check_me_consistency(augmented_ccs, &l_real, &me_parent, &wit_parent) {
-        // Some CCS shapes may have n not a power-of-two (e.g., padded to D). Skip this
-        // parent-level consistency check in that case; soundness is still enforced by
-        // Π‑CCS/Π‑RLC/Π‑DEC and commitment evolution checks.
-        if augmented_ccs.n.is_power_of_two() {
-            #[cfg(feature = "neo-logs")] eprintln!("[folding] ❌ Parent-level ME consistency failed");
-            return Ok(false);
-        } else {
-            #[cfg(feature = "neo-logs")] eprintln!("[folding] ⚠️ Skipping parent-level ME consistency (n not power-of-two)");
-        }
+    // Recompute X from Z via S-module for tie check to avoid any recombination drift.
+    let mut me_parent_tie = me_parent.clone();
+    me_parent_tie.X = l_real.project_x(&wit_parent.Z, me_parent.m_in);
+    eprintln!("[folding] stage=tie (r.len()={})", me_parent_tie.r.len());
+    if let Err(e) = tie_check_with_r(augmented_ccs, &me_parent_tie, &wit_parent, &me_parent_tie.r) {
+        eprintln!("[folding] ❌ tie_with_r failed: {}", e);
+        eprintln!("[folding] debug: me_parent.y.len={} (t), y[0].len={} (D)", me_parent.y.len(), me_parent.y.get(0).map(|v| v.len()).unwrap_or(0));
+        return Ok(false);
     }
 
     // 8) Cross-link Π‑CCS outputs to the parent ME: recombine Π‑CCS y via ρ and 
     //    require the scalars match the parent ME (which DEC/tie bound to Z).
     {
+        eprintln!("[folding] stage=cross-link");
         // Hygiene: arity/shape guards
         if folding.pi_rlc_proof.rho_elems.len() != folding.pi_ccs_outputs.len() {
             return Err(anyhow::anyhow!("rho count != Π‑CCS outputs").into());
@@ -2768,14 +2939,29 @@ pub fn verify_ivc_step_folding(
             ).into());
         }
         if y_scalars_from_rlc != me_parent.y_scalars {
-            #[cfg(feature = "neo-logs")]
-            eprintln!("❌ Cross-link failed: RLC-recombined y_scalars != parent y_scalars");
+            eprintln!("[folding] cross-link failed: recombined y_scalars != parent y_scalars");
             return Ok(false);
         }
     }
 
-    // 9) Terminal claim check temporarily disabled for CCS with n not power-of-two.
-    // Soundness is covered by Pi‑CCS, Pi‑RLC, Pi‑DEC, and the commitment evolution check.
+    // 9) Enforce residual vanishing at r using the same transcript-derived tail.
+    eprintln!("[folding] stage=residual");
+    if tail.alphas.len() != folding.pi_ccs_outputs.len() {
+        return Err(anyhow::anyhow!("alpha count != number of Π‑CCS outputs").into());
+    }
+    // Enforce terminal equality exactly as in Π‑CCS verification (robust for arbitrary shapes):
+    // running_sum must equal the expected terminal expression.
+    let expected_term = pi_ccs_compute_terminal_claim_r1cs_or_ccs(
+        augmented_ccs,
+        tail.wr,
+        &tail.alphas,
+        &folding.pi_ccs_outputs,
+    );
+    if tail.running_sum != expected_term {
+        eprintln!("[folding] terminal equality mismatch: running_sum != expected");
+        return Ok(false);
+    }
+
     Ok(true)
 }
 

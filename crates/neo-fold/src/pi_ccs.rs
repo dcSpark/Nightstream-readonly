@@ -681,9 +681,12 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
 
     // MAJOR OPTIMIZATION: Convert to CSR sparse format once for all operations
     // This enables O(nnz) operations instead of O(n*m) for our extremely sparse matrices  
+    #[cfg(feature = "debug-logs")]
     let csr_start = std::time::Instant::now();
     let mats_csr: Vec<Csr<F>> = s.matrices.iter().map(|m| to_csr::<F>(m, s.n, s.m)).collect();
+    #[cfg(feature = "debug-logs")]
     let total_nnz: usize = mats_csr.iter().map(|c| c.data.len()).sum();
+    #[cfg(feature = "debug-logs")]
     println!("🔥 [NUCLEAR] CSR conversion completed: {:.2}ms ({} matrices, {} nnz total, {:.4}% density)",
              csr_start.elapsed().as_secs_f64() * 1000.0, 
              mats_csr.len(), total_nnz, 
@@ -698,11 +701,16 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         c: Cmt,
     }
     let mut insts: Vec<Inst> = Vec::with_capacity(mcs_list.len());
+    #[cfg(feature = "debug-logs")]
     let instance_prep_start = std::time::Instant::now();
     for (inst_idx, (inst, wit)) in mcs_list.iter().zip(witnesses.iter()).enumerate() {
+        #[cfg(not(feature = "debug-logs"))]
+        let _ = inst_idx;
+        #[cfg(feature = "debug-logs")]
         let z_check_start = std::time::Instant::now();
         let z = neo_ccs::relations::check_mcs_opening(l, inst, wit)
             .map_err(|e| PiCcsError::InvalidInput(format!("MCS opening failed: {e}")))?;
+        #[cfg(feature = "debug-logs")]
         println!("🔧 [INSTANCE {}] MCS opening check: {:.2}ms", inst_idx, 
                  z_check_start.elapsed().as_secs_f64() * 1000.0);
         // SECURITY: Ensure z matches CCS width to prevent OOB during M*z
@@ -715,18 +723,23 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         
         // === CRITICAL SECURITY CHECK: Z == Decomp_b(z) ===
         // This prevents prover from using satisfying z for CCS but different Z for commitment
+        #[cfg(feature = "debug-logs")]
         let decomp_start = std::time::Instant::now();
         let Z_expected_col_major = neo_ajtai::decomp_b(&z, params.b, neo_math::D, neo_ajtai::DecompStyle::Balanced);
+        #[cfg(feature = "debug-logs")]
         println!("🔧 [INSTANCE {}] Decomp_b: {:.2}ms", inst_idx, 
                  decomp_start.elapsed().as_secs_f64() * 1000.0);
         
+        #[cfg(feature = "debug-logs")]
         let range_check_start = std::time::Instant::now();
         neo_ajtai::assert_range_b(&Z_expected_col_major, params.b)
             .map_err(|e| PiCcsError::InvalidInput(format!("Range check failed on expected Z: {e}")))?;
+        #[cfg(feature = "debug-logs")]
         println!("🔧 [INSTANCE {}] Range check: {:.2}ms", inst_idx, 
                  range_check_start.elapsed().as_secs_f64() * 1000.0);
         
         // Convert Z_expected from column-major to row-major format to match wit.Z
+        #[cfg(feature = "debug-logs")]
         let format_conv_start = std::time::Instant::now();
         let d = neo_math::D;
         let m = Z_expected_col_major.len() / d;
@@ -738,31 +751,38 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
                 Z_expected_row_major[row_major_idx] = Z_expected_col_major[col_major_idx];
             }
         }
+        #[cfg(feature = "debug-logs")]
         println!("🔧 [INSTANCE {}] Format conversion: {:.2}ms", inst_idx, 
                  format_conv_start.elapsed().as_secs_f64() * 1000.0);
         
         // Compare Z with expected decomposition (both in row-major format)
+        #[cfg(feature = "debug-logs")]
         let z_compare_start = std::time::Instant::now();
         if wit.Z.as_slice() != Z_expected_row_major.as_slice() {
             return Err(PiCcsError::InvalidInput("SECURITY: Z != Decomp_b(z) - prover using inconsistent z and Z".into()));
         }
+        #[cfg(feature = "debug-logs")]
         println!("🔧 [INSTANCE {}] Z comparison: {:.2}ms", inst_idx, 
                  z_compare_start.elapsed().as_secs_f64() * 1000.0);
         // MAJOR OPTIMIZATION: Use CSR sparse matrix-vector multiply - O(nnz) instead of O(n*m)!
+        #[cfg(feature = "debug-logs")]
         let mz_start = std::time::Instant::now();
         let mz: Vec<Vec<F>> = mats_csr.par_iter().map(|csr| 
             spmv_csr_ff::<F>(csr, &z)
         ).collect();
+        #[cfg(feature = "debug-logs")]
         println!("💥 [TIMING] CSR M_j z computation: {:.2}ms (nnz={}, vs {}M dense elements - {}x reduction)", 
                  mz_start.elapsed().as_secs_f64() * 1000.0, total_nnz, 
                  (s.n * s.m * s.matrices.len()) / 1_000_000,
                  (s.n * s.m * s.matrices.len()) / total_nnz.max(1));
         insts.push(Inst{ Z: &wit.Z, m_in: inst.m_in, mz, c: inst.c.clone() });
     }
+    #[cfg(feature = "debug-logs")]
     println!("🔧 [TIMING] Instance preparation total: {:.2}ms ({} instances)", 
              instance_prep_start.elapsed().as_secs_f64() * 1000.0, insts.len());
 
     // --- SECURITY: Absorb instance data BEFORE sampling challenges to prevent malleability ---
+    #[cfg(feature = "debug-logs")]
     let transcript_start = std::time::Instant::now();
     tr.append_message(b"neo/ccs/instances", b"");
     tr.append_u64s(b"dims", &[s.n as u64, s.m as u64, s.t() as u64]);
@@ -783,10 +803,12 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         // CRITICAL: Absorb commitment to prevent cross-instance attacks
         tr.append_fields(b"c_data", &inst.c.data);
     }
+    #[cfg(feature = "debug-logs")]
     println!("🔧 [TIMING] Transcript absorption: {:.2}ms", 
              transcript_start.elapsed().as_secs_f64() * 1000.0);
 
     // --- Generate eq-binding vector and batching coefficients for composed polynomial Q ---
+    #[cfg(feature = "debug-logs")]
     let batching_start = std::time::Instant::now();
     // Eq-binding vector w sampled before batching (used only when t>=3)
     tr.append_message(b"neo/ccs/eq", b"");
@@ -797,10 +819,12 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     let alphas: Vec<K> = (0..insts.len()).map(|_| { let ch = tr.challenge_fields(b"chal/k", 2); neo_math::from_complex(ch[0], ch[1]) }).collect();
     
     let batch_coeffs = BatchingCoeffs { alphas };
+    #[cfg(feature = "debug-logs")]
     println!("🔧 [TIMING] Batching coefficients: {:.2}ms", 
              batching_start.elapsed().as_secs_f64() * 1000.0);
 
     // --- Run sum-check rounds over composed polynomial Q (degree ≤ d_sc) ---
+    #[cfg(feature = "debug-logs")]
     println!("🔍 Sum-check starting: {} instances, {} rounds", insts.len(), ell);
     let sample_xs_generic: Vec<K> = (0..=d_sc as u64).map(|u| K::from(F::from_u64(u))).collect();
     let sample_xs_r1cs: Vec<K> = (0..=3u64).map(|u| K::from(F::from_u64(u))).collect();
@@ -809,6 +833,7 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     let use_generic_ccs = !use_r1cs;
 
     // Build partial states (invariant across the engine)
+    #[cfg(feature = "debug-logs")]
     let mle_start = std::time::Instant::now();
     let partials_per_inst_opt: Option<Vec<MlePartials>>;
     if use_generic_ccs {
@@ -826,6 +851,7 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         // R1CS eq-weighted oracle uses A,B,C shrinking tables instead of residuals
         partials_per_inst_opt = None;
     }
+    #[cfg(feature = "debug-logs")]
     println!("🔧 [TIMING] MLE partials setup: {:.2}ms",
              mle_start.elapsed().as_secs_f64() * 1000.0);
 
@@ -870,19 +896,24 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         run_sumcheck_skip_eval_at_one(tr, &mut oracle, initial_sum, &sample_xs_r1cs)?
     };
 
+    #[cfg(feature = "debug-logs")]
     println!("🔧 [TIMING] Sum-check rounds complete ({} rounds)", ell);
 
     // Compute M_j^T * χ_r using streaming/half-table weights (no full χ_r materialization)
+    #[cfg(feature = "debug-logs")]
     println!("🚀 [OPTIMIZATION] Computing M_j^T * χ_r with half-table weights...");
+    #[cfg(feature = "debug-logs")]
     let transpose_once_start = std::time::Instant::now();
     let w = HalfTableEq::new(&r);
     let vjs: Vec<Vec<K>> = mats_csr.par_iter()
         .map(|csr| spmv_csr_t_weighted_fk::<_>(csr, &w))
         .collect();
+    #[cfg(feature = "debug-logs")]
     println!("💥 [OPTIMIZATION] Weighted CSR M_j^T * χ_r computed: {:.2}ms (nnz={})",
              transpose_once_start.elapsed().as_secs_f64() * 1000.0, total_nnz);
 
     // --- Build ME instances (one per input) ---
+    #[cfg(feature = "debug-logs")]
     let me_start = std::time::Instant::now();
     
     // CRITICAL SECURITY FIX: Generate fold_digest from final transcript state
@@ -901,12 +932,14 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         // We still populate y_scalars with the CORRECT scalars: ⟨(M_j z), χ_r⟩ derived below.
         
         // Use precomputed v_j = M_j^T * χ_r vectors (no more expensive recomputation per instance!)
-        let z_operations_start = std::time::Instant::now();
+            #[cfg(feature = "debug-logs")]
+            let z_operations_start = std::time::Instant::now();
         for (_j, vj) in vjs.iter().enumerate() {
             let z_ref = neo_ccs::MatRef::from_mat(inst.Z);
             let yj = neo_ccs::utils::mat_vec_mul_fk::<F,K>(z_ref.data, z_ref.rows, z_ref.cols, vj);
             y.push(yj);
         }
+        #[cfg(feature = "debug-logs")]
         println!("🚀 [OPTIMIZATION] Used precomputed v_j vectors - only Z * v_j needed: {:.2}ms", 
                  z_operations_start.elapsed().as_secs_f64() * 1000.0);
         
@@ -933,6 +966,7 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         });
     }
 
+    #[cfg(feature = "debug-logs")]
     println!("🔧 [TIMING] ME instance building: {:.2}ms", 
              me_start.elapsed().as_secs_f64() * 1000.0);
 
@@ -1006,12 +1040,14 @@ pub fn pi_ccs_verify(
         let digest = tr.digest32();
         // Verify proof header matches transcript state
         if proof.header_digest != digest {
+            #[cfg(feature = "debug-logs")]
             eprintln!("❌ PI_CCS VERIFY: header digest mismatch (proof={:?}, verifier={:?})",
                       &proof.header_digest[..4], &digest[..4]);
             return Ok(false);
         }
         // Verify all output ME instances are bound to this transcript
         if !out_me.iter().all(|me| me.fold_digest == digest) {
+            #[cfg(feature = "debug-logs")]
             eprintln!("❌ PI_CCS VERIFY: out_me fold_digest mismatch");
             return Ok(false);
         }
@@ -1022,15 +1058,21 @@ pub fn pi_ccs_verify(
 
     // === CRITICAL BINDING: out_me[i] must match input instance ===
     // This prevents attacks where unrelated ME outputs pass RLC/DEC algebra
-    if out_me.len() != mcs_list.len() { return Ok(false); }
+    if out_me.len() != mcs_list.len() {
+        #[cfg(feature = "debug-logs")]
+        eprintln!("[pi-ccs] out_me.len() {} != mcs_list.len() {}", out_me.len(), mcs_list.len());
+        return Ok(false);
+    }
     for (i, (out, inp)) in out_me.iter().zip(mcs_list.iter()).enumerate() {
-        if out.c != inp.c { #[allow(unused_variables)] let _i = i; /* logs gated by workspace */ return Ok(false); }
-        if out.m_in != inp.m_in { #[allow(unused_variables)] let _i = i; return Ok(false); }
+        #[cfg(not(feature = "debug-logs"))]
+        let _ = i;
+        if out.c != inp.c { #[cfg(feature = "debug-logs")] eprintln!("[pi-ccs] output {} commitment mismatch vs input", i); return Ok(false); }
+        if out.m_in != inp.m_in { #[cfg(feature = "debug-logs")] eprintln!("[pi-ccs] output {} m_in {} != input m_in {}", i, out.m_in, inp.m_in); return Ok(false); }
         
         // Shape/consistency checks: catch subtle mismatches before terminal verification
-        if out.X.rows() != neo_math::D { return Ok(false); }
-        if out.X.cols() != inp.m_in { return Ok(false); }
-        if out.y.len() != s.t() { return Ok(false); } // Number of CCS matrices
+        if out.X.rows() != neo_math::D { #[cfg(feature = "debug-logs")] eprintln!("[pi-ccs] out.X.rows {} != D {}", out.X.rows(), neo_math::D); return Ok(false); }
+        if out.X.cols() != inp.m_in { #[cfg(feature = "debug-logs")] eprintln!("[pi-ccs] out.X.cols {} != m_in {}", out.X.cols(), inp.m_in); return Ok(false); }
+        if out.y.len() != s.t() { #[cfg(feature = "debug-logs")] eprintln!("[pi-ccs] out.y.len {} != t {}", out.y.len(), s.t()); return Ok(false); } // Number of CCS matrices
     }
 
     // === CRITICAL SUM-CHECK TERMINAL VERIFICATION ===
@@ -1056,7 +1098,7 @@ pub fn pi_ccs_verify(
             let c = me_inst.y_scalars[2];
             expected += batch_coeffs.alphas[inst_idx] * (a * b - c);
         }
-        if running_sum != wr * expected { return Ok(false); }
+        if running_sum != wr * expected { #[cfg(feature = "debug-logs")] eprintln!("[pi-ccs] terminal mismatch (R1CS): running_sum != wr*sum(a*b-c)"); return Ok(false); }
     } else {
         // Generic CCS
         if !out_me.iter().all(|me| me.y_scalars.len() == s.t()) { return Ok(false); }
@@ -1065,7 +1107,7 @@ pub fn pi_ccs_verify(
             let f_eval = s.f.eval_in_ext::<K>(&me_inst.y_scalars);
             expected_q_r += batch_coeffs.alphas[inst_idx] * f_eval;
         }
-        if running_sum != expected_q_r { return Ok(false); }
+        if running_sum != expected_q_r { #[cfg(feature = "debug-logs")] eprintln!("[pi-ccs] terminal mismatch (CCS): running_sum != Σ α_i f(Y)"); return Ok(false); }
     }
 
     // Optionally verify v_j = M_j^T χ_r if carried (disabled to keep verifier lightweight)
@@ -1074,6 +1116,8 @@ pub fn pi_ccs_verify(
 }
 
 /// Replay the Π_CCS transcript to derive (r, alphas) exactly as the verifier did.
+#[doc(hidden)]
+#[deprecated(note = "Use pi_ccs_derive_transcript_tail which returns wr, r, alphas as a struct")]
 pub fn pi_ccs_derive_r_and_alphas(
     params: &neo_params::NeoParams,
     s: &CcsStructure<F>,
@@ -1086,6 +1130,7 @@ pub fn pi_ccs_derive_r_and_alphas(
     let n_pad = s.n.next_power_of_two();
     let ell = n_pad.trailing_zeros() as usize;
     let d_sc = s.max_degree() as usize;
+    #[cfg(feature = "debug-logs")]
     eprintln!("[pi-ccs] derive_tail: s.n={}, n_pad={}, ell={}, d_sc={}, rounds_in_proof={}", s.n, n_pad, ell, d_sc, proof.sumcheck_rounds.len());
     let ext = params.extension_check(ell as u32, d_sc as u32)
         .map_err(|e| PiCcsError::ExtensionPolicyFailed(e.to_string()))?;
@@ -1115,6 +1160,7 @@ pub fn pi_ccs_derive_r_and_alphas(
     let d_round = if is_r1cs { 3 } else { d_sc };
     let (r, _running_sum, ok_rounds) = verify_sumcheck_rounds(&mut tr, d_round, K::ZERO, &proof.sumcheck_rounds);
     if !ok_rounds {
+        #[cfg(feature = "debug-logs")]
         eprintln!("[pi-ccs] rounds invalid: expected ell={}, d_round={}, got rounds={} (s.n={})",
                   ell, d_round, proof.sumcheck_rounds.len(), s.n);
     }
@@ -1128,6 +1174,7 @@ pub struct TranscriptTail {
     pub wr: K,
     pub r: Vec<K>,
     pub alphas: Vec<K>,
+    pub running_sum: K,
 }
 
 /// Replay the Π-CCS transcript to derive the tail (wr, r, alphas).
@@ -1138,6 +1185,7 @@ pub fn pi_ccs_derive_transcript_tail(
     proof: &PiCcsProof,
 ) -> Result<TranscriptTail, PiCcsError> {
     let mut tr = Poseidon2Transcript::new(b"neo/fold");
+    tr.append_message(tr_labels::PI_CCS, b"");
     // Header (same as in pi_ccs_verify)
     if s.n == 0 { return Err(PiCcsError::InvalidInput("n=0 not allowed".into())); }
     let n_pad = s.n.next_power_of_two();
@@ -1174,8 +1222,13 @@ pub fn pi_ccs_derive_transcript_tail(
     // Derive r by verifying rounds (structure only)
     let is_r1cs = is_r1cs_shape(s);
     let d_round = if is_r1cs { 3 } else { d_sc };
-    let (r, _running_sum, ok_rounds) = verify_sumcheck_rounds(&mut tr, d_round, K::ZERO, &proof.sumcheck_rounds);
-    if !ok_rounds { return Err(PiCcsError::SumcheckError("rounds invalid".into())); }
+    let (r, running_sum, ok_rounds) = verify_sumcheck_rounds(&mut tr, d_round, K::ZERO, &proof.sumcheck_rounds);
+    if !ok_rounds {
+        #[cfg(feature = "debug-logs")]
+        #[cfg(feature = "debug-logs")]
+        eprintln!("[pi-ccs] rounds invalid: expected <= {}, got {} rounds", d_round, proof.sumcheck_rounds.len());
+        return Err(PiCcsError::SumcheckError("rounds invalid".into()));
+    }
 
     // Compute wr = EQ(w, r)
     let mut wr = K::ONE;
@@ -1183,7 +1236,10 @@ pub fn pi_ccs_derive_transcript_tail(
         wr *= (K::ONE - *wi) * (K::ONE - *ri) + *wi * *ri;
     }
 
-    Ok(TranscriptTail { wr, r, alphas })
+    #[cfg(feature = "debug-logs")]
+    #[cfg(feature = "debug-logs")]
+    eprintln!("[pi-ccs] derive_tail: s.n={}, ell={}, d_sc={}, outputs={}, rounds={}", s.n, ell, d_sc, mcs_list.len(), proof.sumcheck_rounds.len());
+    Ok(TranscriptTail { wr, r, alphas, running_sum })
 }
 
 /// Backward-compatible wrapper; prefer `pi_ccs_derive_transcript_tail`.

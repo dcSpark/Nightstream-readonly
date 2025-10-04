@@ -146,8 +146,8 @@ pub fn fold_ccs_instances(
     {
             let mut tr_check = Poseidon2Transcript::new(b"neo/fold");
         match pi_ccs::pi_ccs_verify(&mut tr_check, params, structure, instances, &me_list, &pi_ccs_proof) {
-            Ok(ok) => eprintln!("[DEBUG] Prover self-check Pi-CCS verify: {}", ok),
-            Err(e) => eprintln!("[DEBUG] Prover self-check Pi-CCS verify error: {}", e),
+            Ok(_ok) => { #[cfg(feature = "debug-logs")] eprintln!("[DEBUG] Prover self-check Pi-CCS verify: {}", _ok) },
+            Err(_e) => { #[cfg(feature = "debug-logs")] eprintln!("[DEBUG] Prover self-check Pi-CCS verify error: {}", _e) },
         }
     }
 
