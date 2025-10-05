@@ -1166,7 +1166,10 @@ pub fn prove_ivc_step_chained(
         Z: z_matrix.clone()
     };
 
-    // 6) Reify previous ME→MCS, or create trivial zero instance (base case)
+    // 6) Reify previous ME→MCS, or self-fold on the first step (sound + satisfies CCS)
+    //    Using a zero MCS as base case does not satisfy the step CCS, causing Π‑CCS to fail.
+    //    Instead, for the very first step (no prior LHS), fold the RHS with itself and let the
+    //    verifier enforce linkage via augmented-x threading. This yields a valid CCS instance pair.
     let (lhs_inst, lhs_wit) = if let Some((inst, wit)) = prev_lhs_mcs {
         // Use exact previous RHS MCS as next LHS for strict linkage
         (inst, wit)
@@ -1204,8 +1207,8 @@ pub fn prove_ivc_step_chained(
             (inst, wit_mcs)
         }
         _ => {
-            // Base case (step 0): use a canonical zero running instance matching current shape.
-            zero_mcs_instance_for_shape(step_public_input.len(), m_step, Some(input.binding_spec.const1_witness_index))?
+            // Base case (step 0): self-fold using the current step instance
+            (step_mcs_inst.clone(), step_mcs_wit.clone())
         }
     }};
 
