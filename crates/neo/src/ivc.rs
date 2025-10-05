@@ -1166,10 +1166,7 @@ pub fn prove_ivc_step_chained(
         Z: z_matrix.clone()
     };
 
-    // 6) Reify previous ME→MCS, or self-fold on the first step (sound + satisfies CCS)
-    //    Using a zero MCS as base case does not satisfy the step CCS, causing Π‑CCS to fail.
-    //    Instead, for the very first step (no prior LHS), fold the RHS with itself and let the
-    //    verifier enforce linkage via augmented-x threading. This yields a valid CCS instance pair.
+    // 6) Reify previous ME→MCS, or create trivial zero instance (base case)
     let (lhs_inst, lhs_wit) = if let Some((inst, wit)) = prev_lhs_mcs {
         // Use exact previous RHS MCS as next LHS for strict linkage
         (inst, wit)
@@ -1207,8 +1204,8 @@ pub fn prove_ivc_step_chained(
             (inst, wit_mcs)
         }
         _ => {
-            // Base case (step 0): self-fold using the current step instance
-            (step_mcs_inst.clone(), step_mcs_wit.clone())
+            // Base case (step 0): use a canonical zero running instance matching current shape.
+            zero_mcs_instance_for_shape(step_public_input.len(), m_step, Some(input.binding_spec.const1_witness_index))?
         }
     }};
 
@@ -1571,8 +1568,10 @@ pub fn verify_ivc_step(
     };
     
     let is_valid = digest_valid && y_next_valid;
-    #[cfg(feature = "debug-logs")]
-    eprintln!("[ivc] digest_valid={}, y_next_valid={}", digest_valid, y_next_valid);
+    #[cfg(feature = "neo-logs")]
+    {
+        eprintln!("[ivc] digest_valid={}, y_next_valid={}", digest_valid, y_next_valid);
+    }
     // Bind result of digest and y_next checks
     
     #[cfg(feature = "neo-logs")]
@@ -1635,6 +1634,8 @@ pub fn verify_ivc_step(
     if !folding_ok {
         #[cfg(feature = "debug-logs")]
         eprintln!("[ivc] folding_ok=false");
+        #[cfg(feature = "neo-logs")]
+        eprintln!("❌ Folding verification (Pi-CCS/RLC/DEC) failed");
         return Ok(false);
     }
 
@@ -2732,8 +2733,14 @@ pub fn verify_ivc_step_folding(
             eprintln!("[folding] early: base-case LHS augmented input length mismatch");
             return Ok(false);
         }
-        // Require canonical zero vector for base-case LHS augmented x (matches zero_mcs_instance_for_shape)
-        if !x_lhs_proof.iter().all(|&f| f == F::ZERO) { #[cfg(feature = "neo-logs")] eprintln!("[folding] early: base-case LHS augmented x not all zeros"); return Ok(false); }
+        // Accept either canonical zero-vector (zero-MCS base case) or self-fold (LHS == RHS augmented x)
+        let is_zero = x_lhs_proof.iter().all(|&f| f == F::ZERO);
+        let is_self_fold = x_lhs_proof == x_rhs_expected;
+        if !is_zero && !is_self_fold {
+            #[cfg(feature = "neo-logs")]
+            eprintln!("[folding] early: base-case LHS augmented x not zero or self-fold");
+            return Ok(false);
+        }
     } else if let Some(_px) = prev_augmented_x {
         // Production strict: enforce provided prev_augmented_x linkage
         let px = _px;

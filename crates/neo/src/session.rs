@@ -107,6 +107,17 @@ impl IvcSession {
         }
     }
 
+    /// Create a new session with optional initial state.
+    ///
+    /// When `initial_state` is `None`, the session defers fixing the state length
+    /// until the first step is synthesized. At that time, it initializes the
+    /// accumulator state to a zero vector of length `spec.y_len` provided by the
+    /// step adapter. This removes the need to guess an "empty" state upfront.
+    pub fn new_opt(params: &NeoParams, initial_state: Option<Vec<F>>, start_step: u64) -> Self {
+        let y = initial_state.unwrap_or_default();
+        IvcSession::new(params, y, start_step)
+    }
+
     /// Current state (y_prev)
     pub fn state(&self) -> &[F] { &self.acc.y_compact }
     /// Current step index
@@ -122,7 +133,11 @@ impl IvcSession {
         let artifacts = stepper.synthesize_step(self.step as usize, &self.acc.y_compact, inputs);
 
         // Sanity: state length consistency
-        if artifacts.spec.y_len != self.acc.y_compact.len() {
+        // If session was created without an explicit initial state (y_len=0),
+        // initialize it lazily to a zero vector of spec.y_len.
+        if self.acc.y_compact.is_empty() && artifacts.spec.y_len > 0 {
+            self.acc.y_compact = vec![F::ZERO; artifacts.spec.y_len];
+        } else if artifacts.spec.y_len != self.acc.y_compact.len() {
             return Err(format!(
                 "state length mismatch: spec.y_len={} != acc.y_len={}",
                 artifacts.spec.y_len, self.acc.y_compact.len()
