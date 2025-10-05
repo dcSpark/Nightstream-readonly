@@ -2001,29 +2001,26 @@ pub fn build_augmented_ccs_linked_with_rlc(
     // Public input: [ step_x || ρ || y_prev || y_next ]
     let pub_cols = step_x_len + 1 + 2 * y_len;
 
-    // Row budget:
+    // Row accounting (no preset cap):
     //  - step_rows                              (copy step CCS)
-    //  - 2*y_len EV rows                        (u = ρ*y_step, y_next - y_prev - u = 0)
+    //  - EV rows                                (see below; production: 2*y_len, testing: 2)
     //  - step_x_len binder rows (optional)      (step_x[i] - step_witness[x_i] = 0)
-    //  - y_len prev binder rows                 (REVIEWER FIX: y_prev[k] - step_witness[prev_k] = 0)
+    //  - y_len prev binder rows                 (y_prev[k] - step_witness[prev_k] = 0)
     //  - 1 RLC binder row (optional)            (⟨G, z⟩ = Σ r_i * c_step[i])
     let step_rows = step_ccs.n;
+    // EV rows in production encoding: two per state element (u = ρ·y_step; y_next − y_prev − u)
     let ev_rows = 2 * y_len;
     let x_bind_rows = if step_program_input_witness_indices.is_empty() { 0 } else { step_x_len };
     let prev_bind_rows = if y_prev_witness_indices.is_empty() { 0 } else { y_len };
     let rlc_rows = if rlc_binder.is_some() { 1 } else { 0 };
     let total_rows = step_rows + ev_rows + x_bind_rows + prev_bind_rows + rlc_rows;
-    // Pad rows to global D to satisfy ME checks and tensor-point definition
-    let target_rows = neo_math::D;
-    if total_rows > target_rows {
-        return Err(format!(
-            "augmented CCS rows ({}) exceed D ({}). Reduce constraints or increase D",
-            total_rows, target_rows
-        ));
-    }
+    // Pre-pad to next power-of-two for clean χ_r wiring (optional but stable).
+    // This keeps augmented CCS shape fixed and matches Π_CCS's ℓ computation.
+    let target_rows = total_rows.next_power_of_two();
 
     // Witness: [ step_witness || u ]
     let step_wit_cols = step_ccs.m;
+    // Witness columns added for EV section: u has length y_len
     let ev_wit_cols = y_len; // u
     let total_wit_cols = step_wit_cols + ev_wit_cols;
     let total_cols = pub_cols + total_wit_cols;
@@ -2047,8 +2044,8 @@ pub fn build_augmented_ccs_linked_with_rlc(
         let col_y_next0 = col_y_prev0 + y_len;
         // absolute column for the constant-1 witness (within the *augmented* z = [public | witness])
         let col_const1_abs = pub_cols + const1_witness_index;
-        let col_u0      = pub_cols + step_wit_cols;
-
+        
+        let col_u0 = pub_cols + step_wit_cols;
         // EV: u[k] = ρ * y_step[k]
         for k in 0..y_len {
             let r = step_rows + k;
