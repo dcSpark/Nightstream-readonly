@@ -86,7 +86,7 @@ fn test_self_fold_basecase_manual_verify() {
     let _ = session.prove_step(&mut stepper, &NoInputs).expect("prove step 0");
     let _ = session.prove_step(&mut stepper, &NoInputs).expect("prove step 1");
 
-    let chain = session.finalize();
+    let (chain, _step_ios) = session.finalize();
     let descriptor = StepDescriptor { ccs: stepper.ccs.clone(), spec: stepper.spec.clone() };
 
     // Manual per-step verification with strict threading of prev_augmented_x
@@ -124,9 +124,9 @@ fn test_basecase_chain_verifies_canonical() {
     let mut stepper = MinimalStep::new();
 
     let _ = session.prove_step(&mut stepper, &NoInputs).expect("prove step 0");
-    let chain = session.finalize();
+    let (chain, step_ios) = session.finalize();
     let descriptor = StepDescriptor { ccs: stepper.ccs.clone(), spec: stepper.spec.clone() };
 
-    let ok = verify_chain_with_descriptor(&descriptor, &chain, &[], &params).expect("verify should not error");
+    let ok = verify_chain_with_descriptor(&descriptor, &chain, &[], &params, &step_ios).expect("verify should not error");
     assert!(ok, "canonical verifier should accept zero-base case chain");
 }

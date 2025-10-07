@@ -979,10 +979,25 @@ pub fn prove_ivc_step_chained(
         }
     }
 
-    // 3) SECURITY FIX: Use full augmentation CCS to prove commitment evolution
-    // Moved after Ajtai dimensions (m_step, kappa, d) are known.
+    // PROVER-SIDE CHECK (COMMENTED OUT TO TEST IN-CIRCUIT ENFORCEMENT):
+    // This check can be bypassed by a malicious prover who modifies the code.
+    // The REAL security MUST come from in-circuit constraints in the augmented CCS.
+    // 
+    // TODO: Investigate why step CCS constraints might not be properly enforced in-circuit.
+    // The step CCS should be copied into the augmented CCS and checked cryptographically.
+    //
+    // let step_ccs_public_input = match input.public_input {
+    //     Some(app_inputs) => app_inputs,
+    //     None => &[],
+    // };
+    // neo_ccs::check_ccs_rowwise_zero(input.step_ccs, step_ccs_public_input, input.step_witness)
+    //     .map_err(|e| format!(
+    //         "SOUNDNESS ERROR: step witness does not satisfy CCS constraints: {:?}",
+    //         e
+    //     ))?;
 
-    // 4) Commit to the ρ-independent step witness (Pattern B), then derive ρ,
+
+    // 3) Commit to the ρ-independent step witness (Pattern B), then derive ρ,
     // then build the full augmented witness for proving. This breaks FS circularity.
     let d = neo_math::ring::D;
     
@@ -2024,13 +2039,16 @@ pub fn build_augmented_ccs_linked_with_rlc(
     //  - step_x_len binder rows (optional)      (step_x[i] - step_witness[x_i] = 0)
     //  - y_len prev binder rows                 (y_prev[k] - step_witness[prev_k] = 0)
     //  - 1 RLC binder row (optional)            (⟨G, z⟩ = Σ r_i * c_step[i])
+    //  - 1 const-1 enforcement row              (w_const1 * ρ = ρ, forces w_const1 = 1)
     let step_rows = step_ccs.n;
     // EV rows in production encoding: two per state element (u = ρ·y_step; y_next − y_prev − u)
     let ev_rows = 2 * y_len;
     let x_bind_rows = if step_program_input_witness_indices.is_empty() { 0 } else { step_x_len };
     let prev_bind_rows = if y_prev_witness_indices.is_empty() { 0 } else { y_len };
     let rlc_rows = if rlc_binder.is_some() { 1 } else { 0 };
-    let total_rows = step_rows + ev_rows + x_bind_rows + prev_bind_rows + rlc_rows;
+    // SOUNDNESS FIX: Enforce const-1 column is actually 1 using public ρ
+    let const1_enforce_rows = 1;
+    let total_rows = step_rows + ev_rows + x_bind_rows + prev_bind_rows + rlc_rows + const1_enforce_rows;
     // Pre-pad to next power-of-two for clean χ_r wiring (optional but stable).
     // This keeps augmented CCS shape fixed and matches Π_CCS's ℓ computation.
     // Avoid n=1 degeneracy (0-round sum-check) which can misalign R1CS terminal checks.
@@ -2152,6 +2170,40 @@ pub fn build_augmented_ccs_linked_with_rlc(
             }
         }
 
+        // SOUNDNESS FIX: Enforce w_const1 * ρ = ρ (forces w_const1 = 1 since ρ ≠ 0)
+        // This prevents malicious provers from setting const-1 to 0, which would turn
+        // all linear constraints (that multiply by const-1) into trivial 0=0 identities.
+        // Many rows above (EV, X/Y binders) rely on B matrix selecting the "1" column;
+        // without this constraint, those rows can be zeroed out by a malicious prover.
+        {
+            let r = step_rows + ev_rows + x_bind_rows + prev_bind_rows + rlc_rows;
+            
+            // SECURITY: Bounds checks to prevent silent corruption of the constraint
+            debug_assert!(r < target_rows, "const-1 enforcement row {} must be within target_rows {}", r, target_rows);
+            debug_assert!(col_const1_abs < total_cols, "const-1 column {} must be within total_cols {}", col_const1_abs, total_cols);
+            debug_assert!(col_rho < total_cols, "rho column {} must be within total_cols {}", col_rho, total_cols);
+            
+            match matrix_idx {
+                0 => {
+                    // A matrix: select w_const1 (the witness column that should be 1)
+                    debug_assert!(r * total_cols + col_const1_abs < data.len(), "A matrix index out of bounds");
+                    data[r * total_cols + col_const1_abs] = F::ONE;
+                }
+                1 => {
+                    // B matrix: select ρ (public, from Fiat-Shamir, guaranteed non-zero)
+                    debug_assert!(r * total_cols + col_rho < data.len(), "B matrix index out of bounds");
+                    data[r * total_cols + col_rho] = F::ONE;
+                }
+                2 => {
+                    // C matrix: also select ρ (public)
+                    // This enforces: w_const1 * ρ = ρ  =>  w_const1 = 1
+                    debug_assert!(r * total_cols + col_rho < data.len(), "C matrix index out of bounds");
+                    data[r * total_cols + col_rho] = F::ONE;
+                }
+                _ => {}
+            }
+        }
+
         // Remaining rows (from total_rows..target_rows) remain zero — they encode 0 == 0
         combined_mats.push(Mat::from_row_major(target_rows, total_cols, data));
     }
@@ -2211,7 +2263,11 @@ fn compute_augmented_public_input_for_step(
     let step_data = build_step_transcript_data(prev_acc, proof.step, &proof.step_public_input);
     let step_digest = create_step_digest(&step_data);
     let (rho_calc, _td) = rho_from_transcript(prev_acc, step_digest, &proof.c_step_coords);
-    let rho = if proof.step_rho != F::ZERO { proof.step_rho } else { rho_calc };
+    
+    // SECURITY: Always use recalculated ρ from transcript, never trust prover's value
+    // The rho_from_transcript uses challenge_nonzero_field which guarantees ρ ≠ 0
+    let rho = rho_calc;
+    debug_assert_ne!(rho, F::ZERO, "ρ must be non-zero for const-1 enforcement soundness");
 
     let x_aug = build_augmented_public_input_for_step(
         &proof.step_public_input,

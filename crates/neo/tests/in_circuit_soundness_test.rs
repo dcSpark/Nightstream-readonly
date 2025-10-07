@@ -155,3 +155,83 @@ fn test_invalid_witness_in_circuit_enforcement() {
         }
     }
 }
+
+/// REGRESSION TEST: Explicitly test the const-1 = 0 attack vector
+/// This is the exact attack that was possible before the soundness fix.
+/// A malicious prover sets witness[const1_index] = 0 to neutralize all
+/// linear constraints that multiply by const-1.
+#[test]
+fn test_const1_zero_attack_is_blocked() {
+    let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
+    let step_ccs = build_increment_ccs();
+    
+    let prev_acc = Accumulator {
+        c_z_digest: [0u8; 32],
+        c_coords: vec![],
+        y_compact: vec![F::ZERO],
+        step: 0,
+    };
+    
+    let binding = StepBindingSpec {
+        y_step_offsets: vec![3],
+        step_program_input_witness_indices: vec![2],
+        y_prev_witness_indices: vec![1],
+        const1_witness_index: 0,  // This is what the attacker targets
+    };
+    
+    // ATTACK: Forge a witness with const1=0 to try to zero out constraints
+    // The step CCS constraint is: (next - prev - delta) * const1 = 0
+    // If const1=0, this becomes: (next - prev - delta) * 0 = 0 (always true!)
+    let delta = F::from_u64(3);
+    let malicious_witness = vec![
+        F::ZERO,             // const1 = 0 ❌ (ATTACK!)
+        F::ZERO,             // prev = 0
+        delta,               // delta = 3
+        F::from_u64(999),    // next = 999 (completely wrong, should be 3)
+    ];
+    
+    // Verify this witness would satisfy the step CCS if const1 could be 0
+    // (it multiplies by 0, making the constraint trivial)
+    
+    let extractor = LastNExtractor { n: 1 };
+    let public_input = vec![delta];
+    
+    let result = prove_ivc_step_with_extractor(
+        &params,
+        &step_ccs,
+        &malicious_witness,
+        &prev_acc,
+        0,
+        Some(&public_input),
+        &extractor,
+        &binding,
+    );
+    
+    // Post-fix: The augmented CCS has a constraint w_const1 * ρ = ρ
+    // which forces const1 = 1. This should catch the attack.
+    match result {
+        Ok(step_result) => {
+            // Prover generated proof, but verifier must reject
+            let verify_result = verify_ivc_step(
+                &step_ccs,
+                &step_result.proof,
+                &prev_acc,
+                &binding,
+                &params,
+                None,
+            );
+            
+            match verify_result {
+                Ok(is_valid) => {
+                    assert!(!is_valid, "CRITICAL: const1=0 attack was NOT blocked! The w_const1 * ρ = ρ constraint failed.");
+                }
+                Err(_e) => {
+                    // Verification failed (good - const1 enforcement working)
+                }
+            }
+        }
+        Err(_e) => {
+            // Prover failed (also acceptable - caught early)
+        }
+    }
+}

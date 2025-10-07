@@ -180,7 +180,7 @@ fn main() -> Result<()> {
     let steps_time = steps_start.elapsed();
 
     // Finalize IVC chain with outer SNARK (Stage 5)
-    let chain = session.finalize();
+    let (chain, _step_ios) = session.finalize();
     let descriptor = StepDescriptor { ccs: step_ccs.clone(), spec: stepper.spec.clone() };
     println!("\n🔄 Step 5: Generating Final SNARK Layer proof...");
     println!("   • EV embedding: disabled (public-ρ path)");

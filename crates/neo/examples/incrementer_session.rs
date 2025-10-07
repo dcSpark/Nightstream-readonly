@@ -127,9 +127,9 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     // Finalize and verify chain
-    let chain = session.finalize();
+    let (chain, step_ios) = session.finalize();
     let descriptor = StepDescriptor { ccs: stepper.ccs.clone(), spec: stepper.spec.clone() };
-    let ok = verify_chain_with_descriptor(&descriptor, &chain, &[F::ZERO], &params)?;
+    let ok = verify_chain_with_descriptor(&descriptor, &chain, &[F::ZERO], &params, &step_ios)?;
 
     println!("✅ Chain verify: {}", ok);
     println!("Final state (acc): {:?}", chain.final_accumulator.y_compact);

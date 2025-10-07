@@ -200,7 +200,8 @@ fn roundtrip_vs_padded_power_of_two() {
 
 #[test]
 fn augmented_ccs_padding_regression() {
-    // total_rows = step_rows (1) + ev_rows (2*y_len=32) = 33 ⇒ target_rows should be 64
+    // total_rows = step_rows (1) + ev_rows (2*y_len=32) + const1_enforce_rows (1) = 34 ⇒ target_rows should be 64
+    // NOTE: const1_enforce_rows added by soundness fix (w_const1 * ρ = ρ constraint)
     let y_len = 16usize;
     let step_ccs = trivial_step_ccs_rows(y_len, 1);
 
@@ -221,10 +222,10 @@ fn augmented_ccs_padding_regression() {
         None,
     ).expect("augmented CCS should build");
 
-    assert_eq!(augmented.n, 64, "target_rows must be next power-of-two (33 → 64)");
+    assert_eq!(augmented.n, 64, "target_rows must be next power-of-two (34 → 64)");
 
-    // Verify rows [33..64) are all zeros in each matrix
-    let used = 33usize;
+    // Verify rows [34..64) are all zeros in each matrix (row 33 is the const-1 enforcement row)
+    let used = 34usize;
     for (j, mtx) in augmented.matrices.iter().enumerate() {
         for r in used..augmented.n {
             let row = mtx.row(r);
