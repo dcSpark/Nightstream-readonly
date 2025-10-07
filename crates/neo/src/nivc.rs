@@ -19,6 +19,8 @@ use crate::{F, NeoParams};
 use p3_field::{PrimeField64, PrimeCharacteristicRing};
 
 use neo_ccs::CcsStructure;
+use neo_math::F as FF;
+use neo_spartan_bridge::pi_ccs_embed as piccs;
 
 /// Import IVC helpers
 use crate::ivc::{
@@ -883,9 +885,6 @@ pub fn finalize_nivc_chain_with_options(
 
         // Canonicalize weight vectors to Pi‑CCS definition to avoid inconsistencies
         {
-            use neo_math::F as FF;
-            use neo_spartan_bridge::pi_ccs_embed as piccs;
-
             // Rebuild CSR bundle for convenience
             let mut mats = Vec::with_capacity(augmented_ccs.matrices.len());
             for mj in &augmented_ccs.matrices {

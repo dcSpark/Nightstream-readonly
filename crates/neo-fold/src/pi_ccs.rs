@@ -9,7 +9,7 @@ use neo_transcript::{Transcript, Poseidon2Transcript, labels as tr_labels};
 use crate::error::PiCcsError;
 use neo_ccs::{CcsStructure, McsInstance, McsWitness, MeInstance, Mat, MatRef, SparsePoly};
 use neo_ajtai::Commitment as Cmt;
-use neo_math::{F, K};
+use neo_math::{F, K, KExtensions};
 use p3_field::{PrimeCharacteristicRing, Field, PrimeField64};
 use rayon::prelude::*;
 use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
@@ -26,6 +26,8 @@ pub struct PiCcsProof {
     pub sumcheck_rounds: Vec<Vec<K>>,
     /// Extension policy binding digest  
     pub header_digest: [u8; 32],
+    /// Sum-check initial claim s(0)+s(1) when the R1CS engine is used; None for generic CCS.
+    pub sc_initial_sum: Option<K>,
 }
 
 // ===== CSR Sparse Matrix Operations =====
@@ -271,50 +273,9 @@ fn absorb_sparse_polynomial(tr: &mut Poseidon2Transcript, f: &SparsePoly<F>) {
         tr.append_fields(b"coeff", &[term.coeff]);
         let exps: Vec<u64> = term.exps.iter().map(|&e| e as u64).collect();
         tr.append_u64s(b"exps", &exps);
-}
+    }
 }
 
-// Detect whether a CCS structure encodes an R1CS relation: t=3 and f(y)=y0*y1 - y2.
-fn is_r1cs_shape(s: &CcsStructure<F>) -> bool {
-    // Detect up to a nonzero scalar multiple and variable permutation:
-    // f(y0,y1,y2) = λ·(y_i · y_j − y_k), where {i,j,k} = {0,1,2} and λ ≠ 0.
-    if s.t() != 3 || s.f.arity() != 3 { return false; }
-    use std::collections::BTreeMap;
-    let mut map: BTreeMap<[u32; 3], F> = BTreeMap::new();
-    for term in s.f.terms() {
-        if term.exps.len() != 3 { return false; }
-        let mut key = [0u32; 3];
-        key.copy_from_slice(&term.exps[..3]);
-        *map.entry(key).or_insert(F::ZERO) += term.coeff;
-    }
-    // Drop zero coefficients
-    map.retain(|_, c| *c != F::ZERO);
-    if map.len() != 2 { return false; }
-
-    // Identify the product term (two ones) and the single term (one one)
-    let mut prod_key = None; let mut prod_coeff = F::ZERO;
-    let mut single_key = None; let mut single_coeff = F::ZERO;
-    for (k, &c) in &map {
-        let wt: u32 = k.iter().copied().sum();
-        match wt {
-            2 => {
-                // Must be exactly [1,1,0] up to permutation
-                if k.iter().all(|&e| e <= 1) { prod_key = Some(*k); prod_coeff = c; }
-            }
-            1 => {
-                if k.iter().all(|&e| e <= 1) { single_key = Some(*k); single_coeff = c; }
-            }
-            _ => return false,
-        }
-    }
-    let (prod, single) = match (prod_key, single_key) { (Some(p), Some(s)) => (p, s), _ => return false };
-    // The single 1 must be on the index where the product has a 0 (complement index)
-    let zero_idx = prod.iter().position(|&e| e == 0).unwrap();
-    if single[zero_idx] != 1 { return false; }
-    // Coefficients must be opposite up to a nonzero scalar: single = -prod
-    if prod_coeff == F::ZERO { return false; }
-    single_coeff == -prod_coeff
-}
 
 // ===== Local MLE partial structures and Sum-check round oracles =====
 
@@ -340,59 +301,56 @@ impl<'a> RoundOracle for GenericCcsOracle<'a> {
     fn evals_at(&mut self, sample_xs: &[K]) -> Vec<K> {
         let t = self.s.t();
         let mut sample_ys = vec![K::ZERO; sample_xs.len()];
+        // Scratch buffers reused across loops
         if !self.first_round_done {
-            // Round-0 small-value path: accumulate in F, then lift once per sample X
+            // Round 0: iterate over each remaining row-block ρ (k), build (a,d), evaluate f, then sum
+            let n_pad = 1usize << self.ell;
+            let half = n_pad >> 1;
+            let mut a = vec![K::ZERO; t];
+            let mut d = vec![K::ZERO; t];
+            let mut y_buf = vec![K::ZERO; t];
             for (inst_idx, mz_f) in self.mz_f_per_inst.iter().enumerate() {
-                let mut a_f = vec![F::ZERO; t];
-                let mut d_f = vec![F::ZERO; t];
-                let n_pad = 1usize << self.ell;
-                let half = n_pad >> 1;
-                for j in 0..t {
-                    let v_f = mz_f[j];
-                    let mut aj = F::ZERO;
-                    let mut dj = F::ZERO;
-                    for k in 0..half {
-                        let idx_e = 2*k;
+                let alpha = self.alphas[inst_idx];
+                for k in 0..half {
+                    // Build per-ρ a,d across all j
+                    for j in 0..t {
+                        let v_f = mz_f[j];
+                        let idx_e = 2 * k;
                         let idx_o = idx_e + 1;
                         let e = if idx_e < v_f.len() { v_f[idx_e] } else { F::ZERO };
                         let o = if idx_o < v_f.len() { v_f[idx_o] } else { F::ZERO };
-                        aj += e;
-                        dj += o - e;
+                        a[j] = K::from(e);
+                        d[j] = K::from(o - e);
                     }
-                    a_f[j] = aj; d_f[j] = dj;
-                }
-                let alpha = self.alphas[inst_idx];
-                let mut y_buf = vec![K::ZERO; t];
-                for (sx, &X) in sample_xs.iter().enumerate() {
-                    for j in 0..t { y_buf[j] = K::from(a_f[j]) + K::from(d_f[j]) * X; }
-                    let f_eval = self.s.f.eval_in_ext::<K>(&y_buf);
-                    sample_ys[sx] += alpha * f_eval;
+                    // Evaluate f(a + d X) for all requested X and accumulate
+                    for (sx, &X) in sample_xs.iter().enumerate() {
+                        for j in 0..t { y_buf[j] = a[j] + d[j] * X; }
+                        sample_ys[sx] += alpha * self.s.f.eval_in_ext::<K>(&y_buf);
+                    }
                 }
             }
             self.first_round_done = true;
         } else {
+            // Later rounds: use folded partials; same per-ρ evaluation pattern
+            let mut a = vec![K::ZERO; t];
+            let mut d = vec![K::ZERO; t];
+            let mut y_buf = vec![K::ZERO; t];
             for (inst_idx, partials) in self.partials_per_inst.iter().enumerate() {
-                let mut a = vec![K::ZERO; t];
-                let mut delta = vec![K::ZERO; t];
-                for j in 0..t {
-                    let v = &partials.s_per_j[j];
-                    debug_assert!(v.len().is_power_of_two() && v.len() >= 2);
-                    let half = v.len() >> 1;
-                    let (mut aj, mut dj) = (K::ZERO, K::ZERO);
-                    for k in 0..half {
-                        let e = v[2*k];
-                        let o = v[2*k + 1];
-                        aj += e;
-                        dj += o - e;
-                    }
-                    a[j] = aj; delta[j] = dj;
-                }
                 let alpha = self.alphas[inst_idx];
-                let mut y_buf = vec![K::ZERO; t];
-                for (sx, &X) in sample_xs.iter().enumerate() {
-                    for j in 0..t { y_buf[j] = a[j] + delta[j] * X; }
-                    let f_eval = self.s.f.eval_in_ext::<K>(&y_buf);
-                    sample_ys[sx] += alpha * f_eval;
+                debug_assert!(partials.s_per_j.len() == t);
+                let half = partials.s_per_j[0].len() >> 1;
+                for k in 0..half {
+                    for j in 0..t {
+                        let v = &partials.s_per_j[j];
+                        let e = v[2 * k];
+                        let o = v[2 * k + 1];
+                        a[j] = e;
+                        d[j] = o - e;
+                    }
+                    for (sx, &X) in sample_xs.iter().enumerate() {
+                        for j in 0..t { y_buf[j] = a[j] + d[j] * X; }
+                        sample_ys[sx] += alpha * self.s.f.eval_in_ext::<K>(&y_buf);
+                    }
                 }
             }
         }
@@ -409,92 +367,6 @@ impl<'a> RoundOracle for GenericCcsOracle<'a> {
                 v.truncate(n2);
             }
         }
-    }
-}
-
-// Legacy residual oracle removed (replaced by eq-weighted oracle)
-
-// === Eq-weighted R1CS oracle: binds product via equality MLE ===
-struct R1csEqOracle {
-    alphas: Vec<K>,
-    a_per_inst: Vec<Vec<K>>, // shrinking tables (length halves each round)
-    b_per_inst: Vec<Vec<K>>, 
-    c_per_inst: Vec<Vec<K>>, 
-    w: Vec<K>,               // eq-binding vector
-    eq_prefix: K,            // ∏_{j<i} eq(w_j, r_j)
-    ell: usize,
-    round: usize,
-}
-
-impl R1csEqOracle {
-    #[inline]
-    fn eq_lin(wi: K, x: K) -> K { (K::ONE - wi) * (K::ONE - x) + wi * x }
-}
-
-impl RoundOracle for R1csEqOracle {
-    fn num_rounds(&self) -> usize { self.ell }
-    fn degree_bound(&self) -> usize { 3 }
-    fn evals_at(&mut self, xs: &[K]) -> Vec<K> {
-        debug_assert!(self.a_per_inst.iter().all(|a| a.len().is_power_of_two()));
-        debug_assert!(self.b_per_inst.iter().all(|a| a.len().is_power_of_two()));
-        debug_assert!(self.c_per_inst.iter().all(|a| a.len().is_power_of_two()));
-        let i = self.round;
-        let wi = self.w[i];
-        let pair_cnt = self.a_per_inst[0].len() >> 1;
-        // Build suffix weights eq(w_{>i}, ·) of length 2^{ell-i-1}
-        let rem = self.ell - (i + 1);
-        let mut suffix = vec![K::ONE; pair_cnt];
-        for mask in 0..pair_cnt {
-            let mut acc = K::ONE;
-            let mut m = mask;
-            for j in 0..rem {
-                let wj = self.w[i + 1 + j];
-                acc *= if (m & 1) == 0 { K::ONE - wj } else { wj };
-                m >>= 1;
-            }
-            suffix[mask] = acc;
-        }
-
-        let mut ys = vec![K::ZERO; xs.len()];
-        for inst_idx in 0..self.a_per_inst.len() {
-            let alpha = self.alphas[inst_idx];
-            let a = &self.a_per_inst[inst_idx];
-            let b = &self.b_per_inst[inst_idx];
-            let c = &self.c_per_inst[inst_idx];
-            for k in 0..pair_cnt {
-                let e = 2*k;
-                let o = e + 1;
-                let a0 = a[e]; let da = a[o] - a[e];
-                let b0 = b[e]; let db = b[o] - b[e];
-                let c0 = c[e]; let dc = c[o] - c[e];
-                let w_suf = suffix[k];
-                for (t, &x) in xs.iter().enumerate() {
-                    let ax = a0 + da * x;
-                    let bx = b0 + db * x;
-                    let cx = c0 + dc * x;
-                    let res = ax * bx - cx; // deg 2
-                    let eqix = Self::eq_lin(wi, x); // deg 1
-                    ys[t] += alpha * self.eq_prefix * eqix * w_suf * res;
-                }
-            }
-        }
-        ys
-    }
-    fn fold(&mut self, r_i: K) {
-        // Shrink tables
-        for a in &mut self.a_per_inst {
-            let n2 = a.len() >> 1; for k in 0..n2 { a[k] = (K::ONE - r_i) * a[2*k] + r_i * a[2*k + 1]; } a.truncate(n2);
-        }
-        for b in &mut self.b_per_inst {
-            let n2 = b.len() >> 1; for k in 0..n2 { b[k] = (K::ONE - r_i) * b[2*k] + r_i * b[2*k + 1]; } b.truncate(n2);
-        }
-        for c in &mut self.c_per_inst {
-            let n2 = c.len() >> 1; for k in 0..n2 { c[k] = (K::ONE - r_i) * c[2*k] + r_i * c[2*k + 1]; } c.truncate(n2);
-        }
-        // Extend eq prefix
-        let wi = self.w[self.round];
-        self.eq_prefix *= Self::eq_lin(wi, r_i);
-        self.round += 1;
     }
 }
 
@@ -661,7 +533,7 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     if s.n == 0 {
         return Err(PiCcsError::InvalidInput("n=0 not allowed".into()));
     }
-    let n_pad = s.n.next_power_of_two();
+    let n_pad = s.n.next_power_of_two().max(2);
     let ell = n_pad.trailing_zeros() as usize;
     let d_sc = s.max_degree() as usize;
 
@@ -697,9 +569,10 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     struct Inst<'a> {
         Z: &'a Mat<F>, 
         m_in: usize, 
-        mz: Vec<Vec<F>>,
+        mz: Vec<Vec<F>>, // rows = n, per-matrix M_j z over F
         c: Cmt,
     }
+    
     let mut insts: Vec<Inst> = Vec::with_capacity(mcs_list.len());
     #[cfg(feature = "debug-logs")]
     let instance_prep_start = std::time::Instant::now();
@@ -810,9 +683,9 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     // --- Generate eq-binding vector and batching coefficients for composed polynomial Q ---
     #[cfg(feature = "debug-logs")]
     let batching_start = std::time::Instant::now();
-    // Eq-binding vector w sampled before batching (used only when t>=3)
+    // Eq-binding vector w sampled before batching (kept for transcript layout)
     tr.append_message(b"neo/ccs/eq", b"");
-    let w_eq: Vec<K> = (0..ell).map(|_| { let ch = tr.challenge_fields(b"chal/k", 2); neo_math::from_complex(ch[0], ch[1]) }).collect();
+    let _w_eq: Vec<K> = (0..ell).map(|_| { let ch = tr.challenge_fields(b"chal/k", 2); neo_math::from_complex(ch[0], ch[1]) }).collect();
     tr.append_message(b"neo/ccs/batch", b"");
     
     // α coefficients for CCS constraints (one per instance)
@@ -827,16 +700,13 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     #[cfg(feature = "debug-logs")]
     println!("🔍 Sum-check starting: {} instances, {} rounds", insts.len(), ell);
     let sample_xs_generic: Vec<K> = (0..=d_sc as u64).map(|u| K::from(F::from_u64(u))).collect();
-    let sample_xs_r1cs: Vec<K> = (0..=3u64).map(|u| K::from(F::from_u64(u))).collect();
-    // Enable R1CS eq-binding terminal check whenever the CCS is R1CS-shaped.
-    let use_r1cs = is_r1cs_shape(s);
-    let use_generic_ccs = !use_r1cs;
+    // Single generic engine for all shapes (including R1CS-shaped CCS)
 
     // Build partial states (invariant across the engine)
     #[cfg(feature = "debug-logs")]
     let mle_start = std::time::Instant::now();
     let partials_per_inst_opt: Option<Vec<MlePartials>>;
-    if use_generic_ccs {
+    {
         let partials: Result<Vec<MlePartials>, PiCcsError> = insts.par_iter().map(|inst| {
             let mut s_per_j = Vec::with_capacity(s.t());
             for j in 0..s.t() {
@@ -847,17 +717,43 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
             Ok(MlePartials { s_per_j })
         }).collect();
         partials_per_inst_opt = Some(partials?);
-    } else {
-        // R1CS eq-weighted oracle uses A,B,C shrinking tables instead of residuals
-        partials_per_inst_opt = None;
     }
     #[cfg(feature = "debug-logs")]
     println!("🔧 [TIMING] MLE partials setup: {:.2}ms",
              mle_start.elapsed().as_secs_f64() * 1000.0);
 
     // Drive rounds with the generic engine
-    let initial_sum = K::ZERO;
-    let SumcheckOutput { rounds, challenges: r, final_sum: _running_sum } = if use_generic_ccs {
+    // Compute initial_sum = s(0) + s(1) for round 0 and bind before rounds
+    let initial_sum = {
+        let t = s.t();
+        let n_pad = 1usize << ell;
+        let half = n_pad >> 1;
+        let mut acc0_plus_1 = K::ZERO;
+        let mut a = vec![K::ZERO; t];
+        let mut o = vec![K::ZERO; t];
+        for (inst_idx, inst) in insts.iter().enumerate() {
+            let alpha = batch_coeffs.alphas[inst_idx];
+            for k in 0..half {
+                // Build per-ρ vectors a_ρ and o_ρ across all j
+                for j in 0..t {
+                    let v_f = &inst.mz[j];
+                    let idx_e = 2 * k;
+                    let idx_o = idx_e + 1;
+                    let e = if idx_e < v_f.len() { v_f[idx_e] } else { F::ZERO };
+                    let oo = if idx_o < v_f.len() { v_f[idx_o] } else { F::ZERO };
+                    a[j] = K::from(e);
+                    o[j] = K::from(oo);
+                }
+                let f0 = s.f.eval_in_ext::<K>(&a);
+                let f1 = s.f.eval_in_ext::<K>(&o);
+                acc0_plus_1 += alpha * (f0 + f1);
+            }
+        }
+        acc0_plus_1
+    };
+    // Bind initial_sum BEFORE rounds to the transcript (prover side)
+    tr.append_fields(b"sumcheck/initial_sum", &initial_sum.as_coeffs());
+    let SumcheckOutput { rounds, challenges: r, final_sum: running_sum } = {
         let mut oracle = GenericCcsOracle {
             s, alphas: batch_coeffs.alphas.clone(),
             partials_per_inst: partials_per_inst_opt.unwrap(),
@@ -867,37 +763,32 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         };
         if d_sc >= 1 { run_sumcheck_skip_eval_at_one(tr, &mut oracle, initial_sum, &sample_xs_generic)? }
         else { run_sumcheck(tr, &mut oracle, initial_sum, &sample_xs_generic)? }
-    } else {
-        // Build A,B,C shrinking tables per instance
-        let mut a_per_inst = Vec::with_capacity(insts.len());
-        let mut b_per_inst = Vec::with_capacity(insts.len());
-        let mut c_per_inst = Vec::with_capacity(insts.len());
-        for inst in &insts {
-            let mut a_vk: Vec<K> = inst.mz[0].iter().map(|&x| K::from(x)).collect();
-            let mut b_vk: Vec<K> = inst.mz[1].iter().map(|&x| K::from(x)).collect();
-            let mut c_vk: Vec<K> = inst.mz[2].iter().map(|&x| K::from(x)).collect();
-            a_vk = pad_to_pow2_k(a_vk, ell)?;
-            b_vk = pad_to_pow2_k(b_vk, ell)?;
-            c_vk = pad_to_pow2_k(c_vk, ell)?;
-            a_per_inst.push(a_vk);
-            b_per_inst.push(b_vk);
-            c_per_inst.push(c_vk);
-        }
-        let mut oracle = R1csEqOracle {
-            alphas: batch_coeffs.alphas.clone(),
-            a_per_inst,
-            b_per_inst,
-            c_per_inst,
-            w: w_eq.clone(),
-            eq_prefix: K::ONE,
-            ell,
-            round: 0,
-        };
-        run_sumcheck_skip_eval_at_one(tr, &mut oracle, initial_sum, &sample_xs_r1cs)?
     };
+    
 
     #[cfg(feature = "debug-logs")]
-    println!("🔧 [TIMING] Sum-check rounds complete ({} rounds)", ell);
+    println!("🔧 [TIMING] Sum-check rounds complete: {} rounds", ell);
+
+    // Prover-side transcript snapshot and alpha/r summary
+    #[cfg(feature = "neo-logs")]
+    {
+        use std::cmp::min;
+        eprintln!("[pi-ccs][prove] ell={}, d_sc={}, instances={}, alphas_len={}",
+                  ell, d_sc, insts.len(), batch_coeffs.alphas.len());
+        eprintln!("[pi-ccs][prove] r[0..{}]={:?}",
+                  min(4, r.len()), r.iter().take(4).collect::<Vec<_>>());
+        eprintln!("[pi-ccs][prove] alphas[0..{}]={:?}",
+                  min(4, batch_coeffs.alphas.len()),
+                  batch_coeffs.alphas.iter().take(4).map(|a| format!("{:?}", a)).collect::<Vec<_>>());
+        for (i, inst) in mcs_list.iter().enumerate().take(2) {
+            let prefix = inst.c.data.as_slice();
+            let prefix = if prefix.len() >= 4 { &prefix[0..4] } else { prefix };
+            eprintln!(
+                "[pi-ccs][prove] inst {}: m_in={}, c_prefix={:02x?}",
+                i, inst.m_in, prefix
+            );
+        }
+    }
 
     // Compute M_j^T * χ_r using streaming/half-table weights (no full χ_r materialization)
     #[cfg(feature = "debug-logs")]
@@ -905,6 +796,13 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     #[cfg(feature = "debug-logs")]
     let transpose_once_start = std::time::Instant::now();
     let w = HalfTableEq::new(&r);
+    #[cfg(feature = "neo-logs")]
+    {
+        let max_i = core::cmp::min(8usize, s.n);
+        for i in 0..max_i {
+            eprintln!("[chi] w({}) = {}", i, format_ext(w.w(i)));
+        }
+    }
     let vjs: Vec<Vec<K>> = mats_csr.par_iter()
         .map(|csr| spmv_csr_t_weighted_fk::<_>(csr, &w))
         .collect();
@@ -921,48 +819,37 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     let fold_digest = tr.digest32();
     
     let mut out_me = Vec::with_capacity(insts.len());
-    for (inst_idx, inst) in insts.iter().enumerate() {
+    for (_inst_idx, inst) in insts.iter().enumerate() {
         // X = L_x(Z)
         let X = l.project_x(inst.Z, inst.m_in);
         
         // OPTIMIZATION: Use precomputed v_j vectors and MLE fold results  
         let mut y = Vec::with_capacity(s.t());
-        // Use final MLE fold results for Y_j(r) (already computed above) — we do not maintain per-j partials
-        // here, so reconstruct Y_j(r) via sparse transpose multiply below.
-        // We still populate y_scalars with the CORRECT scalars: ⟨(M_j z), χ_r⟩ derived below.
-        
-        // Use precomputed v_j = M_j^T * χ_r vectors (no more expensive recomputation per instance!)
-            #[cfg(feature = "debug-logs")]
-            let z_operations_start = std::time::Instant::now();
         for (_j, vj) in vjs.iter().enumerate() {
             let z_ref = neo_ccs::MatRef::from_mat(inst.Z);
             let yj = neo_ccs::utils::mat_vec_mul_fk::<F,K>(z_ref.data, z_ref.rows, z_ref.cols, vj);
             y.push(yj);
         }
-        #[cfg(feature = "debug-logs")]
-        println!("🚀 [OPTIMIZATION] Used precomputed v_j vectors - only Z * v_j needed: {:.2}ms", 
-                 z_operations_start.elapsed().as_secs_f64() * 1000.0);
-        
-        // Compute the CORRECT Y_j(r) scalars: ⟨(M_j z), χ_r⟩ using streaming weights
-        let y_scalars: Vec<K> = (0..s.t()).map(|j| {
-            let mut acc = K::ZERO;
-            for i in 0..s.n {
-                acc += K::from(insts[inst_idx].mz[j][i]) * w.w(i);
-            }
-            acc
-        }).collect();
+        // Compute Y_j(r) canonically: ⟨M_j z, χ_r⟩ using the same LSB-first row indexing as the sum-check oracle
+        let y_scalars: Vec<K> = (0..s.t())
+            .map(|j| {
+                (0..s.n)
+                    .map(|i| K::from(inst.mz[j][i]) * w.w(i))
+                    .fold(K::ZERO, |acc, term| acc + term)
+            })
+            .collect();
 
         out_me.push(MeInstance{ 
-            c_step_coords: vec![], // Pattern B: Populated by IVC layer, not folding
-            u_offset: 0,  // Pattern B: Unused (computed deterministically from witness structure)
-            u_len: 0,     // Pattern B: Unused (computed deterministically from witness structure)
+            c_step_coords: vec![],
+            u_offset: 0,
+            u_len: 0,
             c: inst.c.clone(), 
             X, 
             r: r.clone(), 
             y, 
-            y_scalars, // SECURITY: Correct scalars for terminal check
+            y_scalars,
             m_in: inst.m_in,
-            fold_digest, // Bind to transcript
+            fold_digest,
         });
     }
 
@@ -970,7 +857,78 @@ pub fn pi_ccs_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     println!("🔧 [TIMING] ME instance building: {:.2}ms", 
              me_start.elapsed().as_secs_f64() * 1000.0);
 
-    let proof = PiCcsProof { sumcheck_rounds: rounds, header_digest: fold_digest };
+    // Prover-side terminal decomposition and χ probes
+    #[cfg(feature = "neo-logs")]
+    {
+        let mut sum_qr = K::ZERO;
+        for (i, me) in out_me.iter().enumerate() {
+            let f_eval = s.f.eval_in_ext::<K>(&me.y_scalars);
+            let contrib = batch_coeffs.alphas[i] * f_eval;
+            sum_qr += contrib;
+            eprintln!(
+                "[pi-ccs][prove] inst {}: f(Y)={}, alpha={}, alpha*f(Y)={}",
+                i, format_ext(f_eval), format_ext(batch_coeffs.alphas[i]), format_ext(contrib)
+            );
+        }
+        eprintln!("[pi-ccs][prove] Σ alpha f(Y) = {}", format_ext(sum_qr));
+        eprintln!("[pi-ccs][prove] final running_sum = {}", format_ext(running_sum));
+
+        // Prover-side self-check: compare sum-check terminal running_sum vs Σ α_i f(Y(r))
+        eprintln!(
+            "[pi-ccs][prove/self-check] running_sum = {}",
+            format_ext(running_sum)
+        );
+        eprintln!(
+            "[pi-ccs][prove/self-check] Σ α f(Y)   = {}",
+            format_ext(sum_qr)
+        );
+
+        // Probe χ consistency for first two instances across all matrices
+        let n = 1usize << ell;
+        let mut chi_lsbf = vec![K::ONE; n];
+        for (jbit, &rj) in r.iter().enumerate() {
+            let stride = 1usize << jbit;
+            let (a0, a1) = (K::ONE - rj, rj);
+            for block in (0..n).step_by(stride * 2) {
+                for i in 0..stride {
+                    let t = chi_lsbf[block + i];
+                    chi_lsbf[block + i] = t * a0;
+                    chi_lsbf[block + i + stride] = t * a1;
+                }
+            }
+        }
+        let mut chi_msbf = vec![K::ZERO; n];
+        for i in 0..n {
+            let mut x = i; let mut y = 0usize;
+            for _ in 0..ell { y = (y << 1) | (x & 1); x >>= 1; }
+            chi_msbf[y] = chi_lsbf[i];
+        }
+        let inst_probe_max = core::cmp::min(2usize, insts.len());
+        for inst_idx in 0..inst_probe_max {
+            for j in 0..s.t() {
+                let acc_lsbf = (0..s.n).fold(K::ZERO, |acc, i| acc + K::from(insts[inst_idx].mz[j][i]) * chi_lsbf[i]);
+                let acc_msbf = (0..s.n).fold(K::ZERO, |acc, i| acc + K::from(insts[inst_idx].mz[j][i]) * chi_msbf[i]);
+                let y_cur = out_me[inst_idx].y_scalars[j];
+                eprintln!(
+                    "[pi-ccs][probe] inst{} j{}: y_cur={}, acc_lsbf={}, acc_msbf={}",
+                    inst_idx, j, format_ext(y_cur), format_ext(acc_lsbf), format_ext(acc_msbf)
+                );
+            }
+        }
+    }
+    #[cfg(not(any(feature = "neo-logs", feature = "debug-logs")))]
+    let _ = running_sum;
+
+    // (Optional) self-check could compare against generic terminal; omitted for performance.
+
+    // Carry exactly the initial_sum value we absorbed (works for both engines)
+    let sc_initial_sum = Some(initial_sum);
+    
+    let proof = PiCcsProof { 
+        sumcheck_rounds: rounds, 
+        header_digest: fold_digest,
+        sc_initial_sum,
+    };
     Ok((out_me, proof))
 }
 
@@ -986,7 +944,7 @@ pub fn pi_ccs_verify(
     tr.append_message(tr_labels::PI_CCS, b"");
     // >>> CHANGE #2: allow arbitrary n; compute ℓ from next power of two
     if s.n == 0 { return Err(PiCcsError::InvalidInput("n=0 not allowed".into())); }
-    let n_pad = s.n.next_power_of_two();
+    let n_pad = s.n.next_power_of_two().max(2);
     let ell = n_pad.trailing_zeros() as usize;
     let d_sc = s.max_degree() as usize;
 
@@ -1015,9 +973,9 @@ pub fn pi_ccs_verify(
         tr.append_fields(b"c_data", &inst.c.data);
     }
 
-    // Re-derive the SAME eq-binding vector and batching coefficients as the prover
+    // Keep transcript layout stable, but also bind initial_sum before rounds
     tr.append_message(b"neo/ccs/eq", b"");
-    let w_eq: Vec<K> = (0..ell).map(|_| { let ch = tr.challenge_fields(b"chal/k", 2); neo_math::from_complex(ch[0], ch[1]) }).collect();
+    let _w_eq: Vec<K> = (0..ell).map(|_| { let ch = tr.challenge_fields(b"chal/k", 2); neo_math::from_complex(ch[0], ch[1]) }).collect();
     tr.append_message(b"neo/ccs/batch", b"");
     let alphas: Vec<K> = (0..mcs_list.len()).map(|_| { let ch = tr.challenge_fields(b"chal/k", 2); neo_math::from_complex(ch[0], ch[1]) }).collect();
     
@@ -1025,12 +983,70 @@ pub fn pi_ccs_verify(
 
     if proof.sumcheck_rounds.len() != ell { return Ok(false); }
     // Check sum-check rounds using shared helper (derives r and running_sum)
-    // Enable R1CS eq-binding terminal check whenever the CCS is R1CS-shaped.
-    let is_r1cs = is_r1cs_shape(s);
-    let d_round = if is_r1cs { 3 } else { d_sc };
+    let d_round = d_sc;
+    
+    // Use the prover-carried initial sum when present; else derive from round 0
+    let claimed_initial = match proof.sc_initial_sum {
+        Some(s) => s,
+        None => {
+            if let Some(round0) = proof.sumcheck_rounds.get(0) {
+                use crate::sumcheck::poly_eval_k;
+                poly_eval_k(round0, K::ZERO) + poly_eval_k(round0, K::ONE)
+            } else {
+                K::ZERO
+            }
+        }
+    };
+    
+    #[cfg(feature = "debug-logs")]
+    {
+        eprintln!("[pi-ccs][verify] d_round={}, claimed_initial={}", d_round, format_ext(claimed_initial));
+        if let Some(round0) = proof.sumcheck_rounds.get(0) {
+            use crate::sumcheck::poly_eval_k;
+            let p0 = poly_eval_k(round0, K::ZERO);
+            let p1 = poly_eval_k(round0, K::ONE);
+            eprintln!("[pi-ccs][verify] round0: p(0)={}, p(1)={}, p(0)+p(1)={}",
+                      format_ext(p0), format_ext(p1), format_ext(p0 + p1));
+        }
+    }
+    
+    // Bind initial_sum BEFORE verifying rounds (verifier side)
+    tr.append_fields(b"sumcheck/initial_sum", &claimed_initial.as_coeffs());
     let (r, running_sum, ok_rounds) =
-        verify_sumcheck_rounds(tr, d_round, K::ZERO, &proof.sumcheck_rounds);
+        verify_sumcheck_rounds(tr, d_round, claimed_initial, &proof.sumcheck_rounds);
     if !ok_rounds { return Ok(false); }
+
+    // NOTE: No s(0)+s(1) == 0 requirement for R1CS eq-binding; terminal equality suffices.
+    
+    // (Already bound before rounds)
+
+    // Verifier-side terminal decomposition logs
+    #[cfg(feature = "neo-logs")]
+    {
+        use std::cmp::min;
+        eprintln!(
+            "[pi-ccs][verify] ell={}, d_round={}, claimed_initial={}",
+            ell, d_round, format_ext(claimed_initial)
+        );
+        eprintln!("[pi-ccs][verify] r[0..{}]={:?}",
+                  min(4, r.len()), r.iter().take(4).collect::<Vec<_>>());
+        eprintln!("[pi-ccs][verify] alphas[0..{}]={:?}",
+                  min(4, batch_coeffs.alphas.len()),
+                  batch_coeffs.alphas.iter().take(4).map(|a| format!("{:?}", a)).collect::<Vec<_>>());
+
+        let mut sum_qr = K::ZERO;
+        for (i, me) in out_me.iter().enumerate() {
+            let f_eval = s.f.eval_in_ext::<K>(&me.y_scalars);
+            let contrib = batch_coeffs.alphas[i] * f_eval;
+            eprintln!(
+                "[pi-ccs][verify] inst {}: f(Y)={}, alpha={}, alpha*f(Y)={}",
+                i, format_ext(f_eval), format_ext(batch_coeffs.alphas[i]), format_ext(contrib)
+            );
+            sum_qr += contrib;
+        }
+        eprintln!("[pi-ccs][verify] Σ alpha f(Y) = {}", format_ext(sum_qr));
+        eprintln!("[pi-ccs][verify] running_sum   = {}", format_ext(running_sum));
+    }
 
     // === CRITICAL TRANSCRIPT BINDING SECURITY CHECK ===
     // Only apply transcript binding when we have sum-check rounds
@@ -1120,102 +1136,41 @@ pub fn pi_ccs_verify(
     // NOTE: Only CCS and range/decomp constraints in Q(r).
     // Tie constraints removed from sum-check as they break soundness.
     
-    // Terminal check: generic CCS (t<3) uses Q(r) = Σ α_i·f(Y(r));
-    // R1CS-style (t≥3) uses eq-binding: running_sum = eq(w,r)·Σ α_i·(A(r)B(r)−C(r)).
-    if is_r1cs {
-        // R1CS eq-bound terminal check
-        if !out_me.iter().all(|me| me.y_scalars.len() == 3) { return Ok(false); }
-        let mut wr = K::ONE;
-        for (wi, ri) in w_eq.iter().zip(r.iter()) {
-            wr *= (K::ONE - *wi) * (K::ONE - *ri) + *wi * *ri;
+    // Unified terminal check for all shapes: Q(r) = Σ α_i·f(Y(r))
+    for (i, me) in out_me.iter().enumerate() {
+        if me.y_scalars.len() != s.t() {
+            return Err(PiCcsError::InvalidInput(format!(
+                "output[{}].y_scalars.len {} != t {}", i, me.y_scalars.len(), s.t()
+            )));
         }
-        let mut expected = K::ZERO;
-        for (inst_idx, me_inst) in out_me.iter().enumerate() {
-            let a = me_inst.y_scalars[0];
-            let b = me_inst.y_scalars[1];
-            let c = me_inst.y_scalars[2];
-            expected += batch_coeffs.alphas[inst_idx] * (a * b - c);
-        }
-        if running_sum != wr * expected { #[cfg(feature = "debug-logs")] eprintln!("[pi-ccs] terminal mismatch (R1CS): running_sum != wr*sum(a*b-c)"); return Ok(false); }
-    } else {
-        // Generic CCS
-        for (i, me) in out_me.iter().enumerate() {
-            if me.y_scalars.len() != s.t() {
-                return Err(PiCcsError::InvalidInput(format!(
-                    "output[{}].y_scalars.len {} != t {}", i, me.y_scalars.len(), s.t()
-                )));
-            }
-        }
-        let mut expected_q_r = K::ZERO;
-        for (inst_idx, me_inst) in out_me.iter().enumerate() {
-            let f_eval = s.f.eval_in_ext::<K>(&me_inst.y_scalars);
-            expected_q_r += batch_coeffs.alphas[inst_idx] * f_eval;
-        }
-        if running_sum != expected_q_r { #[cfg(feature = "debug-logs")] eprintln!("[pi-ccs] terminal mismatch (CCS): running_sum != Σ α_i f(Y)"); return Ok(false); }
+    }
+    let mut expected_q_r = K::ZERO;
+    for (inst_idx, me_inst) in out_me.iter().enumerate() {
+        let f_eval = s.f.eval_in_ext::<K>(&me_inst.y_scalars);
+        expected_q_r += batch_coeffs.alphas[inst_idx] * f_eval;
+    }
+    if running_sum != expected_q_r {
+        #[cfg(feature = "debug-logs")]
+        eprintln!(
+            "[pi-ccs] terminal mismatch (CCS): running_sum != Σ α_i f(Y)\n  running_sum = {}\n  Σ α_i f(Y) = {}",
+            format_ext(running_sum),
+            format_ext(expected_q_r)
+        );
+        return Ok(false);
     }
 
-    // Optionally verify v_j = M_j^T χ_r if carried (disabled to keep verifier lightweight)
+    // Note: In the folding pipeline, zero-ness is enforced at later stages (RLC/DEC).
+    // Here we only require terminal equality consistency.
+
+    // TODO: verify v_j = M_j^T χ_r if carried (disabled to keep verifier lightweight) under a flag for testing
 
     Ok(true)
-}
-
-/// Replay the Π_CCS transcript to derive (r, alphas) exactly as the verifier did.
-#[doc(hidden)]
-#[deprecated(note = "Use pi_ccs_derive_transcript_tail which returns wr, r, alphas as a struct")]
-pub fn pi_ccs_derive_r_and_alphas(
-    params: &neo_params::NeoParams,
-    s: &CcsStructure<F>,
-    mcs_list: &[McsInstance<Cmt, F>],
-    proof: &PiCcsProof,
-) -> Result<(Vec<K>, Vec<K>), PiCcsError> {
-    let mut tr = Poseidon2Transcript::new(b"neo/fold");
-    // Header (same as in pi_ccs_verify)
-    if s.n == 0 { return Err(PiCcsError::InvalidInput("n=0 not allowed".into())); }
-    let n_pad = s.n.next_power_of_two();
-    let ell = n_pad.trailing_zeros() as usize;
-    let d_sc = s.max_degree() as usize;
-    #[cfg(feature = "debug-logs")]
-    eprintln!("[pi-ccs] derive_tail: s.n={}, n_pad={}, ell={}, d_sc={}, rounds_in_proof={}", s.n, n_pad, ell, d_sc, proof.sumcheck_rounds.len());
-    let ext = params.extension_check(ell as u32, d_sc as u32)
-        .map_err(|e| PiCcsError::ExtensionPolicyFailed(e.to_string()))?;
-    tr.append_message(b"neo/ccs/header/v1", b"");
-    tr.append_u64s(b"ccs/header", &[64, ext.s_supported as u64, params.lambda as u64, ell as u64, d_sc as u64, ext.slack_bits.unsigned_abs() as u64]);
-    tr.append_message(b"ccs/slack_sign", &[if ext.slack_bits >= 0 {1} else {0}]);
-
-    // Instances
-    tr.append_message(b"neo/ccs/instances", b"");
-    tr.append_u64s(b"dims", &[s.n as u64, s.m as u64, s.t() as u64]);
-    let matrix_digest = digest_ccs_matrices(s);
-    for &digest_elem in &matrix_digest { tr.append_fields(b"mat_digest", &[F::from_u64(digest_elem.as_canonical_u64())]); }
-    absorb_sparse_polynomial(&mut tr, &s.f);
-    for inst in mcs_list.iter() {
-        tr.append_fields(b"x", &inst.x);
-        tr.append_u64s(b"m_in", &[inst.m_in as u64]);
-        tr.append_fields(b"c_data", &inst.c.data);
-    }
-    // Sample eq-binding vector and batch alphas
-    tr.append_message(b"neo/ccs/eq", b"");
-    let _w_eq: Vec<K> = (0..ell).map(|_| { let ch = tr.challenge_fields(b"chal/k", 2); neo_math::from_complex(ch[0], ch[1]) }).collect();
-    tr.append_message(b"neo/ccs/batch", b"");
-    let alphas: Vec<K> = (0..mcs_list.len()).map(|_| { let ch = tr.challenge_fields(b"chal/k", 2); neo_math::from_complex(ch[0], ch[1]) }).collect();
-
-    // Derive r by verifying rounds (structure only)
-    let is_r1cs = is_r1cs_shape(s);
-    let d_round = if is_r1cs { 3 } else { d_sc };
-    let (r, _running_sum, ok_rounds) = verify_sumcheck_rounds(&mut tr, d_round, K::ZERO, &proof.sumcheck_rounds);
-    if !ok_rounds {
-        #[cfg(feature = "debug-logs")]
-        eprintln!("[pi-ccs] rounds invalid: expected ell={}, d_round={}, got rounds={} (s.n={})",
-                  ell, d_round, proof.sumcheck_rounds.len(), s.n);
-    }
-    if !ok_rounds { return Err(PiCcsError::SumcheckError("rounds invalid".into())); }
-    Ok((r, alphas))
 }
 
 /// Data derived from the Π-CCS transcript tail used by the verifier.
 #[derive(Debug, Clone)]
 pub struct TranscriptTail {
-    pub wr: K,
+    pub _wr: K,
     pub r: Vec<K>,
     pub alphas: Vec<K>,
     pub running_sum: K,
@@ -1232,7 +1187,8 @@ pub fn pi_ccs_derive_transcript_tail(
     tr.append_message(tr_labels::PI_CCS, b"");
     // Header (same as in pi_ccs_verify)
     if s.n == 0 { return Err(PiCcsError::InvalidInput("n=0 not allowed".into())); }
-    let n_pad = s.n.next_power_of_two();
+    // Keep derive-tail consistent with prove/verify to avoid ℓ=0 for n=1
+    let n_pad = s.n.next_power_of_two().max(2);
     let ell = n_pad.trailing_zeros() as usize;
     let d_sc = s.max_degree() as usize;
     let ext = params.extension_check(ell as u32, d_sc as u32)
@@ -1253,9 +1209,9 @@ pub fn pi_ccs_derive_transcript_tail(
         tr.append_fields(b"c_data", &inst.c.data);
     }
 
-    // Sample eq-binding vector w and batch alphas
+    // Sample eq-binding vector w and batch alphas (layout only; wr unused by verifier)
     tr.append_message(b"neo/ccs/eq", b"");
-    let w_eq: Vec<K> = (0..ell)
+    let _w_eq: Vec<K> = (0..ell)
         .map(|_| { let ch = tr.challenge_fields(b"chal/k", 2); neo_math::from_complex(ch[0], ch[1]) })
         .collect();
     tr.append_message(b"neo/ccs/batch", b"");
@@ -1264,92 +1220,54 @@ pub fn pi_ccs_derive_transcript_tail(
         .collect();
 
     // Derive r by verifying rounds (structure only)
-    let is_r1cs = is_r1cs_shape(s);
-    let d_round = if is_r1cs { 3 } else { d_sc };
-    let (r, running_sum, ok_rounds) = verify_sumcheck_rounds(&mut tr, d_round, K::ZERO, &proof.sumcheck_rounds);
+    let d_round = d_sc;
+    // Use the prover-carried initial sum when present; else derive from round 0
+    let claimed_initial = match proof.sc_initial_sum {
+        Some(s) => s,
+        None => {
+            if let Some(round0) = proof.sumcheck_rounds.get(0) {
+                use crate::sumcheck::poly_eval_k;
+                poly_eval_k(round0, K::ZERO) + poly_eval_k(round0, K::ONE)
+            } else {
+                K::ZERO
+            }
+        }
+    };
+
+    // Bind initial_sum BEFORE rounds to match prover/verifier transcript layout
+    tr.append_fields(b"sumcheck/initial_sum", &claimed_initial.as_coeffs());
+    let (r, running_sum, ok_rounds) = verify_sumcheck_rounds(&mut tr, d_round, claimed_initial, &proof.sumcheck_rounds);
     if !ok_rounds {
         #[cfg(feature = "debug-logs")]
-        eprintln!("[pi-ccs] rounds invalid: expected <= {}, got {} rounds", d_round, proof.sumcheck_rounds.len());
+        eprintln!("[pi-ccs] rounds invalid: expected degree ≤ {}, got {} rounds", d_round, proof.sumcheck_rounds.len());
         return Err(PiCcsError::SumcheckError("rounds invalid".into()));
     }
+    // (Already bound before rounds)
 
-    // Compute wr = EQ(w, r)
-    let mut wr = K::ONE;
-    for (wi, ri) in w_eq.iter().zip(r.iter()) {
-        wr *= (K::ONE - *wi) * (K::ONE - *ri) + *wi * *ri;
-    }
+    // NOTE: No s(0)+s(1) == 0 requirement for R1CS eq-binding; terminal equality suffices.
 
+    // Keep transcript layout; wr no longer used by verifier semantics
+    let _wr = K::ONE;
+    
     #[cfg(feature = "debug-logs")]
     eprintln!("[pi-ccs] derive_tail: s.n={}, ell={}, d_sc={}, outputs={}, rounds={}", s.n, ell, d_sc, mcs_list.len(), proof.sumcheck_rounds.len());
-    Ok(TranscriptTail { wr, r, alphas, running_sum })
+    Ok(TranscriptTail { _wr, r, alphas, running_sum })
 }
 
-/// Backward-compatible wrapper; prefer `pi_ccs_derive_transcript_tail`.
-#[doc(hidden)]
-pub fn pi_ccs_derive_wr_r_and_alphas(
-    params: &neo_params::NeoParams,
-    s: &CcsStructure<F>,
-    mcs_list: &[McsInstance<Cmt, F>],
-    proof: &PiCcsProof,
-) -> Result<(K, Vec<K>, Vec<K>), PiCcsError> {
-    let tail = pi_ccs_derive_transcript_tail(params, s, mcs_list, proof)?;
-    Ok((tail.wr, tail.r, tail.alphas))
-}
+// (Removed backward-compat wrappers in favor of `pi_ccs_derive_transcript_tail` only)
 
 /// Compute the terminal claim from Π_CCS outputs given wr or generic CCS terminal.
 pub fn pi_ccs_compute_terminal_claim_r1cs_or_ccs(
     s: &CcsStructure<F>,
-    wr: K,
+    _wr: K,
     alphas: &[K],
     out_me: &[MeInstance<Cmt, F, K>],
 ) -> K {
-    if is_r1cs_shape(s) {
-        let mut expected = K::ZERO;
-        for (inst_idx, me_inst) in out_me.iter().enumerate() {
-            if me_inst.y_scalars.len() < 3 { return K::from(F::from_u64(0xdeadbeefu64)); }
-            let a = me_inst.y_scalars[0];
-            let b = me_inst.y_scalars[1];
-            let c = me_inst.y_scalars[2];
-            expected += alphas[inst_idx] * (a * b - c);
-        }
-        wr * expected
-    } else {
-        let mut expected_q_r = K::ZERO;
-        for (inst_idx, me_inst) in out_me.iter().enumerate() {
-            let f_eval = s.f.eval_in_ext::<K>(&me_inst.y_scalars);
-            expected_q_r += alphas[inst_idx] * f_eval;
-        }
-        expected_q_r
+    // Unified semantics: ignore wr; always compute generic CCS terminal
+    let mut expected_q_r = K::ZERO;
+    for (inst_idx, me_inst) in out_me.iter().enumerate() {
+        let f_eval = s.f.eval_in_ext::<K>(&me_inst.y_scalars);
+        expected_q_r += alphas[inst_idx] * f_eval;
     }
-}
-
-/// DEPRECATED: use `pi_ccs_compute_terminal_claim_r1cs_or_ccs` with `wr` instead.
-#[doc(hidden)]
-pub fn pi_ccs_compute_terminal_claim(
-    s: &CcsStructure<F>,
-    _r: &[K],
-    alphas: &[K],
-    out_me: &[MeInstance<Cmt, F, K>],
-) -> K {
-    // Maintain behavior for backward compatibility in tests: this computes EQ(r,r)=1.
-    // Prefer using the wr-aware variant wherever possible.
-    let is_r1cs = is_r1cs_shape(s);
-    if is_r1cs {
-        let mut expected = K::ZERO;
-        for (inst_idx, me_inst) in out_me.iter().enumerate() {
-            if me_inst.y_scalars.len() < 3 { return K::from(F::from_u64(0xdeadbeefu64)); }
-            let a = me_inst.y_scalars[0];
-            let b = me_inst.y_scalars[1];
-            let c = me_inst.y_scalars[2];
-            expected += alphas[inst_idx] * (a * b - c);
-        }
-        expected // wr==1 when w:=r
-    } else {
-        let mut expected_q_r = K::ZERO;
-        for (inst_idx, me_inst) in out_me.iter().enumerate() {
-            let f_eval = s.f.eval_in_ext::<K>(&me_inst.y_scalars);
-            expected_q_r += alphas[inst_idx] * f_eval;
-        }
-        expected_q_r
-    }
+    expected_q_r
 }

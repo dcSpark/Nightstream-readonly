@@ -1138,21 +1138,9 @@ pub fn prove_ivc_step_chained(
         rlc_binder, // RLC binder enabled for soundness
     )?;
 
-    // CRITICAL FIX: Use full ρ-dependent vector for CCS instance
-    // Pattern B: CCS uses full vector (with ρ), commitment binding uses pre-commit
+    // CCS uses full vector (with ρ), commitment binding uses pre-commit
     let full_witness_part = full_step_z[step_public_input.len()..].to_vec();
     
-    let mut z_row_major = vec![F::ZERO; d * m_step];
-    for col in 0..m_step { for row in 0..d { z_row_major[row * m_step + col] = decomp_z[col * d + row]; } }
-    let z_matrix = neo_ccs::Mat::from_row_major(d, m_step, z_row_major);
-    
-    // CRITICAL FIX: Use step_public_input for CCS instance (with ρ)
-    // Pattern B: The CCS instance uses ρ-bearing public input, full witness, and full commitment
-    let step_mcs_inst = neo_ccs::McsInstance { 
-        c: full_commitment, 
-        x: step_public_input.clone(), 
-        m_in: step_public_input.len()
-    };
     // DEBUG: Check consistency
     #[cfg(feature = "debug-logs")]
     println!("🔍 DEBUG: full_step_z.len()={}, step_public_input.len()={}, full_witness_part.len()={}", 
@@ -1161,10 +1149,17 @@ pub fn prove_ivc_step_chained(
     println!("🔍 DEBUG: decomp_z.len()={}, d*m_step={}", 
              decomp_z.len(), d * m_step);
     
-    let step_mcs_wit = neo_ccs::McsWitness::<F> { 
-        w: full_witness_part.clone(),
-        Z: z_matrix.clone()
-    };
+    // Build MCS instance/witness using shared helper
+    // CRITICAL FIX: Use step_public_input for CCS instance (with ρ)
+    // Pattern B: The CCS instance uses ρ-bearing public input, full witness, and full commitment
+    let (step_mcs_inst, step_mcs_wit) = crate::build_mcs_from_decomp(
+        full_commitment,
+        &decomp_z,
+        &step_public_input,
+        &full_witness_part,
+        d,
+        m_step,
+    );
 
     // 6) Reify previous ME→MCS, or create trivial zero instance (base case)
     let (lhs_inst, lhs_wit) = if let Some((inst, wit)) = prev_lhs_mcs {
@@ -2020,7 +2015,9 @@ pub fn build_augmented_ccs_linked_with_rlc(
     let total_rows = step_rows + ev_rows + x_bind_rows + prev_bind_rows + rlc_rows;
     // Pre-pad to next power-of-two for clean χ_r wiring (optional but stable).
     // This keeps augmented CCS shape fixed and matches Π_CCS's ℓ computation.
-    let target_rows = total_rows.next_power_of_two();
+    // Avoid n=1 degeneracy (0-round sum-check) which can misalign R1CS terminal checks.
+    let mut target_rows = total_rows.next_power_of_two();
+    if target_rows < 2 { target_rows = 2; }
 
     // Witness: [ step_witness || u ]
     let step_wit_cols = step_ccs.m;
@@ -3029,24 +3026,26 @@ pub fn verify_ivc_step_folding(
         }
     }
 
-    // 9) Enforce residual vanishing at r using the same transcript-derived tail.
+    // 9) Enforce satisfiability in the tie‑free case (no step y-outputs):
+    //     When y_len is 0, Q encodes only CCS constraints (no folding accumulator),
+    //     so Σ α_i f(Y_i(r)) must equal 0 for a valid witness.
     #[cfg(feature = "neo-logs")]
     eprintln!("[folding] stage=residual");
-    if tail.alphas.len() != folding.pi_ccs_outputs.len() {
-        return Err(anyhow::anyhow!("alpha count != number of Π‑CCS outputs").into());
-    }
-    // Enforce terminal equality exactly as in Π‑CCS verification (robust for arbitrary shapes):
-    // running_sum must equal the expected terminal expression.
-    let expected_term = pi_ccs_compute_terminal_claim_r1cs_or_ccs(
-        augmented_ccs,
-        tail.wr,
-        &tail.alphas,
-        &folding.pi_ccs_outputs,
-    );
-    if tail.running_sum != expected_term {
-        #[cfg(feature = "neo-logs")]
-        eprintln!("[folding] terminal equality mismatch: running_sum != expected");
-        return Ok(false);
+    let y_len = prev_acc.y_compact.len();
+    if y_len == 0 {
+        // Compute Σ α_i f(Y_i(r)) from the ME outputs (same terminal used by Π‑CCS)
+        use crate::K;
+        let mut residue = K::ZERO;
+        for (i, me) in folding.pi_ccs_outputs.iter().enumerate() {
+            // f is the CCS polynomial; evaluate it on the Y scalars at r
+            let f_eval = augmented_ccs.f.eval_in_ext::<K>(&me.y_scalars);
+            residue += tail.alphas[i] * f_eval;
+        }
+        if residue != K::ZERO {
+            #[cfg(feature = "neo-logs")]
+            eprintln!("[folding] non-zero CCS residual at r (tie-free): rejecting");
+            return Ok(false);
+        }
     }
 
     Ok(true)

@@ -227,6 +227,69 @@ pub fn claim_z_eq(params: &NeoParams, m: usize, idx: usize, value: F) -> OutputC
     }
 }
 
+/// Build MCS instance and witness from decomposed data
+/// 
+/// This is a shared helper used by both single-step proving and IVC to construct
+/// MCS (Matrix Constraint System) instances from decomposed witness data.
+/// 
+/// # Arguments
+/// * `commitment` - Ajtai commitment to the decomposed witness
+/// * `decomp_z` - Column-major decomposed witness vector (length d*m) in base field F, LSB-first per column
+/// * `public_input` - Public input vector x
+/// * `witness_part` - Private witness vector w (z = x || w)
+/// * `d` - Decomposition dimension (number of digits)
+/// * `m` - Number of CCS variables
+/// 
+/// # Security Notes
+/// - Commitment consistency (c = L(Z)) is verified in `neo_ccs::check_mcs_opening()` during folding
+/// - Digit bounds are enforced by `neo_ajtai::assert_range_b()` in the Pi_CCS protocol
+/// - This helper assumes inputs are already validated by upstream decomposition
+pub fn build_mcs_from_decomp(
+    commitment: neo_ajtai::Commitment,
+    decomp_z: &[F],
+    public_input: &[F],
+    witness_part: &[F],
+    d: usize,
+    m: usize,
+) -> (neo_ccs::McsInstance<neo_ajtai::Commitment, F>, neo_ccs::McsWitness<F>) {
+    // Dimension sanity checks (always enabled for safety)
+    let m_in = public_input.len();
+    assert_eq!(
+        m_in + witness_part.len(), m,
+        "MCS dimension mismatch: m_in + witness_len = {} + {} = {}, but m = {}",
+        m_in, witness_part.len(), m_in + witness_part.len(), m
+    );
+    assert_eq!(
+        decomp_z.len(), d * m,
+        "Decomp dimension mismatch: decomp_z.len = {}, but d*m = {}*{} = {}",
+        decomp_z.len(), d, m, d * m
+    );
+    
+    // Convert column-major decomp to row-major matrix
+    // decomp_z is stored as: [col0_digit0, col0_digit1, ..., col1_digit0, col1_digit1, ...]
+    // Z matrix should be: Z[row, col] = decomp_z[col * d + row]
+    // LSB-first convention: row 0 = b^0, row 1 = b^1, ...
+    let mut z_row_major = vec![F::ZERO; d * m];
+    for col in 0..m { 
+        for row in 0..d { 
+            z_row_major[row * m + col] = decomp_z[col * d + row]; 
+        } 
+    }
+    let z_matrix = neo_ccs::Mat::from_row_major(d, m, z_row_major);
+
+    let mcs_inst = neo_ccs::McsInstance { 
+        c: commitment, 
+        x: public_input.to_vec(), 
+        m_in: public_input.len()
+    };
+    let mcs_wit = neo_ccs::McsWitness::<F> { 
+        w: witness_part.to_vec(),
+        Z: z_matrix 
+    };
+    
+    (mcs_inst, mcs_wit)
+}
+
 /// Lean proof object without VK - FIXES THE 51MB ISSUE!
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Proof {
@@ -406,24 +469,15 @@ pub fn prove(input: ProveInput) -> Result<Proof> {
     debug!("Ajtai setup completed: {:.2}ms (commit: {:.2}ms)", 
             ajtai_time.as_secs_f64() * 1000.0, commit_time.as_secs_f64() * 1000.0);
     
-    // Step 3: Build MCS instance/witness (row-major conversion)
-    let mut z_row_major = vec![F::ZERO; d * m];
-    for col in 0..m { 
-        for row in 0..d { 
-            z_row_major[row*m + col] = decomp_z[col*d + row]; 
-        } 
-    }
-    let z_matrix = neo_ccs::Mat::from_row_major(d, m, z_row_major);
-
-    let mcs_inst = neo_ccs::McsInstance { 
-        c: commitment, 
-        x: input.public_input.to_vec(), 
-        m_in: input.public_input.len()  // 🔧 FIX: Use actual public input count, not hardcoded 0
-    };
-    let mcs_wit = neo_ccs::McsWitness::<F> { 
-        w: input.witness.to_vec(),  // Only witness part (public inputs are in McsInstance.x)
-        Z: z_matrix 
-    };
+    // Step 3: Build MCS instance/witness using shared helper
+    let (mcs_inst, mcs_wit) = build_mcs_from_decomp(
+        commitment,
+        &decomp_z,
+        input.public_input,
+        input.witness,
+        d,
+        m,
+    );
 
     // Duplicate the instance to satisfy k+1 ≥ 2 requirement for folding
     let mcs_instances = std::iter::repeat(mcs_inst).take(2).collect::<Vec<_>>();

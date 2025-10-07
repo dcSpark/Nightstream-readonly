@@ -37,7 +37,7 @@ pub use pi_ccs::{pi_ccs_prove, pi_ccs_verify, PiCcsProof, eval_tie_constraints, 
 pub use pi_rlc::{pi_rlc_prove, pi_rlc_verify, PiRlcProof};
 pub use pi_dec::{pi_dec, pi_dec_verify, PiDecProof};
 #[allow(deprecated)]
-pub use bridge_adapter::{compress_via_bridge, verify_via_bridge, verify_via_bridge_with_io, modern_to_legacy_instance, modern_to_legacy_witness};
+pub use bridge_adapter::{compress_via_bridge, verify_via_bridge, modern_to_legacy_instance, modern_to_legacy_witness};
 
 use neo_ccs::{MeInstance, MeWitness, CcsStructure};
 use neo_math::{F, K, Rq, cf_inv};
@@ -142,12 +142,33 @@ pub fn fold_ccs_instances(
     let (me_list, pi_ccs_proof) =
         pi_ccs::pi_ccs_prove(&mut tr, params, structure, instances, witnesses, &l)?;
 
-    #[cfg(debug_assertions)]
-    {
-            let mut tr_check = Poseidon2Transcript::new(b"neo/fold");
-        match pi_ccs::pi_ccs_verify(&mut tr_check, params, structure, instances, &me_list, &pi_ccs_proof) {
-            Ok(_ok) => { #[cfg(feature = "debug-logs")] eprintln!("[DEBUG] Prover self-check Pi-CCS verify: {}", _ok) },
-            Err(_e) => { #[cfg(feature = "debug-logs")] eprintln!("[DEBUG] Prover self-check Pi-CCS verify error: {}", _e) },
+    // Prover-side hardening: optional self-check of Π-CCS and fail-fast toggle.
+    // Always compute the self-check result; fail fast if NEO_PROVER_FAIL_FAST is set.
+    let self_check_result = {
+        let mut tr_check = Poseidon2Transcript::new(b"neo/fold");
+        pi_ccs::pi_ccs_verify(&mut tr_check, params, structure, instances, &me_list, &pi_ccs_proof)
+    };
+    match &self_check_result {
+        Ok(_ok) => {
+            #[cfg(feature = "debug-logs")]
+            eprintln!("[DEBUG] Prover self-check Pi-CCS verify: {}", _ok);
+        }
+        Err(_e) => {
+            #[cfg(feature = "debug-logs")]
+            eprintln!("[DEBUG] Prover self-check Pi-CCS verify error: {}", _e);
+        }
+    }
+    if std::env::var("NEO_PROVER_FAIL_FAST").map(|v| v == "1" || v.eq_ignore_ascii_case("true")).unwrap_or(false) {
+        match self_check_result {
+            Ok(true) => { /* proceed */ }
+            Ok(false) => {
+                return Err(FoldingError::PiCcs(crate::error::PiCcsError::InvalidInput(
+                    "Prover self-check Pi-CCS verify returned false".to_string()
+                )));
+            }
+            Err(e) => {
+                return Err(FoldingError::PiCcs(e));
+            }
         }
     }
 
@@ -289,14 +310,21 @@ pub fn verify_spartan_last_mile(
     if spartan_bundle.public_io_bytes.len() != expected_public_io.len()
         || spartan_bundle.public_io_bytes != expected_public_io
     {
-        return Ok(false);
+        return Err(FoldingError::InvalidInput(
+            "Spartan bundle public IO mismatch (anti-replay)".to_string(),
+        ));
     }
 
     // Verify the Spartan proof
     match neo_spartan_bridge::verify_me_spartan(spartan_bundle) {
         Ok(true) => Ok(true),
-        Ok(false) => Ok(false),
-        Err(_e) => Ok(false),
+        Ok(false) => Err(FoldingError::InvalidInput(
+            "Spartan verification failed".to_string(),
+        )),
+        Err(e) => Err(FoldingError::InvalidInput(format!(
+            "Spartan verifier error: {}",
+            e
+        ))),
     }
 }
 
@@ -311,7 +339,11 @@ pub fn verify_folding_proof_with_spartan(
     spartan_bundle: &neo_spartan_bridge::ProofBundle,
 ) -> Result<bool, FoldingError> {
     let ok_fold = verify_folding_proof(params, structure, input_instances, output_instances, proof)?;
-    if !ok_fold { return Ok(false); }
+    if !ok_fold {
+        return Err(FoldingError::InvalidInput(
+            "Folding verification returned false".to_string(),
+        ));
+    }
     verify_spartan_last_mile(params, output_instances, spartan_bundle)
 }
 
