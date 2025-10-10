@@ -294,3 +294,150 @@ fn test_large_ccs_ell_4() {
     // With ℓ=4 (9-row CCS → padded to 16 → ℓ=4), valid witness should pass
     assert!(ok, "Valid witness should pass verification for ℓ=4 CCS");
 }
+
+/// Sanity: with non-empty c_coords (step 2 of chain), a *valid* witness must still pass.
+/// This forces the non-base-case path in sum-check verification.
+#[test]
+fn test_valid_witness_passes_with_non_empty_coords() {
+    let (ccs, witness, binding, extractor) = simple_ccs_and_witness_valid();
+    let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
+
+    // Step 0: Start from base case (empty c_coords)
+    let acc0 = Accumulator {
+        c_z_digest: [0u8; 32],
+        c_coords: vec![],
+        y_compact: vec![],
+        step: 0,
+    };
+
+    let step0_res = prove_ivc_step_with_extractor(
+        &params, &ccs, &witness, &acc0, 0, None, &extractor, &binding,
+    ).expect("step 0 should succeed");
+
+    // Step 1: Now c_coords is non-empty (non-base case)
+    // This is the real test of the non-base-case path
+    let acc1 = &step0_res.proof.next_accumulator;
+    
+    let step1_res = prove_ivc_step_with_extractor(
+        &params, &ccs, &witness, acc1, 1, None, &extractor, &binding,
+    ).expect("prove should succeed for valid witness (non-base case)");
+
+    // Verify must accept
+    let ok = verify_ivc_step(&ccs, &step1_res.proof, acc1, &binding, &params, None)
+        .expect("verify should not error");
+    assert!(ok, "Valid witness should verify even when c_coords is non-empty (step 2 of chain)");
+}
+
+/// CRITICAL TEST: with non-empty c_coords (step 2 of chain), an *invalid* witness
+/// must be rejected. If it passes, the verifier is likely checking the fully-bound
+/// Q(r1,r2) instead of the j-round partial sum T^{(j)}(r1).
+#[test]
+fn test_invalid_witness_is_caught_with_non_empty_coords() {
+    let (ccs, witness_valid, binding, extractor) = simple_ccs_and_witness_valid();
+    let (_, witness_bad, _, _) = simple_ccs_and_witness_invalid();
+    let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
+
+    // Step 0: Start with valid witness to establish c_coords
+    let acc0 = Accumulator {
+        c_z_digest: [0u8; 32],
+        c_coords: vec![],
+        y_compact: vec![],
+        step: 0,
+    };
+
+    let step0_res = prove_ivc_step_with_extractor(
+        &params, &ccs, &witness_valid, &acc0, 0, None, &extractor, &binding,
+    ).expect("step 0 should succeed");
+
+    // Step 1: Now c_coords is non-empty, try to prove with INVALID witness
+    let acc1 = &step0_res.proof.next_accumulator;
+    
+    // Prover (by design) does not enforce rowwise CCS; it will still produce a proof.
+    let step_res = prove_ivc_step_with_extractor(
+        &params, &ccs, &witness_bad, acc1, 1, None, &extractor, &binding,
+    ).expect("prove succeeds; soundness checked by verifier");
+
+    // A correct verifier should REJECT here because the witness is invalid.
+    // If this returns true on your current branch, you've reproduced the bug.
+    let ok = verify_ivc_step(&ccs, &step_res.proof, acc1, &binding, &params, None)
+        .expect("verify should not error");
+
+    assert!(
+        !ok,
+        "Invalid witness MUST be rejected when c_coords is non-empty (step 2 of chain). \
+         If this assertion fails (i.e., ok==true), it reproduces the bug: the verifier \
+         is likely checking Q(r1,r2) instead of the partial-sum identity T^{{(1)}}(r1)."
+    );
+}
+
+/// Optional: a larger-ℓ variant (ℓ=4) to exercise the mid-round check.
+/// Keeps the witness valid so it should pass. Uses 2-step chain.
+#[test]
+fn test_mid_round_check_large_ccs_valid_with_non_empty_coords() {
+    let (ccs, witness, binding, extractor) = large_ccs_and_witness_valid(); // ℓ = 4 (9 rows padded to 16)
+    let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
+
+    // Step 0: Base case
+    let acc0 = Accumulator {
+        c_z_digest: [0u8; 32],
+        c_coords: vec![],
+        y_compact: vec![],
+        step: 0,
+    };
+
+    let step0_res = prove_ivc_step_with_extractor(
+        &params, &ccs, &witness, &acc0, 0, None, &extractor, &binding,
+    ).expect("step 0 should succeed");
+
+    // Step 1: Non-base case (c_coords populated from step 0)
+    let acc1 = &step0_res.proof.next_accumulator;
+    
+    let step1_res = prove_ivc_step_with_extractor(
+        &params, &ccs, &witness, acc1, 1, None, &extractor, &binding,
+    ).expect("prove should succeed for valid witness (non-base case)");
+
+    let ok = verify_ivc_step(&ccs, &step1_res.proof, acc1, &binding, &params, None)
+        .expect("verify should not error");
+
+    assert!(ok, "Valid witness should pass at non-base case (ℓ=4).");
+}
+
+/// Stress test: invalid witness at non-base case (ℓ=4) must be rejected.
+#[test]
+fn test_mid_round_check_large_ccs_invalid_with_non_empty_coords() {
+    // Build an invalid witness for the 9-row CCS
+    // Using the same structure but with z0=1, z1=1, z2=5 (invalid for boolean constraints)
+    let (ccs, witness_valid, binding, extractor) = large_ccs_and_witness_valid();
+    let witness_bad = vec![F::ONE, F::ONE, F::ONE, F::from_u64(5)]; // z2=5 is invalid
+    let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
+
+    // Step 0: Base case with valid witness
+    let acc0 = Accumulator {
+        c_z_digest: [0u8; 32],
+        c_coords: vec![],
+        y_compact: vec![],
+        step: 0,
+    };
+
+    let step0_res = prove_ivc_step_with_extractor(
+        &params, &ccs, &witness_valid, &acc0, 0, None, &extractor, &binding,
+    ).expect("step 0 should succeed");
+
+    // Step 1: Non-base case with INVALID witness
+    let acc1 = &step0_res.proof.next_accumulator;
+    
+    // Prover will generate proof (doesn't enforce CCS)
+    let step_res = prove_ivc_step_with_extractor(
+        &params, &ccs, &witness_bad, acc1, 1, None, &extractor, &binding,
+    ).expect("prove succeeds; soundness checked by verifier");
+
+    // Verifier must reject
+    let ok = verify_ivc_step(&ccs, &step_res.proof, acc1, &binding, &params, None)
+        .expect("verify should not error");
+
+    assert!(
+        !ok,
+        "Invalid witness MUST be rejected at non-base case (ℓ=4). \
+         If this assertion fails, the verifier has a bug in partial-sum checking."
+    );
+}

@@ -38,7 +38,7 @@ pub use crate::pi_ccs_embed::{PiCcsEmbed, CcsCsr};
 use anyhow::Result;
 use neo_ccs::{MEInstance, MEWitness};
 use p3_field::{PrimeField64, PrimeCharacteristicRing};
-use neo_ccs::crypto::poseidon2_goldilocks as p2; // unified Poseidon2 (w=12, r=8, cap=4)
+use neo_ccs::crypto::poseidon2_goldilocks as p2; // unified Poseidon2 (w=16, r=8, cap=8)
 use spartan2::spartan::{R1CSSNARK, SpartanVerifierKey};
 // Arc not needed for this file - it's used in me_to_r1cs
 use spartan2::traits::snark::R1CSSNARKTrait;

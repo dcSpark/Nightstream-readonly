@@ -1,6 +1,6 @@
 //! Poseidon2 unification & domain separation tests
-//! This locks in w=12, cap=4 and the exact domain string used by create_step_digest.
-//! If someone accidentally switches back to w=16 or tweaks the domain string, this will fail.
+//! This locks in w=16, cap=8 and the exact domain string used by create_step_digest.
+//! Parameters are defined in neo-params as single source of truth.
 
 use neo::F;
 use neo::ivc::create_step_digest;

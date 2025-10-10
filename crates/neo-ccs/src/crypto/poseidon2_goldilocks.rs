@@ -6,7 +6,7 @@
 //!
 //! ## Usage
 //! 
-//! ```ignore
+//! ```rust
 //! use neo_ccs::crypto::poseidon2_goldilocks as p2;
 //! 
 //! // Hash field elements

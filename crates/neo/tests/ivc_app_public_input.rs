@@ -3,6 +3,7 @@
 
 use neo::{F, NeoParams};
 use neo::ivc::{Accumulator, IvcStepInput, StepBindingSpec, prove_ivc_step, verify_ivc_step};
+use neo_ccs::crypto::poseidon2_goldilocks;
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
@@ -47,7 +48,7 @@ fn app_public_inputs_accepted_now() {
     bytes.extend_from_slice(&prev_acc.c_z_digest);
     bytes.extend_from_slice(&(prev_acc.y_compact.len() as u64).to_le_bytes());
     for &y in &prev_acc.y_compact { bytes.extend_from_slice(&y.as_canonical_u64().to_le_bytes()); }
-    let d = neo_ccs::crypto::poseidon2_goldilocks::poseidon2_hash_packed_bytes(&bytes);
+    let d = poseidon2_goldilocks::poseidon2_hash_packed_bytes(&bytes);
     let digest_prefix: Vec<F> = d.iter().map(|x| F::from_u64(x.as_canonical_u64())).collect();
 
     let x = &ok.proof.step_public_input;

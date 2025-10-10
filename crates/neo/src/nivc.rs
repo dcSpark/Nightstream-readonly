@@ -33,7 +33,7 @@ use crate::ivc::{
     prove_ivc_step_chained,
 };
 
-/// Poseidon2 (same configuration used across the repo)
+/// Poseidon2 (implementation in neo-ccs, params from neo-params)
 use neo_ccs::crypto::poseidon2_goldilocks as p2;
 
 /// One step specification in an NIVC program

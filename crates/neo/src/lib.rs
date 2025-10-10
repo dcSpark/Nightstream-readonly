@@ -56,8 +56,8 @@ where FN: FnMut() -> anyhow::Result<()> {
 }
 
 // ZK-friendly Poseidon2-based context digest with proper domain separation.
-// Parameters: width=12, capacity=4, rate=8.
-// SECURITY NOTE: collision security ≈ 2^(capacity_bits/2) = 2^(256/2) = 2^128.
+// Parameters: width=16, capacity=8, rate=8 (from neo-params).
+// SECURITY NOTE: collision security ≈ 2^(capacity_bits/2) = 2^(512/2) = 2^256.
 // This is ample for binding a proving context (do not reuse as a general object hash).
 pub(crate) fn context_digest_v1(ccs: &CcsStructure<F>, public_input: &[F]) -> [u8; 32] {
     use neo_ccs::crypto::poseidon2_goldilocks as p2;
