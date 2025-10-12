@@ -4,7 +4,7 @@
 //! if the augmented CCS properly enforces step CCS constraints.
 
 use neo::{F, NeoParams};
-use neo::ivc::{Accumulator, StepBindingSpec, prove_ivc_step_with_extractor, verify_ivc_step, LastNExtractor};
+use neo::{Accumulator, StepBindingSpec, prove_ivc_step_with_extractor, verify_ivc_step, LastNExtractor};
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs, check_ccs_rowwise_zero};
 use p3_field::{PrimeCharacteristicRing};
 

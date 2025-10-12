@@ -11,7 +11,8 @@
 //! Each test should FAIL, confirming the vulnerability exists, before we fix the implementation.
 
 use anyhow::Result;
-use neo::{NeoParams, F, ivc::{
+use neo::{
+    NeoParams, F,
     prove_ivc_step_with_extractor,
     Accumulator,
     StepBindingSpec,
@@ -20,7 +21,7 @@ use neo::{NeoParams, F, ivc::{
     build_step_transcript_data,
     create_step_digest,
     rho_from_transcript,
-}};
+};
 use neo::{NivcProgram, NivcStepSpec, NivcFinalizeOptions};
 use neo_ccs::{r1cs_to_ccs, Mat, CcsStructure};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};

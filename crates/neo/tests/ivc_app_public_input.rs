@@ -2,7 +2,7 @@
 //! then will pass once we support x = [H(prev_acc) || app_inputs].
 
 use neo::{F, NeoParams};
-use neo::ivc::{Accumulator, IvcStepInput, StepBindingSpec, prove_ivc_step, verify_ivc_step};
+use neo::{Accumulator, IvcStepInput, StepBindingSpec, prove_ivc_step, verify_ivc_step};
 use neo_ccs::crypto::poseidon2_goldilocks;
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};

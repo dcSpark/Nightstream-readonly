@@ -15,13 +15,13 @@
 
 use anyhow::Result;
 use std::time::Instant;
-use neo::{NeoParams, F, ivc::{prove_ivc_step_with_extractor, Accumulator, StepBindingSpec, LastNExtractor}};
+use neo::{NeoParams, F, prove_ivc_step_with_extractor, Accumulator, StepBindingSpec, LastNExtractor};
 use neo::{NivcProgram, NivcStepSpec, NivcFinalizeOptions};
 
 // Helper function to replace the removed prove_ivc_final_snark
 fn prove_ivc_final_snark_compat(
     params: &NeoParams,
-    ivc_proofs: &[neo::ivc::IvcProof],
+    ivc_proofs: &[neo::IvcProof],
     _final_public_input: &[F], // Ignored; NIVC finalize reconstructs format
 ) -> anyhow::Result<(neo::Proof, neo_ccs::CcsStructure<F>, Vec<F>)> {
     if ivc_proofs.is_empty() {
@@ -185,7 +185,7 @@ fn run_ivc_chain(num_steps: usize) -> Result<IvcChainMetrics> {
         &vec![F::ZERO] // Initial y for single step
     };
     let y_next = &accumulator.y_compact;
-    let final_public_input = neo::ivc::build_final_snark_public_input(step_x, rho, y_prev, y_next);
+    let final_public_input = neo::build_final_snark_public_input(step_x, rho, y_prev, y_next);
     
     let (final_proof, final_augmented_ccs_actual, final_public_input_actual) = prove_ivc_final_snark_compat(&params, &ivc_proofs, &final_public_input)
         .map_err(|e| anyhow::anyhow!("Final SNARK failed: {}", e))?;
@@ -301,7 +301,7 @@ fn test_negative_mutate_early_step_witness() -> Result<()> {
         &vec![F::ZERO] // Initial y for single step
     };
     let y_next = &accumulator.y_compact;
-    let final_public_input = neo::ivc::build_final_snark_public_input(step_x, rho, y_prev, y_next);
+    let final_public_input = neo::build_final_snark_public_input(step_x, rho, y_prev, y_next);
     
     match prove_ivc_final_snark_compat(&params, &ivc_proofs, &final_public_input)
         .map_err(|e| anyhow::anyhow!("Final SNARK failed: {}", e)) {

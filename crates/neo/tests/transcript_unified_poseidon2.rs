@@ -3,7 +3,7 @@
 //! Parameters are defined in neo-params as single source of truth.
 
 use neo::F;
-use neo::ivc::create_step_digest;
+use neo::create_step_digest;
 use neo_ccs::crypto::poseidon2_goldilocks as p2;
 use p3_field::PrimeCharacteristicRing;
 

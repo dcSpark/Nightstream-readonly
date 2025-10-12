@@ -5,7 +5,7 @@
 //! for the next folding step, the dimensions don't match the step circuit.
 
 use neo::{NeoParams, F};
-use neo::ivc::{Accumulator, StepBindingSpec, IvcStepInput, prove_ivc_step_chained, compute_accumulator_digest_fields};
+use neo::{Accumulator, StepBindingSpec, IvcStepInput, prove_ivc_step_chained, compute_accumulator_digest_fields};
 use neo_ccs::{r1cs_to_ccs, Mat};
 use p3_field::PrimeCharacteristicRing;
 

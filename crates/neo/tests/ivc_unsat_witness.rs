@@ -5,7 +5,7 @@
 //! via the initial_sum == 0 check at the base case.
 
 use neo::{F, NeoParams};
-use neo::ivc::{
+use neo::{
     Accumulator, LastNExtractor, StepBindingSpec,
     prove_ivc_step_with_extractor, verify_ivc_step,
 };
@@ -228,7 +228,7 @@ fn ivc_cross_link_vulnerability_pi_ccs_rhs_vs_parent_me() {
         }
         
         // Construct the malicious IvcProof with tampered pi_ccs_outputs
-        neo::ivc::IvcProof {
+        neo::IvcProof {
             step_proof: valid_proof_res.proof.step_proof.clone(),
             next_accumulator: valid_proof_res.proof.next_accumulator.clone(),
             step: valid_proof_res.proof.step,

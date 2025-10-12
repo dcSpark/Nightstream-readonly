@@ -32,7 +32,7 @@ fn main() -> anyhow::Result<()> {
     let ccs_b = trivial_step_ccs_rows(y_len, 2);
 
     // Binding: y_step lives at witness indices [1..=y_len]; const1 at 0
-    let binding = neo::ivc::StepBindingSpec {
+    let binding = neo::StepBindingSpec {
         y_step_offsets: (1..=y_len).collect(),
         step_program_input_witness_indices: vec![],
         y_prev_witness_indices: vec![],

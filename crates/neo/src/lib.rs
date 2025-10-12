@@ -144,30 +144,47 @@ pub use neo_params::NeoParams;
 pub use neo_ccs::CcsStructure;
 pub use neo_math::{F, K};
 
-/// IVC (Incrementally Verifiable Computation) with embedded verifier
-pub mod ivc;
+// Shared types and utilities used by both IVC and NIVC
+mod shared;
+
+// IVC (Incrementally Verifiable Computation) - CRATE PRIVATE, composed by NIVC
+pub(crate) mod ivc;
+
 /// NIVC driver (HyperNova-style non-uniform IVC)
 pub mod nivc;
 
-// Re-export high-level IVC API for production use
-pub use ivc::{
-    // Core IVC types
-    Accumulator, IvcProof, IvcStepInput, IvcChainProof, IvcStepResult, IvcChainStepInput,
-    // High-level proving/verifying functions  
-    prove_ivc_step, prove_ivc_step_with_extractor, verify_ivc_step, prove_ivc_chain, verify_ivc_chain,
-    // Folding verification functions
-    verify_ivc_step_folding,
-    // Step output extractors (fixes "folding with itself" issue)
-    StepOutputExtractor, LastNExtractor, IndexExtractor,
-    // Advanced commitment binding (production-ready)
-    Commitment, BindingMetadata,
-    // Nova embedded verifier and augmentation (production-ready)  
-    augmentation_ccs, AugmentConfig,
-    // PRODUCTION OPTION A: Public ρ EV (recommended)
-    ev_with_public_rho_ccs, build_ev_with_public_rho_witness,
-    // Base case helpers for testing
-    zero_mcs_instance_for_shape,
+// Re-export high-level IVC API for production use (from legacy for now)
+// Core IVC types (from shared module)
+pub use shared::types::{
+    Accumulator, IvcProof, IvcStepInput, IvcChainProof, IvcStepResult, IvcChainStepInput, 
+    StepBindingSpec, Commitment, BindingMetadata, AugmentConfig,
 };
+pub use shared::binding::{StepOutputExtractor, LastNExtractor, IndexExtractor};
+
+// High-level IVC API (from ivc pipeline and internal modules)
+pub use ivc::pipeline::prover::{
+    prove_ivc_step, prove_ivc_step_with_extractor, prove_ivc_step_chained, prove_ivc_chain,
+};
+pub use ivc::pipeline::verifier::{verify_ivc_step, verify_ivc_chain};
+pub use ivc::pipeline::folding::verify_ivc_step_folding;
+pub use ivc::internal::augmented::{
+    augmentation_ccs, build_augmented_ccs_linked, build_augmented_ccs_linked_with_rlc, 
+    build_final_snark_public_input, build_augmented_public_input_for_step,
+    build_linked_augmented_witness,
+};
+pub use ivc::internal::ev::{
+    ev_with_public_rho_ccs, build_ev_with_public_rho_witness, rlc_accumulate_y,
+    ev_full_ccs_public_rho, build_ev_full_witness, ev_light_ccs, build_ev_witness,
+};
+pub use ivc::internal::transcript::{build_step_transcript_data, create_step_digest, rho_from_transcript};
+pub use shared::digest::compute_accumulator_digest_fields;
+
+// Base case helper (from new modular structure)
+pub use ivc::zero_mcs_instance_for_shape;
+
+// TIE check helper for testing
+#[cfg(feature = "testing")]
+pub use ivc::internal::tie::tie_check_with_r_public;
 
 // Re-export core NIVC types and helpers
 pub use nivc::{

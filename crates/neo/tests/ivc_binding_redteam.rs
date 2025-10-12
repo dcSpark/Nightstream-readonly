@@ -1,7 +1,7 @@
 //! Red-team tests for IVC step_x binding: x must equal H(prev_accumulator)
 
 use neo::{F, NeoParams};
-use neo::ivc::{Accumulator, IvcStepInput, StepBindingSpec, prove_ivc_step, verify_ivc_step};
+use neo::{Accumulator, IvcStepInput, StepBindingSpec, prove_ivc_step, verify_ivc_step};
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 

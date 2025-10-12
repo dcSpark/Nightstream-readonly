@@ -10,7 +10,7 @@
 /// but the terminal check doesn't verify them properly.
 
 use neo::{F, NeoParams, Accumulator};
-use neo::ivc::{prove_ivc_step_with_extractor, build_augmented_ccs_linked_with_rlc, StepBindingSpec, LastNExtractor};
+use neo::{prove_ivc_step_with_extractor, build_augmented_ccs_linked_with_rlc, StepBindingSpec, LastNExtractor};
 use neo_ccs::{CcsStructure, relations::check_ccs_rowwise_zero, Mat, SparsePoly, Term};
 use p3_field::PrimeCharacteristicRing;
 

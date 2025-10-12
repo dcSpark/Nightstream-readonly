@@ -2,7 +2,7 @@
 //! relying on external row-wise CCS checks.
 
 use neo::{F, NeoParams};
-use neo::ivc::{
+use neo::{
     Accumulator, LastNExtractor, StepBindingSpec,
     prove_ivc_step_with_extractor, verify_ivc_step,
 };
@@ -40,7 +40,7 @@ fn make_binding_spec() -> StepBindingSpec {
     }
 }
 
-fn make_valid_ivc_step() -> (neo::ivc::IvcStepResult, neo_ccs::CcsStructure<F>, NeoParams, Accumulator, StepBindingSpec) {
+fn make_valid_ivc_step() -> (neo::IvcStepResult, neo_ccs::CcsStructure<F>, NeoParams, Accumulator, StepBindingSpec) {
     // Deterministic PP (optional): uncomment if you need fully reproducible runs
     // std::env::set_var("NEO_DETERMINISTIC", "1");
 

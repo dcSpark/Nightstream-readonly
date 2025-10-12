@@ -8,7 +8,7 @@
 ///! We need at least 3 rows to get ℓ >= 2 after power-of-2 padding.
 
 use neo::{F, NeoParams, Accumulator};
-use neo::ivc::{prove_ivc_step_with_extractor, verify_ivc_step, StepBindingSpec, LastNExtractor};
+use neo::{prove_ivc_step_with_extractor, verify_ivc_step, StepBindingSpec, LastNExtractor};
 use neo_ccs::{CcsStructure, relations::check_ccs_rowwise_zero, Mat, SparsePoly, Term};
 use p3_field::PrimeCharacteristicRing;
 

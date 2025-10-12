@@ -8,8 +8,8 @@
 //!    - Verification ACCEPTS the forged coordinates which should be rejected.
 
 use anyhow::Result;
-use neo::{F, ivc, NeoParams};
-use neo::ivc::StepOutputExtractor;
+use neo::{F, NeoParams, StepOutputExtractor, LastNExtractor};
+use neo::{Accumulator, StepBindingSpec, IvcStepInput, prove_ivc_step, verify_ivc_step};
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
@@ -54,7 +54,7 @@ fn test_ivc_proof_with_forged_coords() -> Result<()> {
     // Setup
     let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
     let step_ccs = build_incrementer_step_ccs();
-    let binding_spec = ivc::StepBindingSpec {
+    let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],   // next_x at witness[3]
         step_program_input_witness_indices: vec![2],// bind delta
         y_prev_witness_indices: vec![],
@@ -62,7 +62,7 @@ fn test_ivc_proof_with_forged_coords() -> Result<()> {
     };
     
     // Initial accumulator
-    let initial_acc = ivc::Accumulator { 
+    let initial_acc = Accumulator { 
         c_z_digest: [0;32], 
         c_coords: vec![], 
         y_compact: vec![F::ZERO], 
@@ -82,10 +82,10 @@ fn test_ivc_proof_with_forged_coords() -> Result<()> {
     println!("🔍 Generating valid IVC proof...");
     
     // Extract y_step manually like working tests do
-    let extractor = ivc::LastNExtractor { n: 1 };
+    let extractor = LastNExtractor { n: 1 };
     let y_step = extractor.extract_y_step(&step_witness);
     
-    let step_input = ivc::IvcStepInput {
+    let step_input = IvcStepInput {
         params: &params,
         step_ccs: &step_ccs,
         step_witness: &step_witness,
@@ -98,12 +98,12 @@ fn test_ivc_proof_with_forged_coords() -> Result<()> {
         prev_augmented_x: None,
     };
     
-    let step_result = ivc::prove_ivc_step(step_input).expect("Failed to prove IVC step");
+    let step_result = prove_ivc_step(step_input).expect("Failed to prove IVC step");
     let mut valid_proof = step_result.proof;
     
     // --- Positive control: the unmodified proof must verify
     println!("🔍 Verifying original (unmodified) IVC proof as positive control...");
-    let ok_original = match ivc::verify_ivc_step(&step_ccs, &valid_proof, &initial_acc, &binding_spec, &params, None) {
+    let ok_original = match verify_ivc_step(&step_ccs, &valid_proof, &initial_acc, &binding_spec, &params, None) {
         Ok(result) => {
             println!("   Verification returned: {}", result);
             result
@@ -150,7 +150,7 @@ fn test_ivc_proof_with_forged_coords() -> Result<()> {
     valid_proof.c_step_coords = forged_coords;
 
     // Test verification with forged coordinates
-    let forged_result = match ivc::verify_ivc_step(&step_ccs, &valid_proof, &initial_acc, &binding_spec, &params, None) {
+    let forged_result = match verify_ivc_step(&step_ccs, &valid_proof, &initial_acc, &binding_spec, &params, None) {
         Ok(result) => result,
         Err(e) => {
             println!("⚠️  Forged proof verification failed with error: {}", e);
@@ -187,14 +187,14 @@ fn test_multiple_forged_coords() -> Result<()> {
     // Setup (same as above)
     let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
     let step_ccs = build_incrementer_step_ccs();
-    let binding_spec = ivc::StepBindingSpec {
+    let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![2],
         y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     
-    let initial_acc = ivc::Accumulator { 
+    let initial_acc = Accumulator { 
         c_z_digest: [0;32], 
         c_coords: vec![], 
         y_compact: vec![F::ZERO], 
@@ -208,10 +208,10 @@ fn test_multiple_forged_coords() -> Result<()> {
     let step_witness = vec![F::ONE, prev_x, delta, next_x];
 
     // Generate valid proof using the working API
-    let extractor = ivc::LastNExtractor { n: 1 };
+    let extractor = LastNExtractor { n: 1 };
     let y_step = extractor.extract_y_step(&step_witness);
     
-    let step_input = ivc::IvcStepInput {
+    let step_input = IvcStepInput {
         params: &params,
         step_ccs: &step_ccs,
         step_witness: &step_witness,
@@ -224,12 +224,12 @@ fn test_multiple_forged_coords() -> Result<()> {
         prev_augmented_x: None,
     };
     
-    let step_result = ivc::prove_ivc_step(step_input).expect("Failed to prove IVC step");
+    let step_result = prove_ivc_step(step_input).expect("Failed to prove IVC step");
     let original_proof = step_result.proof;
     
     // --- Positive control: the unmodified proof must verify
     println!("🔍 Verifying original (unmodified) IVC proof as positive control...");
-    let ok_original = match ivc::verify_ivc_step(&step_ccs, &original_proof, &initial_acc, &binding_spec, &params, None) {
+    let ok_original = match verify_ivc_step(&step_ccs, &original_proof, &initial_acc, &binding_spec, &params, None) {
         Ok(result) => {
             println!("   Verification returned: {}", result);
             result
@@ -265,7 +265,7 @@ fn test_multiple_forged_coords() -> Result<()> {
         
         forged_proof.c_step_coords = forged_coords;
         
-        match ivc::verify_ivc_step(&step_ccs, &forged_proof, &initial_acc, &binding_spec, &params, None) {
+        match verify_ivc_step(&step_ccs, &forged_proof, &initial_acc, &binding_spec, &params, None) {
             Ok(true) => {
                 accepted_count += 1;
                 println!("  Trial {}: ❌ ACCEPTED (unsound)", trial);

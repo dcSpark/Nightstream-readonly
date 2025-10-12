@@ -1,5 +1,5 @@
 #![cfg(feature = "testing")]
-use neo::ivc::tie_check_with_r_public;
+use neo::tie_check_with_r_public;
 use neo::F;
 use p3_field::PrimeCharacteristicRing;
 use neo_ccs::{SparsePoly, Term};

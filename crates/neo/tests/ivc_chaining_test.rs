@@ -1,6 +1,6 @@
 use anyhow::Result;
 use neo::{NeoParams, F};
-use neo::ivc::{StepBindingSpec, IvcStepInput, prove_ivc_step_chained, Accumulator, IvcProof};
+use neo::{StepBindingSpec, IvcStepInput, prove_ivc_step_chained, Accumulator, IvcProof};
 use neo_ccs::{r1cs_to_ccs, CcsStructure, Mat};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 

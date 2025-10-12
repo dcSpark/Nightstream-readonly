@@ -1,7 +1,7 @@
 //! Red-team: Π‑CCS hygiene & shape guards must fail closed.
 
 use neo::{F, NeoParams};
-use neo::ivc::{Accumulator, LastNExtractor, StepBindingSpec,
+use neo::{Accumulator, LastNExtractor, StepBindingSpec,
     prove_ivc_step_with_extractor, verify_ivc_step};
 use neo_ccs::{Mat, r1cs::r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
@@ -37,7 +37,7 @@ fn make_binding_spec() -> StepBindingSpec {
     }
 }
 
-fn make_valid() -> (neo::ivc::IvcStepResult, neo_ccs::CcsStructure<F>, NeoParams, Accumulator, StepBindingSpec) {
+fn make_valid() -> (neo::IvcStepResult, neo_ccs::CcsStructure<F>, NeoParams, Accumulator, StepBindingSpec) {
     let step_ccs = tiny_r1cs_to_ccs();
     let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
     let prev_acc = Accumulator { c_z_digest: [0u8; 32], c_coords: vec![], y_compact: vec![], step: 0 };

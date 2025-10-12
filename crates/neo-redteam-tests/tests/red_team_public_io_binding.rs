@@ -26,7 +26,7 @@
 
 use anyhow::Result;
 use neo::{F, NeoParams};
-use neo::ivc::{
+use neo::{
     Accumulator, IvcStepInput, StepBindingSpec, prove_ivc_step, verify_ivc_step,
     LastNExtractor, StepOutputExtractor, rho_from_transcript,
 };

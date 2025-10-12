@@ -4,7 +4,7 @@
 //! Verifies that the system works correctly with minimal constraint count.
 
 use neo::{F, NeoParams};
-use neo::ivc::{Accumulator, StepBindingSpec, LastNExtractor, prove_ivc_step_with_extractor, verify_ivc_step};
+use neo::{Accumulator, StepBindingSpec, LastNExtractor, prove_ivc_step_with_extractor, verify_ivc_step};
 use neo_ccs::{Mat, r1cs::r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
 

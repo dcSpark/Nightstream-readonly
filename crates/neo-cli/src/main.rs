@@ -3,8 +3,7 @@ static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
-use neo::{NeoParams, CcsStructure, F, NivcProgram, NivcState, NivcStepSpec};
-use neo::ivc::StepBindingSpec;
+use neo::{NeoParams, CcsStructure, F, NivcProgram, NivcState, NivcStepSpec, StepBindingSpec};
 use neo_ccs::{r1cs_to_ccs, Mat};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use std::fs;
