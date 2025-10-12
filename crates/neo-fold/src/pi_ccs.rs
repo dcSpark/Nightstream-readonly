@@ -1169,6 +1169,22 @@ pub fn pi_ccs_verify(
     // instances to produce a non-zero initial sum that still passed terminal verification.
     // In base case: LHS all-zero gives T⁰ ≈ 0, so invalid RHS is caught.
     // In non-base case: LHS + invalid RHS could produce non-zero T⁰ that verifies.
+    //
+    // SOUNDNESS REQUIREMENT: ℓ must be at least 2 for proper validation.
+    // In the ℓ=1 case (single-row padded to 2), the augmented CCS can carry a constant offset
+    // (e.g., from const-1 binding or other glue), making the hypercube sum non-zero even for
+    // valid witnesses. This prevents us from detecting invalid witnesses.
+    // Production circuits MUST have at least 3 constraint rows to ensure ℓ ≥ 2 after padding.
+    if ell < 2 {
+        panic!(
+            "SOUNDNESS ERROR: Pi-CCS verification requires ℓ ≥ 2, got ℓ = {}.\n\
+             Single-row CCS (ℓ=1) cannot be properly validated because the augmented CCS \n\
+             carries constant offsets that prevent distinguishing valid from invalid witnesses.\n\
+             Please ensure your step CCS has at least 3 rows (which pads to 4, giving ℓ=2).",
+            ell
+        );
+    }
+    
     if claimed_initial != K::ZERO {
         #[cfg(feature = "debug-logs")]
         eprintln!(

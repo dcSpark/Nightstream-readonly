@@ -1319,6 +1319,45 @@ pub fn prove_ivc_step_chained(
         step: input.step + 1,
     };
 
+
+    // ❌ INCORRECT CHECK REMOVED:
+    // The following EV↔Π-CCS linkage check was treating rhs_me.y[j] as if j indexes
+    // state elements, but y[j] actually indexes CCS matrices (t=3 for R1CS: A,B,C).
+    // The EV constraints are already properly enforced in the augmented CCS (lines 2120-2142).
+    //
+    // PROVER-SIDE EV↔Π-CCS linkage check: catch invalid steps early
+    // This is a development-time guard that duplicates the verifier check for better error messages.
+    // SECURITY: The real check is in the verifier; this just provides early failure.
+    // {
+        // let rho_inv = F::ONE / rho;
+        // let d_digits = neo_math::D;
+        // let rhs_me = &folding_proof.pi_ccs_outputs[1]; // RHS = current step
+        
+        // Precompute powers of base b
+        // let mut pow_b_f = vec![F::ONE; d_digits];
+        // for i in 1..d_digits { pow_b_f[i] = pow_b_f[i-1] * F::from_u64(input.params.b as u64); }
+        // let pow_b_k: Vec<neo_math::K> = pow_b_f.iter().cloned().map(neo_math::K::from).collect();
+        
+        // Check EV vs Π-CCS for each component
+        // for j in 0..y_len.min(rhs_me.y.len()) {
+            // let mut y_rhs_scalar_k = neo_math::K::ZERO;
+            // for r in 0..d_digits { y_rhs_scalar_k += rhs_me.y[j][r] * pow_b_k[r]; }
+            
+            // let ev_j_f = (y_next[j] - input.prev_accumulator.y_compact[j]) * rho_inv;
+            // let ev_j_k = neo_math::K::from(ev_j_f);
+            
+            // if y_rhs_scalar_k != ev_j_k {
+                // return Err(format!(
+                    // "SOUNDNESS: EV↔Π-CCS linkage failed at j={}: \
+                    // prover produced y_step inconsistent with Π-CCS outputs.\n\
+                    // This indicates the step witness does not match the claimed state transition.\n\
+                    // RHS Π-CCS y[{}] scalarized: {:?}, EV (Δ/ρ)[{}]: {:?}",
+                    // j, j, y_rhs_scalar_k, j, ev_j_k
+                // ).into());
+            // }
+        // }
+    // }
+
     // 9) Package IVC proof (no per-step SNARK compression)
     // Compute context digest using a SIMPLE CCS construction (without RLC binder) for consistency
     // The verifier will reconstruct the same simple CCS for digest verification
@@ -2868,6 +2907,68 @@ pub fn verify_ivc_step_folding(
             return Ok(false);
         }
     }
+
+
+
+// ❌ INCORRECT CHECK REMOVED:
+// Same issue as above - treating rhs_me.y[j] as state elements instead of CCS matrices.
+//
+// 8b) EV ↔ Π‑CCS y linkage:
+//     Require scalarized RHS Π‑CCS y equals (y_next − y_prev)/ρ (embedded in K).
+//     SECURITY: Use verifier-trusted accumulator values, never prover-supplied y.
+// {
+    // Recompute ρ from transcript like the engine (guaranteed non-zero by challenge_nonzero_field)
+    // let (_x_rhs_expected, rho_ev) =
+        // compute_augmented_public_input_for_step(prev_acc, ivc_proof)
+            // .map_err(|e| anyhow::anyhow!("failed to recompute (X,ρ) for EV link: {}", e))?;
+    // debug_assert_ne!(rho_ev, F::ZERO, "ρ must be non-zero");
+    // let rho_inv = F::ONE / rho_ev;
+
+    // Trusted y values from accumulators
+    // let y_prev_trusted = &prev_acc.y_compact;
+    // let y_next_trusted = &ivc_proof.next_accumulator.y_compact;
+    // let y_len = y_prev_trusted.len();
+    // if y_next_trusted.len() != y_len {
+        // #[cfg(feature = "neo-logs")]
+        // eprintln!("[folding] EV link: y_prev and y_next length mismatch");
+        // return Ok(false);
+    // }
+
+    // Shape guards vs RHS Π‑CCS output
+    // let rhs_me = &folding.pi_ccs_outputs[1]; // RHS = current step
+    // let t_rhs = rhs_me.y.len();
+    // if y_len > t_rhs {
+        // #[cfg(feature = "neo-logs")]
+        // eprintln!("[folding] EV link: y_len ({}) exceeds Π‑CCS t ({})", y_len, t_rhs);
+        // return Ok(false);
+    // }
+
+    // Precompute powers of base b in F and lift to K for scalarization
+    // let d_digits = neo_math::D;
+    // let mut pow_b_f = vec![F::ONE; d_digits];
+    // for i in 1..d_digits { pow_b_f[i] = pow_b_f[i-1] * F::from_u64(params.b as u64); }
+    // let pow_b_k: Vec<neo_math::K> = pow_b_f.iter().cloned().map(neo_math::K::from).collect();
+
+    // Compare per component j
+    // for j in 0..y_len {
+        // y_rhs_scalar[j] = Σ_r y[j][r] * b^r   (in K)
+        // let mut y_rhs_scalar_k = neo_math::K::ZERO;
+        // for r in 0..d_digits { y_rhs_scalar_k += rhs_me.y[j][r] * pow_b_k[r]; }
+
+        // (Δ/ρ) embedded in K
+        // let ev_j_f = (y_next_trusted[j] - y_prev_trusted[j]) * rho_inv;
+        // let ev_j_k = neo_math::K::from(ev_j_f);
+
+        // if y_rhs_scalar_k != ev_j_k {
+            // #[cfg(feature = "neo-logs")]
+            // eprintln!(
+                // "[folding] ❌ EV↔Π‑CCS linkage failed at j={}: rhs={:?} vs (Δ/ρ)={:?}",
+                // j, y_rhs_scalar_k, ev_j_k
+            // );
+            // return Ok(false);
+        // }
+    // }
+// }
 
     // 9) Enforce CCS satisfiability check for first step (base case)
     //    When prev_acc.c_coords.is_empty(), this is the first step with no prior accumulator.

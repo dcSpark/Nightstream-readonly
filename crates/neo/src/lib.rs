@@ -171,8 +171,12 @@ pub use ivc::{
 
 // Re-export core NIVC types and helpers
 pub use nivc::{
+    // API types
     NivcProgram, NivcStepSpec, NivcState, NivcStepProof, NivcChainProof,
-    verify_nivc_chain, NivcFinalizeOptions, finalize_nivc_chain_with_options, finalize_nivc_chain,
+    NivcAccumulators, LaneRunningState, LaneId, StepIdx,
+    // Functions
+    verify_nivc_chain, NivcFinalizeOptions, 
+    finalize_nivc_chain_with_options, finalize_nivc_chain,
 };
 
 
