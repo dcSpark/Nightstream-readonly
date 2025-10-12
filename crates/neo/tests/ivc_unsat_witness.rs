@@ -7,7 +7,7 @@
 use neo::{F, NeoParams};
 use neo::{
     Accumulator, LastNExtractor, StepBindingSpec,
-    prove_ivc_step_with_extractor, verify_ivc_step,
+    prove_ivc_step_with_extractor, verify_ivc_step_legacy,
 };
 use neo_ccs::{Mat, SparsePoly, Term, CcsStructure};
 use p3_field::PrimeCharacteristicRing;
@@ -87,7 +87,7 @@ fn ivc_unsat_step_witness_should_fail_verify() {
     ).expect("IVC step proving should not error");
 
     // Verify should REJECT because the step witness violates the step CCS
-    let ok = verify_ivc_step(
+    let ok = verify_ivc_step_legacy(
         &step_ccs,
         &step_res.proof,
         &prev_acc,
@@ -148,7 +148,7 @@ fn ivc_proof_with_invalid_witness_from_generation() {
     ).expect("Proving should complete (soundness check is in verify)");
 
     // Verify should REJECT because the witness doesn't satisfy the CCS
-    let ok = verify_ivc_step(
+    let ok = verify_ivc_step_legacy(
         &step_ccs,
         &proof_res.proof,
         &prev_acc,
@@ -247,7 +247,7 @@ fn ivc_cross_link_vulnerability_pi_ccs_rhs_vs_parent_me() {
     };
 
     // Attempt verification
-    let ok = verify_ivc_step(
+    let ok = verify_ivc_step_legacy(
         &step_ccs,
         &malicious_proof,
         &prev_acc,

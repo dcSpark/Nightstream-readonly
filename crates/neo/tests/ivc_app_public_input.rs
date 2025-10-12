@@ -2,7 +2,7 @@
 //! then will pass once we support x = [H(prev_acc) || app_inputs].
 
 use neo::{F, NeoParams};
-use neo::{Accumulator, IvcStepInput, StepBindingSpec, prove_ivc_step, verify_ivc_step};
+use neo::{Accumulator, IvcStepInput, StepBindingSpec, prove_ivc_step_chained, verify_ivc_step_legacy};
 use neo_ccs::crypto::poseidon2_goldilocks;
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
@@ -39,7 +39,7 @@ fn app_public_inputs_accepted_now() {
     // Provide app inputs that should be appended to H(prev_acc)
     let app_inputs = vec![F::from_u64(42), F::from_u64(7)];
     let input = IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &step_witness, prev_accumulator: &prev_acc, step: 0, public_input: Some(&app_inputs), y_step: &y_step, binding_spec: &binding, transcript_only_app_inputs: false, prev_augmented_x: None };
-    let ok = prove_ivc_step(input).expect("prover should accept app public inputs with prefix digest");
+    let (ok, _me, _wit, _lhs) = prove_ivc_step_chained(input, None, None, None).expect("prover should accept app public inputs with prefix digest");
 
     // Prover accepted: validate that x = [H(prev_acc) || app_inputs]
     // Recompute digest prefix (copy of helper from example)
@@ -70,13 +70,13 @@ fn tampered_digest_prefix_rejected() {
 
     let app_inputs = vec![F::from_u64(11), F::from_u64(22)];
     let input = IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &step_witness, prev_accumulator: &prev_acc, step: 0, public_input: Some(&app_inputs), y_step: &y_step, binding_spec: &binding, transcript_only_app_inputs: false, prev_augmented_x: None };
-    let ok = prove_ivc_step(input).expect("prover should succeed");
+    let (ok, _me, _wit, _lhs) = prove_ivc_step_chained(input, None, None, None).expect("prover should succeed");
 
     // Tamper with digest prefix
     let mut forged = ok.proof.clone();
     if !forged.step_public_input.is_empty() {
         forged.step_public_input[0] = F::from_u64(999);
     }
-    let valid = verify_ivc_step(&step_ccs, &forged, &prev_acc, &binding, &params, None).expect("verifier should not error");
+    let valid = verify_ivc_step_legacy(&step_ccs, &forged, &prev_acc, &binding, &params, None).expect("verifier should not error");
     assert!(!valid, "verifier must reject when digest prefix does not match H(prev_acc)");
 }

@@ -1,7 +1,7 @@
 //! Red-team tests for IVC step_x binding: x must equal H(prev_accumulator)
 
 use neo::{F, NeoParams};
-use neo::{Accumulator, IvcStepInput, StepBindingSpec, prove_ivc_step, verify_ivc_step};
+use neo::{Accumulator, IvcStepInput, StepBindingSpec, prove_ivc_step, verify_ivc_step_legacy};
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
@@ -134,7 +134,7 @@ fn verifier_rejects_tampered_step_x() {
     forged.step_public_input = vec![F::from_u64(999), F::from_u64(888), F::from_u64(777), F::from_u64(666)];
 
     // Verifier must reject tampered x
-    let is_valid = verify_ivc_step(&step_ccs, &forged, &prev_acc, &binding, &params, None).expect("verify must not error");
+    let is_valid = verify_ivc_step_legacy(&step_ccs, &forged, &prev_acc, &binding, &params, None).expect("verify must not error");
     assert!(!is_valid, "verifier should reject proof with tampered step_x");
 }
 

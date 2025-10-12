@@ -299,7 +299,7 @@ fn test_c_step_coords_tampering_detection() {
             
             // First verify the valid proof should succeed
             println!("   Testing valid proof verification...");
-            let valid_verify_result = verify_ivc_step(
+            let valid_verify_result = verify_ivc_step_legacy(
                 &step_ccs,
                 &step_result.proof,
                 &prev_accumulator,
@@ -329,7 +329,7 @@ fn test_c_step_coords_tampering_detection() {
                 tampered_proof.c_step_coords[0] = tampered_proof.c_step_coords[0] + F::ONE;
                 
                 // Verification should fail due to RLC binder constraint
-                let verify_result = verify_ivc_step(
+                let verify_result = verify_ivc_step_legacy(
                     &step_ccs,
                     &tampered_proof,
                     &prev_accumulator,

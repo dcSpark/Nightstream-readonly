@@ -1,10 +1,17 @@
 //! IVC (Incrementally Verifiable Computation) engine
 //!
-//! This module implements the core IVC folding primitive that NIVC composes.
-//! It's crate-private and exposes a minimal engine interface for NIVC to use.
+//! This module implements IVC in two layers:
+//! 1. Core folding primitives (internal, used by NIVC)
+//! 2. Public IVC API as single-lane NIVC wrappers (Option A)
+//!
+//! The public IVC API (`lane` module) provides IVC semantics by delegating to NIVC
+//! with exactly one lane, avoiding code duplication while maintaining ergonomics.
 
 pub(crate) mod internal;
 pub(crate) mod pipeline;
+
+/// Public IVC API implemented as single-lane NIVC (Option A)
+pub mod lane;
 
 use crate::F;
 

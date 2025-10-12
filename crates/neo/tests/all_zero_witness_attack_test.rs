@@ -3,7 +3,7 @@
 /// where all z_vars and z_digits are 0, making all AJTAI-CHECK rows 0=0
 
 use neo::{F, NeoParams};
-use neo::{Accumulator, StepBindingSpec, prove_ivc_step_with_extractor, verify_ivc_step, LastNExtractor};
+use neo::{Accumulator, StepBindingSpec, prove_ivc_step_with_extractor, LastNExtractor, verify_ivc_step_legacy};
 use neo_ccs::{Mat, r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
 
@@ -83,7 +83,7 @@ fn test_all_zero_witness_attack_blocked() {
             println!("⚠️  Prover generated proof (prover-side check may be disabled)");
             println!("   Testing VERIFIER with in-circuit const-1 enforcement...");
             
-            let verify_result = verify_ivc_step(
+            let verify_result = verify_ivc_step_legacy(
                 &step_ccs,
                 &step_result.proof,
                 &prev_acc,
@@ -169,7 +169,7 @@ fn test_all_zero_witness_with_nonzero_const1_still_invalid() {
     // The app-input binding should catch this: witness[2]=0 but public claims 5
     match result {
         Ok(step_result) => {
-            let verify_result = verify_ivc_step(
+            let verify_result = verify_ivc_step_legacy(
                 &step_ccs,
                 &step_result.proof,
                 &prev_acc,
@@ -238,7 +238,7 @@ fn test_valid_zero_state_with_const1_one() {
     // This SHOULD succeed - it's a valid proof of 0+0=0 with const1=1
     let step_result = result.expect("Valid zero-state proof should succeed");
     
-    let ok = verify_ivc_step(
+    let ok = verify_ivc_step_legacy(
         &step_ccs,
         &step_result.proof,
         &prev_acc,
@@ -451,7 +451,7 @@ fn test_complete_zero_witness_critical() {
             println!("\n⚠️  PROVER GENERATED PROOF (prover-side check bypassed or disabled)");
             println!("   Testing VERIFIER...");
             
-            let verify_result = verify_ivc_step(
+            let verify_result = verify_ivc_step_legacy(
                 &step_ccs,
                 &step_result.proof,
                 &prev_acc,

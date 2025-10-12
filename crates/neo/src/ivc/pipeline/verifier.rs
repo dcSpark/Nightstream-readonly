@@ -20,10 +20,6 @@ use crate::shared::digest::compute_accumulator_digest_fields;
 use super::folding::verify_ivc_step_folding;
 
 /// Verify an IVC proof against the step CCS and previous accumulator
-/// 
-/// **CRITICAL SECURITY**: `binding_spec` must come from a trusted source
-/// (circuit specification), NOT from the proof! Using prover-supplied binding 
-/// metadata defeats the security fixes.
 pub fn verify_ivc_step(
     step_ccs: &CcsStructure<F>,
     ivc_proof: &IvcProof,
@@ -35,10 +31,14 @@ pub fn verify_ivc_step(
     // 0. Enforce Las binding: step_x must equal H(prev_accumulator)
     let expected_prefix = compute_accumulator_digest_fields(prev_accumulator)?;
     if ivc_proof.step_public_input.len() < expected_prefix.len() {
-        return Ok(false);
+        return Err(format!(
+            "Step public input too short: expected at least {} bytes, got {}",
+            expected_prefix.len(),
+            ivc_proof.step_public_input.len()
+        ).into());
     }
     if ivc_proof.step_public_input[..expected_prefix.len()] != expected_prefix[..] {
-        return Ok(false);
+        return Err("Las binding check failed: step_x prefix does not match H(prev_accumulator)".into());
     }
 
     // 1. Reconstruct the augmented CCS that was used for proving
@@ -50,22 +50,70 @@ pub fn verify_ivc_step(
     let y_len = prev_accumulator.y_compact.len();
     let step_x_len = ivc_proof.step_public_input.len();
     
+    // 🔒 SECURITY (Pattern-B pre-commit dimension binding): 
+    // Recompute the expected pre-commit dimension to prevent attackers from 
+    // feeding coordinates of the wrong dimension while still producing a hash.
+    // This mirrors the prover's "temp" sizing pass that determines m_final.
+    let d = neo_math::ring::D;
+    
+    // Temp witness with ρ=ONE to fix structure (same as prover's sizing pass)
+    let temp_witness_for_sizing = build_linked_augmented_witness(
+        &vec![F::ZERO; step_ccs.m], // dummy step witness for sizing
+        &binding_spec.y_step_offsets,
+        F::ONE // temporary rho for dimension calculation
+    );
+    let temp_y_next = prev_accumulator.y_compact.clone(); // placeholder
+    
+    // Build final public input structure for sizing (uses ρ=ONE, matching prover)
+    let final_public_input_for_sizing = build_augmented_public_input_for_step(
+        &ivc_proof.step_public_input, 
+        F::ONE, // ρ=ONE for sizing (matches prover's final_public_input calculation)
+        &prev_accumulator.y_compact, 
+        &temp_y_next
+    );
+    
+    // Calculate expected final dimensions: [final_public_input || temp_witness]
+    // This matches the prover's calculation of m_final at lines 202-205
+    let mut z_final_for_sizing = final_public_input_for_sizing.clone();
+    z_final_for_sizing.extend_from_slice(&temp_witness_for_sizing);
+    let decomp_final = crate::decomp_b(&z_final_for_sizing, params.b, d, crate::DecompStyle::Balanced);
+    let expected_m_final = decomp_final.len() / d;
+    let expected_num_coords = params.kappa as usize * expected_m_final;
+    
+    // Guard B: Bind c_step_coords dimension before using it for ρ derivation
+    if ivc_proof.c_step_coords.len() != expected_num_coords {
+        #[cfg(feature = "neo-logs")]
+        eprintln!(
+            "❌ SECURITY GUARD B (Pattern-B dimension binding): c_step_coords length mismatch. Expected {} (κ={} × m_final={}), got {}",
+            expected_num_coords, params.kappa, expected_m_final, ivc_proof.c_step_coords.len()
+        );
+        return Err(format!(
+            "SECURITY GUARD B (Pattern-B dimension binding): c_step_coords length mismatch. Expected {} (κ={} × m_final={}), got {}",
+            expected_num_coords, params.kappa, expected_m_final, ivc_proof.c_step_coords.len()
+        ).into());
+    }
+    
     // 🔒 SECURITY: Recompute ρ to get the same transcript state
     let (rho, _transcript_digest) = super::super::internal::transcript::rho_from_transcript(prev_accumulator, step_digest, &ivc_proof.c_step_coords);
     
-    // --- Guard A: if the proof carries a step_rho, it must match the verifier's recomputation
+    // --- Guard A: Strict ρ equality - proof.step_rho must exactly match verifier's recomputation
     // This prevents any attempt to smuggle an inconsistent rho alongside forged c_step_coords.
+    // No bypass for F::ZERO - all proofs must have valid step_rho.
     #[cfg(feature = "neo-logs")]
     eprintln!("🔍 DEBUG: Verifier recomputed ρ = {}, proof.step_rho = {}", 
               rho.as_canonical_u64(), ivc_proof.step_rho.as_canonical_u64());
-    if ivc_proof.step_rho != F::ZERO && ivc_proof.step_rho != rho {
+    if ivc_proof.step_rho != rho {
         #[cfg(feature = "neo-logs")]
         eprintln!(
-            "❌ SECURITY GUARD A: Recomputed ρ ({}) != proof.step_rho ({})",
+            "❌ SECURITY GUARD A (Strict ρ binding): Recomputed ρ ({}) != proof.step_rho ({})",
             rho.as_canonical_u64(),
             ivc_proof.step_rho.as_canonical_u64()
         );
-        return Ok(false);
+        return Err(format!(
+            "SECURITY GUARD A (Strict ρ binding): Recomputed ρ ({}) != proof.step_rho ({})",
+            rho.as_canonical_u64(),
+            ivc_proof.step_rho.as_canonical_u64()
+        ).into());
     }
     
     // RLC coefficients no longer needed here (binder disabled)
@@ -103,11 +151,10 @@ pub fn verify_ivc_step(
     let decomp_z = crate::decomp_b(
         &full_step_z,
         params.b, // use the same base as prover
-        neo_math::ring::D,
+        d,
         crate::DecompStyle::Balanced
     );
-    let m_step = decomp_z.len() / neo_math::ring::D;
-    let d = neo_math::ring::D;
+    let m_step = decomp_z.len() / d;
     
     // Ensure PP exists for the full witness dimensions
     crate::ensure_ajtai_pp_for_dims(d, m_step, || {
@@ -176,8 +223,15 @@ pub fn verify_ivc_step(
     let expected_context_digest = crate::context_digest_v1(&digest_ccs, &public_input);
     let io = &ivc_proof.step_proof.public_io;
     
-    // Ensure public_io is long enough to contain context digest
-    if io.len() < 32 {
+    // Guard C: Enforce exact public_io length (y_len * 8 bytes for y_next + 32 bytes for digest)
+    // This prevents trailing bytes from being smuggled in the proof
+    let expected_io_len = y_len * 8 + 32;
+    if io.len() != expected_io_len {
+        #[cfg(feature = "neo-logs")]
+        eprintln!(
+            "❌ SECURITY GUARD C (Exact public_io length): Expected {} bytes ({}×8 + 32), got {}",
+            expected_io_len, y_len, io.len()
+        );
         return Ok(false);
     }
     

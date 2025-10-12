@@ -41,7 +41,7 @@ fn prove_ivc_final_snark_compat(
     // Build a synthetic NIVC chain from IVC proofs
     let steps: Vec<neo::NivcStepProof> = ivc_proofs
         .iter()
-        .map(|p| neo::NivcStepProof { which_type: 0, step_io: p.step_public_input.clone(), inner: p.clone() })
+        .map(|p| neo::NivcStepProof { lane_idx: 0, step_io: p.step_public_input.clone(), inner: p.clone() })
         .collect();
     let last = ivc_proofs.last().unwrap();
     let mut acc = neo::nivc::NivcAccumulators::new(1, last.next_accumulator.y_compact.clone());

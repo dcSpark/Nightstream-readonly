@@ -153,7 +153,7 @@ pub(crate) mod ivc;
 /// NIVC driver (HyperNova-style non-uniform IVC)
 pub mod nivc;
 
-// Re-export high-level IVC API for production use (from legacy for now)
+// Re-export high-level IVC API (Option A: single-lane NIVC implementation)
 // Core IVC types (from shared module)
 pub use shared::types::{
     Accumulator, IvcProof, IvcStepInput, IvcChainProof, IvcStepResult, IvcChainStepInput, 
@@ -161,11 +161,17 @@ pub use shared::types::{
 };
 pub use shared::binding::{StepOutputExtractor, LastNExtractor, IndexExtractor};
 
-// High-level IVC API (from ivc pipeline and internal modules)
-pub use ivc::pipeline::prover::{
-    prove_ivc_step, prove_ivc_step_with_extractor, prove_ivc_step_chained, prove_ivc_chain,
+// High-level IVC API (implemented as single-lane NIVC wrappers)
+// This unifies IVC and NIVC under a single implementation with no code duplication
+pub use ivc::lane::{
+    prove_ivc_step, verify_ivc_step, prove_ivc_chain, verify_ivc_chain,
 };
-pub use ivc::pipeline::verifier::{verify_ivc_step, verify_ivc_chain};
+
+// Advanced IVC API for specialized use cases
+// These are exposed for users who need direct access to the internal engine
+pub use ivc::pipeline::prover::{prove_ivc_step_with_extractor, prove_ivc_step_chained, prove_ivc_chain as prove_ivc_chain_legacy};
+pub use ivc::pipeline::verifier::verify_ivc_step as verify_ivc_step_legacy;
+pub use ivc::pipeline::verifier::verify_ivc_chain as verify_ivc_chain_legacy;
 pub use ivc::pipeline::folding::verify_ivc_step_folding;
 pub use ivc::internal::augmented::{
     augmentation_ccs, build_augmented_ccs_linked, build_augmented_ccs_linked_with_rlc, 

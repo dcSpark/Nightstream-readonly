@@ -30,7 +30,7 @@ pub fn verify_chain(
     let mut prev_aug_x_by_lane: Vec<Option<Vec<F>>> = vec![None; program.len()];
 
     for sp in &chain.steps {
-        let j = sp.which_type;
+        let j = sp.lane_idx;
         if j >= program.len() { 
             return Ok(false); 
         }

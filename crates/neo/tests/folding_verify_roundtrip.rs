@@ -3,7 +3,7 @@
 use neo::{
     F, CcsStructure, NeoParams,
     StepBindingSpec, Accumulator, IvcProof, IvcStepInput, IvcChainProof,
-    prove_ivc_step_chained, verify_ivc_chain, verify_ivc_step,
+    prove_ivc_step_chained, verify_ivc_chain_legacy, verify_ivc_step_legacy,
 };
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
@@ -93,7 +93,7 @@ fn fold_roundtrip_chain_ok() -> anyhow::Result<()> {
     };
 
     // Verify (strict: step checks + folding)
-    let ok = verify_ivc_chain(
+    let ok = verify_ivc_chain_legacy(
         &step_ccs,
         &chain,
         &initial_acc,
@@ -115,7 +115,7 @@ fn fold_roundtrip_chain_ok() -> anyhow::Result<()> {
             println!("  step_y_next: {:?}", step_proof.step_y_next.len());
                 
                 // Verify step (now includes folding verification)
-                let step_ok = verify_ivc_step(&step_ccs, step_proof, &current_acc, &binding, &params, prev_step_x.as_deref())
+                let step_ok = verify_ivc_step_legacy(&step_ccs, step_proof, &current_acc, &binding, &params, prev_step_x.as_deref())
                     .map_err(|e| anyhow::anyhow!("Step {} verification failed: {}", i, e))?;
                 println!("  Step verification: {}", step_ok);
                 
@@ -168,7 +168,7 @@ fn fold_roundtrip_rejects_mutated_rhs_commitment() -> anyhow::Result<()> {
     }
 
     let initial_acc = Accumulator { c_z_digest: [0u8; 32], c_coords: vec![], y_compact: vec![F::ZERO], step: 0 };
-    let ok = verify_ivc_step(
+    let ok = verify_ivc_step_legacy(
         &step_ccs,
         &step_proof,
         &initial_acc,

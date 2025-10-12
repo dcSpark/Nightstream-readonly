@@ -4,7 +4,7 @@
 //! if the augmented CCS properly enforces step CCS constraints.
 
 use neo::{F, NeoParams};
-use neo::{Accumulator, StepBindingSpec, prove_ivc_step_with_extractor, verify_ivc_step, LastNExtractor};
+use neo::{Accumulator, StepBindingSpec, prove_ivc_step_with_extractor, verify_ivc_step_legacy, LastNExtractor};
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs, check_ccs_rowwise_zero};
 use p3_field::{PrimeCharacteristicRing};
 
@@ -78,7 +78,7 @@ fn test_valid_witness_passes() {
     
     let step_result = result.expect("Valid witness should be accepted");
     
-    let ok = verify_ivc_step(
+    let ok = verify_ivc_step_legacy(
         &step_ccs,
         &step_result.proof,
         &prev_acc,
@@ -137,7 +137,7 @@ fn test_invalid_witness_in_circuit_enforcement() {
     
     let step_result = result.expect("Prover should generate proof (prover-side check disabled)");
     
-    let verify_result = verify_ivc_step(
+    let verify_result = verify_ivc_step_legacy(
         &step_ccs,
         &step_result.proof,
         &prev_acc,
@@ -212,7 +212,7 @@ fn test_const1_zero_attack_is_blocked() {
     match result {
         Ok(step_result) => {
             // Prover generated proof, but verifier must reject
-            let verify_result = verify_ivc_step(
+            let verify_result = verify_ivc_step_legacy(
                 &step_ccs,
                 &step_result.proof,
                 &prev_acc,

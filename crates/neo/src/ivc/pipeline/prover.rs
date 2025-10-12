@@ -70,6 +70,7 @@ pub fn prove_ivc_step_with_extractor(
     
     prove_ivc_step(input)
 }
+
 /// Prove a single IVC step with proper chaining.
 ///
 /// - Accepts previous folded ME instance (for Stage 5 compression continuity).
@@ -240,6 +241,8 @@ pub fn prove_ivc_step_chained(
     let pre_commitment = crate::commit(&*pp, &decomp_pre);
     
     // Extract pre-commit coordinates for ρ derivation
+    // SECURITY: The verifier will check that c_step_coords.len() == κ * m_final
+    // to prevent attackers from providing coordinates of the wrong dimension (Pattern-B binding)
     let c_step_coords: Vec<F> = pre_commitment
         .data
         .iter()

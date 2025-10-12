@@ -70,7 +70,7 @@ fn base_case_not_self_fold_anymore() -> anyhow::Result<()> {
     assert_ne!(lhs.c.data, rhs.c.data, "base-case LHS commitment must differ from RHS");
 
     // Verify step succeeds
-    let ok = neo::verify_ivc_step(&step_ccs, &res.proof, &prev_acc, &binding, &params, None)
+    let ok = neo::verify_ivc_step_legacy(&step_ccs, &res.proof, &prev_acc, &binding, &params, None)
         .map_err(|e| anyhow::anyhow!("verify_ivc_step failed: {}", e))?;
     assert!(ok, "verification must pass");
     Ok(())
@@ -157,13 +157,13 @@ fn nivc_enforces_selector_and_root_and_step_io() -> anyhow::Result<()> {
     // Baseline verify passes
     assert!(neo::verify_nivc_chain(&program, &params, &chain, &y0)?);
 
-    // A) Flip which_type and expect failure
+    // A) Flip lane_idx and expect failure
     let mut bad = chain.clone();
-    bad.steps[0].which_type ^= 1;
-    assert!(!neo::verify_nivc_chain(&program, &params, &bad, &y0)?, "must reject mismatched which_type");
+    bad.steps[0].lane_idx ^= 1;
+    assert!(!neo::verify_nivc_chain(&program, &params, &bad, &y0)?, "must reject mismatched lane_idx");
 
     // B) Corrupt per-step binding (lanes_root) by mutating a step's public data and expect failure
-    // Flip which_type back to a wrong value (already covered above) or perturb step IO digest.
+    // Flip lane_idx back to a wrong value (already covered above) or perturb step IO digest.
     // Here we reuse case (C) below for explicit step_io tamper.
 
     // C) Corrupt step_io and expect failure

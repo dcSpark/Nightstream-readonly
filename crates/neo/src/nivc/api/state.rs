@@ -46,7 +46,7 @@ impl NivcAccumulators {
 #[derive(Clone)]
 pub struct NivcStepProof {
     /// Which lane / function index `j` was used (this corresponds to φ choice)
-    pub which_type: usize,
+    pub lane_idx: usize,
     /// Public application-level inputs bound into the transcript (step_io)
     pub step_io: Vec<F>,
     /// The inner IVC proof (folding the chosen lane) that enforces zᵢ → zᵢ₊₁

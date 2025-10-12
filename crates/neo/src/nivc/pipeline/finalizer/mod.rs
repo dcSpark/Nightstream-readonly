@@ -23,20 +23,137 @@ pub fn finalize_with_options(
 ) -> anyhow::Result<Option<(crate::Proof, neo_ccs::CcsStructure<F>, Vec<F>)>> {
     if chain.steps.is_empty() { return Ok(None); }
     let last = chain.steps.last().unwrap();
-    let j = last.which_type;
-    anyhow::ensure!(j < program.len(), "invalid which_type in last step");
+    let j = last.lane_idx;
+    anyhow::ensure!(j < program.len(), "invalid lane_idx in last step");
     let spec = &program.steps[j];
 
     // Gather data from last step proof
-    let mut rho = if last.inner.step_rho != F::ZERO { 
-        last.inner.step_rho 
-    } else { 
-        F::ONE 
-    };
     let y_prev = last.inner.step_y_prev.clone();
     let y_next = last.inner.step_y_next.clone();
     let step_x = last.inner.step_public_input.clone();
     let y_len = y_prev.len();
+    
+    // 🔒 SECURITY HARDENING: Multi-layer ρ validation to prevent transcript manipulation
+    
+    // 1️⃣ Reconstruct previous accumulator with validation
+    // Storage for initial accumulator (must outlive the borrow)
+    let initial_acc_storage = crate::ivc::Accumulator {
+        c_z_digest: [0u8; 32],
+        c_coords: vec![],
+        y_compact: y_prev.clone(),
+        step: if last.inner.step > 0 { last.inner.step - 1 } else { 0 },
+    };
+    
+    let prev_acc = if chain.steps.len() > 1 {
+        // Multi-step chain: use the accumulator from the previous step
+        let prev_step = &chain.steps[chain.steps.len() - 2];
+        
+        // Validate step monotonicity
+        anyhow::ensure!(
+            prev_step.inner.step + 1 == last.inner.step,
+            "SECURITY: Step counter discontinuity. Expected {}, got {}",
+            prev_step.inner.step + 1, last.inner.step
+        );
+        
+        &prev_step.inner.next_accumulator
+    } else {
+        // Single step: reconstruct initial accumulator from step data
+        anyhow::ensure!(
+            last.inner.step > 0,
+            "SECURITY: Cannot have first step at counter > 0 without prior steps"
+        );
+        
+        // Validate initial accumulator structure
+        anyhow::ensure!(
+            initial_acc_storage.c_coords.is_empty(),
+            "SECURITY: Initial accumulator must have empty c_coords"
+        );
+        anyhow::ensure!(
+            initial_acc_storage.step + 1 == last.inner.step,
+            "SECURITY: Initial step counter mismatch"
+        );
+        
+        &initial_acc_storage
+    };
+    
+    // 2️⃣ Validate step_x prefix binds to H(prev_acc)
+    let expected_prefix = crate::shared::digest::compute_accumulator_digest_fields(prev_acc)
+        .map_err(|e| anyhow::anyhow!("Failed to compute accumulator digest: {}", e))?;
+    
+    if step_x.len() < expected_prefix.len() {
+        anyhow::bail!(
+            "SECURITY: step_x too short ({} < {}). Cannot contain H(prev_acc) prefix",
+            step_x.len(), expected_prefix.len()
+        );
+    }
+    
+    if !step_x.starts_with(&expected_prefix) {
+        anyhow::bail!(
+            "SECURITY: step_x prefix mismatch. Expected H(prev_acc) binding but got different digest. \
+             This prevents forged step_x from influencing ρ derivation."
+        );
+    }
+    
+    // 3️⃣ Validate c_step_coords dimension (Pattern-B pre-commit dimension binding)
+    // Recompute expected dimension to prevent dimension-mismatch attacks
+    let d = neo_math::ring::D;
+    
+    // Build temporary witness structure for sizing (same logic as prover)
+    let temp_witness_for_sizing = crate::build_linked_augmented_witness(
+        &vec![F::ZERO; spec.ccs.m],
+        &spec.binding.y_step_offsets,
+        F::ONE // temp ρ for sizing
+    );
+    let temp_y_next = prev_acc.y_compact.clone();
+    let final_public_input_for_sizing = crate::build_augmented_public_input_for_step(
+        &step_x,
+        F::ONE, // ρ=1 for sizing
+        &prev_acc.y_compact,
+        &temp_y_next
+    );
+    
+    let mut z_final_for_sizing = final_public_input_for_sizing.clone();
+    z_final_for_sizing.extend_from_slice(&temp_witness_for_sizing);
+    let decomp_final = crate::decomp_b(&z_final_for_sizing, params.b, d, crate::DecompStyle::Balanced);
+    let expected_m_final = decomp_final.len() / d;
+    let expected_num_coords = params.kappa as usize * expected_m_final;
+    
+    anyhow::ensure!(
+        last.inner.c_step_coords.len() == expected_num_coords,
+        "SECURITY: c_step_coords dimension mismatch. Expected {} (κ={} × m_final={}), got {}. \
+         This prevents dimension-based transcript manipulation.",
+        expected_num_coords, params.kappa, expected_m_final, last.inner.c_step_coords.len()
+    );
+    
+    // 4️⃣ Recompute ρ from transcript (now that all inputs are validated)
+    let step_data = crate::ivc::internal::transcript::build_step_transcript_data(
+        prev_acc,
+        last.inner.step,
+        &step_x
+    );
+    let step_digest = crate::ivc::internal::transcript::create_step_digest(&step_data);
+    let (rho_computed, _) = crate::ivc::internal::transcript::rho_from_transcript(
+        prev_acc,
+        step_digest,
+        &last.inner.c_step_coords
+    );
+    
+    // 5️⃣ Reject degenerate ρ = 0 (transcript must produce nonzero challenge)
+    anyhow::ensure!(
+        rho_computed != F::ZERO,
+        "SECURITY: ρ must be nonzero. This indicates a critical transcript failure."
+    );
+    
+    // 6️⃣ Strict equality check - no bypass allowed
+    anyhow::ensure!(
+        last.inner.step_rho == rho_computed,
+        "SECURITY: step_rho mismatch. Proof contains {} but recomputed ρ is {}. \
+         This indicates either a forged proof or transcript manipulation.",
+        last.inner.step_rho.as_canonical_u64(),
+        rho_computed.as_canonical_u64()
+    );
+    
+    let mut rho = rho_computed;
 
     // Reconstruct augmented CCS
     let augmented_ccs = build_augmented_ccs(
