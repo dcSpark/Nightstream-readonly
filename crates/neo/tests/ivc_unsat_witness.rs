@@ -5,9 +5,9 @@
 //! via the initial_sum == 0 check at the base case.
 
 use neo::{F, NeoParams};
-use neo::ivc::{
+use neo::{
     Accumulator, LastNExtractor, StepBindingSpec,
-    prove_ivc_step_with_extractor, verify_ivc_step,
+    prove_ivc_step_with_extractor, verify_ivc_step_legacy,
 };
 use neo_ccs::{Mat, SparsePoly, Term, CcsStructure};
 use p3_field::PrimeCharacteristicRing;
@@ -87,7 +87,7 @@ fn ivc_unsat_step_witness_should_fail_verify() {
     ).expect("IVC step proving should not error");
 
     // Verify should REJECT because the step witness violates the step CCS
-    let ok = verify_ivc_step(
+    let ok = verify_ivc_step_legacy(
         &step_ccs,
         &step_res.proof,
         &prev_acc,
@@ -148,7 +148,7 @@ fn ivc_proof_with_invalid_witness_from_generation() {
     ).expect("Proving should complete (soundness check is in verify)");
 
     // Verify should REJECT because the witness doesn't satisfy the CCS
-    let ok = verify_ivc_step(
+    let ok = verify_ivc_step_legacy(
         &step_ccs,
         &proof_res.proof,
         &prev_acc,
@@ -228,26 +228,13 @@ fn ivc_cross_link_vulnerability_pi_ccs_rhs_vs_parent_me() {
         }
         
         // Construct the malicious IvcProof with tampered pi_ccs_outputs
-        neo::ivc::IvcProof {
-            step_proof: valid_proof_res.proof.step_proof.clone(),
-            next_accumulator: valid_proof_res.proof.next_accumulator.clone(),
-            step: valid_proof_res.proof.step,
-            metadata: valid_proof_res.proof.metadata.clone(),
-            step_public_input: valid_proof_res.proof.step_public_input.clone(),
-            step_augmented_public_input: valid_proof_res.proof.step_augmented_public_input.clone(),
-            prev_step_augmented_public_input: valid_proof_res.proof.prev_step_augmented_public_input.clone(),
-            step_rho: valid_proof_res.proof.step_rho,
-            step_y_prev: valid_proof_res.proof.step_y_prev.clone(),
-            step_y_next: valid_proof_res.proof.step_y_next.clone(),
-            c_step_coords: valid_proof_res.proof.c_step_coords.clone(),
-            me_instances: valid_proof_res.proof.me_instances.clone(), // Unchanged
-            digit_witnesses: valid_proof_res.proof.digit_witnesses.clone(), // Unchanged
-            folding_proof: Some(malicious_folding), // TAMPERED folding proof
-        }
+        let mut malicious_proof_inner = valid_proof_res.proof.clone();
+        malicious_proof_inner.folding_proof = Some(malicious_folding); // TAMPERED folding proof
+        malicious_proof_inner
     };
 
     // Attempt verification
-    let ok = verify_ivc_step(
+    let ok = verify_ivc_step_legacy(
         &step_ccs,
         &malicious_proof,
         &prev_acc,

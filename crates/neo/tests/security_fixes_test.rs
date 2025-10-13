@@ -5,7 +5,7 @@
 //! 2. Challenge derivation includes step commitment
 //! 3. Folding proof verification (basic test)
 
-use neo::ivc::*;
+use neo::*;
 use neo::F;
 use neo_ccs::{CcsStructure, Mat, SparsePoly, Term};
 use p3_field::PrimeCharacteristicRing;
@@ -266,7 +266,7 @@ fn test_c_step_coords_tampering_detection() {
     
     use crate::*;
     use neo_math::F;
-    use neo::ivc::LastNExtractor;
+    use neo::LastNExtractor;
     
     // Create a simple test CCS and binding spec
     let step_ccs = create_test_ccs();
@@ -299,7 +299,7 @@ fn test_c_step_coords_tampering_detection() {
             
             // First verify the valid proof should succeed
             println!("   Testing valid proof verification...");
-            let valid_verify_result = verify_ivc_step(
+            let valid_verify_result = verify_ivc_step_legacy(
                 &step_ccs,
                 &step_result.proof,
                 &prev_accumulator,
@@ -329,7 +329,7 @@ fn test_c_step_coords_tampering_detection() {
                 tampered_proof.c_step_coords[0] = tampered_proof.c_step_coords[0] + F::ONE;
                 
                 // Verification should fail due to RLC binder constraint
-                let verify_result = verify_ivc_step(
+                let verify_result = verify_ivc_step_legacy(
                     &step_ccs,
                     &tampered_proof,
                     &prev_accumulator,

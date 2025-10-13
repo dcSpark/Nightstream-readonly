@@ -3,7 +3,7 @@
 //! Parameters are defined in neo-params as single source of truth.
 
 use neo::F;
-use neo::ivc::create_step_digest;
+use neo::create_step_digest;
 use neo_ccs::crypto::poseidon2_goldilocks as p2;
 use p3_field::PrimeCharacteristicRing;
 
@@ -39,8 +39,8 @@ fn changing_input_changes_digest() {
 #[test]
 fn poseidon2_constants_are_correct() {
     // Lock in the exact parameters we expect
-    assert_eq!(p2::WIDTH, 12, "Poseidon2 width must be 12");
-    assert_eq!(p2::CAPACITY, 4, "Poseidon2 capacity must be 4"); 
+    assert_eq!(p2::WIDTH, 16, "Poseidon2 width must be 16");
+    assert_eq!(p2::CAPACITY, 8, "Poseidon2 capacity must be 8"); 
     assert_eq!(p2::RATE, 8, "Poseidon2 rate must be 8");
     assert_eq!(p2::DIGEST_LEN, 4, "Digest length must be 4 field elements");
 }

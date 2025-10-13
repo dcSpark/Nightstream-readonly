@@ -12,9 +12,8 @@
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-use neo::{F, NeoParams};
+use neo::{F, NeoParams, StepBindingSpec};
 use p3_field::PrimeField64;
-use neo::ivc::StepBindingSpec;
 use neo::{NivcProgram, NivcState, NivcStepSpec, NivcFinalizeOptions};
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;

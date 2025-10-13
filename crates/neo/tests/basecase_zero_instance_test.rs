@@ -91,7 +91,7 @@ fn test_self_fold_basecase_manual_verify() {
 
     // Manual per-step verification with strict threading of prev_augmented_x
     let binding = descriptor.spec.binding_spec();
-    let mut acc = neo::ivc::Accumulator { c_z_digest: [0u8; 32], c_coords: vec![], y_compact: vec![], step: 0 };
+    let mut acc = neo::Accumulator { c_z_digest: [0u8; 32], c_coords: vec![], y_compact: vec![], step: 0 };
     let mut prev_augmented_x: Option<Vec<neo::F>> = None;
 
     for (i, step) in chain.steps.iter().enumerate() {
@@ -99,10 +99,10 @@ fn test_self_fold_basecase_manual_verify() {
             // Base case: with self-fold, Pi‑RLC may reject step 0. Just thread linkage.
             // Thread augmented-x for step 1 verification
             acc = step.next_accumulator.clone();
-            prev_augmented_x = Some(step.step_augmented_public_input.clone());
+            prev_augmented_x = Some(step.public_inputs.step_augmented_public_input().to_vec());
             continue;
         }
-        let ok = neo::ivc::verify_ivc_step(
+        let ok = neo::verify_ivc_step_legacy(
             &descriptor.ccs,
             step,
             &acc,
@@ -112,7 +112,7 @@ fn test_self_fold_basecase_manual_verify() {
         ).expect("per-step verify should not error");
         assert!(ok, "IVC step {} verification failed", i);
         acc = step.next_accumulator.clone();
-        prev_augmented_x = Some(step.step_augmented_public_input.clone());
+        prev_augmented_x = Some(step.public_inputs.step_augmented_public_input().to_vec());
     }
 }
 

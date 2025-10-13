@@ -6,7 +6,7 @@
 /// C) Individual instance verification is bypassed when batching
 
 use neo::{F, NeoParams, Accumulator};
-use neo::ivc::{prove_ivc_step_with_extractor, verify_ivc_step, StepBindingSpec, LastNExtractor};
+use neo::{prove_ivc_step_with_extractor, verify_ivc_step_legacy, StepBindingSpec, LastNExtractor};
 use neo_ccs::{CcsStructure, relations::check_ccs_rowwise_zero, Mat, SparsePoly, Term};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
@@ -261,7 +261,7 @@ fn hypothesis_c_batching_cancellation_bug() {
         &params, &ccs, &invalid_wit, &acc0, 0, None, &extractor, &binding,
     ).expect("base case prove");
     
-    let ok0 = verify_ivc_step(&ccs, &step0_invalid.proof, &acc0, &binding, &params, None)
+    let ok0 = verify_ivc_step_legacy(&ccs, &step0_invalid.proof, &acc0, &binding, &params, None)
         .expect("verify should not error");
     println!("Base case result: {}", if ok0 { "ACCEPTED ✗" } else { "REJECTED ✓" });
     
@@ -271,7 +271,7 @@ fn hypothesis_c_batching_cancellation_bug() {
         &params, &ccs, &invalid_wit, acc1, 1, None, &extractor, &binding,
     ).expect("non-base case prove");
     
-    let ok1 = verify_ivc_step(&ccs, &step1_invalid.proof, acc1, &binding, &params, None)
+    let ok1 = verify_ivc_step_legacy(&ccs, &step1_invalid.proof, acc1, &binding, &params, None)
         .expect("verify should not error");
     println!("Non-base case result: {}", if ok1 { "ACCEPTED ✗" } else { "REJECTED ✓" });
     

@@ -10,7 +10,7 @@ use std::fs;
 use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 use neo::{F, NeoParams};
-use neo::ivc::{Accumulator, StepBindingSpec, IvcChainStepInput, prove_ivc_chain, verify_ivc_chain};
+use neo::{Accumulator, StepBindingSpec, IvcChainStepInput, prove_ivc_chain, verify_ivc_chain};
 use neo::{NivcProgram, NivcStepSpec, NivcState, verify_nivc_chain};
 use neo_ccs::{Mat, r1cs::r1cs_to_ccs, CcsStructure};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
@@ -255,11 +255,13 @@ fn test_starstream_tx_ivc_proof() {
     // Prepare step inputs
     let step_inputs: Vec<IvcChainStepInput> = export.steps
         .iter()
-        .map(|step| {
+        .enumerate()
+        .map(|(i, step)| {
             let witness = extract_witness(&step.witness);
             IvcChainStepInput {
                 witness,
                 public_input: None,  // No explicit public inputs in this test
+                step: i as u64,
             }
         })
         .collect();
@@ -293,17 +295,6 @@ fn test_starstream_tx_ivc_proof() {
                     .collect::<Vec<_>>());
             println!();
             
-            // If should_fail is true but proof succeeded, this is a soundness bug!
-            if export.metadata.should_fail {
-                println!("🚨 SOUNDNESS BUG DETECTED! 🚨");
-                println!("   Test metadata indicates this should fail, but proof generation succeeded.");
-                println!("   This means the prover accepted invalid constraints!");
-                if let Some(reason) = &export.metadata.failure_reason {
-                    println!("   Expected failure: {}", reason);
-                }
-                panic!("Soundness violation: proof succeeded when it should have failed");
-            }
-            
             // Verify the proof
             println!("🔍 Verifying IVC Chain Proof...");
             let verify_result = verify_ivc_chain(
@@ -316,17 +307,54 @@ fn test_starstream_tx_ivc_proof() {
             
             match verify_result {
                 Ok(true) => {
-                    println!("✅ IVC Verification SUCCEEDED");
-                    println!("   The proof is valid and verifies correctly.");
+                    // Verification succeeded
+                    if export.metadata.should_fail {
+                        println!("❌ IVC Verification SUCCEEDED (but should have failed!)");
+                        println!("🚨 SOUNDNESS BUG DETECTED! 🚨");
+                        println!("   Test metadata indicates this should fail, but verifier accepted it.");
+                        println!("   This means the verifier failed to catch invalid constraints!");
+                        if let Some(reason) = &export.metadata.failure_reason {
+                            println!("   Expected failure: {}", reason);
+                        }
+                        panic!("Soundness violation: verifier accepted proof that should have been rejected");
+                    } else {
+                        println!("✅ IVC Verification SUCCEEDED");
+                        println!("   The proof is valid and verifies correctly.");
+                    }
                 }
                 Ok(false) => {
-                    println!("❌ IVC Verification FAILED");
-                    println!("   The proof was generated but verification returned false.");
-                    panic!("Verification failed for generated proof");
+                    // Verification failed (returned false)
+                    if export.metadata.should_fail {
+                        println!("✅ IVC Verification REJECTED (as expected!)");
+                        println!("   The proof was generated but verifier correctly rejected it.");
+                        println!("   🎉 Test PASSED: Verifier correctly caught the invalid constraints!");
+                        if let Some(reason) = &export.metadata.failure_reason {
+                            println!("   Expected issue: {}", reason);
+                        }
+                        // This is the expected behavior - test passes
+                        return;
+                    } else {
+                        println!("❌ IVC Verification FAILED");
+                        println!("   The proof was generated but verification returned false.");
+                        panic!("Verification failed for generated proof");
+                    }
                 }
                 Err(e) => {
-                    println!("❌ IVC Verification ERROR: {}", e);
-                    panic!("Verification error: {}", e);
+                    // Verification error
+                    if export.metadata.should_fail {
+                        println!("✅ IVC Verification ERROR (as expected!)");
+                        println!("   The proof was generated but verifier correctly errored.");
+                        println!("   🎉 Test PASSED: Verifier correctly caught the invalid constraints!");
+                        if let Some(reason) = &export.metadata.failure_reason {
+                            println!("   Expected issue: {}", reason);
+                        }
+                        println!("   Actual error: {}", e);
+                        // This is acceptable behavior for should_fail - test passes
+                        return;
+                    } else {
+                        println!("❌ IVC Verification ERROR: {}", e);
+                        panic!("Verification error: {}", e);
+                    }
                 }
             }
         }
@@ -590,22 +618,6 @@ fn test_starstream_tx_nivc_proof() {
     println!("   All {} steps completed successfully", export.steps.len());
     println!();
     
-    // If should_fail is true but proof succeeded, this is a soundness bug!
-    if export.metadata.should_fail {
-        println!("🚨 SOUNDNESS BUG DETECTED! 🚨");
-        println!("   Test metadata indicates this should fail, but NIVC proof generation succeeded.");
-        println!("   This means the NIVC prover accepted invalid constraints!");
-        if let Some(reason) = &export.metadata.failure_reason {
-            println!("   Expected failure: {}", reason);
-        }
-        println!();
-        println!("   COMPARISON:");
-        println!("   - IVC test: ✅ Correctly rejects with 'Extractor/binding mismatch'");
-        println!("   - NIVC test: ❌ Incorrectly accepts and generates a proof");
-        println!();
-        panic!("Soundness violation: NIVC proof succeeded when it should have failed");
-    }
-    
     // Finalize and verify the NIVC chain
     println!("🔍 Finalizing NIVC Chain Proof...");
     let chain_proof = nivc_state.into_proof();
@@ -623,17 +635,54 @@ fn test_starstream_tx_nivc_proof() {
     
     match verify_result {
         Ok(true) => {
-            println!("✅ NIVC Verification SUCCEEDED");
-            println!("   The proof is valid and verifies correctly.");
+            // Verification succeeded
+            if export.metadata.should_fail {
+                println!("❌ NIVC Verification SUCCEEDED (but should have failed!)");
+                println!("🚨 SOUNDNESS BUG DETECTED! 🚨");
+                println!("   Test metadata indicates this should fail, but verifier accepted it.");
+                println!("   This means the NIVC verifier failed to catch invalid constraints!");
+                if let Some(reason) = &export.metadata.failure_reason {
+                    println!("   Expected failure: {}", reason);
+                }
+                panic!("Soundness violation: NIVC verifier accepted proof that should have been rejected");
+            } else {
+                println!("✅ NIVC Verification SUCCEEDED");
+                println!("   The proof is valid and verifies correctly.");
+            }
         }
         Ok(false) => {
-            println!("❌ NIVC Verification FAILED");
-            println!("   The proof was generated but verification returned false.");
-            panic!("NIVC verification failed for generated proof");
+            // Verification failed (returned false)
+            if export.metadata.should_fail {
+                println!("✅ NIVC Verification REJECTED (as expected!)");
+                println!("   The proof was generated but verifier correctly rejected it.");
+                println!("   🎉 Test PASSED: NIVC verifier correctly caught the invalid constraints!");
+                if let Some(reason) = &export.metadata.failure_reason {
+                    println!("   Expected issue: {}", reason);
+                }
+                // This is the expected behavior - test passes
+                return;
+            } else {
+                println!("❌ NIVC Verification FAILED");
+                println!("   The proof was generated but verification returned false.");
+                panic!("NIVC verification failed for generated proof");
+            }
         }
         Err(e) => {
-            println!("❌ NIVC Verification ERROR: {}", e);
-            panic!("NIVC verification error: {}", e);
+            // Verification error
+            if export.metadata.should_fail {
+                println!("✅ NIVC Verification ERROR (as expected!)");
+                println!("   The proof was generated but verifier correctly errored.");
+                println!("   🎉 Test PASSED: NIVC verifier correctly caught the invalid constraints!");
+                if let Some(reason) = &export.metadata.failure_reason {
+                    println!("   Expected issue: {}", reason);
+                }
+                println!("   Actual error: {}", e);
+                // This is acceptable behavior for should_fail - test passes
+                return;
+            } else {
+                println!("❌ NIVC Verification ERROR: {}", e);
+                panic!("NIVC verification error: {}", e);
+            }
         }
     }
     

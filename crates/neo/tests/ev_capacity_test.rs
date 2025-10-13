@@ -45,7 +45,7 @@ fn large_y_len_augmented_ccs_should_eventually_fit_after_ev_aggregation() {
 
     // Attempt to build the augmented CCS. With the D-cap removed, this should succeed
     // even though EV rows dominate. (Future EV aggregation reduces EV to 2 rows.)
-    let augmented = neo::ivc::build_augmented_ccs_linked_with_rlc(
+    let augmented = neo::build_augmented_ccs_linked_with_rlc(
         &step_ccs,
         step_x_len,
         &y_step_offsets,
@@ -211,7 +211,7 @@ fn augmented_ccs_padding_regression() {
     let const1_idx = 0usize; // first witness column treated as constant 1 in tests
     let step_x_len = 0usize;
 
-    let augmented = neo::ivc::build_augmented_ccs_linked_with_rlc(
+    let augmented = neo::build_augmented_ccs_linked_with_rlc(
         &step_ccs,
         step_x_len,
         &y_step_offsets,

@@ -8,7 +8,7 @@
 ///! We need at least 3 rows to get ℓ >= 2 after power-of-2 padding.
 
 use neo::{F, NeoParams, Accumulator};
-use neo::ivc::{prove_ivc_step_with_extractor, verify_ivc_step, StepBindingSpec, LastNExtractor};
+use neo::{prove_ivc_step_with_extractor, verify_ivc_step_legacy, StepBindingSpec, LastNExtractor};
 use neo_ccs::{CcsStructure, relations::check_ccs_rowwise_zero, Mat, SparsePoly, Term};
 use p3_field::PrimeCharacteristicRing;
 
@@ -142,7 +142,7 @@ fn test_valid_witness_passes_verification() {
     ).expect("prove should succeed for valid witness");
 
     // Verify
-    let ok = verify_ivc_step(
+    let ok = verify_ivc_step_legacy(
         &ccs,
         &step_res.proof,
         &acc,
@@ -177,7 +177,7 @@ fn test_invalid_witness_is_caught() {
     ).expect("prove succeeds (soundness check is in verify)");
 
     // Verify - should REJECT because witness doesn't satisfy CCS
-    let ok = verify_ivc_step(
+    let ok = verify_ivc_step_legacy(
         &ccs,
         &step_res.proof,
         &acc,
@@ -282,7 +282,7 @@ fn test_large_ccs_ell_4() {
     ).expect("prove should succeed for valid witness");
 
     // Verify
-    let ok = verify_ivc_step(
+    let ok = verify_ivc_step_legacy(
         &ccs,
         &step_res.proof,
         &acc,
@@ -323,7 +323,7 @@ fn test_valid_witness_passes_with_non_empty_coords() {
     ).expect("prove should succeed for valid witness (non-base case)");
 
     // Verify must accept
-    let ok = verify_ivc_step(&ccs, &step1_res.proof, acc1, &binding, &params, None)
+    let ok = verify_ivc_step_legacy(&ccs, &step1_res.proof, acc1, &binding, &params, None)
         .expect("verify should not error");
     assert!(ok, "Valid witness should verify even when c_coords is non-empty (step 2 of chain)");
 }
@@ -359,7 +359,7 @@ fn test_invalid_witness_is_caught_with_non_empty_coords() {
 
     // A correct verifier should REJECT here because the witness is invalid.
     // If this returns true on your current branch, you've reproduced the bug.
-    let ok = verify_ivc_step(&ccs, &step_res.proof, acc1, &binding, &params, None)
+    let ok = verify_ivc_step_legacy(&ccs, &step_res.proof, acc1, &binding, &params, None)
         .expect("verify should not error");
 
     assert!(
@@ -396,7 +396,7 @@ fn test_mid_round_check_large_ccs_valid_with_non_empty_coords() {
         &params, &ccs, &witness, acc1, 1, None, &extractor, &binding,
     ).expect("prove should succeed for valid witness (non-base case)");
 
-    let ok = verify_ivc_step(&ccs, &step1_res.proof, acc1, &binding, &params, None)
+    let ok = verify_ivc_step_legacy(&ccs, &step1_res.proof, acc1, &binding, &params, None)
         .expect("verify should not error");
 
     assert!(ok, "Valid witness should pass at non-base case (ℓ=4).");
@@ -432,7 +432,7 @@ fn test_mid_round_check_large_ccs_invalid_with_non_empty_coords() {
     ).expect("prove succeeds; soundness checked by verifier");
 
     // Verifier must reject
-    let ok = verify_ivc_step(&ccs, &step_res.proof, acc1, &binding, &params, None)
+    let ok = verify_ivc_step_legacy(&ccs, &step_res.proof, acc1, &binding, &params, None)
         .expect("verify should not error");
 
     assert!(

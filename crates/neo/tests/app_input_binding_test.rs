@@ -2,7 +2,7 @@
 /// to prevent public input malleability attacks.
 
 use neo::{F, NeoParams};
-use neo::ivc::{Accumulator, StepBindingSpec, prove_ivc_step_with_extractor, verify_ivc_step, LastNExtractor};
+use neo::{Accumulator, StepBindingSpec, prove_ivc_step_with_extractor, verify_ivc_step_legacy, LastNExtractor};
 use neo_ccs::{Mat, r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
 
@@ -87,7 +87,7 @@ fn test_app_input_binding_prevents_malleability() {
     match result {
         Ok(step_result) => {
             // Prover generated proof, but verifier must reject
-            let verify_result = verify_ivc_step(
+            let verify_result = verify_ivc_step_legacy(
                 &step_ccs,
                 &step_result.proof,
                 &prev_acc,
@@ -163,7 +163,7 @@ fn test_app_input_binding_allows_honest_proof() {
     // Honest proof should succeed
     let step_result = result.expect("Honest proof should be generated");
     
-    let verify_result = verify_ivc_step(
+    let verify_result = verify_ivc_step_legacy(
         &step_ccs,
         &step_result.proof,
         &prev_acc,

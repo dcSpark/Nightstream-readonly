@@ -31,6 +31,7 @@ pub mod bridge_adapter;
 // Re-export main types
 pub use error::{FoldingError, PiCcsError, PiRlcError, PiDecError};
 use neo_transcript::{Poseidon2Transcript, Transcript};
+use blake3::Hasher;
 pub use strong_set::{StrongSamplingSet, VerificationError, ds};
 pub use verify_linear::{verify_linear_rlc, verify_linear_rlc as verify_linear};
 pub use pi_ccs::{pi_ccs_prove, pi_ccs_verify, PiCcsProof, eval_tie_constraints, eval_range_decomp_constraints};  
@@ -66,7 +67,6 @@ pub struct FoldingProof {
 /// fingerprint that higher layers can bind into a final SNARK while the
 /// full fold-verifier circuit is being brought up.
 pub fn folding_proof_digest(proof: &FoldingProof) -> [u8; 32] {
-    use blake3::Hasher;
     let mut h = Hasher::new();
     h.update(b"neo/folding_proof_digest/v1");
     // Pi-CCS: bind header digest and round counts
