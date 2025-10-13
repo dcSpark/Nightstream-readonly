@@ -70,7 +70,7 @@ fn fold_roundtrip_chain_ok() -> anyhow::Result<()> {
             y_step: &y_step,
             binding_spec: &binding,
             transcript_only_app_inputs: false,
-            prev_augmented_x: proofs.last().map(|p| p.step_augmented_public_input.as_slice()),
+            prev_augmented_x: proofs.last().map(|p| p.public_inputs.step_augmented_public_input()),
         };
         let (res, me, wit, lhs_next) = prove_ivc_step_chained(
             input,
@@ -109,10 +109,10 @@ fn fold_roundtrip_chain_ok() -> anyhow::Result<()> {
         for (i, step_proof) in chain.steps.iter().enumerate() {
             println!("🔍 DEBUG: Verifying step {} individually", i);
             println!("  prev_step_x: {:?}", prev_step_x.as_ref().map(|x| x.len()));
-            println!("  step_public_input: {:?}", step_proof.step_public_input.len());
-            println!("  step_rho: {}", step_proof.step_rho.as_canonical_u64());
-            println!("  step_y_prev: {:?}", step_proof.step_y_prev.len());
-            println!("  step_y_next: {:?}", step_proof.step_y_next.len());
+            println!("  step_public_input: {:?}", step_proof.public_inputs.wrapper_public_input_x().len());
+            println!("  step_rho: {}", step_proof.public_inputs.rho().as_canonical_u64());
+            println!("  step_y_prev: {:?}", step_proof.public_inputs.y_prev().len());
+            println!("  step_y_next: {:?}", step_proof.public_inputs.y_next().len());
                 
                 // Verify step (now includes folding verification)
                 let step_ok = verify_ivc_step_legacy(&step_ccs, step_proof, &current_acc, &binding, &params, prev_step_x.as_deref())
@@ -127,7 +127,7 @@ fn fold_roundtrip_chain_ok() -> anyhow::Result<()> {
                 
                 current_acc = step_proof.next_accumulator.clone();
                 // Reconstruct the full augmented public input for the next step
-                prev_step_x = Some(step_proof.step_augmented_public_input.clone());
+                prev_step_x = Some(step_proof.public_inputs.step_augmented_public_input().to_vec());
         }
     }
     
@@ -167,7 +167,7 @@ fn fold_roundtrip_rejects_mutated_rhs_commitment() -> anyhow::Result<()> {
         }
     }
 
-    let initial_acc = Accumulator { c_z_digest: [0u8; 32], c_coords: vec![], y_compact: vec![F::ZERO], step: 0 };
+    let initial_acc = Accumulator { c_z_digest: [0u8; 32], c_coords: vec![], y_compact: y0, step: 0 };
     let ok = verify_ivc_step_legacy(
         &step_ccs,
         &step_proof,

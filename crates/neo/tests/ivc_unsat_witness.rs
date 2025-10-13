@@ -228,22 +228,9 @@ fn ivc_cross_link_vulnerability_pi_ccs_rhs_vs_parent_me() {
         }
         
         // Construct the malicious IvcProof with tampered pi_ccs_outputs
-        neo::IvcProof {
-            step_proof: valid_proof_res.proof.step_proof.clone(),
-            next_accumulator: valid_proof_res.proof.next_accumulator.clone(),
-            step: valid_proof_res.proof.step,
-            metadata: valid_proof_res.proof.metadata.clone(),
-            step_public_input: valid_proof_res.proof.step_public_input.clone(),
-            step_augmented_public_input: valid_proof_res.proof.step_augmented_public_input.clone(),
-            prev_step_augmented_public_input: valid_proof_res.proof.prev_step_augmented_public_input.clone(),
-            step_rho: valid_proof_res.proof.step_rho,
-            step_y_prev: valid_proof_res.proof.step_y_prev.clone(),
-            step_y_next: valid_proof_res.proof.step_y_next.clone(),
-            c_step_coords: valid_proof_res.proof.c_step_coords.clone(),
-            me_instances: valid_proof_res.proof.me_instances.clone(), // Unchanged
-            digit_witnesses: valid_proof_res.proof.digit_witnesses.clone(), // Unchanged
-            folding_proof: Some(malicious_folding), // TAMPERED folding proof
-        }
+        let mut malicious_proof_inner = valid_proof_res.proof.clone();
+        malicious_proof_inner.folding_proof = Some(malicious_folding); // TAMPERED folding proof
+        malicious_proof_inner
     };
 
     // Attempt verification

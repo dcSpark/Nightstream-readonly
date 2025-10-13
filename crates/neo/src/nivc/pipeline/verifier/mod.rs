@@ -45,7 +45,7 @@ pub fn verify_chain(
         let expected_app = expected_app_inputs(j, &sp.step_io, &acc);
         
         // Enforce prefix/suffix equality
-        let step_x = &sp.inner.step_public_input;
+        let step_x = sp.inner.public_inputs.wrapper_public_input_x();
         if !check_step_x_prefix_suffix(step_x, &acc_prefix, &expected_app) {
             return Ok(false);
         }
@@ -78,7 +78,7 @@ pub fn verify_chain(
         acc.step += 1;
 
         // Update lane-local previous augmented X for linking next time this lane is used
-        prev_aug_x_by_lane[j] = Some(sp.inner.step_augmented_public_input.clone());
+        prev_aug_x_by_lane[j] = Some(sp.inner.public_inputs.step_augmented_public_input().to_vec());
     }
 
     // Final snapshot minimal check (global y and step)

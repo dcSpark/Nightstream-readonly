@@ -302,9 +302,9 @@ pub fn finalize_ivc_chain_with_options(
     let last = chain.steps.last().unwrap();
 
     // Extract step data
-    let y_prev = last.step_y_prev.clone();
-    let y_next = last.step_y_next.clone();
-    let step_x = last.step_public_input.clone();
+    let y_prev = last.public_inputs.y_prev().to_vec();
+    let y_next = last.public_inputs.y_next().to_vec();
+    let step_x = last.public_inputs.wrapper_public_input_x().to_vec();
     let y_len = y_prev.len();
     
     // 🔒 SECURITY HARDENING: Multi-layer ρ validation to prevent transcript manipulation
@@ -333,7 +333,7 @@ pub fn finalize_ivc_chain_with_options(
         &prev_step.next_accumulator
     } else {
         // Single step: reconstruct initial accumulator from step data
-        if last.step == 0 {
+        if last.step != 0 {
             return Err("SECURITY: Cannot have first step at counter > 0 without prior steps".into());
         }
         
@@ -341,7 +341,7 @@ pub fn finalize_ivc_chain_with_options(
         if !initial_acc_storage.c_coords.is_empty() {
             return Err("SECURITY: Initial accumulator must have empty c_coords".into());
         }
-        if initial_acc_storage.step + 1 != last.step {
+        if initial_acc_storage.step != last.step {
             return Err("SECURITY: Initial step counter mismatch".into());
         }
         
@@ -367,34 +367,15 @@ pub fn finalize_ivc_chain_with_options(
     }
     
     // 3️⃣ Validate c_step_coords dimension (Pattern-B pre-commit dimension binding)
-    // Recompute expected dimension to prevent dimension-mismatch attacks
+    // Ajtai commitments are always d×κ in size, independent of m
     let d = neo_math::ring::D;
-    
-    // Build temporary witness structure for sizing (same logic as prover)
-    let temp_witness_for_sizing = crate::build_linked_augmented_witness(
-        &vec![F::ZERO; descriptor.ccs.m],
-        &descriptor.spec.y_step_indices,
-        F::ONE // temp ρ for sizing
-    );
-    let temp_y_next = prev_acc.y_compact.clone();
-    let final_public_input_for_sizing = crate::build_augmented_public_input_for_step(
-        &step_x,
-        F::ONE, // ρ=1 for sizing
-        &prev_acc.y_compact,
-        &temp_y_next
-    );
-    
-    let mut z_final_for_sizing = final_public_input_for_sizing.clone();
-    z_final_for_sizing.extend_from_slice(&temp_witness_for_sizing);
-    let decomp_final = crate::decomp_b(&z_final_for_sizing, params.b, d, crate::DecompStyle::Balanced);
-    let expected_m_final = decomp_final.len() / d;
-    let expected_num_coords = params.kappa as usize * expected_m_final;
+    let expected_num_coords = d * params.kappa as usize;
     
     if last.c_step_coords.len() != expected_num_coords {
         return Err(format!(
-            "SECURITY: c_step_coords dimension mismatch. Expected {} (κ={} × m_final={}), got {}. \
+            "SECURITY: c_step_coords dimension mismatch. Expected {} (d={} × κ={}), got {}. \
              This prevents dimension-based transcript manipulation.",
-            expected_num_coords, params.kappa, expected_m_final, last.c_step_coords.len()
+            expected_num_coords, d, params.kappa, last.c_step_coords.len()
         ).into());
     }
     
@@ -417,11 +398,11 @@ pub fn finalize_ivc_chain_with_options(
     }
     
     // 6️⃣ Strict equality check - no bypass allowed
-    if last.step_rho != rho_computed {
+    if last.public_inputs.rho() != rho_computed {
         return Err(format!(
             "SECURITY: step_rho mismatch. Proof contains {} but recomputed ρ is {}. \
              This indicates either a forged proof or transcript manipulation.",
-            last.step_rho.as_canonical_u64(),
+            last.public_inputs.rho().as_canonical_u64(),
             rho_computed.as_canonical_u64()
         ).into());
     }

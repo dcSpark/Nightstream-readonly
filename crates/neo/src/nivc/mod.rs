@@ -49,11 +49,11 @@ impl NivcState {
     /// Execute one NIVC step (forwards to pipeline::prover::step)
     pub fn step(
         &mut self,
-        which: usize,
+        lane_idx: usize,
         step_io: &[crate::F],
         step_witness: &[crate::F],
     ) -> anyhow::Result<NivcStepProof> {
-        pipeline::prove_step(self, which, step_io, step_witness)
+        pipeline::prove_step(self, lane_idx, step_io, step_witness)
     }
 }
 

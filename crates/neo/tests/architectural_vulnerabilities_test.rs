@@ -154,7 +154,7 @@ fn test_vulnerability_folding_chain_duplication() -> Result<()> {
     
     // Build the correct augmented CCS public input for the final SNARK
     let final_step = ivc_proofs.last().unwrap();
-    let step_x = final_step.step_public_input.clone();
+    let step_x = final_step.public_inputs.wrapper_public_input_x().to_vec();
     let prev_acc = &ivc_proofs[ivc_proofs.len() - 2].next_accumulator; // we ran 3 steps
     let step_data = build_step_transcript_data(prev_acc, final_step.step, &step_x);
     let step_digest = create_step_digest(&step_data);
@@ -167,7 +167,7 @@ fn test_vulnerability_folding_chain_duplication() -> Result<()> {
     let program = NivcProgram::new(vec![NivcStepSpec { ccs: step_ccs.clone(), binding: binding_spec }]);
     let steps: Vec<neo::NivcStepProof> = ivc_proofs
         .iter()
-        .map(|p| neo::NivcStepProof { lane_idx: 0, step_io: p.step_public_input.clone(), inner: p.clone() })
+        .map(|p| neo::NivcStepProof { lane_idx: 0, step_io: p.public_inputs.wrapper_public_input_x().to_vec(), inner: p.clone() })
         .collect();
     let mut acc = neo::nivc::NivcAccumulators::new(1, y_next.clone());
     if let (Some(meis), Some(wits)) = (&final_step.me_instances, &final_step.digit_witnesses) {
@@ -287,7 +287,7 @@ fn test_vulnerability_final_snark_public_input_format() -> Result<()> {
     let program = NivcProgram::new(vec![NivcStepSpec { ccs: step_ccs.clone(), binding: temp_binding_spec }]);
     let steps: Vec<neo::NivcStepProof> = ivc_proofs
         .iter()
-        .map(|p| neo::NivcStepProof { lane_idx: 0, step_io: p.step_public_input.clone(), inner: p.clone() })
+        .map(|p| neo::NivcStepProof { lane_idx: 0, step_io: p.public_inputs.wrapper_public_input_x().to_vec(), inner: p.clone() })
         .collect();
     let last = ivc_proofs.last().unwrap();
     let mut acc = neo::nivc::NivcAccumulators::new(1, last.next_accumulator.y_compact.clone());

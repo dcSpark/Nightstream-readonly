@@ -51,7 +51,7 @@ fn app_public_inputs_accepted_now() {
     let d = poseidon2_goldilocks::poseidon2_hash_packed_bytes(&bytes);
     let digest_prefix: Vec<F> = d.iter().map(|x| F::from_u64(x.as_canonical_u64())).collect();
 
-    let x = &ok.proof.step_public_input;
+    let x = ok.proof.public_inputs.wrapper_public_input_x();
     assert!(x.len() >= digest_prefix.len() + app_inputs.len());
     assert_eq!(&x[..digest_prefix.len()], &digest_prefix[..]);
 }
@@ -74,9 +74,12 @@ fn tampered_digest_prefix_rejected() {
 
     // Tamper with digest prefix
     let mut forged = ok.proof.clone();
-    if !forged.step_public_input.is_empty() {
-        forged.step_public_input[0] = F::from_u64(999);
+    if !forged.public_inputs.wrapper_public_input_x().is_empty() {
+        forged.public_inputs.__test_tamper_acc_digest(&[F::from_u64(999)]);
     }
-    let valid = verify_ivc_step_legacy(&step_ccs, &forged, &prev_acc, &binding, &params, None).expect("verifier should not error");
-    assert!(!valid, "verifier must reject when digest prefix does not match H(prev_acc)");
+    let result = verify_ivc_step_legacy(&step_ccs, &forged, &prev_acc, &binding, &params, None);
+    assert!(result.is_err(), "verifier must error when digest prefix does not match H(prev_acc)");
+    let err_msg = result.unwrap_err().to_string();
+    assert!(err_msg.contains("Las binding check failed") || err_msg.contains("step_x prefix does not match"), 
+            "error should indicate Las binding check failure, got: {}", err_msg);
 }

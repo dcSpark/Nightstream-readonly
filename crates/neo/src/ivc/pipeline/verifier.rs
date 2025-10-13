@@ -30,66 +30,42 @@ pub fn verify_ivc_step(
 ) -> Result<bool, Box<dyn std::error::Error>> {
     // 0. Enforce Las binding: step_x must equal H(prev_accumulator)
     let expected_prefix = compute_accumulator_digest_fields(prev_accumulator)?;
-    if ivc_proof.step_public_input.len() < expected_prefix.len() {
+    let step_public_input = ivc_proof.public_inputs.wrapper_public_input_x();
+    if step_public_input.len() < expected_prefix.len() {
         return Err(format!(
             "Step public input too short: expected at least {} bytes, got {}",
             expected_prefix.len(),
-            ivc_proof.step_public_input.len()
+            step_public_input.len()
         ).into());
     }
-    if ivc_proof.step_public_input[..expected_prefix.len()] != expected_prefix[..] {
+    if step_public_input[..expected_prefix.len()] != expected_prefix[..] {
         return Err("Las binding check failed: step_x prefix does not match H(prev_accumulator)".into());
     }
 
     // 1. Reconstruct the augmented CCS that was used for proving
-    let step_data = build_step_transcript_data(prev_accumulator, ivc_proof.step, &ivc_proof.step_public_input);
+    let step_data = build_step_transcript_data(prev_accumulator, ivc_proof.step, step_public_input);
     let step_digest = create_step_digest(&step_data);
     
     // 2. Build base augmented CCS using TRUSTED binding metadata
     // 🔒 SECURITY: Use TRUSTED binding_spec, NOT proof-supplied values!
     let y_len = prev_accumulator.y_compact.len();
-    let step_x_len = ivc_proof.step_public_input.len();
+    let step_x_len = step_public_input.len();
     
     // 🔒 SECURITY (Pattern-B pre-commit dimension binding): 
-    // Recompute the expected pre-commit dimension to prevent attackers from 
-    // feeding coordinates of the wrong dimension while still producing a hash.
-    // This mirrors the prover's "temp" sizing pass that determines m_final.
-    let d = neo_math::ring::D;
-    
-    // Temp witness with ρ=ONE to fix structure (same as prover's sizing pass)
-    let temp_witness_for_sizing = build_linked_augmented_witness(
-        &vec![F::ZERO; step_ccs.m], // dummy step witness for sizing
-        &binding_spec.y_step_offsets,
-        F::ONE // temporary rho for dimension calculation
-    );
-    let temp_y_next = prev_accumulator.y_compact.clone(); // placeholder
-    
-    // Build final public input structure for sizing (uses ρ=ONE, matching prover)
-    let final_public_input_for_sizing = build_augmented_public_input_for_step(
-        &ivc_proof.step_public_input, 
-        F::ONE, // ρ=ONE for sizing (matches prover's final_public_input calculation)
-        &prev_accumulator.y_compact, 
-        &temp_y_next
-    );
-    
-    // Calculate expected final dimensions: [final_public_input || temp_witness]
-    // This matches the prover's calculation of m_final at lines 202-205
-    let mut z_final_for_sizing = final_public_input_for_sizing.clone();
-    z_final_for_sizing.extend_from_slice(&temp_witness_for_sizing);
-    let decomp_final = crate::decomp_b(&z_final_for_sizing, params.b, d, crate::DecompStyle::Balanced);
-    let expected_m_final = decomp_final.len() / d;
-    let expected_num_coords = params.kappa as usize * expected_m_final;
-    
     // Guard B: Bind c_step_coords dimension before using it for ρ derivation
+    // Ajtai commitments are always d×κ in size, independent of m
+    let d = neo_math::ring::D;
+    let expected_num_coords = d * params.kappa as usize;
+    
     if ivc_proof.c_step_coords.len() != expected_num_coords {
         #[cfg(feature = "neo-logs")]
         eprintln!(
-            "❌ SECURITY GUARD B (Pattern-B dimension binding): c_step_coords length mismatch. Expected {} (κ={} × m_final={}), got {}",
-            expected_num_coords, params.kappa, expected_m_final, ivc_proof.c_step_coords.len()
+            "❌ SECURITY GUARD B (Pattern-B dimension binding): c_step_coords length mismatch. Expected {} (d={} × κ={}), got {}",
+            expected_num_coords, d, params.kappa, ivc_proof.c_step_coords.len()
         );
         return Err(format!(
-            "SECURITY GUARD B (Pattern-B dimension binding): c_step_coords length mismatch. Expected {} (κ={} × m_final={}), got {}",
-            expected_num_coords, params.kappa, expected_m_final, ivc_proof.c_step_coords.len()
+            "SECURITY GUARD B (Pattern-B dimension binding): c_step_coords length mismatch. Expected {} (d={} × κ={}), got {}",
+            expected_num_coords, d, params.kappa, ivc_proof.c_step_coords.len()
         ).into());
     }
     
@@ -101,18 +77,18 @@ pub fn verify_ivc_step(
     // No bypass for F::ZERO - all proofs must have valid step_rho.
     #[cfg(feature = "neo-logs")]
     eprintln!("🔍 DEBUG: Verifier recomputed ρ = {}, proof.step_rho = {}", 
-              rho.as_canonical_u64(), ivc_proof.step_rho.as_canonical_u64());
-    if ivc_proof.step_rho != rho {
+              rho.as_canonical_u64(), ivc_proof.public_inputs.rho().as_canonical_u64());
+    if ivc_proof.public_inputs.rho() != rho {
         #[cfg(feature = "neo-logs")]
         eprintln!(
             "❌ SECURITY GUARD A (Strict ρ binding): Recomputed ρ ({}) != proof.step_rho ({})",
             rho.as_canonical_u64(),
-            ivc_proof.step_rho.as_canonical_u64()
+            ivc_proof.public_inputs.rho().as_canonical_u64()
         );
         return Err(format!(
             "SECURITY GUARD A (Strict ρ binding): Recomputed ρ ({}) != proof.step_rho ({})",
             rho.as_canonical_u64(),
-            ivc_proof.step_rho.as_canonical_u64()
+            ivc_proof.public_inputs.rho().as_canonical_u64()
         ).into());
     }
     
@@ -124,13 +100,13 @@ pub fn verify_ivc_step(
         &binding_spec.y_step_offsets,
         rho
     );
-    let step_public_input = build_augmented_public_input_for_step(
-        &ivc_proof.step_public_input,
+    let step_augmented_input = build_augmented_public_input_for_step(
+        step_public_input,
         rho,
         &prev_accumulator.y_compact,
         &ivc_proof.next_accumulator.y_compact
     );
-    if step_public_input != ivc_proof.step_augmented_public_input {
+    if step_augmented_input != ivc_proof.public_inputs.step_augmented_public_input() {
         return Ok(false);
     }
 
@@ -146,7 +122,7 @@ pub fn verify_ivc_step(
     }
     
     // Compute full witness dimensions
-    let mut full_step_z = step_public_input.clone();
+    let mut full_step_z = step_augmented_input.to_vec();
     full_step_z.extend_from_slice(&step_witness_augmented);
     let decomp_z = crate::decomp_b(
         &full_step_z,
@@ -200,10 +176,10 @@ pub fn verify_ivc_step(
     
     // 4. Build public input using the recomputed ρ
     let public_input = build_augmented_public_input_for_step(
-        &ivc_proof.step_public_input,                 // step_x 
-        rho,                                          // ρ (PUBLIC - CRITICAL!)
-        &prev_accumulator.y_compact,                  // y_prev
-        &ivc_proof.next_accumulator.y_compact         // y_next
+        ivc_proof.public_inputs.wrapper_public_input_x(), // step_x 
+        rho,                                              // ρ (PUBLIC - CRITICAL!)
+        &prev_accumulator.y_compact,                      // y_prev
+        &ivc_proof.next_accumulator.y_compact             // y_next
     );
     
     // 5. Digest-only verification (skip per-step SNARK compression)
@@ -370,7 +346,7 @@ pub fn verify_ivc_chain(
         // Cross-check prover-supplied augmented input matches verifier reconstruction.
         let (expected_augmented, _) = compute_augmented_public_input_for_step(&acc_before_curr_step, step_proof)
             .map_err(|e| anyhow::anyhow!("failed to compute augmented input: {}", e))?;
-        if expected_augmented != step_proof.step_augmented_public_input { return Ok(false); }
+        if expected_augmented != step_proof.public_inputs.step_augmented_public_input() { return Ok(false); }
 
         // Enforce per-step verification (includes folding checks)
         let ok = verify_ivc_step(
@@ -385,7 +361,7 @@ pub fn verify_ivc_chain(
 
         // Advance and thread linkage
         acc_before_curr_step = step_proof.next_accumulator.clone();
-        prev_augmented_x = Some(step_proof.step_augmented_public_input.clone());
+        prev_augmented_x = Some(step_proof.public_inputs.step_augmented_public_input().to_vec());
     }
 
     Ok(acc_before_curr_step.step == chain_proof.chain_length)

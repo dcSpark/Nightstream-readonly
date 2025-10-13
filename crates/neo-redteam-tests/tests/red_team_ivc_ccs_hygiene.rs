@@ -2,7 +2,7 @@
 
 use neo::{F, NeoParams};
 use neo::{Accumulator, LastNExtractor, StepBindingSpec,
-    prove_ivc_step_with_extractor, verify_ivc_step};
+    prove_ivc_step_with_extractor, verify_ivc_step_legacy};
 use neo_ccs::{Mat, r1cs::r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
 
@@ -61,7 +61,7 @@ fn hygiene_rho_outputs_count_mismatch_is_error() {
     folding.pi_rlc_proof.rho_elems.pop(); // mismatch
     proof.folding_proof = Some(folding);
 
-    let res = verify_ivc_step(&step_ccs, &proof, &prev_acc, &binding, &params, None);
+    let res = verify_ivc_step_legacy(&step_ccs, &proof, &prev_acc, &binding, &params, None);
     assert!(res.is_err(), "expected Err(..) for |ρ| != |outputs|, got {:?}", res);
 }
 
@@ -74,7 +74,7 @@ fn hygiene_inconsistent_t_across_outputs_is_error() {
     folding.pi_ccs_outputs[0].y.push(vec![neo_math::K::ZERO; neo_math::D]); // change t for first output
     proof.folding_proof = Some(folding);
 
-    let res = verify_ivc_step(&step_ccs, &proof, &prev_acc, &binding, &params, None);
+    let res = verify_ivc_step_legacy(&step_ccs, &proof, &prev_acc, &binding, &params, None);
     assert!(res.is_err(), "expected Err(..) for inconsistent t, got {:?}", res);
 }
 
@@ -88,6 +88,6 @@ fn hygiene_y_vector_wrong_length_is_error() {
     folding.pi_ccs_outputs[0].y[0].pop(); // y[j].len() = D-1
     proof.folding_proof = Some(folding);
 
-    let res = verify_ivc_step(&step_ccs, &proof, &prev_acc, &binding, &params, None);
+    let res = verify_ivc_step_legacy(&step_ccs, &proof, &prev_acc, &binding, &params, None);
     assert!(res.is_err(), "expected Err(..) for |y[j]| != D, got {:?}", res);
 }

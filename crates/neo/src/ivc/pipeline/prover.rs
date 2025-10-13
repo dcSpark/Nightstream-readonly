@@ -96,7 +96,7 @@ pub fn prove_ivc_step_chained(
             combined.extend_from_slice(app_inputs);
             combined
         }
-        None => acc_digest_fields,
+        None => acc_digest_fields.clone(),
     };
 
     let step_data = build_step_transcript_data(&input.prev_accumulator, input.step, &step_x);
@@ -580,17 +580,26 @@ pub fn prove_ivc_step_chained(
         public_results: y_next.clone(),   
         meta: crate::ProofMeta { num_y_compact: y_len, num_app_outputs: y_next.len() },
     };
+    
+    // Construct PublicInputSegments from components
+    // The prover doesn't need to know the internal structure of public_input
+    // (it might be NIVC metadata or actual app inputs - we treat it uniformly)
+    let public_inputs = PublicInputSegments::new(
+        acc_digest_fields,                   // H(prev_acc)
+        vec![],                              // app_x: empty (structure unknown to prover)
+        input.public_input.unwrap_or(&[]).to_vec(), // transport: NIVC envelope or app inputs
+        rho,
+        input.prev_accumulator.y_compact.clone(),
+        y_next.clone(),
+    );
+    
     let ivc_proof = IvcProof {
         step_proof,
         next_accumulator: next_accumulator.clone(),
         step: input.step,
         metadata: None,
-        step_public_input: step_x,
-        step_augmented_public_input: step_public_input.clone(),
+        public_inputs,
         prev_step_augmented_public_input: prev_augmented_public_input,
-        step_rho: rho,
-        step_y_prev: input.prev_accumulator.y_compact.clone(),
-        step_y_next: y_next.clone(),
         c_step_coords,
         me_instances: Some(me_instances.clone()), // Keep for final SNARK generation (TODO: optimize)
         digit_witnesses: Some(digit_witnesses.clone()), // Keep for final SNARK generation (TODO: optimize)
@@ -648,7 +657,7 @@ pub fn prove_ivc_chain(
             y_step: &y_step,
             binding_spec,
             transcript_only_app_inputs: false,
-            prev_augmented_x: step_proofs.last().map(|p: &IvcProof| p.step_augmented_public_input.as_slice()),
+            prev_augmented_x: step_proofs.last().map(|p: &IvcProof| p.public_inputs.step_augmented_public_input()),
         };
 
         let (step_result, me_out, me_wit_out, lhs_next) =

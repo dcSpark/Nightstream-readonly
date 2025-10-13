@@ -102,7 +102,7 @@ pub fn step(
 
     // Cache augmented public input for next use of this lane
     state.prev_aug_x_by_lane[lane_idx] =
-        Some(res.proof.step_augmented_public_input.clone());
+        Some(res.proof.public_inputs.step_augmented_public_input().to_vec());
 
     // Return step proof
     let sp = NivcStepProof {

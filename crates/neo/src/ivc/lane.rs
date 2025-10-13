@@ -118,8 +118,9 @@ pub fn verify_ivc_step(
     // In single-lane IVC, there's no lane selector in step_io (it's implicit: always lane 0)
     // Extract step_io from proof's step_public_input by removing the accumulator digest prefix
     let acc_digest_fields = crate::shared::digest::compute_accumulator_digest_fields(prev_accumulator)?;
-    let step_io = if ivc_proof.step_public_input.len() > acc_digest_fields.len() {
-        ivc_proof.step_public_input[acc_digest_fields.len()..].to_vec()
+    let step_public_input = ivc_proof.public_inputs.wrapper_public_input_x();
+    let step_io = if step_public_input.len() > acc_digest_fields.len() {
+        step_public_input[acc_digest_fields.len()..].to_vec()
     } else {
         vec![]
     };
@@ -229,13 +230,34 @@ pub fn verify_ivc_chain(
     }]);
 
     // Convert IVC chain to NIVC chain
-    let nivc_steps: Vec<NivcStepProof> = chain.steps.iter().map(|ivc_proof| {
+    let nivc_steps: Vec<NivcStepProof> = chain.steps.iter().enumerate().map(|(idx, ivc_proof)| {
         // Extract step_io from step_public_input (remove accumulator digest prefix)
-        // For simplicity, use the step_public_input directly (NIVC verifier will validate it)
-        let step_io = vec![]; // Will be reconstructed by NIVC verifier from step_public_input
+        // The proof was generated through the lane wrapper, so app_inputs = [lane_idx || step_io || lanes_root]
+        let acc_digest_len = if idx == 0 {
+            // For first step, compute digest length from initial accumulator
+            crate::shared::digest::compute_accumulator_digest_fields(initial_accumulator)
+                .map(|d| d.len())
+                .unwrap_or(4)
+        } else {
+            // For subsequent steps, we can use the previous proof's accumulator
+            4 // DIGEST_LEN is always 4
+        };
+        
+        let step_public_input = ivc_proof.public_inputs.wrapper_public_input_x();
+        let step_io = if step_public_input.len() > acc_digest_len {
+            let app_inputs = &step_public_input[acc_digest_len..];
+            // app_inputs format: [lane_idx(1) || step_io || lanes_root(4)]
+            if app_inputs.len() > 5 {
+                app_inputs[1..app_inputs.len()-4].to_vec()
+            } else {
+                vec![]
+            }
+        } else {
+            vec![]
+        };
         
         NivcStepProof {
-            lane_idx: 0, // Lane 0
+            lane_idx: 0,
             step_io,
             inner: ivc_proof.clone(),
         }

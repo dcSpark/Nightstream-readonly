@@ -41,7 +41,7 @@ fn prove_ivc_final_snark_compat(
     // Build a synthetic NIVC chain from IVC proofs
     let steps: Vec<neo::NivcStepProof> = ivc_proofs
         .iter()
-        .map(|p| neo::NivcStepProof { lane_idx: 0, step_io: p.step_public_input.clone(), inner: p.clone() })
+        .map(|p| neo::NivcStepProof { lane_idx: 0, step_io: p.public_inputs.wrapper_public_input_x().to_vec(), inner: p.clone() })
         .collect();
     let last = ivc_proofs.last().unwrap();
     let mut acc = neo::nivc::NivcAccumulators::new(1, last.next_accumulator.y_compact.clone());
@@ -177,8 +177,8 @@ fn run_ivc_chain(num_steps: usize) -> Result<IvcChainMetrics> {
     let final_snark_start = Instant::now();
     // Build proper final public input format: [step_x || ρ || y_prev || y_next]
     let final_ivc_proof = ivc_proofs.last().unwrap();
-    let step_x = &final_ivc_proof.step_public_input;
-    let rho = final_ivc_proof.step_rho;
+    let step_x = final_ivc_proof.public_inputs.wrapper_public_input_x();
+    let rho = final_ivc_proof.public_inputs.rho();
     let y_prev = if ivc_proofs.len() > 1 {
         &ivc_proofs[ivc_proofs.len() - 2].next_accumulator.y_compact
     } else {
@@ -293,8 +293,8 @@ fn test_negative_mutate_early_step_witness() -> Result<()> {
     
     // Build proper final public input format: [step_x || ρ || y_prev || y_next]
     let final_ivc_proof = ivc_proofs.last().unwrap();
-    let step_x = &final_ivc_proof.step_public_input;
-    let rho = final_ivc_proof.step_rho;
+    let step_x = final_ivc_proof.public_inputs.wrapper_public_input_x();
+    let rho = final_ivc_proof.public_inputs.rho();
     let y_prev = if ivc_proofs.len() > 1 {
         &ivc_proofs[ivc_proofs.len() - 2].next_accumulator.y_compact
     } else {

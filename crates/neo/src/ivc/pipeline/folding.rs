@@ -164,7 +164,7 @@ pub fn verify_ivc_step_folding(
     // Compute expected RHS augmented x and ensure it matches both the proof copy and stored input.
     let (x_rhs_expected, _) = compute_augmented_public_input_for_step(prev_acc, ivc_proof)
         .map_err(|e| anyhow::anyhow!("failed to compute augmented input: {}", e))?;
-    if x_rhs_expected != ivc_proof.step_augmented_public_input {
+    if x_rhs_expected != ivc_proof.public_inputs.step_augmented_public_input() {
         #[cfg(feature = "neo-logs")]
         eprintln!("[folding] early: RHS augmented input mismatch vs proof copy");
         return Ok(false);
@@ -195,8 +195,8 @@ pub fn verify_ivc_step_folding(
     // Consider per-lane base case: first use of this running ME (coords empty) and no prev_augmented_x provided.
     let is_lane_base_case = prev_acc.c_coords.is_empty();
     if is_lane_base_case && prev_augmented_x.is_none() {
-        let step_x_len = ivc_proof.step_public_input.len();
-        let y_len = ivc_proof.step_y_prev.len();
+        let step_x_len = ivc_proof.public_inputs.wrapper_public_input_x().len();
+        let y_len = ivc_proof.public_inputs.y_prev().len();
         if x_lhs_proof.len() != step_x_len + 1 + 2 * y_len {
             #[cfg(feature = "neo-logs")]
             eprintln!("[folding] early: base-case LHS augmented input length mismatch");

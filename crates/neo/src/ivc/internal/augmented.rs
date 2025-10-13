@@ -400,7 +400,7 @@ pub(crate) fn compute_augmented_public_input_for_step(
     prev_acc: &Accumulator,
     proof: &IvcProof,
 ) -> Result<(Vec<F>, F), Box<dyn std::error::Error>> {
-    let step_data = build_step_transcript_data(prev_acc, proof.step, &proof.step_public_input);
+    let step_data = build_step_transcript_data(prev_acc, proof.step, proof.public_inputs.wrapper_public_input_x());
     let step_digest = create_step_digest(&step_data);
     let (rho_calc, _td) = super::transcript::rho_from_transcript(prev_acc, step_digest, &proof.c_step_coords);
     
@@ -410,7 +410,7 @@ pub(crate) fn compute_augmented_public_input_for_step(
     debug_assert_ne!(rho, F::ZERO, "ρ must be non-zero for const-1 enforcement soundness");
 
     let x_aug = build_augmented_public_input_for_step(
-        &proof.step_public_input,
+        proof.public_inputs.wrapper_public_input_x(),
         rho,
         &prev_acc.y_compact,
         &proof.next_accumulator.y_compact,
