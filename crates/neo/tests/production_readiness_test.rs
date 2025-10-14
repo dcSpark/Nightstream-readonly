@@ -66,7 +66,7 @@ use p3_field::PrimeCharacteristicRing;
 
 /// Build simple incrementer CCS: next_x = prev_x + delta
 fn build_increment_ccs() -> CcsStructure<F> {
-    let rows = 1;
+    let rows = 4;  // Minimum 4 rows required (ℓ=ceil(log2(n)) must be ≥ 2)
     let cols = 4; // [const=1, prev_x, delta, next_x]
 
     let mut a_trips = Vec::new();
@@ -78,6 +78,11 @@ fn build_increment_ccs() -> CcsStructure<F> {
     a_trips.push((0, 1, -F::ONE));  // -prev_x  
     a_trips.push((0, 2, -F::ONE));  // -delta
     b_trips.push((0, 0, F::ONE));   // × const 1
+
+    // Rows 1-3: dummy constraints (0 * 1 = 0)
+    for row in 1..4 {
+        b_trips.push((row, 0, F::ONE));
+    }
 
     let a_data = triplets_to_dense(rows, cols, a_trips);
     let b_data = triplets_to_dense(rows, cols, b_trips);
@@ -194,7 +199,7 @@ fn run_ivc_chain(num_steps: usize) -> Result<IvcChainMetrics> {
     // Verify final proof using the correct CCS and public input from chained API
     let verify_start = Instant::now();
     
-    let is_valid = neo::verify(&final_augmented_ccs_actual, &final_public_input_actual, &final_proof)
+    let is_valid = neo::verify_spartan2(&final_augmented_ccs_actual, &final_public_input_actual, &final_proof)
         .map_err(|e| anyhow::anyhow!("Verification failed: {}", e))?;
     let verification_time = verify_start.elapsed();
     
@@ -313,7 +318,7 @@ fn test_negative_mutate_early_step_witness() -> Result<()> {
                 modified_public_input[0] += F::ONE; // Modify first element
             }
                 
-            let is_valid = neo::verify(&final_augmented_ccs_actual, &modified_public_input, &final_proof)
+            let is_valid = neo::verify_spartan2(&final_augmented_ccs_actual, &modified_public_input, &final_proof)
                 .map_err(|e| anyhow::anyhow!("Verification failed: {}", e))?;
             
             if is_valid {
@@ -351,7 +356,7 @@ fn test_negative_change_final_public_input() -> Result<()> {
     modified_plus1[0] = modified_plus1[0] + F::ONE;
     
     println!("   🔧 Testing with +1 modification: {:?}", modified_plus1);
-    let is_valid_plus1 = neo::verify(&metrics.final_augmented_ccs, &modified_plus1, &metrics.final_proof)
+    let is_valid_plus1 = neo::verify_spartan2(&metrics.final_augmented_ccs, &modified_plus1, &metrics.final_proof)
         .map_err(|e| anyhow::anyhow!("Verification failed: {}", e))?;
     
     if is_valid_plus1 {
@@ -367,7 +372,7 @@ fn test_negative_change_final_public_input() -> Result<()> {
     modified_minus1[0] = modified_minus1[0] - F::ONE;
     
     println!("   🔧 Testing with -1 modification: {:?}", modified_minus1);
-    let is_valid_minus1 = neo::verify(&metrics.final_augmented_ccs, &modified_minus1, &metrics.final_proof)
+    let is_valid_minus1 = neo::verify_spartan2(&metrics.final_augmented_ccs, &modified_minus1, &metrics.final_proof)
         .map_err(|e| anyhow::anyhow!("Verification failed: {}", e))?;
     
     if is_valid_minus1 {
@@ -379,7 +384,7 @@ fn test_negative_change_final_public_input() -> Result<()> {
     }
     
     // Verify original still works
-    let is_valid_original = neo::verify(&metrics.final_augmented_ccs, &metrics.final_public_input, &metrics.final_proof)
+    let is_valid_original = neo::verify_spartan2(&metrics.final_augmented_ccs, &metrics.final_public_input, &metrics.final_proof)
         .map_err(|e| anyhow::anyhow!("Verification failed: {}", e))?;
     
     if !is_valid_original {
@@ -560,9 +565,9 @@ fn test_determinism_consistent_proofs() -> Result<()> {
     // This is expected and correct behavior for a secure cryptographic system
     
     // Both proofs should verify
-    let valid1 = neo::verify(&metrics1.final_augmented_ccs, &metrics1.final_public_input, &metrics1.final_proof)
+    let valid1 = neo::verify_spartan2(&metrics1.final_augmented_ccs, &metrics1.final_public_input, &metrics1.final_proof)
         .map_err(|e| anyhow::anyhow!("Verification 1 failed: {}", e))?;
-    let valid2 = neo::verify(&metrics2.final_augmented_ccs, &metrics2.final_public_input, &metrics2.final_proof)
+    let valid2 = neo::verify_spartan2(&metrics2.final_augmented_ccs, &metrics2.final_public_input, &metrics2.final_proof)
         .map_err(|e| anyhow::anyhow!("Verification 2 failed: {}", e))?;
     
     if !valid1 || !valid2 {

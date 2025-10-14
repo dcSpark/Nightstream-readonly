@@ -6,7 +6,7 @@
 //! Intent: force `(k+1)·T·(b−1) ≥ B` and ensure the prover **refuses to run**.
 //! This tests the parameter guard that prevents unsafe parameter combinations.
 
-use neo::{prove, ProveInput, F};
+use neo::{prove_spartan2, ProveInput, F};
 use neo_ccs::{Mat, r1cs::r1cs_to_ccs};
 use neo_params::{NeoParams, ParamsError};
 use p3_field::PrimeCharacteristicRing;
@@ -91,7 +91,7 @@ fn safe_params_are_accepted() {
     };
     
     // This should succeed with safe parameters
-    let proof_result = prove(prove_input);
+    let proof_result = prove_spartan2(prove_input);
     
     match proof_result {
         Ok(_) => {

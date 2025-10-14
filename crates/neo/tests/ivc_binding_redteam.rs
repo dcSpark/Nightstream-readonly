@@ -1,14 +1,14 @@
 //! Red-team tests for IVC step_x binding: x must equal H(prev_accumulator)
 
 use neo::{F, NeoParams};
-use neo::{Accumulator, IvcStepInput, StepBindingSpec, prove_ivc_step, verify_ivc_step_legacy};
+use neo::{Accumulator, IvcStepInput, StepBindingSpec, prove_ivc_step, verify_ivc_step, AppInputBinding};
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
 fn build_increment_step_ccs() -> CcsStructure<F> {
     // Variables: [const=1, prev_x, next_x]
     // Constraint: next_x - prev_x - 1 = 0  => (next_x - prev_x - const) * 1 = 0
-    let rows = 1;
+    let rows = 4;  // Minimum 4 rows required (ℓ=ceil(log2(n)) must be ≥ 2)
     let cols = 3;
 
     let mut a = vec![F::ZERO; rows * cols];
@@ -20,6 +20,12 @@ fn build_increment_step_ccs() -> CcsStructure<F> {
     a[0 * cols + 1] = -F::ONE;    // - prev_x
     a[0 * cols + 0] = -F::ONE;    // - const (represents -1)
     b[0 * cols + 0] = F::ONE;     // * 1
+
+    // Rows 1-3: dummy constraints (0 * 1 = 0)
+    for row in 1..4 {
+        a[row * cols + 0] = F::ZERO;
+        b[row * cols + 0] = F::ONE;
+    }
 
     let a_mat = Mat::from_row_major(rows, cols, a);
     let b_mat = Mat::from_row_major(rows, cols, b);
@@ -75,7 +81,7 @@ fn prover_ignores_malicious_step_x_and_uses_digest_prefix() {
         public_input: None,
         y_step: &y_step,
         binding_spec: &binding,
-        transcript_only_app_inputs: false,
+        app_input_binding: AppInputBinding::WitnessBound,
         prev_augmented_x: None,
     };
 
@@ -116,7 +122,7 @@ fn verifier_rejects_tampered_step_x() {
         public_input: None, // library fills with H(prev_acc)
         y_step: &y_step,
         binding_spec: &binding,
-        transcript_only_app_inputs: false,
+        app_input_binding: AppInputBinding::WitnessBound,
         prev_augmented_x: None,
     };
     let ok = prove_ivc_step(input_ok).expect("proving should succeed");
@@ -133,7 +139,7 @@ fn verifier_rejects_tampered_step_x() {
     buf[3] = F::from_u64(666);
 
     // Verifier must reject tampered x (should return Err, not Ok(false))
-    let result = verify_ivc_step_legacy(&step_ccs, &forged, &prev_acc, &binding, &params, None);
+    let result = verify_ivc_step(&step_ccs, &forged, &prev_acc, &binding, &params, None);
     assert!(result.is_err(), "verifier must error when digest prefix is tampered");
     let err_msg = result.unwrap_err().to_string();
     assert!(err_msg.contains("Las binding check failed") || err_msg.contains("step_x prefix does not match"), 

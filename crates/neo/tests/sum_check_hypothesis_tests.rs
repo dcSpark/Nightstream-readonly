@@ -6,25 +6,29 @@
 /// C) Individual instance verification is bypassed when batching
 
 use neo::{F, NeoParams, Accumulator};
-use neo::{prove_ivc_step_with_extractor, verify_ivc_step_legacy, StepBindingSpec, LastNExtractor};
+use neo::{prove_ivc_step_with_extractor, verify_ivc_step, StepBindingSpec, LastNExtractor};
 use neo_ccs::{CcsStructure, relations::check_ccs_rowwise_zero, Mat, SparsePoly, Term};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
 fn simple_ccs() -> (CcsStructure<F>, Vec<F>, Vec<F>, StepBindingSpec, LastNExtractor) {
-    let m0 = Mat::from_row_major(3, 3, vec![
+    // Minimum 4 rows required (ℓ=ceil(log2(n)) must be ≥ 2)
+    let m0 = Mat::from_row_major(4, 3, vec![
         F::ZERO, F::ONE, F::ZERO,   // Row 0: z0
         F::ZERO, F::ZERO, F::ONE,   // Row 1: z1
         F::ZERO, F::ONE, F::ZERO,   // Row 2: z0
+        F::ZERO, F::ZERO, F::ZERO,  // Row 3: 0 (dummy)
     ]);
-    let m1 = Mat::from_row_major(3, 3, vec![
+    let m1 = Mat::from_row_major(4, 3, vec![
         F::ZERO, F::ONE, F::ZERO,   // Row 0: z0
         F::ZERO, F::ZERO, F::ONE,   // Row 1: z1
         F::ZERO, F::ZERO, F::ONE,   // Row 2: z1
+        F::ONE, F::ZERO, F::ZERO,   // Row 3: 1 (dummy)
     ]);
-    let m2 = Mat::from_row_major(3, 3, vec![
+    let m2 = Mat::from_row_major(4, 3, vec![
         F::ZERO, F::ONE, F::ZERO,   // Row 0: z0
         F::ZERO, F::ZERO, F::ONE,   // Row 1: z1
         F::ZERO, F::ONE, F::ZERO,   // Row 2: z0
+        F::ZERO, F::ZERO, F::ZERO,  // Row 3: 0 (dummy)
     ]);
     
     let f = SparsePoly::new(3, vec![
@@ -261,7 +265,7 @@ fn hypothesis_c_batching_cancellation_bug() {
         &params, &ccs, &invalid_wit, &acc0, 0, None, &extractor, &binding,
     ).expect("base case prove");
     
-    let ok0 = verify_ivc_step_legacy(&ccs, &step0_invalid.proof, &acc0, &binding, &params, None)
+    let ok0 = verify_ivc_step(&ccs, &step0_invalid.proof, &acc0, &binding, &params, None)
         .expect("verify should not error");
     println!("Base case result: {}", if ok0 { "ACCEPTED ✗" } else { "REJECTED ✓" });
     
@@ -271,7 +275,7 @@ fn hypothesis_c_batching_cancellation_bug() {
         &params, &ccs, &invalid_wit, acc1, 1, None, &extractor, &binding,
     ).expect("non-base case prove");
     
-    let ok1 = verify_ivc_step_legacy(&ccs, &step1_invalid.proof, acc1, &binding, &params, None)
+    let ok1 = verify_ivc_step(&ccs, &step1_invalid.proof, acc1, &binding, &params, None)
         .expect("verify should not error");
     println!("Non-base case result: {}", if ok1 { "ACCEPTED ✗" } else { "REJECTED ✓" });
     

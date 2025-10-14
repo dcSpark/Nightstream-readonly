@@ -28,7 +28,7 @@ use anyhow::Result;
 use neo::{F, NeoParams};
 use neo::{
     Accumulator, IvcStepInput, StepBindingSpec, prove_ivc_step, verify_ivc_step,
-    prove_ivc_step_chained, verify_ivc_step_legacy,
+    prove_ivc_step_chained,
     LastNExtractor, StepOutputExtractor, rho_from_transcript,
 };
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
@@ -36,29 +36,41 @@ use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
 /// Build incrementer CCS: next_x = prev_x + delta
 /// Variables: [const=1, prev_x, delta, next_x]
-/// Constraint: next_x - prev_x - delta = 0
+/// Constraint 0: next_x - prev_x - delta = 0
+/// Constraints 1-2: dummy (0 * 1 = 0)
 fn build_incrementer_step_ccs() -> CcsStructure<F> {
-    let rows = 1;
+    // Minimum of 3 rows required (gets padded to 4 for ℓ=2)
+    let rows = 3;
     let cols = 4;
     
-    // A matrix: next_x - prev_x - delta
+    // A matrix: next_x - prev_x - delta in row 0, dummy rows 1-2
     let a = Mat::from_row_major(rows, cols, vec![
+        // Row 0: real constraint
         F::ZERO,  // const
         -F::ONE,  // -prev_x
         -F::ONE,  // -delta
         F::ONE,   // +next_x
+        // Rows 1-2: dummy constraints (0 * 1 = 0)
+        F::ZERO, F::ZERO, F::ZERO, F::ZERO,
+        F::ZERO, F::ZERO, F::ZERO, F::ZERO,
     ]);
     
-    // B matrix: select constant 1
+    // B matrix: select constant 1 for all rows
     let b = Mat::from_row_major(rows, cols, vec![
+        // Row 0
         F::ONE,   // const = 1
         F::ZERO,  // prev_x
         F::ZERO,  // delta
         F::ZERO,  // next_x
+        // Rows 1-2: const = 1 for dummy constraints
+        F::ONE, F::ZERO, F::ZERO, F::ZERO,
+        F::ONE, F::ZERO, F::ZERO, F::ZERO,
     ]);
     
-    // C matrix: zero (R1CS: A*z ∘ B*z = C*z, so 0 = 0)
+    // C matrix: zero for all rows
     let c = Mat::from_row_major(rows, cols, vec![
+        F::ZERO, F::ZERO, F::ZERO, F::ZERO,
+        F::ZERO, F::ZERO, F::ZERO, F::ZERO,
         F::ZERO, F::ZERO, F::ZERO, F::ZERO,
     ]);
     
@@ -108,7 +120,7 @@ fn test_public_io_digest_matches_augmented_pi() -> Result<()> {
         public_input: None, // No app public input - testing digest binding, not input binding
         y_step: &y_step,
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly,
         prev_augmented_x: None,
     };
     
@@ -119,7 +131,7 @@ fn test_public_io_digest_matches_augmented_pi() -> Result<()> {
     // the FULL augmented public input, not just x
     // 
     // We reconstruct what the verifier should compute and check it matches
-    let is_valid = verify_ivc_step_legacy(&step_ccs, &proof, &initial_acc, &binding_spec, &params, None)
+    let is_valid = verify_ivc_step(&step_ccs, &proof, &initial_acc, &binding_spec, &params, None)
         .map_err(|e| anyhow::anyhow!("Verification failed: {}", e))?;
     
     if !is_valid {
@@ -180,7 +192,7 @@ fn test_verifier_rejects_when_augmented_pi_changes_but_x_same() -> Result<()> {
         params: &params, step_ccs: &step_ccs, step_witness: &witness_a,
         prev_accumulator: &acc_a, step: 0, public_input: Some(&x),
         y_step: &y_step_a, binding_spec: &binding_spec,
-        transcript_only_app_inputs: false, prev_augmented_x: None,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly, prev_augmented_x: None,
     };
     let result_a = prove_ivc_step(step_a).expect("prove step A");
     
@@ -194,24 +206,36 @@ fn test_verifier_rejects_when_augmented_pi_changes_but_x_same() -> Result<()> {
         params: &params, step_ccs: &step_ccs, step_witness: &witness_b,
         prev_accumulator: &acc_b, step: 0, public_input: Some(&x),
         y_step: &y_step_b, binding_spec: &binding_spec,
-        transcript_only_app_inputs: false, prev_augmented_x: None,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly, prev_augmented_x: None,
     };
     let _result_b = prove_ivc_step(step_b).expect("prove step B");
     
     // Critical test: Try to verify proof A against accumulator B
     // This should FAIL because y_prev is different (0 vs 10) even though x is the same
-    let cross_verify = verify_ivc_step(&step_ccs, &result_a.proof, &acc_b, &binding_spec, &params, None)
-        .map_err(|e| anyhow::anyhow!("Cross-verification failed: {}", e))?;
+    // The Las binding check should structurally reject this mismatch
+    let cross_verify_result = verify_ivc_step(&step_ccs, &result_a.proof, &acc_b, &binding_spec, &params, None);
     
-    if cross_verify {
-        println!("   ❌ CRITICAL VULNERABILITY: Verifier accepted proof with wrong y_prev!");
-        println!("   Proof A (prev_x=0, delta=5, next_x=5) was accepted against accumulator B (prev_x=10)");
-        println!("   This means the digest only commits to x (delta), not the full augmented PI");
-        panic!("Verifier must reject when augmented PI changes even if x stays the same");
+    match cross_verify_result {
+        Ok(true) => {
+            println!("   ❌ CRITICAL VULNERABILITY: Verifier accepted proof with wrong y_prev!");
+            println!("   Proof A (prev_x=0, delta=5, next_x=5) was accepted against accumulator B (prev_x=10)");
+            println!("   This means the digest only commits to x (delta), not the full augmented PI");
+            panic!("Verifier must reject when augmented PI changes even if x stays the same");
+        }
+        Ok(false) => {
+            println!("   ✅ SUCCESS: Verifier correctly rejected proof with mismatched y_prev (returned false)");
+            println!("   This confirms the digest commits to the full augmented PI, not just x");
+        }
+        Err(e) => {
+            // Las binding check failure is also acceptable - it's a structural rejection
+            if e.to_string().contains("Las binding check failed") {
+                println!("   ✅ SUCCESS: Verifier correctly rejected proof with mismatched y_prev (Las binding check failed)");
+                println!("   This confirms the digest prefix binding is working correctly");
+            } else {
+                return Err(anyhow::anyhow!("Unexpected error during cross-verification: {}", e));
+            }
+        }
     }
-    
-    println!("   ✅ SUCCESS: Verifier correctly rejected proof with mismatched y_prev");
-    println!("   This confirms the digest commits to the full augmented PI, not just x");
     
     Ok(())
 }
@@ -250,7 +274,7 @@ fn test_context_digest_changes_when_any_bound_field_changes() -> Result<()> {
         params: &params, step_ccs: &step_ccs, step_witness: &witness_a,
         prev_accumulator: &acc_a, step: 0, public_input: Some(&x),
         y_step: &y_step_a, binding_spec: &binding_spec,
-        transcript_only_app_inputs: false, prev_augmented_x: None,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly, prev_augmented_x: None,
     }).expect("prove A");
     
     // Scenario B: prev_x = 3 (different y_prev, same x)
@@ -267,7 +291,7 @@ fn test_context_digest_changes_when_any_bound_field_changes() -> Result<()> {
         params: &params, step_ccs: &step_ccs, step_witness: &witness_b,
         prev_accumulator: &acc_b, step: 0, public_input: Some(&x),
         y_step: &y_step_b, binding_spec: &binding_spec,
-        transcript_only_app_inputs: false, prev_augmented_x: None,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly, prev_augmented_x: None,
     }).expect("prove B");
     
     // Extract digests from public_io (last 32 bytes)
@@ -327,7 +351,7 @@ fn test_rho_challenge_binding() -> Result<()> {
         params: &params, step_ccs: &step_ccs, step_witness: &witness_1,
         prev_accumulator: &acc_1, step: 0, public_input: Some(&x),
         y_step: &y_step_1, binding_spec: &binding_spec,
-        transcript_only_app_inputs: false, prev_augmented_x: None,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly, prev_augmented_x: None,
     }).expect("prove 1");
     
     let witness_2 = vec![F::ONE, F::from_u64(8), F::from_u64(3), F::from_u64(11)];
@@ -336,7 +360,7 @@ fn test_rho_challenge_binding() -> Result<()> {
         params: &params, step_ccs: &step_ccs, step_witness: &witness_2,
         prev_accumulator: &acc_2, step: 0, public_input: Some(&x),
         y_step: &y_step_2, binding_spec: &binding_spec,
-        transcript_only_app_inputs: false, prev_augmented_x: None,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly, prev_augmented_x: None,
     }).expect("prove 2");
     
     // ρ values should be different because they're derived from different transcripts
@@ -391,7 +415,7 @@ fn test_step_index_binding_prevents_replay() -> Result<()> {
         params: &params, step_ccs: &step_ccs, step_witness: &witness,
         prev_accumulator: &acc, step: 0, public_input: Some(&x),
         y_step: &y_step, binding_spec: &binding_spec,
-        transcript_only_app_inputs: false, prev_augmented_x: None,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly, prev_augmented_x: None,
     }).expect("prove step 0");
     
     // Prove at step 1 (different step index, same computation)
@@ -401,7 +425,7 @@ fn test_step_index_binding_prevents_replay() -> Result<()> {
         params: &params, step_ccs: &step_ccs, step_witness: &witness,
         prev_accumulator: &acc_step_1, step: 1, public_input: Some(&x),
         y_step: &y_step, binding_spec: &binding_spec,
-        transcript_only_app_inputs: false, prev_augmented_x: None,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly, prev_augmented_x: None,
     }).expect("prove step 1");
     
     // Extract digests
@@ -439,27 +463,38 @@ fn test_ccs_domain_separation() -> Result<()> {
     
     // Build a different CCS: next_x = prev_x + delta + 1 (slightly different adder)
     let step_ccs_2 = {
-        let rows = 1;
+        // Minimum of 3 rows required (gets padded to 4 for ℓ=2)
+        let rows = 3;
         let cols = 4;
         
         // A matrix: next_x - prev_x - delta - 1 = 0 (so next_x = prev_x + delta + 1)
         let a = Mat::from_row_major(rows, cols, vec![
+            // Row 0: real constraint
             -F::ONE,  // -const (so we get -1)
             -F::ONE,  // -prev_x
             -F::ONE,  // -delta
             F::ONE,   // +next_x
+            // Rows 1-2: dummy constraints (0 * 1 = 0)
+            F::ZERO, F::ZERO, F::ZERO, F::ZERO,
+            F::ZERO, F::ZERO, F::ZERO, F::ZERO,
         ]);
         
-        // B matrix: select constant 1
+        // B matrix: select constant 1 for all rows
         let b = Mat::from_row_major(rows, cols, vec![
+            // Row 0
             F::ONE,   // const = 1
             F::ZERO,  // prev_x
             F::ZERO,  // delta
             F::ZERO,  // next_x
+            // Rows 1-2: const = 1 for dummy constraints
+            F::ONE, F::ZERO, F::ZERO, F::ZERO,
+            F::ONE, F::ZERO, F::ZERO, F::ZERO,
         ]);
         
-        // C matrix: zero (R1CS: A*z ∘ B*z = C*z, so 0 = 0)
+        // C matrix: zero for all rows
         let c = Mat::from_row_major(rows, cols, vec![
+            F::ZERO, F::ZERO, F::ZERO, F::ZERO,
+            F::ZERO, F::ZERO, F::ZERO, F::ZERO,
             F::ZERO, F::ZERO, F::ZERO, F::ZERO,
         ]);
         
@@ -486,7 +521,7 @@ fn test_ccs_domain_separation() -> Result<()> {
         params: &params, step_ccs: &step_ccs_1, step_witness: &witness_1,
         prev_accumulator: &acc, step: 0, public_input: Some(&x),
         y_step: &y_step_1, binding_spec: &binding_spec,
-        transcript_only_app_inputs: false, prev_augmented_x: None,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly, prev_augmented_x: None,
     }).expect("prove with incrementer CCS");
     
     // Prove with modified incrementer CCS: 3 + 2 + 1 = 6
@@ -496,7 +531,7 @@ fn test_ccs_domain_separation() -> Result<()> {
         params: &params, step_ccs: &step_ccs_2, step_witness: &witness_2,
         prev_accumulator: &acc, step: 0, public_input: Some(&x),
         y_step: &y_step_2, binding_spec: &binding_spec,
-        transcript_only_app_inputs: false, prev_augmented_x: None,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly, prev_augmented_x: None,
     }).expect("prove with modified incrementer CCS");
     
     // Extract digests
@@ -567,7 +602,7 @@ fn test_verifier_accepts_with_mismatched_prev_acc_vulnerability() -> Result<()> 
         public_input: None, // No app public input - testing digest binding, not input binding
         y_step: &y_step,
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly,
         prev_augmented_x: None,
     };
     
@@ -575,7 +610,7 @@ fn test_verifier_accepts_with_mismatched_prev_acc_vulnerability() -> Result<()> 
     let proof = step_result.proof;
     
     // Positive control: A should verify
-    let valid_verify = verify_ivc_step_legacy(&step_ccs, &proof, &prev_acc_a, &binding_spec, &params, None)
+    let valid_verify = verify_ivc_step(&step_ccs, &proof, &prev_acc_a, &binding_spec, &params, None)
         .map_err(|e| anyhow::anyhow!("Verifier error for A: {}", e))?;
     
     if !valid_verify {
@@ -593,7 +628,7 @@ fn test_verifier_accepts_with_mismatched_prev_acc_vulnerability() -> Result<()> 
     
     // CRITICAL TEST: With a sound verifier, this MUST be REJECTED 
     // because y_prev is bound in the witness but the accumulator has different y_prev
-    let accepted = verify_ivc_step_legacy(&step_ccs, &proof, &prev_acc_b, &binding_spec, &params, None)
+    let accepted = verify_ivc_step(&step_ccs, &proof, &prev_acc_b, &binding_spec, &params, None)
         .unwrap_or(false);
     
     if accepted {
@@ -660,7 +695,7 @@ fn test_vulnerability_when_y_prev_not_bound() -> Result<()> {
         public_input: Some(&step_x),
         y_step: &y_step,
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly,
         prev_augmented_x: None,
     };
     
@@ -756,7 +791,7 @@ fn test_context_digest_provides_automatic_y_prev_binding() -> Result<()> {
         public_input: Some(&step_x),
         y_step: &y_step,
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly,
         prev_augmented_x: None,
     };
     
@@ -845,7 +880,7 @@ fn test_step_index_manipulation_attack() -> Result<()> {
         public_input: Some(&step_x),
         y_step: &y_step,
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly,
         prev_augmented_x: None,
     };
     
@@ -931,7 +966,7 @@ fn test_public_input_prefix_attack() -> Result<()> {
         public_input: Some(&step_x_a),
         y_step: &y_step,
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly,
         prev_augmented_x: None,
     };
     
@@ -1017,7 +1052,7 @@ fn test_public_io_malleability_attack() -> Result<()> {
         public_input: Some(&step_x),
         y_step: &y_step,
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly,
         prev_augmented_x: None,
     };
     
@@ -1119,7 +1154,7 @@ fn test_zero_rho_bypass_attack() -> Result<()> {
         public_input: Some(&step_x),
         y_step: &y_step,
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly,
         prev_augmented_x: None,
     };
     
@@ -1210,7 +1245,7 @@ fn test_coordinated_rho_coordinates_attack() -> Result<()> {
         public_input: Some(&step_x),
         y_step: &y_step,
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: neo::AppInputBinding::TranscriptOnly,
         prev_augmented_x: None,
     };
     

@@ -4,7 +4,7 @@
 //! if the augmented CCS properly enforces step CCS constraints.
 
 use neo::{F, NeoParams};
-use neo::{Accumulator, StepBindingSpec, prove_ivc_step_with_extractor, verify_ivc_step_legacy, LastNExtractor};
+use neo::{Accumulator, StepBindingSpec, prove_ivc_step_with_extractor, verify_ivc_step, LastNExtractor};
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs, check_ccs_rowwise_zero};
 use p3_field::{PrimeCharacteristicRing};
 
@@ -12,7 +12,7 @@ use p3_field::{PrimeCharacteristicRing};
 /// Variables: [const, prev, delta, next]
 /// Constraint: next - prev - delta = 0
 fn build_increment_ccs() -> CcsStructure<F> {
-    let rows = 1;
+    let rows = 4;  // Minimum 4 rows required (ℓ=ceil(log2(n)) must be ≥ 2)
     let cols = 4;
     let mut a = vec![F::ZERO; rows * cols];
     let mut b = vec![F::ZERO; rows * cols];
@@ -23,6 +23,12 @@ fn build_increment_ccs() -> CcsStructure<F> {
     a[0 * cols + 1] = -F::ONE;  // -prev
     a[0 * cols + 2] = -F::ONE;  // -delta
     b[0 * cols + 0] = F::ONE;   // *const1
+
+    // Rows 1-3: dummy constraints (0 * 1 = 0)
+    for row in 1..4 {
+        a[row * cols] = F::ZERO;
+        b[row * cols] = F::ONE;
+    }
 
     let a_mat = Mat::from_row_major(rows, cols, a);
     let b_mat = Mat::from_row_major(rows, cols, b);
@@ -78,7 +84,7 @@ fn test_valid_witness_passes() {
     
     let step_result = result.expect("Valid witness should be accepted");
     
-    let ok = verify_ivc_step_legacy(
+    let ok = verify_ivc_step(
         &step_ccs,
         &step_result.proof,
         &prev_acc,
@@ -137,7 +143,7 @@ fn test_invalid_witness_in_circuit_enforcement() {
     
     let step_result = result.expect("Prover should generate proof (prover-side check disabled)");
     
-    let verify_result = verify_ivc_step_legacy(
+    let verify_result = verify_ivc_step(
         &step_ccs,
         &step_result.proof,
         &prev_acc,
@@ -212,7 +218,7 @@ fn test_const1_zero_attack_is_blocked() {
     match result {
         Ok(step_result) => {
             // Prover generated proof, but verifier must reject
-            let verify_result = verify_ivc_step_legacy(
+            let verify_result = verify_ivc_step(
                 &step_ccs,
                 &step_result.proof,
                 &prev_acc,

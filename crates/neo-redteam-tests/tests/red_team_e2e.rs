@@ -1,7 +1,7 @@
 // neo-tests/tests/red_team_e2e.rs
 #![cfg(feature = "redteam")]
 #![cfg_attr(debug_assertions, allow(unused))]
-use neo::{prove, verify, ProveInput, NeoParams, F};
+use neo::{prove_spartan2, verify_spartan2, ProveInput, NeoParams, F};
 use neo_ccs::{Mat, r1cs::r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
 
@@ -48,7 +48,7 @@ fn e2e_rejects_tampered_proof() {
     };
 
     // produce proof
-    let proof = prove(prove_input).expect("prove should succeed");
+    let proof = prove_spartan2(prove_input).expect("prove should succeed");
 
     // tamper: flip one byte in the proof_bytes (main proof data)
     let mut forged_proof = proof.clone();
@@ -58,7 +58,7 @@ fn e2e_rejects_tampered_proof() {
     }
 
     // Tampered proof should either return false or fail with error
-    let verification_result = verify(&ccs, &public_input, &forged_proof);
+    let verification_result = verify_spartan2(&ccs, &public_input, &forged_proof);
     match verification_result {
         Ok(false) => {
             // Good: verification correctly rejected the tampered proof

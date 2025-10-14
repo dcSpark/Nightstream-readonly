@@ -4,7 +4,7 @@
 //! can be combined with public_io from another circuit to create a valid-looking proof.
 
 use anyhow::Result;
-use neo::{prove, verify, ProveInput, NeoParams, CcsStructure, F};
+use neo::{prove_spartan2, verify_spartan2, ProveInput, NeoParams, CcsStructure, F};
 use neo_ccs::{r1cs_to_ccs, Mat};
 use p3_field::PrimeCharacteristicRing;
 
@@ -127,7 +127,7 @@ fn splice_proof_bytes_and_public_io_must_fail() -> Result<()> {
     let pub_a: Vec<F> = vec![];
     println!("📐 Circuit A: Fibonacci CCS with {} constraints", ccs_a.n);
     
-    let proof_a = prove(ProveInput { 
+    let proof_a = prove_spartan2(ProveInput { 
         params: &params, 
         ccs: &ccs_a, 
         public_input: &pub_a, 
@@ -142,7 +142,7 @@ fn splice_proof_bytes_and_public_io_must_fail() -> Result<()> {
     let pub_b: Vec<F> = vec![];
     println!("📐 Circuit B: Linear CCS with {} constraints", ccs_b.n);
     
-    let proof_b = prove(ProveInput { 
+    let proof_b = prove_spartan2(ProveInput { 
         params: &params, 
         ccs: &ccs_b, 
         public_input: &pub_b, 
@@ -163,7 +163,7 @@ fn splice_proof_bytes_and_public_io_must_fail() -> Result<()> {
 
     // 🚨 CRITICAL BUG: This should FAIL but currently PASSES due to missing public IO binding!
     // The verifier should reject this mixed proof, but the current implementation allows it.
-    let result = verify(&ccs_b, &pub_b, &franken_proof)?;
+    let result = verify_spartan2(&ccs_b, &pub_b, &franken_proof)?;
     
     println!("🔍 Splice attack result: {}", if result { "❌ ACCEPTED (VULNERABILITY!)" } else { "✅ REJECTED (SECURE)" });
     
@@ -183,7 +183,7 @@ fn normal_proofs_should_still_work() -> Result<()> {
     // Test normal proof A
     let (ccs_a, wit_a) = fib_ccs(2);
     let pub_a: Vec<F> = vec![];
-    let proof_a = prove(ProveInput { 
+    let proof_a = prove_spartan2(ProveInput { 
         params: &params, 
         ccs: &ccs_a, 
         public_input: &pub_a, 
@@ -193,12 +193,12 @@ fn normal_proofs_should_still_work() -> Result<()> {
     })?;
     
     // Should verify normally
-    assert!(verify(&ccs_a, &pub_a, &proof_a)?, "Normal proof A should verify");
+    assert!(verify_spartan2(&ccs_a, &pub_a, &proof_a)?, "Normal proof A should verify");
 
     // Test normal proof B  
     let (ccs_b, wit_b) = linear_ccs(2);
     let pub_b: Vec<F> = vec![];
-    let proof_b = prove(ProveInput { 
+    let proof_b = prove_spartan2(ProveInput { 
         params: &params, 
         ccs: &ccs_b, 
         public_input: &pub_b, 
@@ -208,7 +208,7 @@ fn normal_proofs_should_still_work() -> Result<()> {
     })?;
     
     // Should verify normally
-    assert!(verify(&ccs_b, &pub_b, &proof_b)?, "Normal proof B should verify");
+    assert!(verify_spartan2(&ccs_b, &pub_b, &proof_b)?, "Normal proof B should verify");
 
     Ok(())
 }

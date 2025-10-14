@@ -9,7 +9,7 @@
 
 use anyhow::Result;
 use neo::{F, NeoParams, StepOutputExtractor, LastNExtractor};
-use neo::{Accumulator, StepBindingSpec, IvcStepInput, prove_ivc_step_chained, verify_ivc_step_legacy};
+use neo::{Accumulator, StepBindingSpec, IvcStepInput, prove_ivc_step_chained, verify_ivc_step};
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
@@ -23,18 +23,26 @@ fn triplets_to_dense(rows: usize, cols: usize, triplets: Vec<(usize, usize, F)>)
 
 // Simple step circuit: incrementer x' = x + delta (copied from working tests)
 fn build_incrementer_step_ccs() -> CcsStructure<F> {
-    let rows = 1;
+    // Minimum of 3 rows required (gets padded to 4 for ℓ=2)
+    let rows = 3;
     let cols = 4; // [const=1, prev_x, delta, next_x]
 
     let mut a_trips = Vec::new();
     let mut b_trips = Vec::new();
     let c_trips = Vec::new();
 
-    // Constraint: next_x - prev_x - delta = 0
+    // Constraint 0: next_x - prev_x - delta = 0
     a_trips.push((0, 3, F::ONE));   // +next_x
     a_trips.push((0, 1, -F::ONE));  // -prev_x  
     a_trips.push((0, 2, -F::ONE));  // -delta
     b_trips.push((0, 0, F::ONE));   // × const 1
+
+    // Dummy constraints (rows 1, 2): 0 * 1 = 0 (trivially satisfied)
+    for row in 1..3 {
+        a_trips.push((row, 0, F::ZERO));  // 0
+        b_trips.push((row, 0, F::ONE));   // × 1
+        // c is zero by default
+    }
 
     let a_data = triplets_to_dense(rows, cols, a_trips);
     let b_data = triplets_to_dense(rows, cols, b_trips);
@@ -93,7 +101,7 @@ fn test_ivc_proof_with_forged_coords() -> Result<()> {
         public_input: None, // No public input needed - testing c_step_coords forgery
         y_step: &y_step,
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: neo::AppInputBinding::WitnessBound,
         prev_augmented_x: None,
     };
     
@@ -102,7 +110,7 @@ fn test_ivc_proof_with_forged_coords() -> Result<()> {
     
     // --- Positive control: the unmodified proof must verify
     println!("🔍 Verifying original (unmodified) IVC proof as positive control...");
-    let ok_original = match verify_ivc_step_legacy(&step_ccs, &valid_proof, &initial_acc, &binding_spec, &params, None) {
+    let ok_original = match verify_ivc_step(&step_ccs, &valid_proof, &initial_acc, &binding_spec, &params, None) {
         Ok(result) => {
             println!("   Verification returned: {}", result);
             result
@@ -149,7 +157,7 @@ fn test_ivc_proof_with_forged_coords() -> Result<()> {
     valid_proof.c_step_coords = forged_coords;
 
     // Test verification with forged coordinates
-    let forged_result = match verify_ivc_step_legacy(&step_ccs, &valid_proof, &initial_acc, &binding_spec, &params, None) {
+    let forged_result = match verify_ivc_step(&step_ccs, &valid_proof, &initial_acc, &binding_spec, &params, None) {
         Ok(result) => result,
         Err(e) => {
             println!("⚠️  Forged proof verification failed with error: {}", e);
@@ -218,7 +226,7 @@ fn test_multiple_forged_coords() -> Result<()> {
         public_input: None, // No public input needed - testing c_step_coords forgery
         y_step: &y_step,
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: neo::AppInputBinding::WitnessBound,
         prev_augmented_x: None,
     };
     
@@ -227,7 +235,7 @@ fn test_multiple_forged_coords() -> Result<()> {
     
     // --- Positive control: the unmodified proof must verify
     println!("🔍 Verifying original (unmodified) IVC proof as positive control...");
-    let ok_original = match verify_ivc_step_legacy(&step_ccs, &original_proof, &initial_acc, &binding_spec, &params, None) {
+    let ok_original = match verify_ivc_step(&step_ccs, &original_proof, &initial_acc, &binding_spec, &params, None) {
         Ok(result) => {
             println!("   Verification returned: {}", result);
             result
@@ -263,7 +271,7 @@ fn test_multiple_forged_coords() -> Result<()> {
         
         forged_proof.c_step_coords = forged_coords;
         
-        match verify_ivc_step_legacy(&step_ccs, &forged_proof, &initial_acc, &binding_spec, &params, None) {
+        match verify_ivc_step(&step_ccs, &forged_proof, &initial_acc, &binding_spec, &params, None) {
             Ok(true) => {
                 accepted_count += 1;
                 println!("  Trial {}: ❌ ACCEPTED (unsound)", trial);

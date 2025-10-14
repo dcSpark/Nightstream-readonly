@@ -3,7 +3,7 @@
 //! This test ensures the facade's prove() and verify() functions work correctly
 //! on a minimal circuit, validating the end-to-end API.
 
-use neo::{prove, verify, ProveInput, CcsStructure, NeoParams, F};
+use neo::{prove_spartan2 as prove, verify_spartan2 as verify, ProveInput, CcsStructure, NeoParams, F};
 use neo_ccs::{Mat, r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
 use anyhow::Result;
@@ -13,7 +13,7 @@ fn minimal_identity_ccs() -> CcsStructure<F> {
     // R1CS with 3 rows to ensure ℓ=2 after padding to 4 rows
     // All constraints: 0 * z0 = 0 (trivially satisfied)
     // Variables: [z0, z1]
-    let rows = 3;
+    let rows = 4;  // Minimum 4 rows required (ℓ=ceil(log2(n)) must be ≥ 2)
     let cols = 2;
     
     let a = vec![F::ZERO; rows * cols];  // All zeros
@@ -24,6 +24,7 @@ fn minimal_identity_ccs() -> CcsStructure<F> {
     b[0 * cols + 0] = F::ONE;   // Row 0: multiply by z0
     b[1 * cols + 0] = F::ONE;   // Row 1: multiply by z0  
     b[2 * cols + 0] = F::ONE;   // Row 2: multiply by z0
+    b[3 * cols + 0] = F::ONE;   // Row 3: multiply by z0
     
     let a_mat = Mat::from_row_major(rows, cols, a);
     let b_mat = Mat::from_row_major(rows, cols, b);

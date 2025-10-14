@@ -4,14 +4,14 @@
 //! Verifies that the system works correctly with minimal constraint count.
 
 use neo::{F, NeoParams};
-use neo::{Accumulator, StepBindingSpec, LastNExtractor, prove_ivc_step_with_extractor, verify_ivc_step_legacy};
+use neo::{Accumulator, StepBindingSpec, LastNExtractor, prove_ivc_step_with_extractor, verify_ivc_step};
 use neo_ccs::{Mat, r1cs::r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
 
 /// Build a 3-row R1CS (ℓ=2 after padding) with 3 variables
 /// Constraints: All trivially satisfied (0 * 1 = 0 for all rows)
 fn minimal_r1cs_ell2() -> neo_ccs::CcsStructure<F> {
-    let rows = 3;
+    let rows = 4;  // Minimum 4 rows required (ℓ=ceil(log2(n)) must be ≥ 2)
     let cols = 3;
     
     let a = vec![F::ZERO; rows * cols];  // All zeros
@@ -22,6 +22,7 @@ fn minimal_r1cs_ell2() -> neo_ccs::CcsStructure<F> {
     b[0 * cols + 0] = F::ONE;   // Row 0: multiply by z0
     b[1 * cols + 0] = F::ONE;   // Row 1: multiply by z0  
     b[2 * cols + 0] = F::ONE;   // Row 2: multiply by z0
+    b[3 * cols + 0] = F::ONE;   // Row 3: multiply by z0
     
     let a_mat = Mat::from_row_major(rows, cols, a);
     let b_mat = Mat::from_row_major(rows, cols, b);
@@ -64,7 +65,7 @@ fn pi_ccs_single_row_deg_shape() {
     ).expect("prove_ivc_step_with_extractor should succeed");
 
     // 4) Verify: Should succeed with ℓ=2
-    let ok = verify_ivc_step_legacy(
+    let ok = verify_ivc_step(
         &ccs,
         &step_res.proof,
         &acc0,

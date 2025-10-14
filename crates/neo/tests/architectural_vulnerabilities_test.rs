@@ -28,18 +28,33 @@ use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
 /// Build simple incrementer CCS: next_x = prev_x + delta
 fn build_increment_ccs() -> CcsStructure<F> {
-    let rows = 1;
+    // Minimum of 4 rows required for security (ℓ=ceil(log2(n)) must be ≥ 2)
+    let rows = 4;
     let cols = 4; // [const=1, prev_x, delta, next_x]
 
     let mut a_trips = Vec::new();
     let mut b_trips = Vec::new();
     let c_trips = Vec::new();
 
-    // Constraint: next_x - prev_x - delta = 0
+    // Constraint 0: next_x - prev_x - delta = 0
     a_trips.push((0, 3, F::ONE));   // +next_x
     a_trips.push((0, 1, -F::ONE));  // -prev_x  
     a_trips.push((0, 2, -F::ONE));  // -delta
     b_trips.push((0, 0, F::ONE));   // × const 1
+
+    // Dummy constraints (rows 1, 2, 3): 1 * 1 = 0 (trivially satisfied)
+    for row in 1..4 {
+        a_trips.push((row, 0, F::ONE));   // const=1
+        b_trips.push((row, 0, F::ONE));   // × const=1
+        // c is zero, so a * b = c means 1 * 1 = 0, which needs adjustment
+        // Better: a * b = c with 0 * 1 = 0
+        // Actually for dummy: let's use 0 * 1 = 0
+        a_trips.pop(); // remove the previous
+        b_trips.pop(); // remove the previous
+        a_trips.push((row, 0, F::ZERO));  // 0
+        b_trips.push((row, 0, F::ONE));   // × 1
+        // = 0 (c is zero by default)
+    }
 
     let a_data = triplets_to_dense(rows, cols, a_trips);
     let b_data = triplets_to_dense(rows, cols, b_trips);
@@ -186,7 +201,7 @@ fn test_vulnerability_folding_chain_duplication() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("No steps to finalize"))?;
     
     // Verify the proof with the correct full chain result
-    let is_valid_full_chain = neo::verify(&final_augmented_ccs, &final_public_input_actual, &final_proof)
+    let is_valid_full_chain = neo::verify_spartan2(&final_augmented_ccs, &final_public_input_actual, &final_proof)
         .map_err(|e| anyhow::anyhow!("Verification failed: {}", e))?;
     
     if !is_valid_full_chain {
@@ -197,7 +212,7 @@ fn test_vulnerability_folding_chain_duplication() -> Result<()> {
     // 🚨 CRITICAL TEST: Try to verify with a wrong public input consistent in length but wrong values
     // Replace y_prev with an incorrect value (use last delta instead of accumulated state)
     let wrong_public_input = build_final_snark_public_input(&step_x, rho, &vec![F::from_u64(deltas[2])], y_next);
-    let is_valid_last_step_only = neo::verify(&final_augmented_ccs, &wrong_public_input, &final_proof)
+    let is_valid_last_step_only = neo::verify_spartan2(&final_augmented_ccs, &wrong_public_input, &final_proof)
         .map_err(|e| anyhow::anyhow!("Verification failed: {}", e))?;
     
     if is_valid_last_step_only {
@@ -306,7 +321,7 @@ fn test_vulnerability_final_snark_public_input_format() -> Result<()> {
     match neo::finalize_nivc_chain_with_options(&program, &params, chain, NivcFinalizeOptions { embed_ivc_ev: false }) {
         Ok(Some((final_proof, final_augmented_ccs, correct_public_input))) => {
             // Test that verification fails with wrong format but succeeds with correct format
-            let is_valid_wrong = neo::verify(&final_augmented_ccs, &wrong_format_input, &final_proof)
+            let is_valid_wrong = neo::verify_spartan2(&final_augmented_ccs, &wrong_format_input, &final_proof)
                 .unwrap_or(false); // Expect this to fail
                 
             if is_valid_wrong {

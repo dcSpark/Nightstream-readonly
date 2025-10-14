@@ -305,15 +305,32 @@ fn test_direct_sum_small_ccs_edge_cases() {
 /// Test the new high-level IVC API (production-ready proving/verification)
 #[test] 
 fn test_high_level_ivc_api() {
-    use neo::{prove_ivc_step, verify_ivc_step_legacy, IvcStepInput, Accumulator, NeoParams};
+    use neo::{prove_ivc_step, verify_ivc_step, IvcStepInput, Accumulator, NeoParams};
     use neo_ccs::{r1cs_to_ccs, Mat};
     
     // Create a simple step CCS (identity: output = input) with 3 columns to match witness [1, input, output]
+    // Minimum 4 rows required (ℓ=ceil(log2(n)) must be ≥ 2)
     let step_ccs = r1cs_to_ccs(
-        Mat::from_row_major(1, 3, vec![F::ZERO, F::ONE,  F::ZERO]), // A: input
-        Mat::from_row_major(1, 3, vec![F::ONE,  F::ZERO, F::ZERO]), // B: 1
-        Mat::from_row_major(1, 3, vec![F::ZERO, F::ZERO, F::ONE]),  // C: output
-        // Constraint: input * 1 = output (so output = input)
+        Mat::from_row_major(4, 3, vec![
+            F::ZERO, F::ONE,  F::ZERO, // Row 0: A: input
+            F::ZERO, F::ZERO, F::ZERO, // Row 1-3: dummy constraints (0 * 1 = 0)
+            F::ZERO, F::ZERO, F::ZERO,
+            F::ZERO, F::ZERO, F::ZERO,
+        ]),
+        Mat::from_row_major(4, 3, vec![
+            F::ONE,  F::ZERO, F::ZERO, // Row 0: B: 1
+            F::ONE,  F::ZERO, F::ZERO, // Row 1-3: B: 1 (for dummy constraints)
+            F::ONE,  F::ZERO, F::ZERO,
+            F::ONE,  F::ZERO, F::ZERO,
+        ]),
+        Mat::from_row_major(4, 3, vec![
+            F::ZERO, F::ZERO, F::ONE,  // Row 0: C: output
+            F::ZERO, F::ZERO, F::ZERO, // Row 1-3: C: 0 (for dummy constraints)
+            F::ZERO, F::ZERO, F::ZERO,
+            F::ZERO, F::ZERO, F::ZERO,
+        ]),
+        // Constraint 0: input * 1 = output (so output = input)
+        // Constraints 1-3: 0 * 1 = 0 (dummy constraints for security)
     );
     
     // Setup parameters
@@ -352,7 +369,7 @@ fn test_high_level_ivc_api() {
             y_prev_witness_indices: vec![], // No binding to EV y_prev (they're different values!)
             const1_witness_index: 0, // Constant-1 at index 0
         },
-        transcript_only_app_inputs: false,
+        app_input_binding: AppInputBinding::WitnessBound,
         prev_augmented_x: None,
     };
     
@@ -371,7 +388,7 @@ fn test_high_level_ivc_api() {
                 const1_witness_index: 0, // Constant-1 at index 0
             };
             // Test high-level verification - this MUST succeed for the test to pass
-            let is_valid = verify_ivc_step_legacy(&step_ccs, &step_result.proof, &initial_acc, &verify_binding_spec, &params, None)
+            let is_valid = verify_ivc_step(&step_ccs, &step_result.proof, &initial_acc, &verify_binding_spec, &params, None)
                 .expect("IVC verification should not error");
             assert!(is_valid, "IVC verification must succeed for valid proof");
             println!("✅ High-level IVC verification succeeded!");

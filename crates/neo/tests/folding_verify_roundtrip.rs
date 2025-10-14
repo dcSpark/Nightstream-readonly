@@ -3,7 +3,7 @@
 use neo::{
     F, CcsStructure, NeoParams,
     StepBindingSpec, Accumulator, IvcProof, IvcStepInput, IvcChainProof,
-    prove_ivc_step_chained, verify_ivc_chain_legacy, verify_ivc_step_legacy,
+    prove_ivc_step_chained, verify_ivc_chain, verify_ivc_step, AppInputBinding,
 };
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
@@ -12,7 +12,7 @@ fn trivial_step_ccs(y_len: usize) -> CcsStructure<F> {
     //  - index 0 = const 1
     //  - indices [1..=y_len] = y_step we bind into the augmentation
     let m = 1 + y_len;
-    let rows = 1; // At least one constraint for valid CCS
+    let rows = 4; // Minimum 4 rows required (ℓ=ceil(log2(n)) must be ≥ 2)
     
     // Create identity constraint: 1 * 1 = 1 (always satisfied)
     let mut a_data = vec![F::ZERO; rows * m];
@@ -23,6 +23,12 @@ fn trivial_step_ccs(y_len: usize) -> CcsStructure<F> {
     a_data[0] = F::ONE;  // A[0,0] = 1 (constant column)
     b_data[0] = F::ONE;  // B[0,0] = 1 (constant column)
     c_data[0] = F::ONE;  // C[0,0] = 1 (result)
+    
+    // Rows 1-3: dummy constraints (0 * 1 = 0)
+    for row in 1..4 {
+        a_data[row * m] = F::ZERO;
+        b_data[row * m] = F::ONE;
+    }
     
     let a = neo_ccs::Mat::from_row_major(rows, m, a_data);
     let b = neo_ccs::Mat::from_row_major(rows, m, b_data);
@@ -69,7 +75,7 @@ fn fold_roundtrip_chain_ok() -> anyhow::Result<()> {
             public_input: Some(&[]),
             y_step: &y_step,
             binding_spec: &binding,
-            transcript_only_app_inputs: false,
+            app_input_binding: AppInputBinding::WitnessBound,
             prev_augmented_x: proofs.last().map(|p| p.public_inputs.step_augmented_public_input()),
         };
         let (res, me, wit, lhs_next) = prove_ivc_step_chained(
@@ -93,7 +99,7 @@ fn fold_roundtrip_chain_ok() -> anyhow::Result<()> {
     };
 
     // Verify (strict: step checks + folding)
-    let ok = verify_ivc_chain_legacy(
+    let ok = verify_ivc_chain(
         &step_ccs,
         &chain,
         &initial_acc,
@@ -115,7 +121,7 @@ fn fold_roundtrip_chain_ok() -> anyhow::Result<()> {
             println!("  step_y_next: {:?}", step_proof.public_inputs.y_next().len());
                 
                 // Verify step (now includes folding verification)
-                let step_ok = verify_ivc_step_legacy(&step_ccs, step_proof, &current_acc, &binding, &params, prev_step_x.as_deref())
+                let step_ok = verify_ivc_step(&step_ccs, step_proof, &current_acc, &binding, &params, prev_step_x.as_deref())
                     .map_err(|e| anyhow::anyhow!("Step {} verification failed: {}", i, e))?;
                 println!("  Step verification: {}", step_ok);
                 
@@ -152,7 +158,7 @@ fn fold_roundtrip_rejects_mutated_rhs_commitment() -> anyhow::Result<()> {
     let acc = Accumulator { c_z_digest: [0u8;32], c_coords: vec![], y_compact: y0.clone(), step: 0 };
     let w = vec![F::ONE, F::from_u64(7)];
     let y_step = w[1..=y_len].to_vec();
-    let input = IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &w, prev_accumulator: &acc, step: 0, public_input: Some(&[]), y_step: &y_step, binding_spec: &binding, transcript_only_app_inputs: false, prev_augmented_x: None };
+    let input = IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &w, prev_accumulator: &acc, step: 0, public_input: Some(&[]), y_step: &y_step, binding_spec: &binding, app_input_binding: AppInputBinding::WitnessBound, prev_augmented_x: None };
     let (res, _, _, _) = prove_ivc_step_chained(input, None, None, None)
         .map_err(|e| anyhow::anyhow!("prove_ivc_step_chained failed: {}", e))?;
     let _acc_unused = res.proof.next_accumulator.clone();
@@ -168,7 +174,7 @@ fn fold_roundtrip_rejects_mutated_rhs_commitment() -> anyhow::Result<()> {
     }
 
     let initial_acc = Accumulator { c_z_digest: [0u8; 32], c_coords: vec![], y_compact: y0, step: 0 };
-    let ok = verify_ivc_step_legacy(
+    let ok = verify_ivc_step(
         &step_ccs,
         &step_proof,
         &initial_acc,

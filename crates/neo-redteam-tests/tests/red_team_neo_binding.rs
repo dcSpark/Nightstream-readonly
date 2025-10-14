@@ -6,7 +6,7 @@
 
 #![cfg(feature = "redteam")]
 
-use neo::{prove, verify, ProveInput, CcsStructure, NeoParams, F};
+use neo::{prove_spartan2, verify_spartan2, ProveInput, CcsStructure, NeoParams, F};
 use p3_field::PrimeCharacteristicRing;
 use neo_ccs::{Mat, SparsePoly, Term};
 
@@ -28,7 +28,7 @@ fn rt26_verify_wrong_public_input_must_fail() {
     let public_input: Vec<F> = vec![];  // empty is fine here
 
     // Prove for (ccs, public_input)
-    let proof = prove(ProveInput {
+    let proof = prove_spartan2(ProveInput {
         params: &params, ccs: &ccs, public_input: &public_input, witness: &witness,
         output_claims: &[],
         vjs_opt: None,
@@ -36,7 +36,7 @@ fn rt26_verify_wrong_public_input_must_fail() {
 
     // Tamper: change the public_input at verification time
     let bad_public_input = vec![F::from_u64(1)];
-    let ok = verify(&ccs, &bad_public_input, &proof).expect("verify runs");
+    let ok = verify_spartan2(&ccs, &bad_public_input, &proof).expect("verify runs");
     assert!(!ok, "verification must return false when public_input differs");
 }
 
@@ -47,7 +47,7 @@ fn rt26_verify_wrong_ccs_must_fail() {
     let witness = vec![F::ZERO; ccs.m];
     let public_input: Vec<F> = vec![];
 
-    let proof = prove(ProveInput {
+    let proof = prove_spartan2(ProveInput {
         params: &params, ccs: &ccs, public_input: &public_input, witness: &witness,
         output_claims: &[],
         vjs_opt: None,
@@ -56,7 +56,7 @@ fn rt26_verify_wrong_ccs_must_fail() {
     // Tamper CCS deterministically: flip one entry in the first matrix
     ccs.matrices[0][(0, 0)] = F::from_u64(1);
 
-    let ok = verify(&ccs, &public_input, &proof).expect("verify runs");
+    let ok = verify_spartan2(&ccs, &public_input, &proof).expect("verify runs");
     assert!(!ok, "verification must return false when CCS differs");
 }
 
@@ -80,7 +80,7 @@ fn rt29_proof_bundle_too_large_rejected_fast() {
         meta: Default::default(),
     };
 
-    let res = verify(&dummy_ccs_structure(), &[], &proof);
+    let res = verify_spartan2(&dummy_ccs_structure(), &[], &proof);
     // With lean proof system, oversized proofs may return Ok(false) or Err
     match res {
         Ok(false) => {

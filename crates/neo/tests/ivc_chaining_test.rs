@@ -1,6 +1,6 @@
 use anyhow::Result;
 use neo::{NeoParams, F};
-use neo::{StepBindingSpec, IvcStepInput, prove_ivc_step_chained, Accumulator, IvcProof};
+use neo::{StepBindingSpec, IvcStepInput, prove_ivc_step_chained, Accumulator, IvcProof, AppInputBinding};
 use neo_ccs::{r1cs_to_ccs, CcsStructure, Mat};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
@@ -8,7 +8,7 @@ use p3_field::{PrimeCharacteristicRing, PrimeField64};
 /// Variables: [const=1, prev_x, delta, next_x]
 /// Constraint: next_x - prev_x - delta = 0
 fn build_increment_ccs() -> CcsStructure<F> {
-    let rows = 1;
+    let rows = 4;  // Minimum 4 rows required (ℓ=ceil(log2(n)) must be ≥ 2)
     let cols = 4;
     
     // A matrix: next_x - prev_x - delta = 0
@@ -23,6 +23,12 @@ fn build_increment_ccs() -> CcsStructure<F> {
     
     // C matrix: all zeros (linear constraint)
     let c_data = vec![F::ZERO; rows * cols];
+    
+    // Rows 1-3: dummy constraints (0 * 1 = 0)
+    for row in 1..4 {
+        a_data[row * cols] = F::ZERO;
+        b_data[row * cols] = F::ONE;
+    }
     
     let a = Mat::from_row_major(rows, cols, a_data);
     let b = Mat::from_row_major(rows, cols, b_data);
@@ -68,7 +74,7 @@ fn test_ivc_chaining_not_self_folding() -> Result<()> {
     let step0_public_input = vec![F::from_u64(5)]; // delta=5
     {
         let y_step = step0_witness[3..=3].to_vec();
-        let input = IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &step0_witness, prev_accumulator: &acc, step: 0, public_input: Some(&step0_public_input), y_step: &y_step, binding_spec: &binding_spec, transcript_only_app_inputs: false, prev_augmented_x: None };
+        let input = IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &step0_witness, prev_accumulator: &acc, step: 0, public_input: Some(&step0_public_input), y_step: &y_step, binding_spec: &binding_spec, app_input_binding: AppInputBinding::WitnessBound, prev_augmented_x: None };
         let (res, me, wit, lhs) = prove_ivc_step_chained(
             input,
             prev_me.take(),
@@ -84,7 +90,7 @@ fn test_ivc_chaining_not_self_folding() -> Result<()> {
     let step1_public_input = vec![F::from_u64(3)]; // delta=3
     {
         let y_step = step1_witness[3..=3].to_vec();
-        let input = IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &step1_witness, prev_accumulator: &acc, step: 1, public_input: Some(&step1_public_input), y_step: &y_step, binding_spec: &binding_spec, transcript_only_app_inputs: false, prev_augmented_x: proofs.last().map(|p| p.public_inputs.step_augmented_public_input()) };
+        let input = IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &step1_witness, prev_accumulator: &acc, step: 1, public_input: Some(&step1_public_input), y_step: &y_step, binding_spec: &binding_spec, app_input_binding: AppInputBinding::WitnessBound, prev_augmented_x: proofs.last().map(|p| p.public_inputs.step_augmented_public_input()) };
         let (res, me, wit, lhs) = prove_ivc_step_chained(
             input,
             prev_me.take(),
@@ -100,7 +106,7 @@ fn test_ivc_chaining_not_self_folding() -> Result<()> {
     let step2_public_input = vec![F::from_u64(2)]; // delta=2
     {
         let y_step = step2_witness[3..=3].to_vec();
-        let input = IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &step2_witness, prev_accumulator: &acc, step: 2, public_input: Some(&step2_public_input), y_step: &y_step, binding_spec: &binding_spec, transcript_only_app_inputs: false, prev_augmented_x: proofs.last().map(|p| p.public_inputs.step_augmented_public_input()) };
+        let input = IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &step2_witness, prev_accumulator: &acc, step: 2, public_input: Some(&step2_public_input), y_step: &y_step, binding_spec: &binding_spec, app_input_binding: AppInputBinding::WitnessBound, prev_augmented_x: proofs.last().map(|p| p.public_inputs.step_augmented_public_input()) };
         let (res, _me, _wit, _lhs) = prove_ivc_step_chained(
             input,
             prev_me.take(),

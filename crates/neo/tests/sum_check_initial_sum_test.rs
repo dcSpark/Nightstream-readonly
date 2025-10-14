@@ -8,7 +8,7 @@
 ///! We need at least 3 rows to get ℓ >= 2 after power-of-2 padding.
 
 use neo::{F, NeoParams, Accumulator};
-use neo::{prove_ivc_step_with_extractor, verify_ivc_step_legacy, StepBindingSpec, LastNExtractor};
+use neo::{prove_ivc_step_with_extractor, verify_ivc_step, StepBindingSpec, LastNExtractor};
 use neo_ccs::{CcsStructure, relations::check_ccs_rowwise_zero, Mat, SparsePoly, Term};
 use p3_field::PrimeCharacteristicRing;
 
@@ -23,6 +23,7 @@ use p3_field::PrimeCharacteristicRing;
 /// Valid witness: [1, 1, 1]
 fn simple_ccs_and_witness_valid() -> (CcsStructure<F>, Vec<F>, StepBindingSpec, LastNExtractor) {
     // Create 3 matrices for 3 rows, 3 columns [const1, z0, z1]
+    // n=3 gets padded to 4 in sumcheck, giving ℓ=2 which is acceptable
     let m0 = Mat::from_row_major(3, 3, vec![
         F::ZERO, F::ONE, F::ZERO,   // Row 0: z0
         F::ZERO, F::ZERO, F::ONE,   // Row 1: z1
@@ -76,7 +77,7 @@ fn simple_ccs_and_witness_valid() -> (CcsStructure<F>, Vec<F>, StepBindingSpec, 
 ///   Row 2: z0 * z1 = z0  (if z0=1, then z1 must be 1)
 /// Invalid witness: [1, 1, 5] violates rows 1 and 2
 fn simple_ccs_and_witness_invalid() -> (CcsStructure<F>, Vec<F>, StepBindingSpec, LastNExtractor) {
-    // Same structure as valid
+    // Same structure as valid (3 rows, padded to 4 for ℓ=2)
     let m0 = Mat::from_row_major(3, 3, vec![
         F::ZERO, F::ONE, F::ZERO,   // Row 0: z0
         F::ZERO, F::ZERO, F::ONE,   // Row 1: z1
@@ -142,7 +143,7 @@ fn test_valid_witness_passes_verification() {
     ).expect("prove should succeed for valid witness");
 
     // Verify
-    let ok = verify_ivc_step_legacy(
+    let ok = verify_ivc_step(
         &ccs,
         &step_res.proof,
         &acc,
@@ -177,7 +178,7 @@ fn test_invalid_witness_is_caught() {
     ).expect("prove succeeds (soundness check is in verify)");
 
     // Verify - should REJECT because witness doesn't satisfy CCS
-    let ok = verify_ivc_step_legacy(
+    let ok = verify_ivc_step(
         &ccs,
         &step_res.proof,
         &acc,
@@ -282,7 +283,7 @@ fn test_large_ccs_ell_4() {
     ).expect("prove should succeed for valid witness");
 
     // Verify
-    let ok = verify_ivc_step_legacy(
+    let ok = verify_ivc_step(
         &ccs,
         &step_res.proof,
         &acc,
@@ -323,7 +324,7 @@ fn test_valid_witness_passes_with_non_empty_coords() {
     ).expect("prove should succeed for valid witness (non-base case)");
 
     // Verify must accept
-    let ok = verify_ivc_step_legacy(&ccs, &step1_res.proof, acc1, &binding, &params, None)
+    let ok = verify_ivc_step(&ccs, &step1_res.proof, acc1, &binding, &params, None)
         .expect("verify should not error");
     assert!(ok, "Valid witness should verify even when c_coords is non-empty (step 2 of chain)");
 }
@@ -359,7 +360,7 @@ fn test_invalid_witness_is_caught_with_non_empty_coords() {
 
     // A correct verifier should REJECT here because the witness is invalid.
     // If this returns true on your current branch, you've reproduced the bug.
-    let ok = verify_ivc_step_legacy(&ccs, &step_res.proof, acc1, &binding, &params, None)
+    let ok = verify_ivc_step(&ccs, &step_res.proof, acc1, &binding, &params, None)
         .expect("verify should not error");
 
     assert!(
@@ -396,7 +397,7 @@ fn test_mid_round_check_large_ccs_valid_with_non_empty_coords() {
         &params, &ccs, &witness, acc1, 1, None, &extractor, &binding,
     ).expect("prove should succeed for valid witness (non-base case)");
 
-    let ok = verify_ivc_step_legacy(&ccs, &step1_res.proof, acc1, &binding, &params, None)
+    let ok = verify_ivc_step(&ccs, &step1_res.proof, acc1, &binding, &params, None)
         .expect("verify should not error");
 
     assert!(ok, "Valid witness should pass at non-base case (ℓ=4).");
@@ -432,7 +433,7 @@ fn test_mid_round_check_large_ccs_invalid_with_non_empty_coords() {
     ).expect("prove succeeds; soundness checked by verifier");
 
     // Verifier must reject
-    let ok = verify_ivc_step_legacy(&ccs, &step_res.proof, acc1, &binding, &params, None)
+    let ok = verify_ivc_step(&ccs, &step_res.proof, acc1, &binding, &params, None)
         .expect("verify should not error");
 
     assert!(
