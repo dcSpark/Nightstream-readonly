@@ -8,7 +8,7 @@
 //! because the bridge requires **binding identical public-IO bytes into the 
 //! challenger** on both sides.
 
-use neo::{prove, verify, ProveInput, NeoParams, F};
+use neo::{prove_spartan2, verify_spartan2, ProveInput, NeoParams, F};
 use neo_ccs::{Mat, r1cs::r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
 
@@ -53,13 +53,13 @@ fn bridge_rejects_public_io_tamper() {
         vjs_opt: None,
     };
     
-    let proof = prove(prove_input).expect("Proof generation should succeed");
+    let proof = prove_spartan2(prove_input).expect("Proof generation should succeed");
     
     // Tamper public IO bound into the Poseidon2 transcript
     public_input.push(F::from_u64(42)); // Add unexpected public input
     
     // Verification must fail under tampered IO
-    let verification_result = verify(&ccs, &public_input, &proof);
+    let verification_result = verify_spartan2(&ccs, &public_input, &proof);
     
     match verification_result {
         Ok(false) => {
@@ -95,7 +95,7 @@ fn bridge_rejects_different_ccs() {
         vjs_opt: None,
     };
     
-    let proof = prove(prove_input).expect("Proof generation should succeed");
+    let proof = prove_spartan2(prove_input).expect("Proof generation should succeed");
     
     // Create a different CCS (different constraint matrix) with 3 rows (ℓ=2)
     let a2 = Mat::from_row_major(3, 2, vec![
@@ -116,7 +116,7 @@ fn bridge_rejects_different_ccs() {
     let ccs2 = r1cs_to_ccs(a2, b2, c2);
     
     // Try to verify proof against different CCS
-    let verification_result = verify(&ccs2, &public_input, &proof);
+    let verification_result = verify_spartan2(&ccs2, &public_input, &proof);
     
     match verification_result {
         Ok(false) => {

@@ -5,7 +5,7 @@
 //! for the next folding step, the dimensions don't match the step circuit.
 
 use neo::{NeoParams, F};
-use neo::{Accumulator, StepBindingSpec, IvcStepInput, prove_ivc_step_chained, compute_accumulator_digest_fields};
+use neo::{Accumulator, StepBindingSpec, IvcStepInput, prove_ivc_step_chained, compute_accumulator_digest_fields, AppInputBinding};
 use neo_ccs::{r1cs_to_ccs, Mat};
 use p3_field::PrimeCharacteristicRing;
 
@@ -101,7 +101,7 @@ fn test_folding_chain_dimension_mismatch() {
         public_input: None,
         y_step: &[F::from_u64(5)], // z = 5
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: AppInputBinding::WitnessBound,
         prev_augmented_x: None,
     };
 
@@ -142,7 +142,7 @@ fn test_folding_chain_dimension_mismatch() {
         public_input: None,
         y_step: &[F::from_u64(7)], // z = 7
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: AppInputBinding::WitnessBound,
         prev_augmented_x: None,
     };
 

@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use neo::{self, F, CcsStructure, NeoParams};
+use neo::{self, F, CcsStructure, NeoParams, AppInputBinding};
 use p3_field::PrimeCharacteristicRing;
 
 fn trivial_step_ccs(y_len: usize) -> CcsStructure<F> {
@@ -41,7 +41,7 @@ fn ivc_linking_rejects_mismatched_prev_augmented_x() -> anyhow::Result<()> {
         vec![F::ONE, F::from_u64(5)],
     ].into_iter().enumerate() {
         let y_step = w[1..=y_len].to_vec();
-        let input = neo::IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &w, prev_accumulator: &acc, step: i as u64, public_input: Some(&[]), y_step: &y_step, binding_spec: &binding, transcript_only_app_inputs: false, prev_augmented_x: proofs.last().map(|p| p.public_inputs.step_augmented_public_input()) };
+        let input = neo::IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &w, prev_accumulator: &acc, step: i as u64, public_input: Some(&[]), y_step: &y_step, binding_spec: &binding, app_input_binding: AppInputBinding::WitnessBound, prev_augmented_x: proofs.last().map(|p| p.public_inputs.step_augmented_public_input()) };
         let (res, _me, _wit, lhs_next) = neo::prove_ivc_step_chained(input, None, None, prev_lhs.take())
             .map_err(|e| anyhow::anyhow!("prove_ivc_step_chained failed: {}", e))?;
         acc = res.proof.next_accumulator.clone();
@@ -58,7 +58,7 @@ fn ivc_linking_rejects_mismatched_prev_augmented_x() -> anyhow::Result<()> {
 
     // Verify chain should now fail due to linking check
     let initial_acc = neo::Accumulator { c_z_digest: [0u8;32], c_coords: vec![], y_compact: y0, step: 0 };
-    match neo::verify_ivc_chain_legacy(&step_ccs, &chain, &initial_acc, &binding, &params) {
+    match neo::verify_ivc_chain(&step_ccs, &chain, &initial_acc, &binding, &params) {
         Ok(ok) => assert!(!ok, "linking violation should be rejected"),
         Err(_) => { /* also acceptable: verifier detected linking failure */ }
     }
@@ -124,7 +124,7 @@ fn ivc_linking_accepts_matched_prev_augmented_x() -> anyhow::Result<()> {
         vec![F::ONE, F::from_u64(5)],
     ].into_iter().enumerate() {
         let y_step = w[1..=y_len].to_vec();
-        let input = neo::IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &w, prev_accumulator: &acc, step: i as u64, public_input: Some(&[]), y_step: &y_step, binding_spec: &binding, transcript_only_app_inputs: false, prev_augmented_x: proofs.last().map(|p| p.public_inputs.step_augmented_public_input()) };
+        let input = neo::IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &w, prev_accumulator: &acc, step: i as u64, public_input: Some(&[]), y_step: &y_step, binding_spec: &binding, app_input_binding: AppInputBinding::WitnessBound, prev_augmented_x: proofs.last().map(|p| p.public_inputs.step_augmented_public_input()) };
         let (res, _me, _wit, lhs_next) = neo::prove_ivc_step_chained(input, None, None, prev_lhs.take())
             .map_err(|e| anyhow::anyhow!("prove_ivc_step_chained failed: {}", e))?;
         acc = res.proof.next_accumulator.clone();
@@ -143,7 +143,7 @@ fn ivc_linking_accepts_matched_prev_augmented_x() -> anyhow::Result<()> {
 
     // Verify the entire chain passes with strict verification
     let initial_acc = neo::Accumulator { c_z_digest: [0u8; 32], c_coords: vec![], y_compact: y0, step: 0 };
-    match neo::verify_ivc_chain_legacy(&step_ccs, &chain, &initial_acc, &binding, &params) {
+    match neo::verify_ivc_chain(&step_ccs, &chain, &initial_acc, &binding, &params) {
         Ok(ok) => assert!(ok, "strict chain verification should succeed for matched linkage"),
         Err(e) => panic!("verification failed unexpectedly: {}", e),
     }

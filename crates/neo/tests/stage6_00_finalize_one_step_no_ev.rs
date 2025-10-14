@@ -39,7 +39,7 @@ fn finalize_one_step_no_ev() -> Result<()> {
     let (proof, final_ccs, final_public_input) =
         neo::finalize_nivc_chain_with_options(&program, &params, chain, NivcFinalizeOptions { embed_ivc_ev: false })?
         .ok_or_else(|| anyhow::anyhow!("No steps to finalize"))?;
-    let ok = neo::verify(&final_ccs, &final_public_input, &proof)?;
+    let ok = neo::verify_spartan2(&final_ccs, &final_public_input, &proof)?;
     assert!(ok);
     Ok(())
 }

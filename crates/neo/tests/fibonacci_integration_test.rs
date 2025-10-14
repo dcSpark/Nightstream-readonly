@@ -141,7 +141,7 @@ fn test_fibonacci_integration() -> Result<()> {
     println!("\n🔍 Step 7: Verifying Final SNARK proof...");
     let verify_start = std::time::Instant::now();
     
-    let is_valid = neo::verify(&final_ccs, &final_public_input, &final_proof)
+    let is_valid = neo::verify_spartan2(&final_ccs, &final_public_input, &final_proof)
         .map_err(|e| anyhow::anyhow!("Final SNARK verification failed: {}", e))?;
     let verify_time = verify_start.elapsed();
     

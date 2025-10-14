@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-use neo::{self, F, CcsStructure, NeoParams};
+use neo::{self, F, CcsStructure, NeoParams, AppInputBinding};
 use p3_field::PrimeCharacteristicRing;
 
 fn trivial_step_ccs_rows(y_len: usize, rows: usize) -> CcsStructure<F> {
@@ -52,7 +52,7 @@ fn base_case_not_self_fold_anymore() -> anyhow::Result<()> {
         public_input: None,
         y_step: &y_step,
         binding_spec: &binding,
-        transcript_only_app_inputs: false,
+        app_input_binding: AppInputBinding::WitnessBound,
         prev_augmented_x: None,
     };
 
@@ -70,7 +70,7 @@ fn base_case_not_self_fold_anymore() -> anyhow::Result<()> {
     assert_ne!(lhs.c.data, rhs.c.data, "base-case LHS commitment must differ from RHS");
 
     // Verify step succeeds
-    let ok = neo::verify_ivc_step_legacy(&step_ccs, &res.proof, &prev_acc, &binding, &params, None)
+    let ok = neo::verify_ivc_step(&step_ccs, &res.proof, &prev_acc, &binding, &params, None)
         .map_err(|e| anyhow::anyhow!("verify_ivc_step failed: {}", e))?;
     assert!(ok, "verification must pass");
     Ok(())

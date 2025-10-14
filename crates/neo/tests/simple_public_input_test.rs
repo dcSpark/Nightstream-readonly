@@ -51,7 +51,7 @@ fn test_prove_with_public_inputs_after_fix() {
     let public_input = vec![F::from_u64(7), F::from_u64(11)];
     let witness      = vec![F::from_u64(7), F::from_u64(11)];
 
-    let result = neo::prove(neo::ProveInput {
+    let result = neo::prove_spartan2(neo::ProveInput {
         params: &params,
         ccs: &ccs,
         public_input: &public_input,

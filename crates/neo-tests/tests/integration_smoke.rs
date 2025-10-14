@@ -5,7 +5,7 @@
 //! These tests verify that the core Neo API works correctly for normal use cases.
 //! For security and vulnerability testing, see the neo-redteam-tests crate.
 
-use neo::{prove, verify, ProveInput, NeoParams, F};
+use neo::{prove_spartan2, ProveInput, NeoParams, F};
 use neo_ccs::{Mat, r1cs::r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
 
@@ -53,10 +53,10 @@ fn neo_basic_prove_verify_works() {
     };
 
     // Generate proof
-    let proof = prove(prove_input).expect("prove should succeed");
+    let proof = prove_spartan2(prove_input).expect("prove should succeed");
 
     // Verify proof
-    let verification_result = verify(&ccs, &public_input, &proof).expect("verify should not error");
+    let verification_result = neo::verify_spartan2(&ccs, &public_input, &proof).expect("verify should not error");
     assert!(verification_result, "valid proof should verify successfully");
     
     println!("✅ Basic Neo prove/verify cycle works correctly");
@@ -82,7 +82,7 @@ fn neo_constraint_violation_fails() {
     };
 
     // Proof generation should fail with constraint violation
-    let result = prove(prove_input);
+    let result = prove_spartan2(prove_input);
     assert!(result.is_err(), "prove with invalid witness should fail");
     
     if let Err(e) = result {

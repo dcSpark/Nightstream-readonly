@@ -114,7 +114,7 @@ fn test_fibonacci_nivc_ev_embed_small() -> Result<()> {
         .ok_or_else(|| anyhow::anyhow!("No steps to finalize"))?;
 
     // Verify lean proof
-    let ok = neo::verify(&final_ccs, &final_public_input, &proof)?;
+    let ok = neo::verify_spartan2(&final_ccs, &final_public_input, &proof)?;
     assert!(ok, "Final SNARK verification must succeed for small NIVC EV run");
 
     // Sanity: public IO is non-empty and decodes

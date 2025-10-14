@@ -1,10 +1,4 @@
 //! Integration test for Starstream TX IVC proof generation
-//!
-//! This test reads the exported test data from `test_starstream_tx_export.json`
-//! and attempts to generate an IVC proof using the Neo proving system.
-//!
-//! According to the export metadata, this test SHOULD FAIL at Step 2 due to a
-//! constraint violation (YieldResume expects current_program=300 but it's actually 400).
 
 use std::fs;
 use std::path::PathBuf;
@@ -12,8 +6,9 @@ use serde::{Deserialize, Serialize};
 use neo::{F, NeoParams};
 use neo::{Accumulator, StepBindingSpec, IvcChainStepInput, prove_ivc_chain, verify_ivc_chain};
 use neo::{NivcProgram, NivcStepSpec, NivcState, verify_nivc_chain};
+use neo::{IvcSession, NeoStep, StepArtifacts, StepDescriptor, verify_chain_with_descriptor};
 use neo_ccs::{Mat, r1cs::r1cs_to_ccs, CcsStructure};
-use p3_field::{PrimeCharacteristicRing, PrimeField64};
+use p3_field::PrimeCharacteristicRing;
 
 /// Top-level structure matching the JSON export format
 #[derive(Debug, Deserialize, Serialize)]
@@ -39,18 +34,20 @@ struct Metadata {
 #[derive(Debug, Deserialize, Serialize)]
 struct IvcParams {
     y0: Vec<String>,
-    step_spec: StepSpec,
+    step_spec: JsonStepSpec,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
-struct StepSpec {
+struct JsonStepSpec {
     y_len: usize,
     const1_index: usize,
     y_step_indices: Vec<usize>,
     y_prev_indices: Vec<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    app_input_indices: Option<Vec<usize>>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct StepData {
     step_idx: usize,
     instruction: String,
@@ -58,14 +55,14 @@ struct StepData {
     r1cs: R1csData,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct WitnessData {
     instance: Vec<String>,
     witness: Vec<String>,
     z_full: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, Clone, Deserialize, Serialize)]
 struct R1csData {
     num_constraints: usize,
     num_variables: usize,
@@ -82,7 +79,6 @@ struct FinalSnark {
     num_constraints: usize,
 }
 
-/// Parse a field element string (either decimal or hex)
 fn parse_field_element(s: &str) -> F {
     if let Some(hex) = s.strip_prefix("0x") {
         F::from_u64(u64::from_str_radix(hex, 16).expect("valid hex"))
@@ -91,160 +87,107 @@ fn parse_field_element(s: &str) -> F {
     }
 }
 
-/// Convert sparse matrix format to dense Mat
-fn sparse_to_dense_mat(
-    sparse: &[(usize, usize, String)],
-    rows: usize,
-    cols: usize,
-) -> Mat<F> {
+fn sparse_to_dense_mat(sparse: &[(usize, usize, String)], rows: usize, cols: usize) -> Mat<F> {
     let mut data = vec![F::ZERO; rows * cols];
-    
     for (row, col, val_str) in sparse {
-        let val = parse_field_element(val_str);
-        data[row * cols + col] = val;
+        data[row * cols + col] = parse_field_element(val_str);
     }
-    
     Mat::from_row_major(rows, cols, data)
 }
 
-/// Build CCS from R1CS data in the export
 fn build_step_ccs(r1cs: &R1csData) -> CcsStructure<F> {
-    let rows = r1cs.num_constraints;
-    let cols = r1cs.num_variables;
-    
-    let a = sparse_to_dense_mat(&r1cs.a_sparse, rows, cols);
-    let b = sparse_to_dense_mat(&r1cs.b_sparse, rows, cols);
-    let c = sparse_to_dense_mat(&r1cs.c_sparse, rows, cols);
-    
+    let a = sparse_to_dense_mat(&r1cs.a_sparse, r1cs.num_constraints, r1cs.num_variables);
+    let b = sparse_to_dense_mat(&r1cs.b_sparse, r1cs.num_constraints, r1cs.num_variables);
+    let c = sparse_to_dense_mat(&r1cs.c_sparse, r1cs.num_constraints, r1cs.num_variables);
     r1cs_to_ccs(a, b, c)
 }
 
-/// Extract witness vector from step data
 fn extract_witness(witness_data: &WitnessData) -> Vec<F> {
-    witness_data.z_full
-        .iter()
-        .map(|s| parse_field_element(s))
-        .collect()
+    witness_data.z_full.iter().map(|s| parse_field_element(s)).collect()
 }
 
-/// Manually verify R1CS constraint satisfaction for debugging
+fn load_test_export() -> TestExport {
+    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    let json_path = manifest_dir.join("tests/test_starstream_tx_export.json");
+    let json_content = fs::read_to_string(&json_path).expect("Failed to read JSON");
+    serde_json::from_str(&json_content).expect("Failed to parse JSON")
+}
+
+fn handle_test_result(result: Result<bool, impl std::fmt::Display>, should_fail: bool, test_name: &str) {
+    match result {
+        Ok(true) if should_fail => {
+            panic!("SOUNDNESS BUG: {} verification succeeded but should have failed", test_name);
+        }
+        Ok(false) if !should_fail => {
+            panic!("{} verification failed unexpectedly", test_name);
+        }
+        Err(e) if !should_fail => {
+            panic!("{} verification error: {}", test_name, e);
+        }
+        _ => {} // Expected outcome
+    }
+}
+
 fn verify_r1cs_constraints(step: &StepData) -> Result<(), String> {
     let z = extract_witness(&step.witness);
     let r1cs = &step.r1cs;
     
-    // Compute A*z, B*z, C*z
     let mut az = vec![F::ZERO; r1cs.num_constraints];
     let mut bz = vec![F::ZERO; r1cs.num_constraints];
     let mut cz = vec![F::ZERO; r1cs.num_constraints];
     
     for (row, col, val_str) in &r1cs.a_sparse {
-        let val = parse_field_element(val_str);
-        az[*row] += val * z[*col];
+        az[*row] += parse_field_element(val_str) * z[*col];
     }
-    
     for (row, col, val_str) in &r1cs.b_sparse {
-        let val = parse_field_element(val_str);
-        bz[*row] += val * z[*col];
+        bz[*row] += parse_field_element(val_str) * z[*col];
     }
-    
     for (row, col, val_str) in &r1cs.c_sparse {
-        let val = parse_field_element(val_str);
-        cz[*row] += val * z[*col];
+        cz[*row] += parse_field_element(val_str) * z[*col];
     }
     
-    // Check: A*z ∘ B*z = C*z
-    let mut violations = Vec::new();
     for i in 0..r1cs.num_constraints {
-        let lhs = az[i] * bz[i];
-        let rhs = cz[i];
-        if lhs != rhs {
-            violations.push(format!(
-                "Constraint {} violated: ({}) * ({}) = {} ≠ {} (instruction: {})",
-                i,
-                az[i].as_canonical_u64(),
-                bz[i].as_canonical_u64(),
-                lhs.as_canonical_u64(),
-                rhs.as_canonical_u64(),
-                step.instruction
-            ));
+        if az[i] * bz[i] != cz[i] {
+            return Err(format!("Step {} constraint {} violated", step.step_idx, i));
         }
-    }
-    
-    if !violations.is_empty() {
-        return Err(format!(
-            "Step {} has {} constraint violations:\n{}",
-            step.step_idx,
-            violations.len(),
-            violations.join("\n")
-        ));
     }
     
     Ok(())
 }
 
 #[test]
-fn test_starstream_tx_ivc_proof() {
-    println!("🧪 Testing Starstream TX IVC Proof Generation");
-    println!("{}", "=".repeat(60));
+fn test_json_parsing_only() {
+    let export = load_test_export();
+    assert!(export.steps.len() > 0);
+    assert!(export.ivc_params.y0.len() > 0);
+}
+
+#[test]
+fn test_r1cs_constraint_verification() {
+    let export = load_test_export();
+    let found_violation = export.steps.iter().any(|step| verify_r1cs_constraints(step).is_err());
     
-    // Load the JSON export
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let json_path = manifest_dir.join("tests/test_starstream_tx_export.json");
-    
-    let json_content = fs::read_to_string(&json_path)
-        .expect("Failed to read test_starstream_tx_export.json");
-    
-    let export: TestExport = serde_json::from_str(&json_content)
-        .expect("Failed to parse JSON export");
-    
-    println!("📋 Test Metadata:");
-    println!("   Name: {}", export.metadata.test_name);
-    println!("   Field: {} (modulus: {})", export.metadata.field, export.metadata.modulus);
-    println!("   Steps: {}", export.metadata.num_steps);
-    println!("   Should Fail: {}", export.metadata.should_fail);
-    if let Some(reason) = &export.metadata.failure_reason {
-        println!("   Failure Reason: {}", reason);
+    if export.metadata.should_fail {
+        assert!(found_violation, "Expected constraint violations but found none");
+    } else {
+        assert!(!found_violation, "Found unexpected constraint violations");
     }
-    println!();
-    
-    // Parse initial state y0
-    let y0: Vec<F> = export.ivc_params.y0
-        .iter()
-        .map(|s| parse_field_element(s))
-        .collect();
-    
-    println!("🎯 Initial State y0: {:?}", 
-        y0.iter().map(|f| f.as_canonical_u64()).collect::<Vec<_>>());
-    println!();
-    
-    // Setup Neo parameters
+}
+
+#[test]
+fn test_starstream_tx_ivc_proof() {
+    let export = load_test_export();
+    let y0: Vec<F> = export.ivc_params.y0.iter().map(|s| parse_field_element(s)).collect();
     let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
     
-    // Build binding spec from step_spec
     let binding_spec = StepBindingSpec {
         y_step_offsets: export.ivc_params.step_spec.y_step_indices.clone(),
-        step_program_input_witness_indices: vec![],  // No explicit public inputs binding
+        step_program_input_witness_indices: vec![],
         y_prev_witness_indices: export.ivc_params.step_spec.y_prev_indices.clone(),
         const1_witness_index: export.ivc_params.step_spec.const1_index,
     };
     
-    println!("📊 Binding Spec:");
-    println!("   y_step_offsets: {:?}", binding_spec.y_step_offsets);
-    println!("   y_prev_indices: {:?}", binding_spec.y_prev_witness_indices);
-    println!("   const1_index: {}", binding_spec.const1_witness_index);
-    println!();
-    
-    // Build step CCS - use the first step's R1CS structure
-    // (All steps should have the same structure, just different witnesses)
     let step_ccs = build_step_ccs(&export.steps[0].r1cs);
-    
-    println!("🔧 Step CCS Structure:");
-    println!("   Constraints (n): {}", step_ccs.n);
-    println!("   Variables (m): {}", step_ccs.m);
-    println!("   Matrices (t): {}", step_ccs.t());
-    println!();
-    
-    // Initial accumulator
     let initial_accumulator = Accumulator {
         c_z_digest: [0u8; 32],
         c_coords: vec![],
@@ -252,442 +195,135 @@ fn test_starstream_tx_ivc_proof() {
         step: 0,
     };
     
-    // Prepare step inputs
     let step_inputs: Vec<IvcChainStepInput> = export.steps
         .iter()
         .enumerate()
-        .map(|(i, step)| {
-            let witness = extract_witness(&step.witness);
-            IvcChainStepInput {
-                witness,
-                public_input: None,  // No explicit public inputs in this test
-                step: i as u64,
-            }
+        .map(|(i, step)| IvcChainStepInput {
+            witness: extract_witness(&step.witness),
+            public_input: None,
+            step: i as u64,
         })
         .collect();
     
-    println!("🚀 Attempting IVC Proof Generation...");
-    println!("   This will run {} IVC steps", export.steps.len());
-    if export.metadata.should_fail {
-        println!("   ⚠️  Test metadata indicates this should fail: {}", 
-            export.metadata.failure_reason.as_deref().unwrap_or("unknown reason"));
-    }
-    println!();
-    
-    // Generate proof (NO pre-flight checks - let the prover catch any issues!)
-    let proof_result = prove_ivc_chain(
-        &params,
-        &step_ccs,
-        &step_inputs,
-        initial_accumulator.clone(),
-        &binding_spec,
-    );
+    let proof_result = prove_ivc_chain(&params, &step_ccs, &step_inputs, initial_accumulator.clone(), &binding_spec);
     
     match proof_result {
         Ok(chain_proof) => {
-            println!("✅ IVC Proof Generation SUCCEEDED");
-            println!("   Chain Length: {}", chain_proof.chain_length);
-            println!("   Final Accumulator Step: {}", chain_proof.final_accumulator.step);
-            println!("   Final State: {:?}", 
-                chain_proof.final_accumulator.y_compact
-                    .iter()
-                    .map(|f| f.as_canonical_u64())
-                    .collect::<Vec<_>>());
-            println!();
-            
-            // Verify the proof
-            println!("🔍 Verifying IVC Chain Proof...");
-            let verify_result = verify_ivc_chain(
-                &step_ccs,
-                &chain_proof,
-                &initial_accumulator,
-                &binding_spec,
-                &params,
-            );
-            
-            match verify_result {
-                Ok(true) => {
-                    // Verification succeeded
-                    if export.metadata.should_fail {
-                        println!("❌ IVC Verification SUCCEEDED (but should have failed!)");
-                        println!("🚨 SOUNDNESS BUG DETECTED! 🚨");
-                        println!("   Test metadata indicates this should fail, but verifier accepted it.");
-                        println!("   This means the verifier failed to catch invalid constraints!");
-                        if let Some(reason) = &export.metadata.failure_reason {
-                            println!("   Expected failure: {}", reason);
-                        }
-                        panic!("Soundness violation: verifier accepted proof that should have been rejected");
-                    } else {
-                        println!("✅ IVC Verification SUCCEEDED");
-                        println!("   The proof is valid and verifies correctly.");
-                    }
-                }
-                Ok(false) => {
-                    // Verification failed (returned false)
-                    if export.metadata.should_fail {
-                        println!("✅ IVC Verification REJECTED (as expected!)");
-                        println!("   The proof was generated but verifier correctly rejected it.");
-                        println!("   🎉 Test PASSED: Verifier correctly caught the invalid constraints!");
-                        if let Some(reason) = &export.metadata.failure_reason {
-                            println!("   Expected issue: {}", reason);
-                        }
-                        // This is the expected behavior - test passes
-                        return;
-                    } else {
-                        println!("❌ IVC Verification FAILED");
-                        println!("   The proof was generated but verification returned false.");
-                        panic!("Verification failed for generated proof");
-                    }
-                }
-                Err(e) => {
-                    // Verification error
-                    if export.metadata.should_fail {
-                        println!("✅ IVC Verification ERROR (as expected!)");
-                        println!("   The proof was generated but verifier correctly errored.");
-                        println!("   🎉 Test PASSED: Verifier correctly caught the invalid constraints!");
-                        if let Some(reason) = &export.metadata.failure_reason {
-                            println!("   Expected issue: {}", reason);
-                        }
-                        println!("   Actual error: {}", e);
-                        // This is acceptable behavior for should_fail - test passes
-                        return;
-                    } else {
-                        println!("❌ IVC Verification ERROR: {}", e);
-                        panic!("Verification error: {}", e);
-                    }
-                }
-            }
+            let verify_result = verify_ivc_chain(&step_ccs, &chain_proof, &initial_accumulator, &binding_spec, &params);
+            handle_test_result(verify_result, export.metadata.should_fail, "IVC");
         }
-        Err(e) => {
-            println!("❌ IVC Proof Generation FAILED");
-            println!("   Error: {}", e);
-            println!();
-            
-            // If should_fail is true, this is the expected outcome
-            if export.metadata.should_fail {
-                println!("✅ Expected failure occurred (should_fail=true)");
-                println!("   The prover correctly rejected the invalid constraints.");
-                if let Some(reason) = &export.metadata.failure_reason {
-                    println!("   Expected reason: {}", reason);
-                }
-                println!("   Actual error: {}", e);
-                
-                // This is actually a success - the system is sound!
-                println!();
-                println!("🎉 Test PASSED: Prover correctly rejected invalid proof");
-                return;
-            } else {
-                // If should_fail is false but proof failed, that's unexpected
-                println!("⚠️  Unexpected failure (should_fail=false)");
-                panic!("Proof generation failed unexpectedly: {}", e);
-            }
-        }
+        Err(_e) if export.metadata.should_fail => {} // Expected failure
+        Err(e) => panic!("IVC proof generation failed unexpectedly: {}", e),
     }
-    
-    println!();
-    println!("{}", "=".repeat(60));
-    println!("🎉 Test Completed Successfully");
-}
-
-#[test]
-fn test_json_parsing_only() {
-    println!("🧪 Testing JSON Parsing");
-    
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let json_path = manifest_dir.join("tests/test_starstream_tx_export.json");
-    
-    let json_content = fs::read_to_string(&json_path)
-        .expect("Failed to read test_starstream_tx_export.json");
-    
-    let export: TestExport = serde_json::from_str(&json_content)
-        .expect("Failed to parse JSON export");
-    
-    println!("✅ Successfully parsed JSON");
-    println!("   Test: {}", export.metadata.test_name);
-    println!("   Steps: {}", export.steps.len());
-    println!("   y0 length: {}", export.ivc_params.y0.len());
-    
-    for (i, step) in export.steps.iter().enumerate() {
-        println!("   Step {}: {} constraints, {} variables",
-            i, step.r1cs.num_constraints, step.r1cs.num_variables);
-    }
-}
-
-#[test]
-fn test_r1cs_constraint_verification() {
-    println!("🧪 Testing R1CS Constraint Verification");
-    println!("{}", "=".repeat(60));
-    
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let json_path = manifest_dir.join("tests/test_starstream_tx_export.json");
-    
-    let json_content = fs::read_to_string(&json_path)
-        .expect("Failed to read test_starstream_tx_export.json");
-    
-    let export: TestExport = serde_json::from_str(&json_content)
-        .expect("Failed to parse JSON export");
-    
-    println!("📋 Test: {}", export.metadata.test_name);
-    println!("   Should Fail: {}", export.metadata.should_fail);
-    if let Some(reason) = &export.metadata.failure_reason {
-        println!("   Expected Failure: {}", reason);
-    }
-    println!();
-    
-    println!("🔍 Verifying R1CS constraints for each step:");
-    println!();
-    
-    let mut found_violation = false;
-    
-    for step in &export.steps {
-        println!("Step {}: {}", step.step_idx, step.instruction);
-        println!("  {} constraints × {} variables", 
-            step.r1cs.num_constraints, step.r1cs.num_variables);
-        
-        match verify_r1cs_constraints(step) {
-            Ok(()) => {
-                println!("  ✅ All constraints satisfied");
-            }
-            Err(e) => {
-                println!("  ❌ CONSTRAINT VIOLATION DETECTED");
-                println!("  {}", e.replace('\n', "\n  "));
-                found_violation = true;
-            }
-        }
-        println!();
-    }
-    
-    // Assert test expectation matches reality
-    if export.metadata.should_fail {
-        assert!(found_violation, 
-            "Test marked as should_fail=true but no constraint violations found");
-        println!("✅ Test PASSED: Constraint violation detected as expected");
-    } else {
-        assert!(!found_violation, 
-            "Test marked as should_fail=false but constraint violations found");
-        println!("✅ Test PASSED: All constraints satisfied as expected");
-    }
-    
-    println!();
-    println!("{}", "=".repeat(60));
 }
 
 #[test]
 fn test_starstream_tx_nivc_proof() {
-    println!("🧪 Testing Starstream TX NIVC Proof Generation");
-    println!("{}", "=".repeat(60));
-    
-    // Load the JSON export
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let json_path = manifest_dir.join("tests/test_starstream_tx_export.json");
-    
-    let json_content = fs::read_to_string(&json_path)
-        .expect("Failed to read test_starstream_tx_export.json");
-    
-    let export: TestExport = serde_json::from_str(&json_content)
-        .expect("Failed to parse JSON export");
-    
-    println!("📋 Test Metadata:");
-    println!("   Name: {}", export.metadata.test_name);
-    println!("   Field: {} (modulus: {})", export.metadata.field, export.metadata.modulus);
-    println!("   Steps: {}", export.metadata.num_steps);
-    println!("   Should Fail: {}", export.metadata.should_fail);
-    if let Some(reason) = &export.metadata.failure_reason {
-        println!("   Failure Reason: {}", reason);
-    }
-    println!();
-    
-    // Parse initial state y0
-    let y0: Vec<F> = export.ivc_params.y0
-        .iter()
-        .map(|s| parse_field_element(s))
-        .collect();
-    
-    println!("🎯 Initial State y0: {:?}", 
-        y0.iter().map(|f| f.as_canonical_u64()).collect::<Vec<_>>());
-    println!();
-    
-    // Setup Neo parameters
+    let export = load_test_export();
+    let y0: Vec<F> = export.ivc_params.y0.iter().map(|s| parse_field_element(s)).collect();
     let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
     
-    // Build binding spec from step_spec
     let binding_spec = StepBindingSpec {
         y_step_offsets: export.ivc_params.step_spec.y_step_indices.clone(),
-        step_program_input_witness_indices: vec![],  // No explicit public inputs binding
+        step_program_input_witness_indices: vec![],
         y_prev_witness_indices: export.ivc_params.step_spec.y_prev_indices.clone(),
         const1_witness_index: export.ivc_params.step_spec.const1_index,
     };
     
-    println!("📊 Binding Spec:");
-    println!("   y_step_offsets: {:?}", binding_spec.y_step_offsets);
-    println!("   y_prev_indices: {:?}", binding_spec.y_prev_witness_indices);
-    println!("   const1_index: {}", binding_spec.const1_witness_index);
-    println!();
-    
-    // Build step CCS - use the first step's R1CS structure
     let step_ccs = build_step_ccs(&export.steps[0].r1cs);
+    let program = NivcProgram::new(vec![NivcStepSpec {
+        ccs: step_ccs.clone(),
+        binding: binding_spec.clone(),
+    }]);
     
-    println!("🔧 Step CCS Structure:");
-    println!("   Constraints (n): {}", step_ccs.n);
-    println!("   Variables (m): {}", step_ccs.m);
-    println!("   Matrices (t): {}", step_ccs.t());
-    println!();
+    let mut nivc_state = NivcState::new(params.clone(), program.clone(), y0.clone())
+        .expect("Failed to create NIVC state");
     
-    // Create NIVC program with a single step type
-    // (In a more sophisticated version, we could have different step types for Nop, Resume, YieldResume)
-    let program = NivcProgram::new(vec![
-        NivcStepSpec {
-            ccs: step_ccs.clone(),
-            binding: binding_spec.clone(),
-        },
-    ]);
-    
-    println!("🔧 NIVC Program:");
-    println!("   Number of step types (lanes): {}", program.len());
-    println!();
-    
-    // Create NIVC state
-    let mut nivc_state = match NivcState::new(params.clone(), program.clone(), y0.clone()) {
-        Ok(state) => state,
-        Err(e) => {
-            panic!("Failed to create NIVC state: {}", e);
+    let mut proof_succeeded = true;
+    for step_data in &export.steps {
+        let witness = extract_witness(&step_data.witness);
+        if nivc_state.step(0, &vec![], &witness).is_err() {
+            proof_succeeded = false;
+            break;
         }
+    }
+    
+    if !proof_succeeded {
+        assert!(export.metadata.should_fail, "NIVC proof generation failed unexpectedly");
+        return;
+    }
+    
+    let chain_proof = nivc_state.into_proof();
+    let verify_result = verify_nivc_chain(&program, &params, &chain_proof, &y0);
+    handle_test_result(verify_result, export.metadata.should_fail, "NIVC");
+}
+
+struct TestStepCircuit {
+    steps: Vec<StepData>,
+    step_spec: neo::StepSpec,
+    step_ccs: CcsStructure<F>,
+}
+
+impl NeoStep for TestStepCircuit {
+    type ExternalInputs = ();
+    
+    fn state_len(&self) -> usize {
+        self.step_spec.y_len
+    }
+    
+    fn step_spec(&self) -> neo::StepSpec {
+        self.step_spec.clone()
+    }
+    
+    fn synthesize_step(&mut self, step_idx: usize, _z_prev: &[F], _inputs: &Self::ExternalInputs) -> StepArtifacts {
+        StepArtifacts {
+            ccs: self.step_ccs.clone(),
+            witness: extract_witness(&self.steps[step_idx].witness),
+            public_app_inputs: vec![],
+            spec: self.step_spec.clone(),
+        }
+    }
+}
+
+#[test]
+fn test_starstream_tx_session_api() {
+    let export = load_test_export();
+    let y0: Vec<F> = export.ivc_params.y0.iter().map(|s| parse_field_element(s)).collect();
+    let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
+    
+    let step_spec = neo::StepSpec {
+        y_len: export.ivc_params.step_spec.y_len,
+        const1_index: export.ivc_params.step_spec.const1_index,
+        y_step_indices: export.ivc_params.step_spec.y_step_indices.clone(),
+        y_prev_indices: Some(export.ivc_params.step_spec.y_prev_indices.clone()),
+        app_input_indices: export.ivc_params.step_spec.app_input_indices.clone(),
     };
     
-    println!("🚀 Attempting NIVC Proof Generation...");
-    println!("   This will run {} NIVC steps", export.steps.len());
-    if export.metadata.should_fail {
-        println!("   ⚠️  Test metadata indicates this should fail: {}", 
-            export.metadata.failure_reason.as_deref().unwrap_or("unknown reason"));
-    }
-    println!();
+    let step_ccs = build_step_ccs(&export.steps[0].r1cs);
+    let mut circuit = TestStepCircuit {
+        steps: export.steps.clone(),
+        step_spec: step_spec.clone(),
+        step_ccs: step_ccs.clone(),
+    };
     
-    // Execute steps (NO pre-flight checks - let the prover catch any issues!)
-    let mut proof_generation_succeeded = true;
-    let mut error_message = String::new();
+    let mut session = IvcSession::new(&params, Some(y0.clone()), 0);
     
-    for (step_idx, step_data) in export.steps.iter().enumerate() {
-        println!("   Executing Step {}: {} ...", step_idx, step_data.instruction);
-        
-        let witness = extract_witness(&step_data.witness);
-        let step_io: Vec<F> = vec![];  // No explicit public I/O for this test
-        
-        // All steps use lane 0 (single step type)
-        match nivc_state.step(0, &step_io, &witness) {
-            Ok(_step_proof) => {
-                println!("      ✅ Step {} succeeded", step_idx);
-            }
-            Err(e) => {
-                println!("      ❌ Step {} failed: {}", step_idx, e);
-                proof_generation_succeeded = false;
-                error_message = e.to_string();
-                break;
-            }
+    let mut proof_succeeded = true;
+    for _ in 0..export.steps.len() {
+        if session.prove_step(&mut circuit, &()).is_err() {
+            proof_succeeded = false;
+            break;
         }
     }
     
-    println!();
-    
-    if !proof_generation_succeeded {
-        println!("❌ NIVC Proof Generation FAILED");
-        println!("   Error: {}", error_message);
-        println!();
-        
-        // If should_fail is true, this is the expected outcome
-        if export.metadata.should_fail {
-            println!("✅ Expected failure occurred (should_fail=true)");
-            println!("   The NIVC prover correctly rejected the invalid constraints.");
-            if let Some(reason) = &export.metadata.failure_reason {
-                println!("   Expected reason: {}", reason);
-            }
-            println!("   Actual error: {}", error_message);
-            
-            // This is actually a success - the system is sound!
-            println!();
-            println!("🎉 Test PASSED: NIVC prover correctly rejected invalid proof");
-            return;
-        } else {
-            // If should_fail is false but proof failed, that's unexpected
-            println!("⚠️  Unexpected failure (should_fail=false)");
-            panic!("NIVC proof generation failed unexpectedly: {}", error_message);
-        }
+    if !proof_succeeded {
+        assert!(export.metadata.should_fail, "Session proof generation failed unexpectedly");
+        return;
     }
     
-    // If we get here, all steps succeeded
-    println!("✅ NIVC Proof Generation SUCCEEDED");
-    println!("   All {} steps completed successfully", export.steps.len());
-    println!();
-    
-    // Finalize and verify the NIVC chain
-    println!("🔍 Finalizing NIVC Chain Proof...");
-    let chain_proof = nivc_state.into_proof();
-    println!("   Chain Length: {}", chain_proof.steps.len());
-    println!("   Final Accumulator Step: {}", chain_proof.final_acc.step);
-    println!("   Final Global State: {:?}", 
-        chain_proof.final_acc.global_y
-            .iter()
-            .map(|f| f.as_canonical_u64())
-            .collect::<Vec<_>>());
-    println!();
-    
-    println!("🔍 Verifying NIVC Chain Proof...");
-    let verify_result = verify_nivc_chain(&program, &params, &chain_proof, &y0);
-    
-    match verify_result {
-        Ok(true) => {
-            // Verification succeeded
-            if export.metadata.should_fail {
-                println!("❌ NIVC Verification SUCCEEDED (but should have failed!)");
-                println!("🚨 SOUNDNESS BUG DETECTED! 🚨");
-                println!("   Test metadata indicates this should fail, but verifier accepted it.");
-                println!("   This means the NIVC verifier failed to catch invalid constraints!");
-                if let Some(reason) = &export.metadata.failure_reason {
-                    println!("   Expected failure: {}", reason);
-                }
-                panic!("Soundness violation: NIVC verifier accepted proof that should have been rejected");
-            } else {
-                println!("✅ NIVC Verification SUCCEEDED");
-                println!("   The proof is valid and verifies correctly.");
-            }
-        }
-        Ok(false) => {
-            // Verification failed (returned false)
-            if export.metadata.should_fail {
-                println!("✅ NIVC Verification REJECTED (as expected!)");
-                println!("   The proof was generated but verifier correctly rejected it.");
-                println!("   🎉 Test PASSED: NIVC verifier correctly caught the invalid constraints!");
-                if let Some(reason) = &export.metadata.failure_reason {
-                    println!("   Expected issue: {}", reason);
-                }
-                // This is the expected behavior - test passes
-                return;
-            } else {
-                println!("❌ NIVC Verification FAILED");
-                println!("   The proof was generated but verification returned false.");
-                panic!("NIVC verification failed for generated proof");
-            }
-        }
-        Err(e) => {
-            // Verification error
-            if export.metadata.should_fail {
-                println!("✅ NIVC Verification ERROR (as expected!)");
-                println!("   The proof was generated but verifier correctly errored.");
-                println!("   🎉 Test PASSED: NIVC verifier correctly caught the invalid constraints!");
-                if let Some(reason) = &export.metadata.failure_reason {
-                    println!("   Expected issue: {}", reason);
-                }
-                println!("   Actual error: {}", e);
-                // This is acceptable behavior for should_fail - test passes
-                return;
-            } else {
-                println!("❌ NIVC Verification ERROR: {}", e);
-                panic!("NIVC verification error: {}", e);
-            }
-        }
-    }
-    
-    println!();
-    println!("{}", "=".repeat(60));
-    println!("🎉 Test Completed Successfully");
+    let (chain_proof, step_ios) = session.finalize();
+    let descriptor = StepDescriptor { ccs: step_ccs, spec: step_spec };
+    let verify_result = verify_chain_with_descriptor(&descriptor, &chain_proof, &y0, &params, &step_ios);
+    handle_test_result(verify_result, export.metadata.should_fail, "Session");
 }
 

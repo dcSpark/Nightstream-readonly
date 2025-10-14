@@ -83,7 +83,7 @@ fn test_single_bit_flip_in_rho() -> Result<()> {
         public_input: None, // No public input needed - testing ρ tampering, not input binding
         y_step: &y_step,
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: neo::AppInputBinding::WitnessBound,
         prev_augmented_x: None,
     };
     
@@ -167,7 +167,7 @@ fn test_multiple_bit_flips_in_rho() -> Result<()> {
         public_input: None, // No public input needed - testing ρ tampering, not input binding
         y_step: &y_step,
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: neo::AppInputBinding::WitnessBound,
         prev_augmented_x: None,
     };
     

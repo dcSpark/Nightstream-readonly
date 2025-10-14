@@ -5,7 +5,7 @@
 
 use anyhow::Result;
 use serial_test::serial;
-use neo::{prove, verify, ProveInput, NeoParams, CcsStructure, F};
+use neo::{prove_spartan2, verify_spartan2, ProveInput, NeoParams, CcsStructure, F};
 use neo_ccs::{check_ccs_rowwise_zero, r1cs_to_ccs, Mat};
 use p3_field::PrimeCharacteristicRing;
 
@@ -112,7 +112,7 @@ fn test_verify_rejects_proof_with_tampered_public_input() -> Result<()> {
     let (ccs, public_input, witness, params) = create_simple_fibonacci_fixture();
     
     // Generate valid proof for the original context
-    let proof = prove(ProveInput {
+    let proof = prove_spartan2(ProveInput {
         params: &params,
         ccs: &ccs, 
         public_input: &public_input,
@@ -131,7 +131,7 @@ fn test_verify_rejects_proof_with_tampered_public_input() -> Result<()> {
     tampered_public_input.push(F::from_u64(42));
     
     // Verification should fail with tampered public input
-    let invalid = verify(&ccs, &tampered_public_input, &proof)?;
+    let invalid = verify_spartan2(&ccs, &tampered_public_input, &proof)?;
     assert!(!invalid, "Proof must not verify with tampered public input - this prevents replay attacks");
     
     Ok(())
@@ -142,7 +142,7 @@ fn test_verify_rejects_proof_with_different_ccs() -> Result<()> {
     let (ccs, public_input, witness, params) = create_simple_fibonacci_fixture();
     
     // Generate valid proof for the original CCS
-    let proof = prove(ProveInput {
+    let proof = prove_spartan2(ProveInput {
         params: &params,
         ccs: &ccs,
         public_input: &public_input, 
@@ -159,7 +159,7 @@ fn test_verify_rejects_proof_with_different_ccs() -> Result<()> {
     }
     
     // Verification should fail with different CCS
-    let invalid = verify(&different_ccs, &public_input, &proof)?;
+    let invalid = verify_spartan2(&different_ccs, &public_input, &proof)?;
     assert!(!invalid, "Proof must not verify with different CCS - this prevents cross-circuit replay attacks");
     
     Ok(())
@@ -170,7 +170,7 @@ fn test_verify_succeeds_with_correct_context() -> Result<()> {
     let (ccs, public_input, witness, params) = create_simple_fibonacci_fixture();
     
     // Generate proof  
-    let proof = prove(ProveInput {
+    let proof = prove_spartan2(ProveInput {
         params: &params,
         ccs: &ccs,
         public_input: &public_input,
@@ -192,7 +192,7 @@ fn test_unsupported_proof_version_rejected() -> Result<()> {
     let (ccs, public_input, witness, params) = create_simple_fibonacci_fixture();
     
     // Generate valid proof
-    let mut proof = prove(ProveInput {
+    let mut proof = prove_spartan2(ProveInput {
         params: &params, 
         ccs: &ccs,
         public_input: &public_input,
@@ -205,7 +205,7 @@ fn test_unsupported_proof_version_rejected() -> Result<()> {
     proof.v = 99; // Unsupported version
     
     // Should get an error for unsupported version  
-    let result = verify(&ccs, &public_input, &proof);
+    let result = verify_spartan2(&ccs, &public_input, &proof);
     assert!(result.is_err(), "Should reject unsupported proof version");
     
     let error_msg = result.unwrap_err().to_string();
@@ -219,7 +219,7 @@ fn test_malformed_proof_rejected() -> Result<()> {
     let (ccs, public_input, witness, params) = create_simple_fibonacci_fixture();
     
     // Generate valid proof
-    let mut proof = prove(ProveInput {
+    let mut proof = prove_spartan2(ProveInput {
         params: &params,
         ccs: &ccs, 
         public_input: &public_input,
@@ -232,7 +232,7 @@ fn test_malformed_proof_rejected() -> Result<()> {
     proof.public_io = vec![0u8; 16]; // Less than 32 bytes required
     
     // Should get an error for malformed proof
-    let result = verify(&ccs, &public_input, &proof);
+    let result = verify_spartan2(&ccs, &public_input, &proof);
     assert!(result.is_err(), "Should reject malformed proof with short public_io");
     
     let error_msg = result.unwrap_err().to_string();
@@ -256,7 +256,7 @@ fn rejects_wrong_ccs_or_public_input() -> Result<()> {
     let z_a = vec![F::ONE, F::from_u64(5)]; // [const=1, x=5]
     let pub_a: Vec<F> = vec![]; // keep empty for the test
 
-    let proof_a = prove(ProveInput {
+    let proof_a = prove_spartan2(ProveInput {
         params: &params,
         ccs: &ccs_a,
         public_input: &pub_a,
@@ -266,7 +266,7 @@ fn rejects_wrong_ccs_or_public_input() -> Result<()> {
     })?;
 
     // Baseline: verifies for the statement it was created for
-    assert!(verify(&ccs_a, &pub_a, &proof_a)?);
+    assert!(verify_spartan2(&ccs_a, &pub_a, &proof_a)?);
 
     // Different statement/context - try to verify the proof against different CCS
     let ccs_b = one_row_ccs_x_eq_0(); // Different circuit
@@ -274,7 +274,7 @@ fn rejects_wrong_ccs_or_public_input() -> Result<()> {
 
     // ❗ Now try to verify proof A against circuit B - this must be REJECTED
     // The proof was generated for circuit A but we're trying to verify against circuit B
-    let result = verify(&ccs_b, &pub_b, &proof_a);
+    let result = verify_spartan2(&ccs_b, &pub_b, &proof_a);
     match result {
         Ok(false) => {
             // This is what we want - verification correctly rejected the mismatched proof
@@ -302,7 +302,7 @@ fn rejects_tampered_public_io() -> Result<()> {
     // Ensure VK registry starts clean for deterministic behavior
     neo_spartan_bridge::clear_vk_registry();
 
-    let proof = prove(ProveInput {
+    let proof = prove_spartan2(ProveInput {
         params: &params,
         ccs: &ccs,
         public_input: &public_input,
@@ -319,7 +319,7 @@ fn rejects_tampered_public_io() -> Result<()> {
     // ❗ Should be false after you reintroduce statement-binding.
     // Current code will (wrongly) return true because public_io is not checked.
     assert!(
-        !verify(&ccs, &public_input, &forged)?,
+        !verify_spartan2(&ccs, &public_input, &forged)?,
         "tampering with public-IO must be detected"
     );
     Ok(())
@@ -333,7 +333,7 @@ fn fails_when_vk_registry_is_missing() -> Result<()> {
     let z = vec![F::ONE, F::from_u64(5)];
     let public_input: Vec<F> = vec![];
 
-    let proof = prove(ProveInput {
+    let proof = prove_spartan2(ProveInput {
         params: &params,
         ccs: &ccs,
         public_input: &public_input,
@@ -345,7 +345,7 @@ fn fails_when_vk_registry_is_missing() -> Result<()> {
     // Blow away the ephemeral VK cache and ensure verify fails hard.
     neo_spartan_bridge::clear_vk_registry();
     assert!(
-        verify(&ccs, &public_input, &proof).is_err(),
+        verify_spartan2(&ccs, &public_input, &proof).is_err(),
         "verify should error when VK for circuit_key is not registered"
     );
     Ok(())

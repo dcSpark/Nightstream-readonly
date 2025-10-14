@@ -1,5 +1,5 @@
 use anyhow::Result;
-use neo::{prove, ProveInput, NeoParams, CcsStructure, F, claim_z_eq, verify_and_extract_exact};
+use neo::{prove_spartan2, ProveInput, NeoParams, CcsStructure, F, claim_z_eq, verify_and_extract_exact};
 use neo_ccs::{r1cs_to_ccs, Mat};
 use p3_field::PrimeCharacteristicRing;
 
@@ -92,7 +92,7 @@ fn prove_and_verify_fibonacci_with_public_seed() -> Result<()> {
     let claim = claim_z_eq(&params, ccs.m, idx_zn, final_value);
 
     // Prove
-    let proof = prove(ProveInput {
+    let proof = prove_spartan2(ProveInput {
         params: &params,
         ccs: &ccs,
         public_input: &public_input,

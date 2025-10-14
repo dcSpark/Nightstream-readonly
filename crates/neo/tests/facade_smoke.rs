@@ -3,7 +3,7 @@
 //! This test ensures the facade's prove() and verify() functions work correctly
 //! on a minimal circuit, validating the end-to-end API.
 
-use neo::{prove, verify, ProveInput, CcsStructure, NeoParams, F};
+use neo::{prove_spartan2 as prove, verify_spartan2 as verify, ProveInput, CcsStructure, NeoParams, F};
 use neo_ccs::{Mat, r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
 use anyhow::Result;

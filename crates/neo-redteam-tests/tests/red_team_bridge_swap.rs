@@ -8,7 +8,7 @@
 //! across folding→SNARK: if public IO (which implicitly binds the commitments) 
 //! doesn't match, verification fails.
 
-use neo::{prove, verify, ProveInput, NeoParams, F};
+use neo::{prove_spartan2, verify_spartan2, ProveInput, NeoParams, F};
 use neo_ccs::{Mat, r1cs::r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
 
@@ -48,7 +48,7 @@ fn bridge_rejects_cross_proof_swap() {
     let public_input_b = vec![];
     
     // Generate proofs for each CCS/witness pair
-    let proof_a = prove(ProveInput {
+    let proof_a = prove_spartan2(ProveInput {
         params: &params,
         ccs: &ccs_a,
         public_input: &public_input_a,
@@ -57,7 +57,7 @@ fn bridge_rejects_cross_proof_swap() {
         vjs_opt: None,
     }).expect("Proof A should succeed");
     
-    let proof_b = prove(ProveInput {
+    let proof_b = prove_spartan2(ProveInput {
         params: &params,
         ccs: &ccs_b,
         public_input: &public_input_b,
@@ -67,9 +67,9 @@ fn bridge_rejects_cross_proof_swap() {
     }).expect("Proof B should succeed");
     
     // Verify that each proof works with its own CCS (sanity check)
-    assert!(verify(&ccs_a, &public_input_a, &proof_a).unwrap(), 
+    assert!(verify_spartan2(&ccs_a, &public_input_a, &proof_a).unwrap(), 
         "Proof A should verify against CCS A");
-    assert!(verify(&ccs_b, &public_input_b, &proof_b).unwrap(), 
+    assert!(verify_spartan2(&ccs_b, &public_input_b, &proof_b).unwrap(), 
         "Proof B should verify against CCS B");
         
     // Sanity check: verify the header digests differ (contexts are distinguishable)
@@ -80,8 +80,8 @@ fn bridge_rejects_cross_proof_swap() {
     
     // Now try cross-verification (should fail)
     // Intentionally verify each proof against the *other* CCS (and its IO)
-    let cross_verify_a = verify(&ccs_b, &public_input_b, &proof_a);  // proof_a (for ccs_a) vs ccs_b
-    let cross_verify_b = verify(&ccs_a, &public_input_a, &proof_b);  // proof_b (for ccs_b) vs ccs_a
+    let cross_verify_a = verify_spartan2(&ccs_b, &public_input_b, &proof_a);  // proof_a (for ccs_a) vs ccs_b
+    let cross_verify_b = verify_spartan2(&ccs_a, &public_input_a, &proof_b);  // proof_b (for ccs_b) vs ccs_a
     
     // Handle both error and false cases
     match cross_verify_a {
@@ -121,7 +121,7 @@ fn bridge_rejects_different_public_inputs() {
     let public_input_extra = vec![F::from_u64(42)]; // Extra public input
     
     // Generate proof with empty public input
-    let proof = prove(ProveInput {
+    let proof = prove_spartan2(ProveInput {
         params: &params,
         ccs: &ccs,
         public_input: &public_input_empty,
@@ -131,11 +131,11 @@ fn bridge_rejects_different_public_inputs() {
     }).expect("Proof should succeed");
     
     // Verify against original public input (should work)
-    assert!(verify(&ccs, &public_input_empty, &proof).unwrap(), 
+    assert!(verify_spartan2(&ccs, &public_input_empty, &proof).unwrap(), 
         "Proof should verify against original public input");
     
     // Try to verify against different public input (should fail)
-    let different_verify = verify(&ccs, &public_input_extra, &proof);
+    let different_verify = verify_spartan2(&ccs, &public_input_extra, &proof);
     
     match different_verify {
         Ok(false) => {

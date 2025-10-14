@@ -4,7 +4,7 @@
 //! Verifies that the system works correctly with minimal constraint count.
 
 use neo::{F, NeoParams};
-use neo::{Accumulator, StepBindingSpec, LastNExtractor, prove_ivc_step_with_extractor, verify_ivc_step_legacy};
+use neo::{Accumulator, StepBindingSpec, LastNExtractor, prove_ivc_step_with_extractor, verify_ivc_step};
 use neo_ccs::{Mat, r1cs::r1cs_to_ccs};
 use p3_field::PrimeCharacteristicRing;
 
@@ -64,7 +64,7 @@ fn pi_ccs_single_row_deg_shape() {
     ).expect("prove_ivc_step_with_extractor should succeed");
 
     // 4) Verify: Should succeed with ℓ=2
-    let ok = verify_ivc_step_legacy(
+    let ok = verify_ivc_step(
         &ccs,
         &step_res.proof,
         &acc0,

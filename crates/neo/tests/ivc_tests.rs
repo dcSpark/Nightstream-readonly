@@ -305,7 +305,7 @@ fn test_direct_sum_small_ccs_edge_cases() {
 /// Test the new high-level IVC API (production-ready proving/verification)
 #[test] 
 fn test_high_level_ivc_api() {
-    use neo::{prove_ivc_step, verify_ivc_step_legacy, IvcStepInput, Accumulator, NeoParams};
+    use neo::{prove_ivc_step, verify_ivc_step, IvcStepInput, Accumulator, NeoParams};
     use neo_ccs::{r1cs_to_ccs, Mat};
     
     // Create a simple step CCS (identity: output = input) with 3 columns to match witness [1, input, output]
@@ -352,7 +352,7 @@ fn test_high_level_ivc_api() {
             y_prev_witness_indices: vec![], // No binding to EV y_prev (they're different values!)
             const1_witness_index: 0, // Constant-1 at index 0
         },
-        transcript_only_app_inputs: false,
+        app_input_binding: AppInputBinding::WitnessBound,
         prev_augmented_x: None,
     };
     
@@ -371,7 +371,7 @@ fn test_high_level_ivc_api() {
                 const1_witness_index: 0, // Constant-1 at index 0
             };
             // Test high-level verification - this MUST succeed for the test to pass
-            let is_valid = verify_ivc_step_legacy(&step_ccs, &step_result.proof, &initial_acc, &verify_binding_spec, &params, None)
+            let is_valid = verify_ivc_step(&step_ccs, &step_result.proof, &initial_acc, &verify_binding_spec, &params, None)
                 .expect("IVC verification should not error");
             assert!(is_valid, "IVC verification must succeed for valid proof");
             println!("✅ High-level IVC verification succeeded!");

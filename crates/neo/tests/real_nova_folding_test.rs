@@ -11,7 +11,7 @@
 use neo::{F, NeoParams};
 use neo::{
     Accumulator, IvcStepInput, prove_ivc_step_chained, StepBindingSpec, 
-    StepOutputExtractor, LastNExtractor, verify_ivc_step_legacy
+    StepOutputExtractor, LastNExtractor, verify_ivc_step, AppInputBinding
 };
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
@@ -123,7 +123,7 @@ fn test_real_nova_folding_5_steps() -> Result<(), Box<dyn std::error::Error + Se
             public_input: None, // No app public input needed - testing folding, not input binding
             y_step: &y_step,
             binding_spec: &binding_spec,
-            transcript_only_app_inputs: false,
+            app_input_binding: AppInputBinding::WitnessBound,
             prev_augmented_x: None,
         };
 
@@ -137,7 +137,7 @@ fn test_real_nova_folding_5_steps() -> Result<(), Box<dyn std::error::Error + Se
         let (step_result, _me, _wit, _lhs) = prove_ivc_step_chained(ivc_input, None, None, None).expect("IVC step should succeed");
         
         // 🔍 VALIDATION 0: Verify the proof is valid
-        let verification_result = verify_ivc_step_legacy(&step_ccs, &step_result.proof, &current_accumulator, &binding_spec, &params, None);
+        let verification_result = verify_ivc_step(&step_ccs, &step_result.proof, &current_accumulator, &binding_spec, &params, None);
         match verification_result {
             Ok(is_valid) => {
                 if !is_valid {
@@ -274,14 +274,14 @@ fn test_folding_equation_validation() -> Result<(), Box<dyn std::error::Error + 
         public_input: None, // No app public input needed - testing folding, not input binding
         y_step: &y_step,
         binding_spec: &binding_spec,
-        transcript_only_app_inputs: false,
+        app_input_binding: AppInputBinding::WitnessBound,
         prev_augmented_x: None,
     };
 
     let (step_result, _me, _wit, _lhs) = prove_ivc_step_chained(ivc_input, None, None, None).expect("IVC step should succeed");
     
     // Verify the proof is valid
-    let verification_result = verify_ivc_step_legacy(&step_ccs, &step_result.proof, &initial_accumulator, &binding_spec, &params, None);
+    let verification_result = verify_ivc_step(&step_ccs, &step_result.proof, &initial_accumulator, &binding_spec, &params, None);
     match verification_result {
         Ok(is_valid) => {
             if !is_valid {
@@ -356,7 +356,7 @@ fn test_not_constraint_batching() -> Result<(), Box<dyn std::error::Error + Send
             public_input: None, // No app public input needed - testing folding, not input binding
             y_step: &y_step,
             binding_spec: &binding_spec,
-            transcript_only_app_inputs: false,
+            app_input_binding: AppInputBinding::WitnessBound,
             prev_augmented_x: None,
         };
 

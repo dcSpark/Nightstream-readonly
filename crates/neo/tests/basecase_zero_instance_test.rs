@@ -102,7 +102,7 @@ fn test_self_fold_basecase_manual_verify() {
             prev_augmented_x = Some(step.public_inputs.step_augmented_public_input().to_vec());
             continue;
         }
-        let ok = neo::verify_ivc_step_legacy(
+        let ok = neo::verify_ivc_step(
             &descriptor.ccs,
             step,
             &acc,
