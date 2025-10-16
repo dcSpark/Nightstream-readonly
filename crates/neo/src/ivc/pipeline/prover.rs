@@ -161,13 +161,6 @@ pub fn prove_ivc_step_chained(
         }
     }
 
-    let y_len = input.prev_accumulator.y_compact.len();
-    if !input.binding_spec.y_prev_witness_indices.is_empty()
-        && input.binding_spec.y_prev_witness_indices.len() != y_len
-    {
-        return Err("y_prev_witness_indices length must match y_len when provided".into());
-    }
-
     // Enforce const-1 convention
     let const_idx = input.binding_spec.const1_witness_index;
     if input.step_witness.get(const_idx) != Some(&F::ONE) {
@@ -385,7 +378,6 @@ pub fn prove_ivc_step_chained(
         input.step_ccs,
         step_x.len(),
         &input.binding_spec.y_step_offsets,
-        &input.binding_spec.y_prev_witness_indices,
         &input.binding_spec.step_program_input_witness_indices,
         y_len,
         input.binding_spec.const1_witness_index,
@@ -603,7 +595,6 @@ pub fn prove_ivc_step_chained(
         input.step_ccs,
         step_x.len(),
         &input.binding_spec.y_step_offsets,
-        &input.binding_spec.y_prev_witness_indices,
         &input.binding_spec.step_program_input_witness_indices,
         y_len,
         input.binding_spec.const1_witness_index,

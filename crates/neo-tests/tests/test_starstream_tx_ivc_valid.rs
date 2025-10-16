@@ -184,7 +184,6 @@ fn test_starstream_tx_ivc_proof_valid() {
     let binding_spec = StepBindingSpec {
         y_step_offsets: export.ivc_params.step_spec.y_step_indices.clone(),
         step_program_input_witness_indices: vec![],
-        y_prev_witness_indices: export.ivc_params.step_spec.y_prev_indices.clone(),
         const1_witness_index: export.ivc_params.step_spec.const1_index,
     };
     
@@ -227,7 +226,6 @@ fn test_starstream_tx_nivc_proof_valid() {
     let binding_spec = StepBindingSpec {
         y_step_offsets: export.ivc_params.step_spec.y_step_indices.clone(),
         step_program_input_witness_indices: vec![],
-        y_prev_witness_indices: export.ivc_params.step_spec.y_prev_indices.clone(),
         const1_witness_index: export.ivc_params.step_spec.const1_index,
     };
     
@@ -296,7 +294,6 @@ fn test_starstream_tx_session_api_valid() {
         y_len: export.ivc_params.step_spec.y_len,
         const1_index: export.ivc_params.step_spec.const1_index,
         y_step_indices: export.ivc_params.step_spec.y_step_indices.clone(),
-        y_prev_indices: Some(export.ivc_params.step_spec.y_prev_indices.clone()),
         app_input_indices: export.ivc_params.step_spec.app_input_indices.clone(),
     };
     

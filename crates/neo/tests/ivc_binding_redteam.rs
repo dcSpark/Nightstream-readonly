@@ -66,7 +66,6 @@ fn prover_ignores_malicious_step_x_and_uses_digest_prefix() {
         y_step_offsets: vec![2],
         // No app input binding needed for this test - we're just testing digest prefix
         step_program_input_witness_indices: vec![],
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
 
@@ -109,7 +108,6 @@ fn verifier_rejects_tampered_step_x() {
     let binding = StepBindingSpec {
         y_step_offsets: vec![2],
         step_program_input_witness_indices: vec![],
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
 

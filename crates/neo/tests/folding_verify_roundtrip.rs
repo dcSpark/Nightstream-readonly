@@ -47,7 +47,6 @@ fn fold_roundtrip_chain_ok() -> anyhow::Result<()> {
     let binding = StepBindingSpec {
         y_step_offsets: (1..=y_len).collect(),
         step_program_input_witness_indices: vec![],          // no app x in this trivial example
-        y_prev_witness_indices: vec![],     // not needed for this test
         const1_witness_index: 0,
     };
     let y0 = vec![F::from_u64(10), F::from_u64(20)];
@@ -150,7 +149,6 @@ fn fold_roundtrip_rejects_mutated_rhs_commitment() -> anyhow::Result<()> {
     let binding = StepBindingSpec {
         y_step_offsets: vec![1],
         step_program_input_witness_indices: vec![],
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     let y0 = vec![F::from_u64(1)];

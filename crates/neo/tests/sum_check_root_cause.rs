@@ -43,7 +43,6 @@ fn simple_ccs() -> (CcsStructure<F>, Vec<F>, Vec<F>, StepBindingSpec, LastNExtra
     let binding = StepBindingSpec {
         y_step_offsets: vec![],
         step_program_input_witness_indices: vec![],
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     let extractor = LastNExtractor { n: 0 };
@@ -62,7 +61,6 @@ fn confirm_augmented_ccs_polynomial_mismatch() {
         &step_ccs,
         0, // step_x_len
         &binding.y_step_offsets,
-        &binding.y_prev_witness_indices,
         &binding.step_program_input_witness_indices,
         0, // y_len
         binding.const1_witness_index,

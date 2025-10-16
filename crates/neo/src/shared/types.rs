@@ -62,8 +62,6 @@ pub struct StepBindingSpec {
     pub y_step_offsets: Vec<usize>,
     /// Positions of step program-supplied public inputs in the step witness (binds the tail of step_x)
     pub step_program_input_witness_indices: Vec<usize>,
-    /// Positions of y_prev (state input) in the step witness - must be length y_len
-    pub y_prev_witness_indices: Vec<usize>,
     /// Index of the constant-1 column in the step witness (for stitching constraints)
     pub const1_witness_index: usize,
 }

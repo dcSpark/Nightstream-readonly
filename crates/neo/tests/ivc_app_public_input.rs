@@ -2,7 +2,7 @@
 //! then will pass once we support x = [H(prev_acc) || app_inputs].
 
 use neo::{F, NeoParams};
-use neo::{Accumulator, IvcStepInput, StepBindingSpec, prove_ivc_step_chained, verify_ivc_step, AppInputBinding};
+use neo::{Accumulator, IvcStepInput, prove_ivc_step_chained, verify_ivc_step, AppInputBinding};
 use neo_ccs::crypto::poseidon2_goldilocks;
 use neo_ccs::{CcsStructure, Mat, r1cs_to_ccs};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
@@ -39,7 +39,11 @@ fn app_public_inputs_accepted_now() {
     let step_witness = vec![F::ONE, F::ZERO, F::ONE, F::from_u64(42), F::from_u64(7)]; // [const, a, b, app1, app2]
     let y_step = vec![F::ONE];
     // Bind the 2 app inputs to witness positions 3,4 (where they actually are)
-    let binding = StepBindingSpec { y_step_offsets: vec![2], step_program_input_witness_indices: vec![3, 4], y_prev_witness_indices: vec![], const1_witness_index: 0 };
+    let binding = neo::StepBindingSpec {
+        y_step_offsets: vec![2],              // b at index 2 is the y_step output
+        step_program_input_witness_indices: vec![3, 4],  // app inputs at witness positions 3,4
+        const1_witness_index: 0,
+    };
 
     // Provide app inputs that should be appended to H(prev_acc)
     let app_inputs = vec![F::from_u64(42), F::from_u64(7)];
@@ -71,7 +75,11 @@ fn tampered_digest_prefix_rejected() {
     let step_witness = vec![F::ONE, F::ZERO, F::ONE, F::from_u64(11), F::from_u64(22)]; // [const, a, b, app1, app2]
     let y_step = vec![F::ONE];
     // Bind the 2 app inputs to witness positions 3,4 (where they actually are)
-    let binding = StepBindingSpec { y_step_offsets: vec![2], step_program_input_witness_indices: vec![3, 4], y_prev_witness_indices: vec![], const1_witness_index: 0 };
+    let binding = neo::StepBindingSpec {
+        y_step_offsets: vec![2],              // b at index 2 is the y_step output
+        step_program_input_witness_indices: vec![3, 4],  // app inputs at witness positions 3,4
+        const1_witness_index: 0,
+    };
 
     let app_inputs = vec![F::from_u64(11), F::from_u64(22)];
     let input = IvcStepInput { params: &params, step_ccs: &step_ccs, step_witness: &step_witness, prev_accumulator: &prev_acc, step: 0, public_input: Some(&app_inputs), y_step: &y_step, binding_spec: &binding, app_input_binding: AppInputBinding::WitnessBound, prev_augmented_x: None };

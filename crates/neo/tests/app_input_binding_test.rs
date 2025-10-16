@@ -54,7 +54,6 @@ fn test_app_input_binding_prevents_malleability() {
     let binding = StepBindingSpec {
         y_step_offsets: vec![3],           // next is at witness[3]
         step_program_input_witness_indices: vec![2],  // delta is at witness[2] (public input)
-        y_prev_witness_indices: vec![1],   // prev is at witness[1]
         const1_witness_index: 0,
     };
     
@@ -137,7 +136,6 @@ fn test_app_input_binding_allows_honest_proof() {
     let binding = StepBindingSpec {
         y_step_offsets: vec![3],           // next is at witness[3]
         step_program_input_witness_indices: vec![2],  // delta is at witness[2] (public input)
-        y_prev_witness_indices: vec![1],   // prev is at witness[1]
         const1_witness_index: 0,
     };
     

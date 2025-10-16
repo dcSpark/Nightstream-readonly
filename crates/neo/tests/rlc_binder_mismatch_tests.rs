@@ -27,7 +27,6 @@ fn rlc_binder_linear_equality_correctness() {
 
     // No extra binders for x or y_prev in this focused test
     let x_witness_indices: Vec<usize> = vec![];
-    let y_prev_witness_indices: Vec<usize> = vec![];
 
     // CORRECT EV semantics (HyperNova/Nova): u = ρ·y_step, y_next = y_prev + u
     // This matches the fixed folding equation
@@ -54,7 +53,6 @@ fn rlc_binder_linear_equality_correctness() {
         &step_ccs,
         step_x_len,
         &[y_step_offset],
-        &y_prev_witness_indices,
         &x_witness_indices,
         y_len,
         const1_witness_index,
@@ -98,7 +96,6 @@ fn rlc_binder_rejects_mismatch() {
     let y_step_offset = 1usize;        // step_witness[1] holds y_step
 
     let x_witness_indices: Vec<usize> = vec![];
-    let y_prev_witness_indices: Vec<usize> = vec![];
 
     // EV semantics
     let rho = F::from_u64(3);
@@ -123,7 +120,6 @@ fn rlc_binder_rejects_mismatch() {
         &step_ccs,
         step_x_len,
         &[y_step_offset],
-        &y_prev_witness_indices,
         &x_witness_indices,
         y_len,
         const1_witness_index,

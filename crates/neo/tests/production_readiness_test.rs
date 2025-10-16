@@ -33,7 +33,6 @@ fn prove_ivc_final_snark_compat(
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![2],
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     let program = NivcProgram::new(vec![NivcStepSpec { ccs: step_ccs, binding: binding_spec }]);
@@ -139,7 +138,6 @@ fn run_ivc_chain(num_steps: usize) -> Result<IvcChainMetrics> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],        
         step_program_input_witness_indices: vec![2],     // Bind delta (public input) to witness position 2
-        y_prev_witness_indices: vec![], // No binding to EV y_prev (they're different values!)
         const1_witness_index: 0,
     };
 
@@ -240,7 +238,6 @@ fn test_negative_mutate_early_step_witness() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],        
         step_program_input_witness_indices: vec![2],     // Bind delta (public input) to witness position 2
-        y_prev_witness_indices: vec![], // No binding to EV y_prev (they're different values!)
         const1_witness_index: 0,
     };
 

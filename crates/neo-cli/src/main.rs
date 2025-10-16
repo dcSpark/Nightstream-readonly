@@ -207,7 +207,6 @@ fn cmd_gen(n: usize, out: PathBuf, bundle_vk: bool, emit_vk: bool) -> Result<()>
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![4, 5, 6],     // last three entries are i_next, a_next, b_next
         step_program_input_witness_indices: vec![],         // no extra public X binding for this example
-        y_prev_witness_indices: vec![1, 2, 3], // previous state inside witness
         const1_witness_index: 0,
     };
 

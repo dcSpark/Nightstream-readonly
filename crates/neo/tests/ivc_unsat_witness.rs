@@ -65,7 +65,6 @@ fn ivc_unsat_step_witness_should_fail_verify() {
     let binding = StepBindingSpec {
         y_step_offsets: vec![],
         step_program_input_witness_indices: vec![],
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
 
@@ -126,7 +125,6 @@ fn ivc_proof_with_invalid_witness_from_generation() {
     let binding = StepBindingSpec {
         y_step_offsets: vec![],
         step_program_input_witness_indices: vec![],
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
 
@@ -186,7 +184,6 @@ fn ivc_cross_link_vulnerability_pi_ccs_rhs_vs_parent_me() {
     let binding = StepBindingSpec {
         y_step_offsets: vec![],
         step_program_input_witness_indices: vec![],
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
 

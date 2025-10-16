@@ -48,7 +48,6 @@
 //! #     let binding_spec = StepBindingSpec {
 //! #         y_step_offsets: vec![],
 //! #         step_program_input_witness_indices: vec![],
-//! #         y_prev_witness_indices: vec![],
 //! #         const1_witness_index: 0,
 //! #     };
 //! #     let initial_acc = Accumulator::default();

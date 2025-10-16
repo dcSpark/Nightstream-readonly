@@ -47,7 +47,6 @@ fn pi_ccs_single_row_deg_shape() {
     let binding = StepBindingSpec {
         y_step_offsets: vec![],
         step_program_input_witness_indices: vec![],
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     let extractor = LastNExtractor { n: 0 };

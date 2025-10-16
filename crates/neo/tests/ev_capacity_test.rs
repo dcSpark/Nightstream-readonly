@@ -38,7 +38,6 @@ fn large_y_len_augmented_ccs_should_eventually_fit_after_ev_aggregation() {
 
     // Binding: put y_step in witness indices [1..=y_len]; const1 at 0.
     let y_step_offsets: Vec<usize> = (1..=y_len).collect();
-    let y_prev_witness_indices: Vec<usize> = vec![]; // no y_prev binder for this test
     let app_input_witness_indices: Vec<usize> = vec![]; // no app-input binder
     let const1_idx = 0usize;
     let step_x_len = 0usize; // empty step_x for this test
@@ -49,7 +48,6 @@ fn large_y_len_augmented_ccs_should_eventually_fit_after_ev_aggregation() {
         &step_ccs,
         step_x_len,
         &y_step_offsets,
-        &y_prev_witness_indices,
         &app_input_witness_indices,
         y_len,
         const1_idx,
@@ -206,7 +204,6 @@ fn augmented_ccs_padding_regression() {
     let step_ccs = trivial_step_ccs_rows(y_len, 1);
 
     let y_step_offsets: Vec<usize> = (1..=y_len).collect();
-    let y_prev_witness_indices: Vec<usize> = vec![];
     let app_input_witness_indices: Vec<usize> = vec![];
     let const1_idx = 0usize; // first witness column treated as constant 1 in tests
     let step_x_len = 0usize;
@@ -215,7 +212,6 @@ fn augmented_ccs_padding_regression() {
         &step_ccs,
         step_x_len,
         &y_step_offsets,
-        &y_prev_witness_indices,
         &app_input_witness_indices,
         y_len,
         const1_idx,

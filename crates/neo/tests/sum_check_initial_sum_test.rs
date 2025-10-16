@@ -60,7 +60,6 @@ fn simple_ccs_and_witness_valid() -> (CcsStructure<F>, Vec<F>, StepBindingSpec, 
     let binding = StepBindingSpec {
         y_step_offsets: vec![],
         step_program_input_witness_indices: vec![],
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,  // First element is the constant 1
     };
     let extractor = LastNExtractor { n: 0 };
@@ -113,7 +112,6 @@ fn simple_ccs_and_witness_invalid() -> (CcsStructure<F>, Vec<F>, StepBindingSpec
     let binding = StepBindingSpec {
         y_step_offsets: vec![],
         step_program_input_witness_indices: vec![],
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,  // First element is the constant 1
     };
     let extractor = LastNExtractor { n: 0 };
@@ -253,7 +251,6 @@ fn large_ccs_and_witness_valid() -> (CcsStructure<F>, Vec<F>, StepBindingSpec, L
     let binding = StepBindingSpec {
         y_step_offsets: vec![],
         step_program_input_witness_indices: vec![],
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     let extractor = LastNExtractor { n: 0 };
