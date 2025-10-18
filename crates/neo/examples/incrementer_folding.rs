@@ -140,7 +140,6 @@ fn main() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],                // next_x at index 3
         step_program_input_witness_indices: vec![],             // transcript-only app inputs in NIVC
-        y_prev_witness_indices: vec![],        // No binding to EV y_prev in this example
         const1_witness_index: 0,
     };
 

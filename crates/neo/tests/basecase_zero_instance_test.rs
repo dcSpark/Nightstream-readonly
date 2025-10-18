@@ -49,7 +49,6 @@ impl MinimalStep {
             y_len: 0,
             const1_index: 0,
             y_step_indices: vec![],
-            y_prev_indices: None,
             app_input_indices: None,
         };
         Self { ccs, spec }

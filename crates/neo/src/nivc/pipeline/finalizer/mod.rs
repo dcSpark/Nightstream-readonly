@@ -141,7 +141,6 @@ pub fn finalize_with_options(
         &spec.ccs,
         step_x.len(),
         &spec.binding.y_step_offsets,
-        &spec.binding.y_prev_witness_indices,
         &spec.binding.step_program_input_witness_indices,
         y_len,
         spec.binding.const1_witness_index,
@@ -292,7 +291,7 @@ pub fn finalize_with_options(
         // Linkage
         let linkage = Some(neo_spartan_bridge::IvcLinkageInputs {
             x_indices_abs: spec.binding.step_program_input_witness_indices.clone(),
-            y_prev_indices_abs: spec.binding.y_prev_witness_indices.clone(),
+            y_prev_indices_abs: vec![],  // y_prev binding removed (incompatible with ρ-folding)
             const1_index_abs: None,
             step_io: last.step_io.clone(),
         });

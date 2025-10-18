@@ -16,7 +16,6 @@ pub fn build_augmented_ccs_linked(
     step_ccs: &CcsStructure<F>,
     step_x_len: usize,
     y_step_offsets: &[usize],
-    y_prev_witness_indices: &[usize],   
     step_program_input_witness_indices: &[usize],        
     y_len: usize,
     const1_witness_index: usize,
@@ -25,7 +24,6 @@ pub fn build_augmented_ccs_linked(
         step_ccs,
         step_x_len,
         y_step_offsets,
-        y_prev_witness_indices,
         step_program_input_witness_indices,
         y_len,
         const1_witness_index,
@@ -38,7 +36,6 @@ pub fn build_augmented_ccs_linked_with_rlc(
     step_ccs: &CcsStructure<F>,
     step_x_len: usize,
     y_step_offsets: &[usize],
-    y_prev_witness_indices: &[usize],   
     step_program_input_witness_indices: &[usize],        
     y_len: usize,
     const1_witness_index: usize,
@@ -55,14 +52,6 @@ pub fn build_augmented_ccs_linked_with_rlc(
     if y_step_offsets.len() != y_len {
         return Err(format!("y_step_offsets length {} must equal y_len {}", y_step_offsets.len(), y_len));
     }
-    // y_prev_witness_indices are optional now (used later for cross-step stitching)
-    // Only require equal length if provided.
-    if !y_prev_witness_indices.is_empty() && y_prev_witness_indices.len() != y_len {
-        return Err(format!(
-            "y_prev_witness_indices length {} must equal y_len {} when provided",
-            y_prev_witness_indices.len(), y_len
-        ));
-    }
     // Allow binding only the app input tail of step_x; not the digest prefix
     if !step_program_input_witness_indices.is_empty() && step_program_input_witness_indices.len() > step_x_len {
         return Err(format!("step_program_input_witness_indices length {} cannot exceed step_public_input_len {}", step_program_input_witness_indices.len(), step_x_len));
@@ -70,7 +59,7 @@ pub fn build_augmented_ccs_linked_with_rlc(
     if const1_witness_index >= step_ccs.m {
         return Err(format!("const1_witness_index {} out of range (m={})", const1_witness_index, step_ccs.m));
     }
-    for &o in y_step_offsets.iter().chain(y_prev_witness_indices).chain(step_program_input_witness_indices) {
+    for &o in y_step_offsets.iter().chain(step_program_input_witness_indices) {
         if o >= step_ccs.m {
             return Err(format!("witness offset {} out of range (m={})", o, step_ccs.m));
         }
@@ -83,18 +72,16 @@ pub fn build_augmented_ccs_linked_with_rlc(
     //  - step_rows                              (copy step CCS)
     //  - EV rows                                (see below; production: 2*y_len, testing: 2)
     //  - step_x_len binder rows (optional)      (step_x[i] - step_witness[x_i] = 0)
-    //  - y_len prev binder rows                 (y_prev[k] - step_witness[prev_k] = 0)
     //  - 1 RLC binder row (optional)            (⟨G, z⟩ = Σ r_i * c_step[i])
     //  - 1 const-1 enforcement row              (w_const1 * ρ = ρ, forces w_const1 = 1)
     let step_rows = step_ccs.n;
     // EV rows in production encoding: two per state element (u = ρ·y_step; y_next − y_prev − u)
     let ev_rows = 2 * y_len;
     let x_bind_rows = if step_program_input_witness_indices.is_empty() { 0 } else { step_x_len };
-    let prev_bind_rows = if y_prev_witness_indices.is_empty() { 0 } else { y_len };
     let rlc_rows = if rlc_binder.is_some() { 1 } else { 0 };
     // SOUNDNESS FIX: Enforce const-1 column is actually 1 using public ρ
     let const1_enforce_rows = 1;
-    let total_rows = step_rows + ev_rows + x_bind_rows + prev_bind_rows + rlc_rows + const1_enforce_rows;
+    let total_rows = step_rows + ev_rows + x_bind_rows + rlc_rows + const1_enforce_rows;
     // Pre-pad to next power-of-two for clean χ_r wiring (optional but stable).
     // This keeps augmented CCS shape fixed and matches Π_CCS's ℓ computation.
     // Avoid n=1 degeneracy (0-round sum-check) which can misalign R1CS terminal checks.
@@ -129,24 +116,29 @@ pub fn build_augmented_ccs_linked_with_rlc(
         let col_const1_abs = pub_cols + const1_witness_index;
         
         let col_u0 = pub_cols + step_wit_cols;
-        // EV: u[k] = ρ * y_step[k]
+        // EV PART 1: u[k] = ρ · y_step[k]  (multiplication constraint)
+        // This is the CORRECT folding equation using public ρ from transcript
         for k in 0..y_len {
             let r = step_rows + k;
             match matrix_idx {
+                // A: pick ρ (PUBLIC INPUT)
                 0 => data[r * total_cols + col_rho] = F::ONE,
+                // B: multiply by y_step[k] (WITNESS)
                 1 => data[r * total_cols + (pub_cols + y_step_offsets[k])] = F::ONE,
+                // C: equals u[k] (WITNESS)
                 2 => data[r * total_cols + (col_u0 + k)] = F::ONE,
                 _ => {}
             }
         }
-        // EV: y_next[k] - y_prev[k] - u[k] = 0  (× 1 via step_witness[0] == 1)
+        // EV PART 2: y_next[k] - y_prev[k] - u[k] = 0  (linear constraint)
+        // Enforces: y_next = y_prev + u = y_prev + ρ·y_step (correct folding!)
         for k in 0..y_len {
             let r = step_rows + y_len + k;
             match matrix_idx {
                 0 => {
-                    data[r * total_cols + (col_y_next0 + k)] = F::ONE;
-                    data[r * total_cols + (col_y_prev0 + k)] = -F::ONE;
-                    data[r * total_cols + (col_u0 + k)]      = -F::ONE;
+                    data[r * total_cols + (col_y_next0 + k)] = F::ONE;   // +y_next[k]
+                    data[r * total_cols + (col_y_prev0 + k)] = -F::ONE;  // -y_prev[k]
+                    data[r * total_cols + (col_u0 + k)]      = -F::ONE;  // -u[k]
                 }
                 1 => data[r * total_cols + col_const1_abs] = F::ONE,
                 _ => {}
@@ -171,28 +163,12 @@ pub fn build_augmented_ccs_linked_with_rlc(
             }
         }
 
-        // Binder Y_prev: y_prev[k] - step_witness[y_prev_witness_indices[k]] = 0  (if any)
-        // SECURITY FIX: Enforce that step circuit reads of y_prev match the accumulator's y_prev
-        if !y_prev_witness_indices.is_empty() {
-            for k in 0..y_len {
-                let r = step_rows + ev_rows + x_bind_rows + k;
-                match matrix_idx {
-                    0 => {
-                        data[r * total_cols + (col_y_prev0 + k)] = F::ONE;                           // + y_prev[k]
-                        data[r * total_cols + (pub_cols + y_prev_witness_indices[k])] = -F::ONE;    // - step_witness[y_prev_witness_indices[k]]
-                    }
-                    1 => data[r * total_cols + col_const1_abs] = F::ONE,                           // × 1
-                    _ => {}
-                }
-            }
-        }
-
         // RLC Binder: enforce linear equality ⟨G, z⟩ = rhs where
         // G = aggregated_row over witness coordinates and rhs = Σ r_i * c_step[i] (or diff variant)
         // Encode in R1CS as: <A,z> * <B,z> = <C,z>
         //   A row = G · z, B row selects const-1 (== 1), C puts rhs in const-1 column
         if let Some((ref aggregated_row, rhs)) = rlc_binder {
-            let r = step_rows + ev_rows + x_bind_rows + prev_bind_rows;
+            let r = step_rows + ev_rows + x_bind_rows;
             match matrix_idx {
                 0 => {
                     // A matrix: ⟨G, z⟩ where z = [public || witness]
@@ -222,7 +198,7 @@ pub fn build_augmented_ccs_linked_with_rlc(
         // Many rows above (EV, X/Y binders) rely on B matrix selecting the "1" column;
         // without this constraint, those rows can be zeroed out by a malicious prover.
         {
-            let r = step_rows + ev_rows + x_bind_rows + prev_bind_rows + rlc_rows;
+            let r = step_rows + ev_rows + x_bind_rows + rlc_rows;
             
             // SECURITY: Bounds checks to prevent silent corruption of the constraint
             debug_assert!(r < target_rows, "const-1 enforcement row {} must be within target_rows {}", r, target_rows);
@@ -260,8 +236,9 @@ pub fn build_augmented_ccs_linked_with_rlc(
 
 /// Build witness for linked augmented CCS.
 /// 
-/// This creates the combined witness [step_witness || u] where u = ρ * y_step
+/// This creates the combined witness [step_witness || u] where u = ρ · y_step (folding)
 /// and y_step is extracted from the step_witness at the specified offsets.
+/// ρ is used for the correct folding equation: y_next = y_prev + ρ·y_step
 pub fn build_linked_augmented_witness(
     step_witness: &[F],
     y_step_offsets: &[usize],
@@ -273,7 +250,7 @@ pub fn build_linked_augmented_witness(
         y_step.push(step_witness[offset]);
     }
     
-    // Compute u = ρ * y_step
+    // Compute u = ρ · y_step (correct folding equation!)
     let u: Vec<F> = y_step.iter().map(|&ys| rho * ys).collect();
     
     // Combined witness: [step_witness || u]
@@ -297,6 +274,25 @@ pub fn build_augmented_public_input_for_step(
     public_input.push(rho);
     public_input.extend_from_slice(y_prev);
     public_input.extend_from_slice(y_next);
+    public_input
+}
+
+/// Build public input for linked augmented CCS with identity semantics.
+/// 
+/// This is used for the LHS (identity/running) instance in folding where
+/// no state change occurs: y_next = y_prev.
+/// 
+/// Public input layout: [step_x || ρ || y_prev || y_prev]
+pub fn build_augmented_public_input_identity(
+    step_x: &[F],
+    rho: F,
+    y: &[F],
+) -> Vec<F> {
+    let mut public_input = Vec::new();
+    public_input.extend_from_slice(step_x);
+    public_input.push(rho);
+    public_input.extend_from_slice(y);  // y_prev
+    public_input.extend_from_slice(y);  // y_next = y_prev (identity)
     public_input
 }
 

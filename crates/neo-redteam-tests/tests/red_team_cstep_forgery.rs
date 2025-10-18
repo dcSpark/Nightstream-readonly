@@ -65,7 +65,6 @@ fn test_ivc_proof_with_forged_coords() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],   // next_x at witness[3]
         step_program_input_witness_indices: vec![], // No public input binding needed for this test
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     
@@ -197,7 +196,6 @@ fn test_multiple_forged_coords() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![], // No public input binding needed for this test
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     

@@ -109,7 +109,6 @@ impl FoldStepEngine for IvcEngine {
             step_ccs,
             step_x_len,
             &binding.y_step_offsets,
-            &binding.y_prev_witness_indices,
             &binding.step_program_input_witness_indices,
             y_len,
             binding.const1_witness_index,

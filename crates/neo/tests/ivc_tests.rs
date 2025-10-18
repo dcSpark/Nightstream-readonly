@@ -366,7 +366,6 @@ fn test_high_level_ivc_api() {
         binding_spec: &neo::StepBindingSpec {
             y_step_offsets: vec![2, 2], // Both y_step elements map to output at index 2
             step_program_input_witness_indices: vec![], // No step public inputs
-            y_prev_witness_indices: vec![], // No binding to EV y_prev (they're different values!)
             const1_witness_index: 0, // Constant-1 at index 0
         },
         app_input_binding: AppInputBinding::WitnessBound,
@@ -384,7 +383,6 @@ fn test_high_level_ivc_api() {
             let verify_binding_spec = neo::StepBindingSpec {
                 y_step_offsets: vec![2, 2], // Both y_step elements map to output at index 2
                 step_program_input_witness_indices: vec![], // No step public inputs
-                y_prev_witness_indices: vec![], // Same as prover: No binding to EV y_prev
                 const1_witness_index: 0, // Constant-1 at index 0
             };
             // Test high-level verification - this MUST succeed for the test to pass

@@ -42,7 +42,6 @@ fn ev_embedding_public_io_tamper_detected() -> Result<()> {
     let binding = neo::StepBindingSpec {
         y_step_offsets: vec![4],
         step_program_input_witness_indices: vec![],
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
 

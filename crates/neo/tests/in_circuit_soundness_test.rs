@@ -52,7 +52,6 @@ fn test_valid_witness_passes() {
     let binding = StepBindingSpec {
         y_step_offsets: vec![3],           // next is at witness[3]
         step_program_input_witness_indices: vec![2],  // delta is at witness[2], binds to public input
-        y_prev_witness_indices: vec![1],   // prev is at witness[1]
         const1_witness_index: 0,
     };
     
@@ -111,7 +110,6 @@ fn test_invalid_witness_in_circuit_enforcement() {
     let binding = StepBindingSpec {
         y_step_offsets: vec![3],           // next is at witness[3]
         step_program_input_witness_indices: vec![2],  // delta is at witness[2]
-        y_prev_witness_indices: vec![1],   // prev is at witness[1]
         const1_witness_index: 0,
     };
     
@@ -181,7 +179,6 @@ fn test_const1_zero_attack_is_blocked() {
     let binding = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![2],
-        y_prev_witness_indices: vec![1],
         const1_witness_index: 0,  // This is what the attacker targets
     };
     

@@ -43,6 +43,12 @@ use crate::nivc::{NivcState, NivcProgram, NivcStepSpec};
 use crate::shared::types::AppInputBinding;
 
 /// Canonical description of how a step exposes its state/output and wiring.
+/// 
+/// **IMPORTANT**: This API does NOT support `y_prev` binding, which is incompatible with
+/// ρ-folding. The accumulator's `y_compact` is a cryptographic commitment, not raw application
+/// state. For application state continuity, either:
+/// - Keep state in the witness (prover's responsibility), OR
+/// - Pass previous outputs as `app_input_indices` (verified continuity)
 #[derive(Clone, Debug)]
 pub struct StepSpec {
     /// Compact y length (state size)
@@ -51,10 +57,6 @@ pub struct StepSpec {
     pub const1_index: usize,
     /// Exact witness indices corresponding to the next state z_{i+1}
     pub y_step_indices: Vec<usize>,
-    /// Optional witness indices where the circuit reads y_prev.
-    /// SECURITY: If provided, enforces y_prev equality constraints in BOTH WitnessBound and TranscriptOnly modes.
-    /// This ensures state consistency—the circuit must use the same y_prev as the accumulator.
-    pub y_prev_indices: Option<Vec<usize>>,
     /// Optional witness indices for app inputs. Binding behavior depends on mode:
     /// - WitnessBound: enforces in-circuit equality (belt-and-suspenders)
     /// - TranscriptOnly: binding via Fiat-Shamir transcript only (NIVC mode)
@@ -70,10 +72,9 @@ impl StepSpec {
     /// - **TranscriptOnly**: App inputs only influence Fiat-Shamir transcript.
     ///   Use when circuit reads from public `x` directly or inputs are metadata.
     /// 
-    /// **State Binding (mode-independent):**
-    /// - `y_prev` binding is **orthogonal** to app input mode. If `y_prev_indices` is provided,
-    ///   the equality constraints are enforced in BOTH modes to ensure state consistency
-    ///   (the circuit uses the same y_prev as the accumulator).
+    /// **Note on y_prev binding:**
+    /// - Always uses empty `y_prev_witness_indices` (incompatible with ρ-folding)
+    /// - The accumulator's `y_compact` is a cryptographic commitment, not raw app state
     pub fn binding_spec(&self, mode: AppInputBinding) -> StepBindingSpec {
         match mode {
             AppInputBinding::WitnessBound => {
@@ -81,7 +82,6 @@ impl StepSpec {
                 // that seed the transcript (belt-and-suspenders)
                 StepBindingSpec {
                     y_step_offsets: self.y_step_indices.clone(),
-                    y_prev_witness_indices: self.y_prev_indices.clone().unwrap_or_default(),
                     step_program_input_witness_indices: self.app_input_indices.clone().unwrap_or_default(),
                     const1_witness_index: self.const1_index,
                 }
@@ -89,10 +89,8 @@ impl StepSpec {
         AppInputBinding::TranscriptOnly => {
             // NIVC or when circuit reads from public `x` directly:
             // no in-circuit witness binding for APP INPUTS, FS transcript + verifier checks only
-            // BUT: y_prev binding is orthogonal—it ensures state consistency regardless of app input mode
             StepBindingSpec {
                 y_step_offsets: self.y_step_indices.clone(),
-                y_prev_witness_indices: self.y_prev_indices.clone().unwrap_or_default(),
                 step_program_input_witness_indices: vec![],
                 const1_witness_index: self.const1_index,
             }
@@ -776,18 +774,14 @@ pub fn finalize_ivc_chain_with_options(
 
     // Build augmented CCS used by the last step
     // CRITICAL: Use the same binding mode that was used during proving
-    // y_prev binding is orthogonal and always preserved when provided
     // app_input binding depends on the mode used during the session
     let binding_spec = descriptor.spec.binding_spec(binding_mode);
-    let y_prev_witness_indices = binding_spec.y_prev_witness_indices;
-    let app_input_witness_indices = binding_spec.step_program_input_witness_indices;
     
     let augmented_ccs = crate::ivc::build_augmented_ccs_linked_with_rlc(
         &descriptor.ccs,
         step_x.len(),
         &descriptor.spec.y_step_indices,
-        &y_prev_witness_indices,
-        &app_input_witness_indices,
+        &binding_spec.step_program_input_witness_indices,
         y_len,
         descriptor.spec.const1_index,
         None,

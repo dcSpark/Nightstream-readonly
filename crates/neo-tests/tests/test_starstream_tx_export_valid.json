@@ -1,11 +1,11 @@
 {
   "metadata": {
-    "test_name": "test_starstream_tx_should_fail",
+    "test_name": "test_starstream_tx",
     "field": "Goldilocks",
     "modulus": "18446744069414584321",
     "num_steps": 3,
-    "should_fail": true,
-    "failure_reason": "Step 2: YieldResume expects current_program=300 (utxo_id2), but it's actually 400 (utxo_id3 from previous Resume)"
+    "should_fail": false,
+    "failure_reason": null
   },
   "ivc_params": {
     "y0": [
@@ -2139,7 +2139,7 @@
     },
     {
       "step_idx": 2,
-      "instruction": "YieldResume { utxo_id: 300, output: 42 }",
+      "instruction": "YieldResume { utxo_id: 400, output: 42 }",
       "witness": {
         "instance": [
           "1",
@@ -2160,10 +2160,10 @@
           "0",
           "0",
           "0",
-          "300",
+          "400",
           "0",
           "42",
-          "3",
+          "4",
           "1",
           "1",
           "0",
@@ -2185,7 +2185,7 @@
           "0",
           "1",
           "1",
-          "300",
+          "400",
           "0",
           "0",
           "400",
@@ -2210,10 +2210,10 @@
           "0",
           "0",
           "0",
-          "300",
+          "400",
           "0",
           "42",
-          "3",
+          "4",
           "1",
           "1",
           "0",
@@ -2235,7 +2235,7 @@
           "0",
           "1",
           "1",
-          "300",
+          "400",
           "0",
           "0",
           "400",
@@ -3195,8 +3195,8 @@
   "final_snark": {
     "witness": [],
     "public_input": [
-      "400",
-      "3",
+      "802",
+      "12",
       "0"
     ],
     "num_constraints": 55

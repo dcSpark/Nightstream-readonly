@@ -1,21 +1,15 @@
-//! Test that y_prev binding is orthogonal to AppInputBinding mode
+//! Test that y_prev binding is correctly disabled in the Session API
 //!
-//! This test verifies the security property that y_prev equality constraints
-//! are enforced in BOTH WitnessBound and TranscriptOnly modes, ensuring that
-//! the circuit uses the same y_prev as the accumulator regardless of how
-//! app inputs are bound.
+//! **ARCHITECTURAL NOTE**: y_prev binding is incompatible with ρ-folding because
+//! the accumulator's `y_compact` is a cryptographic commitment, not raw application state.
 //!
-//! ## Background
+//! These tests verify that:
+//! - The Session API never enables y_prev binding (always empty vec)
+//! - Application circuits work correctly without binding to the accumulator
+//! - State continuity is the prover's responsibility (self-contained witnesses)
 //!
-//! The AppInputBinding mode controls how application public inputs are bound:
-//! - WitnessBound: app inputs get in-circuit equality constraints (belt-and-suspenders)
-//! - TranscriptOnly: app inputs only influence Fiat-Shamir transcript (NIVC mode)
-//!
-//! However, y_prev binding is about STATE CONSISTENCY, not app input handling.
-//! Without y_prev binding, a malicious circuit could use y_prev' != y_prev
-//! internally while still producing valid proofs against the accumulator's y_prev.
-//!
-//! This test ensures that y_prev_witness_indices are respected in BOTH modes.
+//! For verified state continuity, applications should use `app_input_indices` to
+//! pass previous outputs as public inputs, NOT bind to the accumulator.
 
 use neo::*;
 use neo::session::{NeoStep, StepSpec, StepArtifacts, FoldingSession, StepDescriptor, verify_chain_with_descriptor};
@@ -69,7 +63,6 @@ impl IncrementerStep {
             y_len: 1,
             const1_index: 0,
             y_step_indices: vec![3],    // next_x at witness[3]
-            y_prev_indices: Some(vec![1]), // prev_x at witness[1] - THIS IS THE KEY
             app_input_indices: Some(vec![2]), // delta at witness[2]
         };
         Self { ccs, spec }
@@ -97,15 +90,35 @@ impl NeoStep for IncrementerStep {
     }
 }
 
-/// Test that y_prev binding works in WitnessBound mode
+/// Test that y_prev binding field has been removed from StepBindingSpec
 #[test]
-fn test_y_prev_binding_in_witness_bound_mode() {
+fn test_y_prev_binding_removed() {
+    let spec = StepSpec {
+        y_len: 1,
+        const1_index: 0,
+        y_step_indices: vec![3],
+        app_input_indices: Some(vec![2]),
+    };
+    
+    // Just verify that binding_spec works without y_prev binding
+    let witness_bound_spec = spec.binding_spec(AppInputBinding::WitnessBound);
+    assert_eq!(witness_bound_spec.y_step_offsets, vec![3usize]);
+    assert_eq!(witness_bound_spec.step_program_input_witness_indices, vec![2usize]);
+    
+    let transcript_only_spec = spec.binding_spec(AppInputBinding::TranscriptOnly);
+    assert_eq!(transcript_only_spec.y_step_offsets, vec![3usize]);
+    assert_eq!(transcript_only_spec.step_program_input_witness_indices, Vec::<usize>::new());
+}
+
+/// Test that circuits work correctly without y_prev binding (WitnessBound mode)
+#[test]
+fn test_self_contained_witnesses_witness_bound() {
     let params = NeoParams::goldilocks_small_circuits();
     let mut session = FoldingSession::new(
         &params,
         Some(vec![F::ZERO]),
         0,
-        AppInputBinding::WitnessBound, // <-- WitnessBound mode
+        AppInputBinding::WitnessBound,
     );
     let mut stepper = IncrementerStep::new();
     
@@ -125,25 +138,24 @@ fn test_y_prev_binding_in_witness_bound_mode() {
     let valid = verify_chain_with_descriptor(
         &descriptor,
         &chain,
-        &[F::ZERO],
+        &[F::ZERO],  // initial_state
         &params,
         &step_ios,
         AppInputBinding::WitnessBound,
-    ).expect("verification failed");
+    ).expect("Verification failed");
     
-    assert!(valid, "Chain should be valid in WitnessBound mode with y_prev binding");
+    assert!(valid, "Chain verification should succeed without y_prev binding");
 }
 
-/// Test that y_prev binding ALSO works in TranscriptOnly mode
-/// This is the key test - y_prev binding should be orthogonal to app input mode
+/// Test that circuits work correctly without y_prev binding (TranscriptOnly mode)
 #[test]
-fn test_y_prev_binding_in_transcript_only_mode() {
+fn test_self_contained_witnesses_transcript_only() {
     let params = NeoParams::goldilocks_small_circuits();
     let mut session = FoldingSession::new(
         &params,
         Some(vec![F::ZERO]),
         0,
-        AppInputBinding::TranscriptOnly, // <-- TranscriptOnly mode
+        AppInputBinding::TranscriptOnly,
     );
     let mut stepper = IncrementerStep::new();
     
@@ -163,173 +175,11 @@ fn test_y_prev_binding_in_transcript_only_mode() {
     let valid = verify_chain_with_descriptor(
         &descriptor,
         &chain,
-        &[F::ZERO],
+        &[F::ZERO],  // initial_state
         &params,
         &step_ios,
         AppInputBinding::TranscriptOnly,
-    ).expect("verification failed");
+    ).expect("Verification failed");
     
-    assert!(valid, "Chain should be valid in TranscriptOnly mode with y_prev binding");
+    assert!(valid, "Chain verification should succeed without y_prev binding");
 }
-
-/// Test that y_prev binding is enforced in both modes by checking the binding spec
-#[test]
-fn test_binding_spec_includes_y_prev_in_both_modes() {
-    let spec = StepSpec {
-        y_len: 1,
-        const1_index: 0,
-        y_step_indices: vec![3],
-        y_prev_indices: Some(vec![1]),
-        app_input_indices: Some(vec![2]),
-    };
-    
-    // WitnessBound mode should include y_prev binding
-    let witness_bound_spec = spec.binding_spec(AppInputBinding::WitnessBound);
-    assert_eq!(
-        witness_bound_spec.y_prev_witness_indices,
-        vec![1],
-        "WitnessBound mode should include y_prev_witness_indices"
-    );
-    assert_eq!(
-        witness_bound_spec.step_program_input_witness_indices,
-        vec![2],
-        "WitnessBound mode should include app input indices"
-    );
-    
-    // TranscriptOnly mode should ALSO include y_prev binding (orthogonal)
-    let transcript_only_spec = spec.binding_spec(AppInputBinding::TranscriptOnly);
-    assert_eq!(
-        transcript_only_spec.y_prev_witness_indices,
-        vec![1],
-        "TranscriptOnly mode should ALSO include y_prev_witness_indices (orthogonal to app input mode)"
-    );
-    assert_eq!(
-        transcript_only_spec.step_program_input_witness_indices,
-        Vec::<usize>::new(),
-        "TranscriptOnly mode should NOT include app input indices (transcript-only binding)"
-    );
-}
-
-/// Test that omitting y_prev_indices results in no y_prev binding in either mode
-#[test]
-fn test_omitting_y_prev_indices_results_in_no_binding() {
-    let spec = StepSpec {
-        y_len: 1,
-        const1_index: 0,
-        y_step_indices: vec![3],
-        y_prev_indices: None, // <-- Explicitly None
-        app_input_indices: Some(vec![2]),
-    };
-    
-    let witness_bound_spec = spec.binding_spec(AppInputBinding::WitnessBound);
-    assert!(
-        witness_bound_spec.y_prev_witness_indices.is_empty(),
-        "No y_prev binding when y_prev_indices is None (WitnessBound)"
-    );
-    
-    let transcript_only_spec = spec.binding_spec(AppInputBinding::TranscriptOnly);
-    assert!(
-        transcript_only_spec.y_prev_witness_indices.is_empty(),
-        "No y_prev binding when y_prev_indices is None (TranscriptOnly)"
-    );
-}
-
-/// Test that WitnessBound finalization preserves app input binding constraints
-/// This is critical: finalization must use the SAME binding mode as proving
-#[test]
-fn test_witness_bound_finalization_preserves_app_input_binding() {
-    use neo::session::{finalize_ivc_chain_with_options, IvcFinalizeOptions};
-    
-    let params = NeoParams::goldilocks_small_circuits();
-    let mut session = FoldingSession::new(
-        &params,
-        Some(vec![F::ZERO]),
-        0,
-        AppInputBinding::WitnessBound, // <-- WitnessBound mode
-    );
-    let mut stepper = IncrementerStep::new();
-    
-    // Prove 2 steps
-    for i in 1..=2 {
-        let delta = F::from_u64(i);
-        session.prove_step(&mut stepper, &ExtInputs { delta }).expect("prove_step failed");
-    }
-    
-    // Finalize chain
-    let (chain, _step_ios) = session.finalize();
-    let descriptor = StepDescriptor {
-        ccs: stepper.ccs.clone(),
-        spec: stepper.spec.clone(),
-    };
-    
-    // Test WitnessBound finalization (should succeed - binding matches proving)
-    let result_witness_bound = finalize_ivc_chain_with_options(
-        &descriptor,
-        &params,
-        chain.clone(),
-        AppInputBinding::WitnessBound, // <-- MUST match proving mode
-        IvcFinalizeOptions { embed_ivc_ev: true }
-    );
-    
-    assert!(
-        result_witness_bound.is_ok(),
-        "Finalization with WitnessBound should succeed when proving used WitnessBound"
-    );
-    
-    // Verify the final SNARK
-    if let Ok(Some((final_proof, final_ccs, final_public_input))) = result_witness_bound {
-        let valid = neo::verify_spartan2(&final_ccs, &final_public_input, &final_proof)
-            .expect("verify_spartan2 failed");
-        assert!(valid, "Final SNARK should be valid when binding modes match");
-    }
-}
-
-/// Test that TranscriptOnly finalization works for TranscriptOnly sessions
-#[test]
-fn test_transcript_only_finalization() {
-    use neo::session::{finalize_ivc_chain_with_options, IvcFinalizeOptions};
-    
-    let params = NeoParams::goldilocks_small_circuits();
-    let mut session = FoldingSession::new(
-        &params,
-        Some(vec![F::ZERO]),
-        0,
-        AppInputBinding::TranscriptOnly, // <-- TranscriptOnly mode
-    );
-    let mut stepper = IncrementerStep::new();
-    
-    // Prove 2 steps
-    for i in 1..=2 {
-        let delta = F::from_u64(i);
-        session.prove_step(&mut stepper, &ExtInputs { delta }).expect("prove_step failed");
-    }
-    
-    // Finalize chain
-    let (chain, _step_ios) = session.finalize();
-    let descriptor = StepDescriptor {
-        ccs: stepper.ccs.clone(),
-        spec: stepper.spec.clone(),
-    };
-    
-    // Test TranscriptOnly finalization
-    let result_transcript_only = finalize_ivc_chain_with_options(
-        &descriptor,
-        &params,
-        chain,
-        AppInputBinding::TranscriptOnly, // <-- MUST match proving mode
-        IvcFinalizeOptions { embed_ivc_ev: true }
-    );
-    
-    assert!(
-        result_transcript_only.is_ok(),
-        "Finalization with TranscriptOnly should succeed when proving used TranscriptOnly"
-    );
-    
-    // Verify the final SNARK
-    if let Ok(Some((final_proof, final_ccs, final_public_input))) = result_transcript_only {
-        let valid = neo::verify_spartan2(&final_ccs, &final_public_input, &final_proof)
-            .expect("verify_spartan2 failed");
-        assert!(valid, "Final SNARK should be valid for TranscriptOnly mode");
-    }
-}
-

@@ -92,7 +92,6 @@ fn test_public_io_digest_matches_augmented_pi() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],        // witness[3] is next_x
         step_program_input_witness_indices: vec![],     // Empty - NIVC wrapper handles lane metadata
-        y_prev_witness_indices: vec![], // unused for this test
         const1_witness_index: 0,
     };
     let initial_acc = Accumulator {
@@ -161,7 +160,6 @@ fn test_verifier_rejects_when_augmented_pi_changes_but_x_same() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],   
         step_program_input_witness_indices: vec![], // Empty - NIVC wrapper handles lane metadata 
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     
@@ -254,7 +252,6 @@ fn test_context_digest_changes_when_any_bound_field_changes() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],   
         step_program_input_witness_indices: vec![], // Empty - NIVC wrapper handles lane metadata 
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     
@@ -328,7 +325,6 @@ fn test_rho_challenge_binding() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![], // Empty - NIVC wrapper handles lane metadata
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     
@@ -396,7 +392,6 @@ fn test_step_index_binding_prevents_replay() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![], // Empty - NIVC wrapper handles lane metadata
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     
@@ -504,7 +499,6 @@ fn test_ccs_domain_separation() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![], // Empty - NIVC wrapper handles lane metadata
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     
@@ -572,7 +566,6 @@ fn test_verifier_accepts_with_mismatched_prev_acc_vulnerability() -> Result<()> 
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],        // next_x at witness[3]
         step_program_input_witness_indices: vec![], // Empty - NIVC wrapper handles lane metadata     // delta at witness[2]  
-        y_prev_witness_indices: vec![1], // <-- BIND prev state to witness[1]!
         const1_witness_index: 0,
     };
     
@@ -663,7 +656,6 @@ fn test_vulnerability_when_y_prev_not_bound() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],        // next_x at witness[3]
         step_program_input_witness_indices: vec![], // Empty - NIVC wrapper handles lane metadata     // delta at witness[2]  
-        y_prev_witness_indices: vec![], // <-- NO BINDING! This is the vulnerability
         const1_witness_index: 0,
     };
     
@@ -753,7 +745,6 @@ fn test_context_digest_provides_automatic_y_prev_binding() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],        
         step_program_input_witness_indices: vec![], // Empty - NIVC wrapper handles lane metadata     
-        y_prev_witness_indices: vec![], // No explicit witness binding
         const1_witness_index: 0,
     };
     
@@ -840,7 +831,6 @@ fn test_step_index_manipulation_attack() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![], // Empty - NIVC wrapper handles lane metadata
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     
@@ -927,7 +917,6 @@ fn test_public_input_prefix_attack() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![], // Empty - NIVC wrapper handles lane metadata
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     
@@ -1015,7 +1004,6 @@ fn test_public_io_malleability_attack() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![], // Empty - NIVC wrapper handles lane metadata
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     
@@ -1124,7 +1112,6 @@ fn test_zero_rho_bypass_attack() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![], // Empty - NIVC wrapper handles lane metadata
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     
@@ -1215,7 +1202,6 @@ fn test_coordinated_rho_coordinates_attack() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![], // Empty - NIVC wrapper handles lane metadata
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
     

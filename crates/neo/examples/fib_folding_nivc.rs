@@ -83,8 +83,6 @@ impl FibonacciStep {
             const1_index: 0,
             // y_step = [b_next] at witness index 4
             y_step_indices: vec![4],
-            // No binding to y_prev inside the step witness (not used by circuit)
-            y_prev_indices: None,
             // No app-level public inputs
             app_input_indices: None,
         };

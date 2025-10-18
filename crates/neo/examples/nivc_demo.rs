@@ -35,7 +35,6 @@ fn main() -> anyhow::Result<()> {
     let binding = neo::StepBindingSpec {
         y_step_offsets: (1..=y_len).collect(),
         step_program_input_witness_indices: vec![],
-        y_prev_witness_indices: vec![],
         const1_witness_index: 0,
     };
 

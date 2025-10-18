@@ -85,9 +85,8 @@ impl IncrementerStep {
             y_len: 1,
             const1_index: 0,           // witness[0] == 1
             y_step_indices: vec![3],    // next_x at index 3
-            // Bind that the circuit reads the previous state from witness[1]
-            y_prev_indices: Some(vec![1]),
             // Bind app input (delta) to witness[2]
+            // NOTE: State continuity (prev_x at witness[1]) is prover's responsibility
             app_input_indices: Some(vec![2]),
         };
         Self { ccs, spec }

@@ -51,7 +51,6 @@ fn test_all_zero_witness_attack_blocked() {
     let binding = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![2],
-        y_prev_witness_indices: vec![1],
         const1_witness_index: 0,
     };
     
@@ -145,7 +144,6 @@ fn test_all_zero_witness_with_nonzero_const1_still_invalid() {
     let binding = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![2],
-        y_prev_witness_indices: vec![1],
         const1_witness_index: 0,
     };
     
@@ -217,7 +215,6 @@ fn test_valid_zero_state_with_const1_one() {
     let binding = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![2],
-        y_prev_witness_indices: vec![1],
         const1_witness_index: 0,
     };
     
@@ -275,7 +272,6 @@ fn test_all_zero_witness_attack_with_ivc_session() {
                 y_len: 1,
                 const1_index: 0,
                 y_step_indices: vec![3],
-                y_prev_indices: Some(vec![1]),
                 app_input_indices: None,  // No app inputs for this test
             };
             Self { ccs, spec }
@@ -345,7 +341,6 @@ fn test_valid_ivc_session_with_proper_const1() {
                 y_len: 1,
                 const1_index: 0,
                 y_step_indices: vec![3],
-                y_prev_indices: Some(vec![1]),
                 app_input_indices: None,
             };
             Self { ccs, spec }
@@ -418,7 +413,6 @@ fn test_complete_zero_witness_critical() {
     let binding = StepBindingSpec {
         y_step_offsets: vec![3],
         step_program_input_witness_indices: vec![2],
-        y_prev_witness_indices: vec![1],
         const1_witness_index: 0,
     };
     

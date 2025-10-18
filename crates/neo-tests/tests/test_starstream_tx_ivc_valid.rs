@@ -1,4 +1,4 @@
-//! Integration test for Starstream TX IVC proof generation
+//! Integration test for Starstream TX IVC proof generation (valid test case)
 
 use std::fs;
 use std::path::PathBuf;
@@ -109,7 +109,7 @@ fn extract_witness(witness_data: &WitnessData) -> Vec<F> {
 
 fn load_test_export() -> TestExport {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let json_path = manifest_dir.join("tests/test_starstream_tx_export.json");
+    let json_path = manifest_dir.join("tests/test_starstream_tx_export_valid.json");
     let json_content = fs::read_to_string(&json_path).expect("Failed to read JSON");
     serde_json::from_str(&json_content).expect("Failed to parse JSON")
 }
@@ -176,7 +176,7 @@ fn test_r1cs_constraint_verification() {
 }
 
 #[test]
-fn test_starstream_tx_ivc_proof() {
+fn test_starstream_tx_ivc_proof_valid() {
     let export = load_test_export();
     let y0: Vec<F> = export.ivc_params.y0.iter().map(|s| parse_field_element(s)).collect();
     let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
@@ -218,7 +218,7 @@ fn test_starstream_tx_ivc_proof() {
 }
 
 #[test]
-fn test_starstream_tx_nivc_proof() {
+fn test_starstream_tx_nivc_proof_valid() {
     let export = load_test_export();
     let y0: Vec<F> = export.ivc_params.y0.iter().map(|s| parse_field_element(s)).collect();
     let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);
@@ -285,7 +285,7 @@ impl NeoStep for TestStepCircuit {
 }
 
 #[test]
-fn test_starstream_tx_session_api() {
+fn test_starstream_tx_session_api_valid() {
     let export = load_test_export();
     let y0: Vec<F> = export.ivc_params.y0.iter().map(|s| parse_field_element(s)).collect();
     let params = NeoParams::goldilocks_autotuned_s2(3, 2, 2);

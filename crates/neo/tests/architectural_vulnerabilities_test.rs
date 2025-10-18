@@ -108,7 +108,6 @@ fn test_vulnerability_folding_chain_duplication() -> Result<()> {
         y_step_offsets: vec![3],        
         // Bind only the app input (delta) to witness[2]
         step_program_input_witness_indices: vec![2],
-        y_prev_witness_indices: vec![1],
         const1_witness_index: 0,
     };
 
@@ -178,7 +177,6 @@ fn test_vulnerability_folding_chain_duplication() -> Result<()> {
     let y_next = &final_step.next_accumulator.y_compact;
     let _final_public_input = build_final_snark_public_input(&step_x, rho, y_prev, y_next);
     // Build NIVC program and synthetic chain from IVC proofs
-    let binding_spec = StepBindingSpec { y_step_offsets: vec![3], step_program_input_witness_indices: vec![2], y_prev_witness_indices: vec![1], const1_witness_index: 0 };
     let program = NivcProgram::new(vec![NivcStepSpec { ccs: step_ccs.clone(), binding: binding_spec }]);
     let steps: Vec<neo::NivcStepProof> = ivc_proofs
         .iter()
@@ -252,7 +250,6 @@ fn test_vulnerability_final_snark_public_input_format() -> Result<()> {
         y_step_offsets: vec![3],        
         // Bind only the app input (delta) to witness[2]
         step_program_input_witness_indices: vec![2],
-        y_prev_witness_indices: vec![1],
         const1_witness_index: 0,
     };
 
@@ -295,7 +292,6 @@ fn test_vulnerability_final_snark_public_input_format() -> Result<()> {
     let temp_binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],        
         step_program_input_witness_indices: vec![2],
-        y_prev_witness_indices: vec![1],
         const1_witness_index: 0,
     };
     // Build a synthetic NIVC chain and finalize
@@ -390,7 +386,6 @@ fn test_vulnerability_missing_witness_binding() -> Result<()> {
     let vulnerable_binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],        
         step_program_input_witness_indices: vec![],      // This is the vulnerability!
-        y_prev_witness_indices: vec![1],
         const1_witness_index: 0,
     };
 
@@ -480,7 +475,6 @@ fn test_vulnerability_fixed_ajtai_seed() -> Result<()> {
     let binding_spec = StepBindingSpec {
         y_step_offsets: vec![3],        
         step_program_input_witness_indices: vec![2],
-        y_prev_witness_indices: vec![1],
         const1_witness_index: 0,
     };
 
