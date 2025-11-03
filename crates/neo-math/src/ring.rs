@@ -223,7 +223,7 @@ pub fn rot_apply_vec(a: &Rq, v: &[Fq; D]) -> [Fq; D] {
 }
 
 /// SHOULD: left action on a dense d×m matrix (columns are vectors in F_q^d).
-pub fn rot_apply_matrix(a: &Rq, z: &DenseMatrix<Fq>) -> Result<DenseMatrix<Fq>, NeoMathError> {
+pub(crate) fn rot_apply_matrix(a: &Rq, z: &DenseMatrix<Fq>) -> Result<DenseMatrix<Fq>, NeoMathError> {
     let norms = Norms::default();
     norms.must(z.width > 0 && z.values.len() % z.width == 0, "matrix shape")?;
     let h = z.values.len() / z.width;

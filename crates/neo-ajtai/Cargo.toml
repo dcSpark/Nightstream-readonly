@@ -4,6 +4,9 @@ version = "0.1.0"
 edition = "2021"
 license = "Apache-2.0"
 
+[lints]
+workspace = true
+
 [features]
 default = []
 # Expose testing utilities (like commit_spec) without making them part of the stable API
@@ -31,8 +34,4 @@ p3-matrix = "0.3.0"
 
 [dev-dependencies]
 proptest = "1.7"
-
-# Integration tests that require testing features
-[[test]]
-name = "linear_opening_security"
-required-features = ["testing"]
+serde_json = { workspace = true }

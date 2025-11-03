@@ -2,7 +2,7 @@
 //! MUST: implement F_q and K with conjugation/inversion; constant-time basic ops.
 //! SHOULD: expose roots-of-unity hooks sized for ring ops.
 
-use p3_field::{Field, TwoAdicField, PrimeCharacteristicRing};
+use p3_field::Field;
 use p3_field::extension::BinomialExtensionField;
 use p3_goldilocks::Goldilocks;
 
@@ -12,23 +12,8 @@ pub type Fq = Goldilocks;
 /// Quadratic extension K = F_{q^2}. (This is the only extension used by Neo.)
 pub type K = BinomialExtensionField<Fq, 2>;
 
-/// Goldilocks modulus (public constant for audits & tests).
-pub const GOLDILOCKS_MODULUS: u128 = 18446744069414584321u128;
-
-/// Two-adicity of F_q^* (Goldilocks has 2^32 | q-1).
-pub const TWO_ADICITY: usize = <Fq as TwoAdicField>::TWO_ADICITY;
-
-/// A fixed quadratic non-residue for F_q; verified in tests via Euler's criterion.
-/// We use 7, which is known to be a quadratic non-residue modulo the Goldilocks prime.
-pub fn nonresidue() -> Fq {
-    Fq::from_u64(7)
-}
-
-/// SHOULD: provide a two-adic generator (2^bits-th root of unity) for NTT hooks.
-#[inline]
-pub fn two_adic_generator(bits: usize) -> Fq {
-    <Fq as TwoAdicField>::two_adic_generator(bits)
-}
+/// Goldilocks modulus (internal constant).
+pub(crate) const GOLDILOCKS_MODULUS: u128 = 18446744069414584321u128;
 
 /// Constructor compatibility shim to handle potential upstream API changes
 #[inline]
@@ -63,39 +48,5 @@ impl KExtensions for K {
     }
 }
 
-/// Random K generator for testing only
-/// Gated to avoid accidentally introducing a hard dependency on rand in neo-math
-#[cfg(any(test, feature = "testing"))]
-pub fn random_extf() -> K {
-    use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
-    use rand_chacha::rand_core::RngCore;
-    let mut rng = ChaCha20Rng::seed_from_u64(0x5eed_u64);
-    let real = Fq::from_u64(rng.next_u64());
-    let imag = Fq::from_u64(rng.next_u64());
-    from_complex(real, imag)
-}
-
-/// Embed base field element into extension field
-#[inline] pub fn from_base(x: Fq) -> K { K::from_coeffs([x, Fq::ZERO]) }
-
 /// Create extension field element from real/imaginary parts  
 #[inline] pub fn from_complex(real: Fq, imag: Fq) -> K { K::from_coeffs([real, imag]) }
-
-/// Embed base field into extension (alias for clarity)
-#[inline] pub fn embed_base_to_ext(x: Fq) -> K { from_base(x) }
-
-/// Returns Some(real part) iff imaginary part == 0; otherwise None.
-/// **Preferred for correctness-critical paths** - prevents silent loss of imaginary components.
-#[inline] pub fn try_project_ext_to_base(x: K) -> Option<Fq> {
-    let [re, im] = x.as_coeffs();
-    if im == Fq::ZERO { Some(re) } else { None }
-}
-
-/// Always returns the real part, even if imaginary part != 0.
-/// **Use with caution** - silently discards imaginary components.
-/// Prefer `try_project_ext_to_base` in correctness-critical paths.
-#[must_use = "discarding the result defeats the purpose of this lossy projection"]
-#[inline] pub fn project_ext_to_base_lossy(x: K) -> Fq { x.real() }
-
-/// Backward compatibility alias - routes to the SAFE version
-#[inline] pub fn project_ext_to_base(x: K) -> Option<Fq> { try_project_ext_to_base(x) }

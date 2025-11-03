@@ -55,13 +55,17 @@ impl SAction {
     /// Left action on a K-vector by applying the S-action independently to real and imaginary parts.
     /// This extends the Fq-linear S-action to the extension field K = Fq[u]/(u^2 - 7).
     /// 
-    /// **Security**: For ME claims (y_j ∈ K^d should be length D), vectors longer than D
-    /// are rejected to prevent dimension mismatches that could break soundness.
+    /// Security: For ME claims (y_j ∈ K^d should be length D), vectors may be
+    /// padded up to the next power-of-two (for sum-check alignment). If the
+    /// vector is longer than D, all tail elements beyond D must be zero. Any
+    /// non-zero padding is rejected to prevent dimension-mismatch attacks.
     pub fn apply_k_vec(&self, y: &[K]) -> Result<Vec<K>, SActionError> {
-        // Security check: reject vectors longer than D to prevent silent truncation
-        // that could hide dimension mismatches in ME claims
+        // Allow zero-padded tails up to 2^ell_d; enforce zeros for indices ≥ D
         if y.len() > D {
-            return Err(SActionError::DimMismatch { expected: D, got: y.len() });
+            // Reject if any tail element is non-zero
+            if y[D..].iter().any(|&v| v != K::ZERO) {
+                return Err(SActionError::DimMismatch { expected: D, got: y.len() });
+            }
         }
         
         if y.is_empty() {
@@ -93,7 +97,7 @@ impl SAction {
             result.push(from_complex(rotated_re[i], rotated_im[i]));
         }
         
-        // Copy any remaining elements unchanged (though this won't happen due to early length check)
+        // Copy any remaining elements unchanged (must be zeros by contract)
         // This makes the behavior consistent with apply_k_slice and prevents future index errors
         result.extend_from_slice(&y[process_len..]);
         
@@ -106,9 +110,11 @@ impl SAction {
             return Err(SActionError::DimMismatch { expected: result.len(), got: y.len() });
         }
         
-        // Security check: reject vectors longer than D
+        // Allow zero-padded tails; enforce zeros beyond D
         if y.len() > D {
-            return Err(SActionError::DimMismatch { expected: D, got: y.len() });
+            if y[D..].iter().any(|&v| v != K::ZERO) {
+                return Err(SActionError::DimMismatch { expected: D, got: y.len() });
+            }
         }
         
         let process_len = y.len().min(D);

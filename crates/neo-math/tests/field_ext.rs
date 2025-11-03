@@ -1,4 +1,6 @@
-use neo_math::{Fq, K, TWO_ADICITY, GOLDILOCKS_MODULUS, two_adic_generator, KExtensions};
+mod test_helpers;
+use test_helpers::{GOLDILOCKS_MODULUS, TWO_ADICITY, two_adic_generator};
+use neo_math::{Fq, K, KExtensions};
 use p3_field::PrimeCharacteristicRing;
 
 #[test]

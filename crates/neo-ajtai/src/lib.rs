@@ -30,18 +30,9 @@ pub mod s_module;
 pub use error::{AjtaiError, AjtaiResult};
 pub use types::{Commitment, PP};
 pub use decomp::{decomp_b, split_b, assert_range_b, DecompStyle};
-pub use commit::{setup, commit, try_commit, verify_open, verify_split_open, s_mul, s_lincomb, commit_masked_ct, commit_precomp_ct, rows_for_coords, compute_single_ajtai_row, compute_aggregated_ajtai_row};
+pub use commit::{setup, commit, try_commit, verify_open, verify_split_open, s_mul, s_lincomb, commit_masked_ct, commit_precomp_ct};
 
-// Testing-only exports (open_linear for differential testing only)
-#[cfg(any(test, feature = "testing"))]
-pub use commit::{LinearOpeningProof, open_linear, rot_step};
-
-// NOTE: verify_linear is intentionally NOT PROVIDED in the Ajtai commitment layer.
-// Generic linear openings y = Z·v cannot be verified from a single Ajtai commitment.
-// Use neo_fold::verify_linear (Π_RLC) for linear relation verification instead.
-
-// Test-only differential testing function
-#[cfg(any(test, feature = "testing"))]
-pub use commit::commit_spec;
+#[cfg(feature = "testing")]
+pub use commit::rot_step;
 
 pub use s_module::{AjtaiSModule, set_global_pp, get_global_pp, get_global_pp_for_dims, has_global_pp_for_dims, get_global_pp_for_z_len};

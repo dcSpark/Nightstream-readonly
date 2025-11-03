@@ -19,16 +19,14 @@ pub enum SActionError {
     DimMismatch { expected: usize, got: usize },
 }
 
-pub use field::{Fq, K, GOLDILOCKS_MODULUS, TWO_ADICITY, nonresidue, two_adic_generator, KExtensions, from_base, from_complex, embed_base_to_ext, project_ext_to_base, try_project_ext_to_base, project_ext_to_base_lossy};
-pub use ring::{ETA, D, Rq, cf, cf_inv, inf_norm};
+pub use field::{Fq, K, KExtensions, from_complex};
+pub use ring::{ETA, D, Rq, cf, cf_inv};
 pub use s_action::SAction;
-pub use norms::{NeoMathError, Norms};
 
 // Import trait for field operations - removed unused import
 
 // Backward compatibility exports for existing crates
 pub use Fq as F;  // Field type alias
-pub type ExtF = K; // Extension field type alias
 
 // Legacy modules removed as part of codebase cleanup
 // Use neo_fold::transcript::FoldTranscript for transcript functionality
@@ -38,8 +36,3 @@ pub type ExtF = K; // Extension field type alias
 // Extension field utility functions moved to field.rs
 
 // Random generation moved to field.rs
-
-// Ring type aliases 
-pub type RingElement = Rq;
-pub type RotationRing = RingElement;
-pub type RotationMatrix = Vec<RingElement>;

@@ -4,7 +4,10 @@
 //! testing against the specification. They run with default features and catch 
 //! regressions in fundamental operations.
 
-use neo_ajtai::{setup, commit, verify_open, commit_masked_ct, commit_precomp_ct, rows_for_coords, compute_single_ajtai_row};
+mod test_helpers;
+
+use neo_ajtai::{setup, commit, verify_open, commit_masked_ct, commit_precomp_ct};
+use test_helpers::{rows_for_coords, compute_single_ajtai_row};
 use neo_math::Fq;
 use p3_field::PrimeCharacteristicRing;
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};

@@ -1,4 +1,6 @@
-use neo_math::{Rq, Fq, D, cf, cf_inv, inf_norm};
+mod test_helpers;
+use test_helpers::inf_norm;
+use neo_math::{Rq, Fq, D, cf, cf_inv};
 use p3_field::PrimeCharacteristicRing;
 
 fn rand_rq(seed: u64) -> Rq {

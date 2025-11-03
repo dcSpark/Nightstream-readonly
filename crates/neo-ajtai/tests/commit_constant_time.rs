@@ -8,7 +8,10 @@
 
 #![cfg(feature = "testing")]
 
-use neo_ajtai::{setup, commit_spec, commit_masked_ct, commit_precomp_ct, verify_open};
+mod test_helpers;
+
+use neo_ajtai::{setup, commit_masked_ct, commit_precomp_ct, verify_open};
+use test_helpers::commit_spec;
 use neo_math::Fq;
 use p3_field::PrimeCharacteristicRing;
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};

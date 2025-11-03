@@ -1,4 +1,6 @@
-use neo_math::{Fq, TWO_ADICITY, two_adic_generator};
+mod test_helpers;
+use test_helpers::{TWO_ADICITY, two_adic_generator};
+use neo_math::Fq;
 use p3_field::PrimeCharacteristicRing;
 
 #[test]
