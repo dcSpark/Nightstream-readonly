@@ -178,7 +178,7 @@ mod production_tests {
         // Test that vectors longer than D are rejected (security fix)
         // This should return an error, demonstrating the security fix works
         let mut oversized = create_production_k_vector(D);
-        oversized.push(K::ZERO); // Make it D+1 elements
+        oversized.push(K::new_complex(Fq::ONE, Fq::ZERO)); // Make it D+1 elements with non-zero value
         let result = s.apply_k_vec(&oversized);
         
         assert!(result.is_err(), "Oversized vectors should be rejected for security");

@@ -7,6 +7,9 @@ description = "Nightstream parameter sets with validation and sum-check soundnes
 license = "Apache-2.0"
 rust-version = "1.88"
 
+[lints]
+workspace = true
+
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }

@@ -8,8 +8,11 @@
 
 #![cfg(feature = "testing")]
 
+mod test_helpers;
+
 #[allow(unused_imports)]
-use neo_ajtai::{setup, commit, commit_spec};
+use neo_ajtai::{setup, commit};
+use test_helpers::commit_spec;
 use neo_math::Fq;
 use p3_field::PrimeCharacteristicRing;
 use rand_chacha::{ChaCha20Rng, rand_core::SeedableRng};
@@ -147,7 +150,7 @@ fn dense_commit_matches_spec_with_mixed_digits() {
     let c_actual = neo_ajtai::commit(&pp, &Z);
     
     // Differential testing in test builds only
-    let c_spec = neo_ajtai::commit_spec(&pp, &Z);
+    let c_spec = commit_spec(&pp, &Z);
     assert_eq!(c_actual, c_spec, "Commit with mixed digits must match specification");
     
     // Always verify that opening works correctly
@@ -187,8 +190,8 @@ fn dense_commit_matches_spec_all_patterns() {
     assert_ne!(c_strict, c_mixed, "Different inputs should produce different outputs");
     
     // Differential testing in test builds only
-    let c_spec_strict = neo_ajtai::commit_spec(&pp, &Z_strict);
-    let c_spec_mixed = neo_ajtai::commit_spec(&pp, &Z_mixed);
+    let c_spec_strict = commit_spec(&pp, &Z_strict);
+    let c_spec_mixed = commit_spec(&pp, &Z_mixed);
     assert_eq!(c_strict, c_spec_strict, "Strict {{-1,0,1}} digits must match spec");
     assert_eq!(c_mixed, c_spec_mixed, "Mixed digits must match spec");
     
@@ -223,8 +226,8 @@ fn dense_commit_differential_testing() {
     
     let c_sparse = neo_ajtai::commit(&pp, &Z_sparse);
     let c_mixed = neo_ajtai::commit(&pp, &Z_mixed);
-    let c_sparse_spec = neo_ajtai::commit_spec(&pp, &Z_sparse);
-    let c_mixed_spec = neo_ajtai::commit_spec(&pp, &Z_mixed);
+    let c_sparse_spec = commit_spec(&pp, &Z_sparse);
+    let c_mixed_spec = commit_spec(&pp, &Z_mixed);
     
     // Both should match their specifications exactly
     assert_eq!(c_sparse, c_sparse_spec, "Sparse {{-1,0,1}} digits should match spec");
@@ -262,8 +265,8 @@ fn sparsity_invariant_testing() {
     
     let c_sparse = neo_ajtai::commit(&pp, &Z_very_sparse);  
     let c_dense = neo_ajtai::commit(&pp, &Z_dense);
-    let c_sparse_spec = neo_ajtai::commit_spec(&pp, &Z_very_sparse);
-    let c_dense_spec = neo_ajtai::commit_spec(&pp, &Z_dense);
+    let c_sparse_spec = commit_spec(&pp, &Z_very_sparse);
+    let c_dense_spec = commit_spec(&pp, &Z_dense);
     
     // Correctness: both should match spec
     assert_eq!(c_sparse, c_sparse_spec, "Very sparse input should match spec");

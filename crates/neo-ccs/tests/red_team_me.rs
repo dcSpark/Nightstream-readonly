@@ -58,7 +58,7 @@ fn me_consistency_rejects_tamper() {
     let X = L.project_x(&Z, m_in);
 
     // Choose r ∈ K^ell with ell=log2(n)=2
-    type K = neo_math::ExtF;
+    use neo_math::K;
     let r = vec![K::from(Fq::from_u64(3)), K::from(Fq::from_u64(5))]; // arbitrary
     let rb = neo_ccs::utils::tensor_point::<K>(&r);
 

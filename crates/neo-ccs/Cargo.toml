@@ -5,6 +5,9 @@ version = { workspace = true }
 authors = { workspace = true }
 license = "Apache-2.0"
 
+[lints]
+workspace = true
+
 [dependencies]
 neo-math = { path = "../neo-math" }
 neo-params = { path = "../neo-params" }
@@ -39,3 +42,4 @@ criterion = { workspace = true }
 rand = { workspace = true }
 p3-goldilocks = { workspace = true }
 neo-ajtai = { path = "../neo-ajtai" }
+serde_json = { workspace = true }

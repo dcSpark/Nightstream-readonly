@@ -42,8 +42,9 @@ pub struct NeoParams {
     /// Decomposition base b (usually 2).
     pub b: u32,
     /// Folding exponent k so that B = b^k.
-    pub k: u32,
-    /// Upper ℓ∞ bound used by Ajtai binding *after* RLC: B = b^k.
+    /// Related to decomposition exponent where B = b^{k_rho}.
+    pub k_rho: u32,
+    /// Upper ℓ∞ bound used by Ajtai binding *after* RLC: B = b^{k_rho}.
     pub B: u64,
     /// Expansion factor of the strong challenge set C ⊂ S (empirical/spec bound).
     pub T: u32,
@@ -74,7 +75,7 @@ pub enum ParamsError {
 }
 
 impl NeoParams {
-    /// Construct and validate a parameter set; computes B=b^k and enforces the RLC guard.
+    /// Construct and validate a parameter set; computes B=b^{k_rho} and enforces the RLC guard.
     #[allow(non_snake_case)] // Allow mathematical notation from paper
     #[allow(clippy::too_many_arguments)] // All parameters needed for comprehensive validation
     pub fn new(
@@ -84,7 +85,7 @@ impl NeoParams {
         kappa: u32,
         m: u64,
         b: u32,
-        k: u32,
+        k_rho: u32,
         T: u32,
         s: u32,
         lambda: u32,
@@ -95,25 +96,25 @@ impl NeoParams {
         if kappa == 0 { return Err(ParamsError::Invalid("kappa must be > 0")); }
         if m == 0 { return Err(ParamsError::Invalid("m must be > 0")); }
         if b < 2 { return Err(ParamsError::Invalid("b must be >= 2")); }
-        if k == 0 { return Err(ParamsError::Invalid("k must be > 0")); }
+        if k_rho == 0 { return Err(ParamsError::Invalid("k_rho must be > 0")); }
         if T == 0 { return Err(ParamsError::Invalid("T must be > 0")); }
         if s != 2 { return Err(ParamsError::UnsupportedExtension { required: s }); } // v1 policy
         if lambda == 0 { return Err(ParamsError::Invalid("lambda must be > 0")); }
 
-        let B = pow_u64_checked(b as u64, k)?;
-        // Enforce (k+1)·T·(b-1) < B   [Π_RLC bound]
-        let lhs = (k as u128 + 1) * (T as u128) * ((b as u128).saturating_sub(1));
+        let B = pow_u64_checked(b as u64, k_rho)?;
+        // Enforce (k_rho+1)·T·(b-1) < B   [Π_RLC bound]
+        let lhs = (k_rho as u128 + 1) * (T as u128) * ((b as u128).saturating_sub(1));
         if lhs >= (B as u128) {
             return Err(ParamsError::GuardInequality);
         }
 
-        Ok(Self { q, eta, d, kappa, m, b, k, B, T, s, lambda })
+        Ok(Self { q, eta, d, kappa, m, b, k_rho, B, T, s, lambda })
     }
 
-    /// Goldilocks (~127-bit), Section 6.2: η=81, d=54, κ=16, m=2^24, b=2, k=12, B=4096, T≈216, s=2.
+    /// Goldilocks (~127-bit), Section 6.2: η=81, d=54, κ=16, m=2^24, b=2, k_rho=12, B=4096, T≈216, s=2.
     /// With Goldilocks q = 2^64 - 2^32 + 1, log₂(q) ≈ 63.999999999966 < 64, so q² < 2^128.
     /// For s=2 to be viable, we target λ=127 bits, giving ~127.999 bits of actual security.
-    /// Guard: (k+1)T(b−1)=13·216·1=2808 < 4096 ✓
+    /// Guard: (k_rho+1)T(b−1)=13·216·1=2808 < 4096 ✓
     #[allow(non_snake_case)] // Allow mathematical notation from paper
     pub fn goldilocks_127() -> Self {
         // Values from the paper; see Sec. 6.2.  K = F_{q^2}.
@@ -124,86 +125,65 @@ impl NeoParams {
         let kappa: u32 = 16;
         let m: u64 = 1u64 << 24;
         let b: u32 = 2;
-        let k: u32 = 12;
+        let k_rho: u32 = 12;
         let T: u32 = 216;
         let s: u32 = 2;
         let lambda: u32 = 127; // Adjusted for s=2 compatibility
 
         // new() computes/validates B and guard; unwrap() is safe for a known-good preset.
-        Self::new(q, eta, d, kappa, m, b, k, T, s, lambda).unwrap()
+        Self::new(q, eta, d, kappa, m, b, k_rho, T, s, lambda).unwrap()
     }
 
-    /// Goldilocks strict 128-bit (requires s=3+), Section 6.2: η=81, d=54, κ=16, m=2^24, b=2, k=12, B=4096, T≈216.
-    /// With λ=128 and Goldilocks field, s_min ≥ 3 for any non-trivial (ℓ,d).
-    /// This preset will be rejected by v1 extension policy; kept for completeness.
-    #[allow(non_snake_case)] // Allow mathematical notation from paper
-    pub fn goldilocks_128_strict() -> Self {
-        // Values from the paper; see Sec. 6.2.
-        let q: u64 = 0xFFFF_FFFF_0000_0001;
-        let eta: u32 = 81;
-        let d: u32 = 54;
-        let kappa: u32 = 16;
-        let m: u64 = 1u64 << 24;
-        let b: u32 = 2;
-        let k: u32 = 12;
-        let T: u32 = 216;
-        let s: u32 = 2; // v1 policy: only s=2 supported
-        let lambda: u32 = 128; // strict target
 
-        // new() computes/validates B and guard; unwrap() is safe for a known-good preset.
-        Self::new(q, eta, d, kappa, m, b, k, T, s, lambda).unwrap()
+    /// Auto-pick params for an R1CS instance reduced to CCS (Goldilocks preset).
+    ///
+    /// FE only needs to pass the number of R1CS constraints `n_rows`.
+    /// We:
+    ///   - pad `n_rows` to next power of two,
+    ///   - set ℓ = ceil(log2(d * padded_rows))   // d = φ(η) from the preset
+    ///   - bound d_sc for R1CS as: d_sc = 1 + max(u, 2b, 2), with u=2 (quadratic), b=preset.b
+    ///     => with b=2 this gives d_sc = 5 (safe for R1CS-ish CCS)
+    ///   - keep s=2 (policy v1), and search the largest λ ≤ preset λ with ≥ `safety_margin` slack.
+    ///
+    /// Defaults: min_lambda=96, safety_margin=2 bits. Returns UnsupportedExtension{required:3}
+    /// if even λ=min_lambda would force s≥3.
+    pub fn goldilocks_auto_r1cs_ccs(n_rows: usize) -> Result<Self, ParamsError> {
+        Self::goldilocks_auto_r1cs_ccs_with(n_rows, 96, 2)
     }
 
-    /// Calculate maximum lambda that works with s=2 for given workload parameters
-    pub fn max_lambda_for_s2(ell: u32, d_sc: u32) -> u32 {
-        let q: u64 = 0xFFFF_FFFF_0000_0001; // Goldilocks
-        let max_bits = 2.0 * (q as f64).log2(); // ≈ 127.99999999994
-        let penalty = log2_u128((ell as u128) * (d_sc as u128));
-        let lambda_max = (max_bits - penalty).floor() as u32;
-        lambda_max.saturating_sub(1) // Leave 1 bit safety margin
-    }
+    /// Same as above, but with explicit knobs for `min_lambda` and `safety_margin`.
+    pub fn goldilocks_auto_r1cs_ccs_with(
+        n_rows: usize,
+        min_lambda: u32,
+        safety_margin: u32,
+    ) -> Result<Self, ParamsError> {
+        let mut p = Self::goldilocks_127();
 
-    /// Auto-tuned Goldilocks preset for s=2 with given max workload parameters
-    /// Chooses lambda so that extension_check passes with some safety margin
-    #[allow(non_snake_case)] // Allow mathematical notation from paper
-    pub fn goldilocks_autotuned_s2(max_ell: u32, max_d_sc: u32, safety_margin: u32) -> Self {
-        let q: u64 = 0xFFFF_FFFF_0000_0001;
-        let eta: u32 = 81;
-        let d: u32 = 54;
-        let kappa: u32 = 16;
-        let m: u64 = 1u64 << 24;
-        let b: u32 = 2;
-        let k: u32 = 12;
-        let T: u32 = 216;
-        let s: u32 = 2;
+        // Compute (ℓ, d_sc) specialized for R1CS→CCS
+        // pad rows to power of two (min 2)
+        let padded_rows = if n_rows == 0 { 2 } else { n_rows.next_power_of_two().max(2) };
+        // ℓ = ceil(log2(d * padded_rows))
+        let prod: u128 = (p.d as u128) * (padded_rows as u128);
+        let ell: u32 = ceil_log2_u128(prod);
 
-        let lambda = Self::max_lambda_for_s2(max_ell, max_d_sc).saturating_sub(safety_margin);
-        
-        // Ensure lambda is at least somewhat reasonable (>= 80 bits)
-        let lambda = lambda.max(80);
-        
-        Self::new(q, eta, d, kappa, m, b, k, T, s, lambda).unwrap()
-    }
+        // R1CS: u = 2 (quadratic). d_sc = 1 + max(u, 2b, 2).
+        let u_r1cs: u32 = 2;
+        let two_b: u32 = p.b.saturating_mul(2);
+        let d_sc: u32 = 1 + u_r1cs.max(two_b).max(2);
 
-    /// Preset for typical small-to-medium circuits (ell ≤ 4, d_sc ≤ 3)
-    pub fn goldilocks_small_circuits() -> Self {
-        Self::goldilocks_autotuned_s2(4, 3, 2) // max ell*d_sc=12, 2-bit safety
-    }
-
-    /// Show lambda limits table for different workload sizes with s=2
-    pub fn show_s2_lambda_limits() {
-        println!("\n🔍 Lambda Limits for s=2 with Goldilocks Field:");
-        println!("====================================================");
-        println!(" ell*d_sc  | max_lambda | suggested_lambda");
-        println!("-----------|------------|------------------");
-        
-        for &ell_d_product in &[1, 2, 4, 6, 8, 12, 16, 24, 32, 48, 64, 128, 256] {
-            let max_lambda = Self::max_lambda_for_s2(ell_d_product, 1); // Use ell_d_product directly
-            let suggested = max_lambda.saturating_sub(2); // 2-bit safety margin
-            println!(" {ell_d_product:>8} | {max_lambda:>10} | {suggested:>16}");
+        // Search λ downward (keep s=2) until extension_check passes with slack
+        let mut lam = p.lambda.max(min_lambda);
+        while lam >= min_lambda {
+            p.lambda = lam;
+            match p.extension_check(ell, d_sc) {
+                Ok(sum) if sum.slack_bits >= safety_margin as i32 => return Ok(p),
+                Ok(_) | Err(ParamsError::UnsupportedExtension { .. }) => {
+                    lam = lam.saturating_sub(1);
+                }
+                Err(e) => return Err(e),
+            }
         }
-        println!("\n💡 Rule of thumb: Each doubling of ell*d_sc costs ~1 bit of lambda");
-        println!("🔒 Suggested lambda = max_lambda - 2 (safety margin)");
+        Err(ParamsError::UnsupportedExtension { required: 3 })
     }
 
     #[inline]
@@ -286,6 +266,12 @@ impl NeoParams {
 
 // ---------- small helpers ----------
 
+/// ceil(log2(x)) for u128, with ceil_log2(0) = 0 and ceil_log2(1) = 0.
+#[inline]
+fn ceil_log2_u128(x: u128) -> u32 {
+    if x <= 1 { 0 } else { 128u32 - (x - 1).leading_zeros() }
+}
+
 fn pow_u64_checked(base: u64, mut exp: u32) -> Result<u64, ParamsError> {
     let mut acc: u128 = 1;
     let mut b: u128 = base as u128;
@@ -297,21 +283,12 @@ fn pow_u64_checked(base: u64, mut exp: u32) -> Result<u64, ParamsError> {
     acc.try_into().map_err(|_| ParamsError::Invalid("B overflow"))
 }
 
-fn log2_u128(x: u128) -> f64 {
-    if x == 0 { return f64::NEG_INFINITY; }
-    // exact for powers of two; close enough elsewhere for s_min
-    (128 - x.leading_zeros() as i32 - 1) as f64 + {
-        let top = 1u128 << (127 - x.leading_zeros() as i32);
-        ((x as f64) / (top as f64)).log2()
-    }
-}
-
 impl fmt::Display for NeoParams {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "NeoParams{{ q=0x{:016X}, η={}, d={}, κ={}, m={}, b={}, k={}, B={}, T={}, s={}, λ={} }}",
-            self.q, self.eta, self.d, self.kappa, self.m, self.b, self.k, self.B, self.T, self.s, self.lambda
+            "NeoParams{{ q=0x{:016X}, η={}, d={}, κ={}, m={}, b={}, k_rho={}, B={}, T={}, s={}, λ={} }}",
+            self.q, self.eta, self.d, self.kappa, self.m, self.b, self.k_rho, self.B, self.T, self.s, self.lambda
         )
     }
 }
@@ -326,7 +303,7 @@ mod tests {
     fn goldilocks_128_matches_guard_and_b() {
         let p = NeoParams::goldilocks_127();
         assert_eq!(p.B, 4096);
-        let lhs = (p.k as u128 + 1) * (p.T as u128) * ((p.b as u128) - 1);
+        let lhs = (p.k_rho as u128 + 1) * (p.T as u128) * ((p.b as u128) - 1);
         assert!(lhs < p.B as u128, "guard must hold");
     }
 
@@ -349,7 +326,7 @@ mod tests {
         p.s = 3;
         assert_eq!(
             Err(ParamsError::UnsupportedExtension { required: 3 }),
-            NeoParams::new(p.q, p.eta, p.d, p.kappa, p.m, p.b, p.k, p.T, 3, p.lambda)
+            NeoParams::new(p.q, p.eta, p.d, p.kappa, p.m, p.b, p.k_rho, p.T, 3, p.lambda)
         );
     }
 

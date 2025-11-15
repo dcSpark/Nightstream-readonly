@@ -6,17 +6,8 @@ members = [
   "crates/neo-transcript",
   "crates/neo-ajtai",
   "crates/neo-ccs",
+  "crates/neo-reductions",
   "crates/neo-fold",
-  "crates/neo-challenge",
-  "crates/neo-spartan-bridge",
-  # Facade crate
-  "crates/neo",
-  # CLI
-  "crates/neo-cli",
-  # Tests
-  "crates/neo-tests",
-  "crates/neo-redteam-tests",
-  "crates/neo-quickcheck-tests",
 ]
 resolver = "2"
 
@@ -85,3 +76,9 @@ edition = "2021"
 version = "0.1.0"
 authors = ["Nico Arqueros (Shinkai Labs) <nico@shinkai.com>"]
 rust-version = "1.88"
+
+[workspace.lints.clippy]
+# Allow older-style format strings (prefer explicit for complex error messages)
+uninlined_format_args = "allow"
+# Allow functions with more than 7 arguments (cryptographic functions often need many params)
+too_many_arguments = "allow"

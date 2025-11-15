@@ -14,9 +14,8 @@ use p3_field::PrimeField64;
 /// - Input bytes: domain || seed || row_idx_le || len_le || ctr_le
 /// - Output: `len` field elements in Goldilocks (as F), produced in chunks of 4.
 ///
-/// Compared to v1, this version also absorbs the row length, removing any
-/// ambiguity across circuits that might share the same seed and row indices
-/// but differ in row length.
+/// It absorbs the row length, removing any ambiguity across circuits
+/// that might share the same seed and row indices but differ in row length.
 pub fn expand_row_v2(seed: &[u8; 32], row_idx: u64, len: usize) -> Vec<F> {
     let mut out = Vec::with_capacity(len);
     let mut ctr: u64 = 0;
