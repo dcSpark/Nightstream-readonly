@@ -1,6 +1,8 @@
 //! Test helpers for neo-math tests
 //! This module contains constants and functions that are only needed for testing.
 
+#![allow(dead_code)]
+
 use neo_math::{Fq, Rq};
 use p3_field::{TwoAdicField, PrimeField64};
 use p3_goldilocks::Goldilocks;

@@ -3,6 +3,8 @@
 //! These functions are useful for testing linear algebra properties and extractors
 //! but are not part of the core protocol.
 
+#![allow(dead_code)]
+
 use neo_ajtai::{PP, AjtaiError, AjtaiResult, Commitment};
 use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as Fq;
