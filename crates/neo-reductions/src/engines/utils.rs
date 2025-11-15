@@ -1,12 +1,6 @@
-//! Transcript module: Binding header/instances and sampling challenges
-//!
-//! # Paper Reference  
-//! Section 4.4, Step 0-1:
-//! - Step 0: Bind all public data to transcript before sampling randomness
-//! - Step 1: Sample challenges α, β, γ from transcript
-//!
-//! This ensures Fiat-Shamir security: all public data is committed before
-//! any randomness is derived, preventing selective failure attacks.
+//! Minimal protocol utilities for paper-exact implementation
+//! 
+//! Contains only the essential functions needed by prove and verify.
 
 #![allow(non_snake_case)]
 
@@ -14,31 +8,58 @@ use neo_transcript::{Transcript, Poseidon2Transcript, labels as tr_labels};
 use neo_ccs::{CcsStructure, McsInstance, MeInstance, MatRef, SparsePoly};
 use neo_ajtai::Commitment as Cmt;
 use neo_params::NeoParams;
-use neo_math::{F, K, KExtensions};
+use neo_math::{F, K, D, KExtensions};
 use p3_field::{Field, PrimeField64, PrimeCharacteristicRing};
 use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
 use p3_symmetric::Permutation;
 use crate::error::PiCcsError;
 
-/// Challenges sampled in Step 1 of the protocol
-#[derive(Debug, Clone)]
-pub struct Challenges {
-    /// α ∈ K^{log d} - for Ajtai dimension
-    pub alpha: Vec<K>,
-    /// β = (β_a, β_r) ∈ K^{log(dn)} split into Ajtai and row parts
-    pub beta_a: Vec<K>,
-    pub beta_r: Vec<K>,
-    /// γ ∈ K - random linear combination weight
-    pub gamma: K,
+/// Computed dimensions for the CCS reduction
+#[derive(Debug, Clone, Copy)]
+pub struct Dims {
+    pub ell_d: usize,
+    pub ell_n: usize,
+    pub ell: usize,
+    pub d_sc: usize,
 }
 
-/// Bind header and MCS instances to transcript (Step 0)
-///
-/// # Paper Reference
-/// Before sampling any challenges, we must bind:
-/// - Protocol version and security parameters
-/// - CCS structure (n, m, t, matrices, polynomial f)
-/// - All MCS instances (commitments c, public inputs x, m_in values)
+pub use crate::optimized_engine::Challenges;
+
+/// Build dimensions and validate extension field security policy
+pub fn build_dims_and_policy(
+    params: &NeoParams,
+    s: &CcsStructure<F>,
+) -> Result<Dims, PiCcsError> {
+    if s.n == 0 {
+        return Err(PiCcsError::InvalidInput("n=0 not allowed".into()));
+    }
+
+    let d_pad = D.next_power_of_two();
+    let ell_d = d_pad.trailing_zeros() as usize;
+    
+    let n_pad = s.n.next_power_of_two().max(2);
+    let ell_n = n_pad.trailing_zeros() as usize;
+    
+    let ell = ell_d + ell_n;
+
+    let d_sc = core::cmp::max(
+        s.max_degree() as usize + 1,
+        core::cmp::max(2, 2 * (params.b as usize) + 2),
+    );
+
+    let ext = params.extension_check(ell as u32, d_sc as u32)
+        .map_err(|e| PiCcsError::ExtensionPolicyFailed(e.to_string()))?;
+
+    if ext.slack_bits < 0 {
+        return Err(PiCcsError::ExtensionPolicyFailed(format!(
+            "Insufficient security slack: {} bits", ext.slack_bits
+        )));
+    }
+
+    Ok(Dims { ell_d, ell_n, ell, d_sc })
+}
+
+/// Bind header and MCS instances to transcript
 pub fn bind_header_and_instances(
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
@@ -46,36 +67,28 @@ pub fn bind_header_and_instances(
     mcs_list: &[McsInstance<Cmt, F>],
     ell: usize,
     d_sc: usize,
-    _slack_bits: i32,  // Ignored - we compute extension policy internally
+    _slack_bits: i32,
 ) -> Result<(), PiCcsError> {
-    // Protocol label for domain separation
     tr.append_message(tr_labels::PI_CCS, b"");
     
-    // Compute the same extension policy that the verifier uses
     let ext = params
         .extension_check(ell as u32, d_sc as u32)
         .map_err(|e| PiCcsError::ExtensionPolicyFailed(e.to_string()))?;
     
     tr.append_message(b"neo/ccs/header/v1", b"");
-    #[cfg(feature = "debug-logs")]
-    eprintln!("[transcript] Prover header: s_supported={}, lambda={}, ell={}, d_sc={}, slack_bits={}, sign={}", 
-        ext.s_supported, params.lambda, ell, d_sc, ext.slack_bits, if ext.slack_bits >= 0 { 1 } else { 0 });
     
     tr.append_u64s(b"ccs/header", &[
         64,
-        ext.s_supported as u64,  // Match verifier's field
+        ext.s_supported as u64,
         params.lambda as u64,
         ell as u64,
         d_sc as u64,
-        ext.slack_bits.unsigned_abs() as u64,  // Use computed slack_bits
+        ext.slack_bits.unsigned_abs() as u64,
     ]);
     tr.append_message(b"ccs/slack_sign", &[if ext.slack_bits >= 0 { 1 } else { 0 }]);
 
     tr.append_message(b"neo/ccs/instances", b"");
     tr.append_u64s(b"dims", &[s.n as u64, s.m as u64, s.t() as u64]);
-
-    #[cfg(feature = "debug-logs")]
-    eprintln!("[transcript] Binding CCS structure: n={}, m={}, t={}", s.n, s.m, s.t());
 
     for &digest_elem in &digest_ccs_matrices(s) {
         tr.append_fields(b"mat_digest", &[F::from_u64(digest_elem.as_canonical_u64())]);
@@ -92,10 +105,7 @@ pub fn bind_header_and_instances(
     Ok(())
 }
 
-/// Bind ME inputs to transcript (Step 0)
-///
-/// For k > 1 (folding with prior ME instances), bind all input ME instances
-/// before sampling challenges.
+/// Bind ME inputs to transcript
 pub fn bind_me_inputs(
     tr: &mut Poseidon2Transcript,
     me_inputs: &[MeInstance<Cmt, F, K>],
@@ -119,13 +129,7 @@ pub fn bind_me_inputs(
     Ok(())
 }
 
-/// Sample challenges α, β, γ from transcript (Step 1)
-///
-/// # Paper Reference
-/// Section 4.4, Step 1:
-/// - α ← K^{log d}: Ajtai randomness
-/// - β ← K^{log(dn)}: Split into (β_a, β_r) for two-axis folding
-/// - γ ← K: Random linear combination weight
+/// Sample challenges α, β, γ from transcript
 pub fn sample_challenges(
     tr: &mut Poseidon2Transcript,
     ell_d: usize,
@@ -151,10 +155,6 @@ pub fn sample_challenges(
 
     let g = tr.challenge_fields(b"chal/k", 2);
     let gamma = neo_math::from_complex(g[0], g[1]);
-
-    #[cfg(feature = "debug-logs")]
-    eprintln!("[transcript] Sampled challenges: alpha[0]={:?}, beta_a[0]={:?}, gamma={:?}", 
-        alpha.get(0), beta_a.get(0), gamma);
     
     Ok(Challenges {
         alpha,
@@ -164,12 +164,7 @@ pub fn sample_challenges(
     })
 }
 
-/// Deterministic digest of CCS matrices for transcript binding
-///
-/// Uses Poseidon2 sponge to absorb matrix structure and non-zero entries
-/// in canonical order. This ensures identical CCS structures produce
-/// identical digests regardless of internal representation.
-pub(crate) fn digest_ccs_matrices<F: Field + PrimeField64>(s: &CcsStructure<F>) -> Vec<Goldilocks> {
+fn digest_ccs_matrices<F: Field + PrimeField64>(s: &CcsStructure<F>) -> Vec<Goldilocks> {
     use rand_chacha::{ChaCha8Rng, rand_core::SeedableRng};
 
     const CCS_DIGEST_SEED: u64 = 0x434353445F4D4154;
@@ -229,10 +224,7 @@ pub(crate) fn digest_ccs_matrices<F: Field + PrimeField64>(s: &CcsStructure<F>) 
     state[0..4].to_vec()
 }
 
-/// Absorb sparse polynomial f into transcript
-///
-/// Binds the CCS polynomial structure and all terms in deterministic order
-pub(crate) fn absorb_sparse_polynomial(tr: &mut Poseidon2Transcript, f: &SparsePoly<F>) {
+fn absorb_sparse_polynomial(tr: &mut Poseidon2Transcript, f: &SparsePoly<F>) {
     tr.append_message(b"neo/ccs/poly", b"");
     tr.append_u64s(b"arity", &[f.arity() as u64]);
     tr.append_u64s(b"terms_len", &[f.terms().len() as u64]);

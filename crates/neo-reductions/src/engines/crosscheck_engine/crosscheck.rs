@@ -11,9 +11,12 @@ use neo_ajtai::Commitment as Cmt;
 use neo_params::NeoParams;
 use neo_transcript::Poseidon2Transcript;
 use neo_math::{F, K};
+use p3_field::PrimeCharacteristicRing;
 use crate::error::PiCcsError;
 use crate::engines::optimized_engine::PiCcsProof;
 use crate::engines::PiCcsEngine;
+
+use super::logging::*;
 
 /// Runtime cross-check configuration.
 #[derive(Clone, Debug, Default)]
@@ -71,14 +74,16 @@ where
     let (out_me_opt, proof) = inner
         .prove(tr, params, s, mcs_list, mcs_witnesses, me_inputs, me_witnesses, log)?;
 
-    // 2) Deterministically reconstruct the transcript tail to obtain r' || α'
-    let tail = crate::engines::optimized_engine::transcript_replay::pi_ccs_derive_transcript_tail_with_me_inputs(
-        params, s, mcs_list, me_inputs, &proof,
-    )?;
-
-    // Dimension split for (r', α')
-    let dims = crate::engines::optimized_engine::context::build_dims_and_policy(params, s)?;
-    let (r_prime, alpha_prime) = tail.r.split_at(dims.ell_n);
+    // 2) Use the prover-recorded challenges as the single source of truth.
+    //    This avoids tiny transcript replays from drifting and ensures that
+    //    the r we embed into outputs matches the one used to build them.
+    let dims = crate::engines::utils::build_dims_and_policy(params, s)?;
+    assert_eq!(
+        proof.sumcheck_challenges.len(),
+        dims.ell_n + dims.ell_d,
+        "sumcheck_challenges length mismatch"
+    );
+    let (r_prime, alpha_prime) = proof.sumcheck_challenges.split_at(dims.ell_n);
 
     // 3) Optional cross-checks
     if cfg.initial_sum {
@@ -92,54 +97,116 @@ where
             dims.ell_n,
             me_inputs.get(0).map(|mi| mi.r.as_slice()),
         );
-        if lhs_exact != tail.initial_sum {
-            return Err(PiCcsError::ProtocolError(
-                "crosscheck: initial sum mismatch (optimized vs paper-exact)".into(),
-            ));
+        if let Some(initial_sum_prover) = proof.sc_initial_sum {
+            if lhs_exact != initial_sum_prover {
+                return Err(PiCcsError::ProtocolError(
+                    "crosscheck: initial sum mismatch (optimized vs paper-exact)".into(),
+                ));
+            }
+        }
+    }
+
+    if cfg.per_round {
+        #[cfg(feature = "paper-exact")]
+        {
+            use crate::sumcheck::RoundOracle;
+            
+            let detailed_log = std::env::var("NEO_CROSSCHECK_DETAIL").is_ok();
+            
+            if detailed_log {
+                log_per_round_header(proof.sumcheck_rounds.len());
+            }
+            
+            let mut paper_oracle = crate::engines::paper_exact_engine::oracle::PaperExactOracle::new(
+                s,
+                params,
+                mcs_witnesses,
+                me_witnesses,
+                proof.challenges_public.clone(),
+                dims.ell_d,
+                dims.ell_n,
+                dims.d_sc,
+                me_inputs.first().map(|mi| mi.r.as_slice()),
+            );
+
+            for (round_idx, (opt_coeffs, &challenge)) in proof.sumcheck_rounds.iter()
+                .zip(proof.sumcheck_challenges.iter())
+                .enumerate()
+            {
+                let deg = paper_oracle.degree_bound();
+                let xs: Vec<K> = (0..=deg).map(|t| K::from(F::from_u64(t as u64))).collect();
+                let paper_evals = paper_oracle.evals_at(&xs);
+                
+                if detailed_log {
+                    log_per_round_progress(round_idx, proof.sumcheck_rounds.len(), paper_evals.len());
+                }
+                
+                for (i, (&x, &expected)) in xs.iter().zip(paper_evals.iter()).enumerate() {
+                    let actual = crate::sumcheck::poly_eval_k(opt_coeffs, x);
+                    if actual != expected {
+                        log_per_round_mismatch(round_idx, proof.sumcheck_rounds.len(), i, actual, expected);
+                        if cfg.fail_fast {
+                            return Err(PiCcsError::ProtocolError(
+                                format!("crosscheck: round {} polynomial mismatch at x={}", round_idx, i),
+                            ));
+                        }
+                    }
+            }
+            
+            paper_oracle.fold(challenge);
+        }
+            
+            if detailed_log {
+                log_per_round_success(proof.sumcheck_rounds.len());
+            }
+        }
+        
+        #[cfg(not(feature = "paper-exact"))]
+        {
+            log_paper_exact_feature_warning();
         }
     }
 
     if cfg.terminal {
-        // Check if detailed logging is enabled via environment variable
         let detailed_log = std::env::var("NEO_CROSSCHECK_DETAIL").is_ok();
         
         if detailed_log {
-            eprintln!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
-            eprintln!("║           CROSSCHECK: Computing Terminal Evaluation Q(α', r')            ║");
-            eprintln!("╚═══════════════════════════════════════════════════════════════════════════╝");
-            eprintln!();
+            log_terminal_header();
         }
         
-        // Optimized RHS assembled from outputs
+        let running_sum_prover = if let Some(initial) = proof.sc_initial_sum {
+            let mut running = initial;
+            for (coeffs, &ri) in proof.sumcheck_rounds.iter().zip(proof.sumcheck_challenges.iter()) {
+                running = crate::sumcheck::poly_eval_k(coeffs, ri);
+            }
+            running
+        } else {
+            use crate::sumcheck::poly_eval_k;
+            proof.sumcheck_rounds.get(0)
+                .map(|p0| poly_eval_k(p0, K::ZERO) + poly_eval_k(p0, K::ONE))
+                .unwrap_or(K::ZERO)
+        };
+        
         if detailed_log {
-            eprintln!();
-            eprintln!("╔════════════════════════════════════════════════════════════════════════════╗");
-            eprintln!("║                    OPTIMIZED ENGINE (from ME outputs)                      ║");
-            eprintln!("╚════════════════════════════════════════════════════════════════════════════╝");
+            log_terminal_optimized_header();
         }
-        let rhs_opt = crate::engines::optimized_engine::terminal::rhs_Q_apr(
+        let rhs_opt = crate::paper_exact_engine::rhs_terminal_identity_paper_exact(
             s,
+            params,
             &proof.challenges_public,
             r_prime,
             alpha_prime,
-            mcs_list,
-            me_inputs,
             &out_me_opt,
-            params,
-        )?;
+            me_inputs.first().map(|mi| mi.r.as_slice()),
+        );
         if detailed_log {
-            eprintln!("  [Optimized] Result: {:?}", rhs_opt);
+            log_terminal_optimized_result(rhs_opt);
         }
 
-        // Paper-exact LHS directly from witnesses
         if detailed_log {
-            eprintln!();
-            eprintln!("╔════════════════════════════════════════════════════════════════════════════╗");
-            eprintln!("║                 PAPER-EXACT ENGINE (from witnesses)                        ║");
-            eprintln!("╚════════════════════════════════════════════════════════════════════════════╝");
+            log_terminal_paper_exact_header();
         }
         
-        // IMPORTANT: Pass the ME inputs' r value so the Eval block is properly gated
         let r_inputs = me_inputs.get(0).map(|mi| mi.r.as_slice());
         let (lhs_exact, _rhs_unused) = crate::engines::paper_exact_engine::q_eval_at_ext_point_paper_exact_with_inputs(
             s,
@@ -152,59 +219,12 @@ where
             r_inputs,
         );
         if detailed_log {
-            eprintln!("  [Paper-exact] Result: {:?}", lhs_exact);
-            eprintln!();
-            eprintln!("╔════════════════════════════════════════════════════════════════════════════╗");
-            eprintln!("║                           COMPARISON                                       ║");
-            eprintln!("╚════════════════════════════════════════════════════════════════════════════╝");
-            eprintln!("  Sumcheck final value (from optimized proof): {:?}", tail.running_sum);
-            eprintln!("  Optimized Q(α', r'):                         {:?}", rhs_opt);
-            eprintln!("  Paper-exact Q(α', r'):                       {:?}", lhs_exact);
-            eprintln!("  Match: {}", rhs_opt == lhs_exact && rhs_opt == tail.running_sum);
-            eprintln!();
+            log_terminal_paper_exact_result(lhs_exact);
+            log_terminal_comparison(running_sum_prover, rhs_opt, lhs_exact);
         }
 
-        if rhs_opt != lhs_exact || rhs_opt != tail.running_sum {
-            eprintln!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
-            eprintln!("║              CROSSCHECK: Terminal Evaluation Claim Mismatch               ║");
-            eprintln!("╚═══════════════════════════════════════════════════════════════════════════╝");
-            eprintln!();
-            eprintln!("Background:");
-            eprintln!("  The optimized engine ran and produced a proof via sumcheck.");
-            eprintln!("  Now we're verifying that Q(α', r') can be computed correctly.");
-            eprintln!();
-            eprintln!("Three ways to compute/check Q(α', r'):");
-            eprintln!();
-            eprintln!("  1. Optimized terminal formula (from output ME instances):");
-            eprintln!("     → {:?}", rhs_opt);
-            eprintln!();
-            eprintln!("  2. Paper-exact direct evaluation (from witnesses):");
-            eprintln!("     → {:?}", lhs_exact);
-            eprintln!();
-            eprintln!("  3. Sumcheck final value (from optimized engine's proof):");
-            eprintln!("     → {:?}", tail.running_sum);
-            eprintln!();
-            eprintln!("Comparisons:");
-            eprintln!("  Optimized terminal == Paper-exact:   {}", rhs_opt == lhs_exact);
-            eprintln!("  Optimized terminal == Sumcheck final: {}", rhs_opt == tail.running_sum);
-            eprintln!("  Paper-exact == Sumcheck final:        {}", lhs_exact == tail.running_sum);
-            eprintln!();
-            eprintln!("Expected: All three should match.");
-            eprintln!("Actual:   Mismatch detected!");
-            eprintln!();
-            if rhs_opt == tail.running_sum && lhs_exact != tail.running_sum {
-                eprintln!("Diagnosis: Optimized engine is self-consistent, but paper-exact");
-                eprintln!("           formula produces a different value.");
-            } else if lhs_exact == tail.running_sum && rhs_opt != tail.running_sum {
-                eprintln!("Diagnosis: Paper-exact matches sumcheck, but optimized terminal");
-                eprintln!("           formula produces a different value.");
-            } else {
-                eprintln!("Diagnosis: Complex mismatch - neither matches sumcheck final value.");
-            }
-            eprintln!();
-            eprintln!("Tip: Set NEO_CROSSCHECK_DETAIL=1 for detailed step-by-step computation logs.");
-            eprintln!("═══════════════════════════════════════════════════════════════════════════\n");
-            
+        if rhs_opt != lhs_exact || rhs_opt != running_sum_prover {
+            log_terminal_mismatch(rhs_opt, lhs_exact, running_sum_prover);
             return Err(PiCcsError::ProtocolError(
                 "crosscheck: terminal evaluation claim mismatch".into(),
             ));
@@ -232,45 +252,121 @@ where
         );
 
         if out_me_ref.len() != out_me_opt.len() {
+            log_outputs_length_mismatch(out_me_ref.len(), out_me_opt.len());
             return Err(PiCcsError::ProtocolError(
                 "crosscheck: outputs length mismatch".into(),
             ));
         }
-        for (a, b) in out_me_ref.iter().zip(out_me_opt.iter()) {
-            if a.m_in != b.m_in || a.r != b.r || a.c.data != b.c.data {
+        
+        for (idx, (a, b)) in out_me_ref.iter().zip(out_me_opt.iter()).enumerate() {
+            let mut mismatches = Vec::new();
+            
+            if a.m_in != b.m_in {
+                mismatches.push(format!("m_in: paper={}, optimized={}", a.m_in, b.m_in));
+            }
+            
+            if a.r != b.r {
+                let r_match_count = a.r.iter().zip(b.r.iter()).filter(|(x, y)| x == y).count();
+                mismatches.push(format!(
+                    "r: length paper={}, optimized={}, matching elements={}/{}",
+                    a.r.len(), b.r.len(), r_match_count, a.r.len().min(b.r.len())
+                ));
+                if a.r.len() == b.r.len() && !a.r.is_empty() {
+                    mismatches.push(format!("  first paper r[0]={:?}", a.r.get(0)));
+                    mismatches.push(format!("  first opt   r[0]={:?}", b.r.get(0)));
+                }
+            }
+            
+            if a.c.data != b.c.data {
+                mismatches.push(format!(
+                    "c.data: paper len={}, opt len={}, data_match={}",
+                    a.c.data.len(), b.c.data.len(), a.c.data == b.c.data
+                ));
+                // Show first few elements for debugging
+                let show_len = 4.min(a.c.data.len()).min(b.c.data.len());
+                if show_len > 0 {
+                    mismatches.push(format!("  paper c.data[0..{}]={:?}", show_len, &a.c.data[..show_len]));
+                    mismatches.push(format!("  opt   c.data[0..{}]={:?}", show_len, &b.c.data[..show_len]));
+                }
+            }
+            
+            if !mismatches.is_empty() {
+                log_outputs_metadata_mismatch(
+                    idx,
+                    out_me_ref.len(),
+                    &mismatches,
+                    a.m_in == b.m_in,
+                    a.r == b.r,
+                    a.c.data == b.c.data,
+                    a.m_in,
+                    a.r.len(),
+                    a.c.data.len(),
+                    &fold_digest,
+                    mcs_list.len(),
+                );
+                
                 return Err(PiCcsError::ProtocolError(
-                    "crosscheck: output metadata mismatch".into(),
+                    format!("crosscheck: output metadata mismatch at index {}", idx),
                 ));
             }
-            for (ya, yb) in a.y.iter().zip(b.y.iter()) {
+            
+            for (j, (ya, yb)) in a.y.iter().zip(b.y.iter()).enumerate() {
                 if ya.len() != yb.len() {
+                    log_outputs_y_row_length_mismatch(idx, j, ya.len(), yb.len());
                     return Err(PiCcsError::ProtocolError(
-                        "crosscheck: y row length mismatch".into(),
+                        format!("crosscheck: y row {} length mismatch at instance {}", j, idx),
                     ));
                 }
                 if ya != yb {
+                    let match_count = ya.iter().zip(yb.iter()).filter(|(x, y)| x == y).count();
+                    let mut first_mismatch_info = None;
+                    for (k, (a_val, b_val)) in ya.iter().zip(yb.iter()).enumerate() {
+                        if a_val != b_val {
+                            first_mismatch_info = Some((k, a_val, b_val));
+                            break;
+                        }
+                    }
+                    if let Some((k, a_val, b_val)) = first_mismatch_info {
+                        log_outputs_y_row_content_mismatch(idx, j, match_count, ya.len(), k, a_val, b_val);
+                    }
                     return Err(PiCcsError::ProtocolError(
-                        "crosscheck: y row content mismatch".into(),
+                        format!("crosscheck: y row {} content mismatch at instance {}", j, idx),
                     ));
                 }
             }
+            
             if a.y_scalars != b.y_scalars {
+                let match_count = a.y_scalars.iter().zip(b.y_scalars.iter()).filter(|(x, y)| x == y).count();
+                let mismatches: Vec<(usize, K, K)> = a.y_scalars.iter().zip(b.y_scalars.iter())
+                    .enumerate()
+                    .filter_map(|(k, (a_val, b_val))| {
+                        if a_val != b_val {
+                            Some((k, *a_val, *b_val))
+                        } else {
+                            None
+                        }
+                    })
+                    .collect();
+                log_outputs_y_scalars_mismatch(idx, match_count, a.y_scalars.len(), &mismatches);
                 return Err(PiCcsError::ProtocolError(
-                    "crosscheck: y_scalars mismatch".into(),
+                    format!("crosscheck: y_scalars mismatch at instance {}", idx),
                 ));
             }
+            
             // X matrix equality (dense, small D)
             if a.X.rows() != b.X.rows() || a.X.cols() != b.X.cols() {
+                log_outputs_x_dimension_mismatch(idx, a.X.rows(), a.X.cols(), b.X.rows(), b.X.cols());
                 return Err(PiCcsError::ProtocolError(
-                    "crosscheck: X dims mismatch".into(),
+                    format!("crosscheck: X dims mismatch at instance {}", idx),
                 ));
             }
             for r in 0..a.X.rows() {
                 for c in 0..a.X.cols() {
                     if a.X[(r, c)] != b.X[(r, c)] {
+                        log_outputs_x_element_mismatch(idx, r, c, &a.X[(r, c)], &b.X[(r, c)]);
                         return Err(PiCcsError::ProtocolError(
                             format!(
-                                "crosscheck: X mismatch at ({},{})", r, c
+                                "crosscheck: X mismatch at ({},{}) in instance {}", r, c, idx
                             ),
                         ));
                     }

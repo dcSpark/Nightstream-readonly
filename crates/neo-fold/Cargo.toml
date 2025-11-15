@@ -15,7 +15,7 @@ testing = []
 # Paper-exact, intentionally-inefficient reference implementation for Π-CCS
 paper-exact = []
 # Forward neo-transcript debug logging so tests can enable transcript dumps on stable
-debug-logs = ["neo-transcript/debug-log"]
+debug-logs = ["neo-transcript/debug-log", "neo-reductions/debug-logs"]
 # Forward fs-guard so tests can compare prover vs verifier transcript events
 fs-guard = ["neo-transcript/fs-guard"]
 # Note: dev feature removed - neo-spartan-bridge now uses Poseidon2-only (no dev mode)
@@ -65,5 +65,32 @@ p3-field = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# No tests in this crate - tests are in neo-reductions
+# Starstream integration tests
+[[test]]
+name = "test_starstream_tx_valid_paper_exact"
+path = "starstream-tests/test_starstream_tx_valid_paper_exact.rs"
+required-features = ["paper-exact"]
+
+[[test]]
+name = "test_starstream_tx_valid_optimized"
+path = "starstream-tests/test_starstream_tx_valid_optimized.rs"
+
+[[test]]
+name = "test_starstream_tx_valid_crosscheck"
+path = "starstream-tests/test_starstream_tx_valid_crosscheck.rs"
+required-features = ["paper-exact"]
+
+[[test]]
+name = "test_starstream_tx_invalid_paper_exact"
+path = "starstream-tests/test_starstream_tx_invalid_paper_exact.rs"
+required-features = ["paper-exact"]
+
+[[test]]
+name = "test_starstream_tx_invalid_optimized"
+path = "starstream-tests/test_starstream_tx_invalid_optimized.rs"
+
+[[test]]
+name = "test_starstream_tx_invalid_crosscheck"
+path = "starstream-tests/test_starstream_tx_invalid_crosscheck.rs"
+required-features = ["paper-exact"]
 

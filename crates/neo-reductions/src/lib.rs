@@ -30,6 +30,12 @@ pub use engines::optimized_engine::{
     pi_ccs_prove_simple,
     pi_ccs_verify,
     GenericCcsOracle,
-    TranscriptTail,
 };
 pub use error::PiCcsError;
+
+// Re-export common utilities
+pub use common::{
+    split_b_matrix_k,
+    sample_rot_rhos,
+    RotRing,
+};

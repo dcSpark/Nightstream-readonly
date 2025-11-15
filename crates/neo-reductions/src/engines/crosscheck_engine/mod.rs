@@ -5,7 +5,6 @@
 //! for debugging and ensuring correctness.
 
 mod crosscheck;
+mod logging;
 
 pub use crosscheck::{CrossCheckEngine, CrosscheckCfg, crosscheck_prove, crosscheck_verify};
-
-

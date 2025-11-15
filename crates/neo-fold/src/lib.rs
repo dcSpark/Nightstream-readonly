@@ -18,7 +18,6 @@ pub use neo_reductions::{
     pi_ccs_prove_simple,
     pi_ccs_verify,
     GenericCcsOracle,
-    TranscriptTail,
     PiCcsError,
     sumcheck,
 };

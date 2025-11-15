@@ -4,6 +4,14 @@ use neo_math::{K, KExtensions};
 use neo_transcript::Transcript;
 use p3_field::PrimeCharacteristicRing;
 
+/// Format K value compactly for logging
+#[cfg(feature = "debug-logs")]
+fn format_k(k: &K) -> String {
+    use p3_field::PrimeField64;
+    let coeffs = k.as_coeffs();
+    format!("K[{}, {}]", coeffs[0].as_canonical_u64(), coeffs[1].as_canonical_u64())
+}
+
 /// Trait for round oracles in the sumcheck protocol
 pub trait RoundOracle {
     /// Evaluate the oracle at multiple points for the current round
@@ -49,16 +57,34 @@ pub fn verify_sumcheck_rounds<Tr: Transcript>(
     let mut challenges = Vec::with_capacity(rounds.len());
     let mut running_sum = initial_sum;
     
-    for (_i, round_poly) in rounds.iter().enumerate() {
+    #[cfg(feature = "debug-logs")]
+    eprintln!("VERIFIER: Starting sumcheck with initial_sum={}", format_k(&initial_sum));
+    
+    for (i, round_poly) in rounds.iter().enumerate() {
         // Check degree bound
         if round_poly.len() > degree_bound + 1 {
+            eprintln!("Round {} failed: degree check. len={}, degree_bound={}", i, round_poly.len(), degree_bound);
             return (challenges, running_sum, false);
         }
         
         // Verify that round_poly(0) + round_poly(1) = running_sum
         let eval_0 = poly_eval_k(round_poly, K::ZERO);
         let eval_1 = poly_eval_k(round_poly, K::ONE);
+        
+        #[cfg(feature = "debug-logs")]
+        if i <= 1 {
+            eprintln!("VERIFIER Round {}:", i);
+            eprintln!("  Received {} coefficients", round_poly.len());
+            if i == 0 {
+                eprintln!("  coeffs=[{}]", round_poly.iter().map(format_k).collect::<Vec<_>>().join(", "));
+            }
+            eprintln!("  eval_0={}, eval_1={}, sum={}", format_k(&eval_0), format_k(&eval_1), format_k(&(eval_0 + eval_1)));
+            eprintln!("  expected running_sum={}", format_k(&running_sum));
+        }
+        
         if eval_0 + eval_1 != running_sum {
+            eprintln!("Round {} failed: invariant check. eval_0={:?}, eval_1={:?}, sum={:?}, running_sum={:?}", 
+                      i, eval_0, eval_1, eval_0 + eval_1, running_sum);
             return (challenges, running_sum, false);
         }
         
@@ -76,6 +102,12 @@ pub fn verify_sumcheck_rounds<Tr: Transcript>(
         
         // Update running sum: running_sum := round_poly(challenge)
         running_sum = poly_eval_k(round_poly, challenge);
+        
+        #[cfg(feature = "debug-logs")]
+        if i <= 1 {
+            eprintln!("  challenge={}", format_k(&challenge));
+            eprintln!("  new_running_sum={}", format_k(&running_sum));
+        }
     }
     
     (challenges, running_sum, true)

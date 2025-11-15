@@ -18,12 +18,14 @@ use crate::sumcheck::RoundOracle;
 use crate::error::PiCcsError;
 use crate::optimized_engine::PiCcsProof;
 
+use crate::engines::utils;
+
 /// Paper-exact prove implementation.
 ///
 /// This function runs the sumcheck protocol using the paper-exact oracle,
 /// which directly evaluates the polynomial Q over the Boolean hypercube
 /// without optimizations.
-pub fn paper_exact_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
+pub fn optimized_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
     s: &CcsStructure<F>,
@@ -34,14 +36,14 @@ pub fn paper_exact_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     log: &L,
 ) -> Result<(Vec<MeInstance<Cmt, F, K>>, PiCcsProof), PiCcsError> {
     // Dims + transcript binding
-    let dims = crate::engines::utils::build_dims_and_policy(params, s)?;
-    crate::engines::utils::bind_header_and_instances(
+    let dims = utils::build_dims_and_policy(params, s)?;
+    utils::bind_header_and_instances(
         tr, params, s, mcs_list, dims.ell, dims.d_sc, 0,
     )?;
-    crate::engines::utils::bind_me_inputs(tr, me_inputs)?;
+    utils::bind_me_inputs(tr, me_inputs)?;
 
     // Sample challenges
-    let ch = crate::engines::utils::sample_challenges(tr, dims.ell_d, dims.ell)?;
+    let ch = utils::sample_challenges(tr, dims.ell_d, dims.ell)?;
 
     // Validate ME input r (if provided)
     for (idx, me) in me_inputs.iter().enumerate() {
@@ -103,8 +105,8 @@ pub fn paper_exact_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     // Bind initial sum to transcript
     tr.append_fields(b"sumcheck/initial_sum", &initial_sum.as_coeffs());
 
-    // Paper-exact oracle to evaluate true per-round polynomials
-    let mut oracle = crate::paper_exact_engine::oracle::PaperExactOracle::new(
+    // Optimized oracle with cached sparse formats and factored algebra
+    let mut oracle = super::oracle::OptimizedOracle::new(
         s,
         params,
         mcs_witnesses,
@@ -210,5 +212,17 @@ pub fn paper_exact_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     proof.header_digest = fold_digest.to_vec();
 
     Ok((out_me, proof))
+}
+
+/// Simple wrapper for k=1 case (no ME inputs)
+pub fn optimized_prove_simple<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s: &CcsStructure<F>,
+    mcs_list: &[McsInstance<Cmt, F>],
+    mcs_witnesses: &[McsWitness<F>],
+    log: &L,
+) -> Result<(Vec<MeInstance<Cmt, F, K>>, PiCcsProof), PiCcsError> {
+    optimized_prove(tr, params, s, mcs_list, mcs_witnesses, &[], &[], log)
 }
 

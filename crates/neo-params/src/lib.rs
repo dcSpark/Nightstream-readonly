@@ -42,8 +42,9 @@ pub struct NeoParams {
     /// Decomposition base b (usually 2).
     pub b: u32,
     /// Folding exponent k so that B = b^k.
-    pub k: u32,
-    /// Upper ℓ∞ bound used by Ajtai binding *after* RLC: B = b^k.
+    /// Related to decomposition exponent where B = b^{k_rho}.
+    pub k_rho: u32,
+    /// Upper ℓ∞ bound used by Ajtai binding *after* RLC: B = b^{k_rho}.
     pub B: u64,
     /// Expansion factor of the strong challenge set C ⊂ S (empirical/spec bound).
     pub T: u32,
@@ -74,7 +75,7 @@ pub enum ParamsError {
 }
 
 impl NeoParams {
-    /// Construct and validate a parameter set; computes B=b^k and enforces the RLC guard.
+    /// Construct and validate a parameter set; computes B=b^{k_rho} and enforces the RLC guard.
     #[allow(non_snake_case)] // Allow mathematical notation from paper
     #[allow(clippy::too_many_arguments)] // All parameters needed for comprehensive validation
     pub fn new(
@@ -84,7 +85,7 @@ impl NeoParams {
         kappa: u32,
         m: u64,
         b: u32,
-        k: u32,
+        k_rho: u32,
         T: u32,
         s: u32,
         lambda: u32,
@@ -95,25 +96,25 @@ impl NeoParams {
         if kappa == 0 { return Err(ParamsError::Invalid("kappa must be > 0")); }
         if m == 0 { return Err(ParamsError::Invalid("m must be > 0")); }
         if b < 2 { return Err(ParamsError::Invalid("b must be >= 2")); }
-        if k == 0 { return Err(ParamsError::Invalid("k must be > 0")); }
+        if k_rho == 0 { return Err(ParamsError::Invalid("k_rho must be > 0")); }
         if T == 0 { return Err(ParamsError::Invalid("T must be > 0")); }
         if s != 2 { return Err(ParamsError::UnsupportedExtension { required: s }); } // v1 policy
         if lambda == 0 { return Err(ParamsError::Invalid("lambda must be > 0")); }
 
-        let B = pow_u64_checked(b as u64, k)?;
-        // Enforce (k+1)·T·(b-1) < B   [Π_RLC bound]
-        let lhs = (k as u128 + 1) * (T as u128) * ((b as u128).saturating_sub(1));
+        let B = pow_u64_checked(b as u64, k_rho)?;
+        // Enforce (k_rho+1)·T·(b-1) < B   [Π_RLC bound]
+        let lhs = (k_rho as u128 + 1) * (T as u128) * ((b as u128).saturating_sub(1));
         if lhs >= (B as u128) {
             return Err(ParamsError::GuardInequality);
         }
 
-        Ok(Self { q, eta, d, kappa, m, b, k, B, T, s, lambda })
+        Ok(Self { q, eta, d, kappa, m, b, k_rho, B, T, s, lambda })
     }
 
-    /// Goldilocks (~127-bit), Section 6.2: η=81, d=54, κ=16, m=2^24, b=2, k=12, B=4096, T≈216, s=2.
+    /// Goldilocks (~127-bit), Section 6.2: η=81, d=54, κ=16, m=2^24, b=2, k_rho=12, B=4096, T≈216, s=2.
     /// With Goldilocks q = 2^64 - 2^32 + 1, log₂(q) ≈ 63.999999999966 < 64, so q² < 2^128.
     /// For s=2 to be viable, we target λ=127 bits, giving ~127.999 bits of actual security.
-    /// Guard: (k+1)T(b−1)=13·216·1=2808 < 4096 ✓
+    /// Guard: (k_rho+1)T(b−1)=13·216·1=2808 < 4096 ✓
     #[allow(non_snake_case)] // Allow mathematical notation from paper
     pub fn goldilocks_127() -> Self {
         // Values from the paper; see Sec. 6.2.  K = F_{q^2}.
@@ -124,13 +125,13 @@ impl NeoParams {
         let kappa: u32 = 16;
         let m: u64 = 1u64 << 24;
         let b: u32 = 2;
-        let k: u32 = 12;
+        let k_rho: u32 = 12;
         let T: u32 = 216;
         let s: u32 = 2;
         let lambda: u32 = 127; // Adjusted for s=2 compatibility
 
         // new() computes/validates B and guard; unwrap() is safe for a known-good preset.
-        Self::new(q, eta, d, kappa, m, b, k, T, s, lambda).unwrap()
+        Self::new(q, eta, d, kappa, m, b, k_rho, T, s, lambda).unwrap()
     }
 
 
@@ -286,8 +287,8 @@ impl fmt::Display for NeoParams {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
             f,
-            "NeoParams{{ q=0x{:016X}, η={}, d={}, κ={}, m={}, b={}, k={}, B={}, T={}, s={}, λ={} }}",
-            self.q, self.eta, self.d, self.kappa, self.m, self.b, self.k, self.B, self.T, self.s, self.lambda
+            "NeoParams{{ q=0x{:016X}, η={}, d={}, κ={}, m={}, b={}, k_rho={}, B={}, T={}, s={}, λ={} }}",
+            self.q, self.eta, self.d, self.kappa, self.m, self.b, self.k_rho, self.B, self.T, self.s, self.lambda
         )
     }
 }
@@ -302,7 +303,7 @@ mod tests {
     fn goldilocks_128_matches_guard_and_b() {
         let p = NeoParams::goldilocks_127();
         assert_eq!(p.B, 4096);
-        let lhs = (p.k as u128 + 1) * (p.T as u128) * ((p.b as u128) - 1);
+        let lhs = (p.k_rho as u128 + 1) * (p.T as u128) * ((p.b as u128) - 1);
         assert!(lhs < p.B as u128, "guard must hold");
     }
 
@@ -325,7 +326,7 @@ mod tests {
         p.s = 3;
         assert_eq!(
             Err(ParamsError::UnsupportedExtension { required: 3 }),
-            NeoParams::new(p.q, p.eta, p.d, p.kappa, p.m, p.b, p.k, p.T, 3, p.lambda)
+            NeoParams::new(p.q, p.eta, p.d, p.kappa, p.m, p.b, p.k_rho, p.T, 3, p.lambda)
         );
     }
 

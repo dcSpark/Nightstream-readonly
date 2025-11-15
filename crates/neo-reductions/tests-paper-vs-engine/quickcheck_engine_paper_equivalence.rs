@@ -474,7 +474,7 @@ proptest! {
     ) {
         let params = NeoParams::goldilocks_127();
         let b = params.b;
-        let k = params.k as usize;
+        let k = params.k_rho as usize;
         
         let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(seed);
         

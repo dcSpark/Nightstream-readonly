@@ -25,7 +25,8 @@ pub use crate::engines::optimized_engine::PiCcsProof;
 // Re-export common utilities for convenience (single import path for users)
 pub use crate::common::{
     split_b_matrix_k,
-    sample_diag_rhos,
+    sample_rot_rhos,       // Paper-compliant ΠRLC sampler (Section 4.5)
+    RotRing,               // Ring metadata for rotation matrix sampling
     compute_y_from_Z_and_r,
     left_mul_acc,
     format_ext,
@@ -299,8 +300,14 @@ where
     MB: Fn(&[Cmt], u32) -> Cmt,
 {
     let k = children.len();
-    if k == 0 { return false; }
-    if !children.iter().all(|ch| ch.r == parent.r) { return false; }
+    if k == 0 {
+        eprintln!("verify_dec_public failed: no children");
+        return false;
+    }
+    if !children.iter().all(|ch| ch.r == parent.r) {
+        eprintln!("verify_dec_public failed: r mismatch");
+        return false;
+    }
 
     // X
     let mut lhs_X = Mat::zero(D, parent.m_in, F::ZERO);
@@ -315,7 +322,8 @@ where
     }
     for r in 0..D { 
         for c in 0..parent.m_in {
-            if lhs_X[(r, c)] != parent.X[(r, c)] { 
+            if lhs_X[(r, c)] != parent.X[(r, c)] {
+                eprintln!("verify_dec_public failed: X check mismatch at ({}, {})", r, c);
                 return false; 
             }
         }
@@ -333,7 +341,8 @@ where
             }
             p *= bK;
         }
-        if lhs != parent.y[j] { 
+        if lhs != parent.y[j] {
+            eprintln!("verify_dec_public failed: y check mismatch at j={}", j);
             return false; 
         }
     }
@@ -343,6 +352,11 @@ where
         &children.iter().map(|c| c.c.clone()).collect::<Vec<_>>(), 
         params.b
     );
-    want_c == parent.c
+    if want_c != parent.c {
+        eprintln!("verify_dec_public failed: commitment check mismatch");
+        return false;
+    }
+    
+    true
 }
 

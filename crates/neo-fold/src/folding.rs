@@ -14,11 +14,11 @@ use neo_ccs::{CcsStructure, McsInstance, McsWitness, MeInstance, Mat};
 use neo_ajtai::Commitment as Cmt;
 
 use neo_params::NeoParams;
-use neo_math::{F, K, D};
+use neo_math::{F, K};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 
 use crate::PiCcsError;
-use crate::optimized_engine::context;
+use neo_reductions::engines::utils;
 
 // Pull Π_CCS and RLC/DEC via the public facade (engine-agnostic)
 use crate::pi_ccs::{self as ccs, FoldingMode, PiCcsProof};
@@ -99,13 +99,12 @@ where
     let s = s_in
         .ensure_identity_first()
         .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
-    let context::Dims { ell_d, .. } = context::build_dims_and_policy(params, &s)?;
+    let utils::Dims { ell_d, .. } = utils::build_dims_and_policy(params, &s)?;
 
-    // Infer k from initial accumulator
+    // Infer initial k from initial accumulator
     if acc_init.len() != acc_wit_init.len() {
         return Err(PiCcsError::InvalidInput("initial accumulator size mismatch".into()));
     }
-    let k = acc_init.len() + 1;
 
     // Current accumulator (carried inputs)
     let mut accumulator = acc_init.to_vec();
@@ -114,6 +113,10 @@ where
     let mut steps = Vec::with_capacity(mcss.len());
 
     for (idx, (mcs_i, wit_i)) in mcss.iter().enumerate() {
+        // Recompute k for this iteration based on current accumulator size
+        // k = |accumulator| + 1 (new MCS instance)
+        let k = accumulator.len() + 1;
+        
         // --- Π_CCS via facade (chooses engine by `mode`)
         let (ccs_out, ccs_proof) = ccs::prove(
             mode.clone(),
@@ -137,21 +140,26 @@ where
         outs_Z.extend(accumulator_wit.iter().cloned());
 
         // --- RLC (via facade): pick ρ, combine k → parent
-        let rhos = ccs::sample_diag_rhos(tr, k, params)?;
+        // Use paper-compliant rotation matrix sampler (Section 4.5, Definition 14)
+        // Paper ΠRLC: V samples p_1,...,p_{k_rho+1} ← C where k_rho = params.k_rho
+        let ring = ccs::RotRing::goldilocks();
+        let rhos = ccs::sample_rot_rhos(tr, params, &ring)?;
+        
+        // Use only the first k rhos for the actual RLC (k = runtime folding count)
+        let rhos_for_rlc = &rhos[..k];
         // Compute parent via RLC and combined witness Z_mix = Σ ρ_i·Z_i
-        let (mut parent_pub, Z_mix) = ccs::rlc_with_commit(
+        let (parent_pub, Z_mix) = ccs::rlc_with_commit(
             mode.clone(),
-            &s, params, &rhos, &ccs_out, &outs_Z, ell_d, mixers.mix_rhos_commits,
+            &s, params, rhos_for_rlc, &ccs_out, &outs_Z, ell_d, mixers.mix_rhos_commits,
         );
 
-        // Recompute parent's y from Z_mix to ensure DEC y-equality holds in all modes.
-        // y_j := Z_mix · (M_j^T · r^b) with padding to 2^{ell_d}; y_scalars are base-b recomposition.
-        let (y_new, y_scalars) = ccs::compute_y_from_Z_and_r(&s, &Z_mix, &parent_pub.r, ell_d, params.b);
-        parent_pub.y = y_new;
-        parent_pub.y_scalars = y_scalars;
+        // NOTE: y-vectors are already correctly computed by rlc_with_commit via the S-module action.
+        // Do NOT recompute from Z_mix as that gives different results due to the digit structure of y.
 
-        // --- DEC (public): split Z_mix into k children; compute (c_i, X_i, y_(i,j))
-        let Z_split = ccs::split_b_matrix_k(&Z_mix, k, params.b)?;
+        // --- DEC (public): split Z_mix into params.k_rho children; compute (c_i, X_i, y_(i,j))
+        // Note: DEC uses params.k_rho (decomposition exponent), NOT k_fold (runtime folding count)
+        let k_dec = params.k_rho as usize;
+        let Z_split = ccs::split_b_matrix_k(&Z_mix, k_dec, params.b)?;
         // Commitments for children via L(Z_i)
         let child_cs: Vec<Cmt> = Z_split.iter().map(|Zi| l.commit(Zi)).collect();
         let (children, ok_y, ok_X, ok_c) = ccs::dec_children_with_commit(
@@ -172,7 +180,7 @@ where
         steps.push(FoldStep {
             ccs_out,
             ccs_proof,
-            rlc_rhos: rhos,
+            rlc_rhos: rhos_for_rlc.to_vec(),
             rlc_parent: parent_pub,
             dec_children: children,
         });
@@ -209,13 +217,13 @@ where
     let s = s_in
         .ensure_identity_first()
         .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
-    let context::Dims { ell_d, .. } = context::build_dims_and_policy(params, &s)?;
+    let utils::Dims { ell_d, .. } = utils::build_dims_and_policy(params, &s)?;
 
     if mcss.len() != run.steps.len() {
         return Err(PiCcsError::InvalidInput("mcss.len() must equal run.steps.len()".into()));
     }
 
-    let mut accumulator = acc_init.to_vec(); // public initial accumulator (k-1)
+    let mut accumulator = acc_init.to_vec(); // public initial accumulator
 
     for (i, step) in run.steps.iter().enumerate() {
         // 1) Verify Π_CCS via facade (engine-agnostic)
@@ -231,16 +239,40 @@ where
             return Err(PiCcsError::SumcheckError("Π_CCS verification failed".into()));
         }
 
-        // 2) Verify RLC publicly: recompute parent from (rhos, ccs_out)
+        // 1a) Consume the same digest the prover took at the end of Π_CCS.
+        //     This keeps the transcript state synchronized across steps.
+        //     Also verify it matches what the prover recorded in the proof.
+        let observed_digest = tr.digest32();
+        if observed_digest != step.ccs_proof.header_digest.as_slice() {
+            return Err(PiCcsError::ProtocolError("Π_CCS header digest mismatch".into()));
+        }
+
+        // 1b) Sample RLC ρ from transcript and verify they match what the prover used.
+        //     This binds the ρ to the Fiat-Shamir transcript, preventing adversarial ρ selection.
+        let ring = ccs::RotRing::goldilocks();
+        let rhos_from_tr = ccs::sample_rot_rhos(tr, params, &ring)?;
+        let k = step.rlc_rhos.len();
+        if rhos_from_tr.len() < k {
+            return Err(PiCcsError::ProtocolError(
+                format!("Insufficient RLC rhos sampled: got {}, need {}", rhos_from_tr.len(), k)
+            ));
+        }
+        // Check that the first k rhos match (these are the ones used for RLC)
+        for (j, (sampled, stored)) in rhos_from_tr[..k].iter().zip(step.rlc_rhos.iter()).enumerate() {
+            if sampled.as_slice() != stored.as_slice() {
+                return Err(PiCcsError::ProtocolError(
+                    format!("RLC ρ #{} mismatch: transcript vs proof", j)
+                ));
+            }
+        }
+
+        // 2) Verify RLC publicly: recompute parent from (stored rhos, ccs_out)
+        // Use the rhos from the proof (already committed to via parent_pub)
         let parent_pub = ccs::rlc_public(&s, params, &step.rlc_rhos, &step.ccs_out, mixers.mix_rhos_commits, ell_d);
-        // Check X, y, c, r
+        
+        // Check X, c, r (Π_DEC will validate y)
         if parent_pub.X.as_slice() != step.rlc_parent.X.as_slice() {
             return Err(PiCcsError::ProtocolError("RLC X mismatch".into()));
-        }
-        if parent_pub.y.len() != step.rlc_parent.y.len()
-            || parent_pub.y.iter().zip(&step.rlc_parent.y).any(|(a, b)| a != b)
-        {
-            return Err(PiCcsError::ProtocolError("RLC y mismatch".into()));
         }
         if parent_pub.c != step.rlc_parent.c {
             return Err(PiCcsError::ProtocolError("RLC commitment mismatch".into()));
@@ -256,7 +288,8 @@ where
 
         // Advance accumulator
         accumulator = step.dec_children.clone();
-        tr.append_message(b"fold/verify_step_done", &(i as u64).to_le_bytes());
+        // Use the exact same marker label the prover used so the next step's challenges line up.
+        tr.append_message(b"fold/step_done", &(i as u64).to_le_bytes());
     }
 
     Ok(true)

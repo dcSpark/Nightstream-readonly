@@ -6,6 +6,9 @@
 
 #![allow(non_snake_case)]
 
+// Shared utilities for all engines
+pub mod utils;
+
 // Engine implementation modules
 pub mod optimized_engine;
 pub mod pi_rlc_dec;

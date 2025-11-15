@@ -1,7 +1,10 @@
-//! Paper-exact Π-CCS implementation (Section 4.4).
+//! Common utilities and reference implementations for Π_CCS.
 //!
-//! Important: This is intentionally inefficient and meant for correctness/reference.
-//! It follows the paper literally, with explicit sums/products and full hypercube loops.
+//! This module contains:
+//! - The `Challenges` struct used by all engines
+//! - Utility functions (eq_points, chi, recomposition, etc.)
+//! - Reference implementations for Q evaluation and output building
+//! - These reference functions are used for cross-checking and verification
 
 #![allow(non_snake_case)]
 
@@ -11,7 +14,17 @@ use neo_params::NeoParams;
 use neo_math::{K, D};
 use p3_field::{Field, PrimeCharacteristicRing};
 
-use crate::optimized_engine::Challenges;
+/// Challenges sampled in Step 1 of the protocol
+#[derive(Debug, Clone)]
+pub struct Challenges {
+    /// α ∈ K^{log d} - for Ajtai dimension
+    pub alpha: Vec<K>,
+    /// β = (β_a, β_r) ∈ K^{log(dn)} split into Ajtai and row parts
+    pub beta_a: Vec<K>,
+    pub beta_r: Vec<K>,
+    /// γ ∈ K - random linear combination weight
+    pub gamma: K,
+}
 
 /// --- Utilities -------------------------------------------------------------
 
@@ -303,7 +316,7 @@ where
 
 /// Brute-force hypercube sum: ∑_{X∈{0,1}^{ℓ_d+ℓ_n}} Q(X).
 ///
-/// This is the literal “claimed sum” the SumCheck proves.
+/// This is the literal "claimed sum" the SumCheck proves.
 /// It requires no precomputations and is O(2^{ℓ_d+ℓ_n} · t · k · m).
 pub fn sum_q_over_hypercube_paper_exact<Ff>(
     s: &CcsStructure<Ff>,
@@ -907,7 +920,9 @@ where
         let mut vj = vec![K::ZERO; s.m];
         for row in 0..n_sz {
             let wr = if row < s.n { chi_rp[row] } else { K::ZERO };
-            if wr == K::ZERO { continue; }
+            if wr == K::ZERO {
+                continue;
+            }
             for c in 0..s.m {
                 vj[c] += K::from(get_F(&s.matrices[j], row, c)) * wr;
             }
@@ -955,7 +970,9 @@ where
         let y_scalars: Vec<K> = y.iter().map(|yj| recompose(yj)).collect();
 
         out.push(MeInstance {
-            c_step_coords: vec![], u_offset: 0, u_len: 0,
+            c_step_coords: vec![],
+            u_offset: 0,
+            u_len: 0,
             c: inst.c.clone(),
             X,
             r: r_prime.to_vec(),
@@ -983,7 +1000,9 @@ where
         let y_scalars: Vec<K> = y.iter().map(|yj| recompose(yj)).collect();
 
         out.push(MeInstance {
-            c_step_coords: vec![], u_offset: 0, u_len: 0,
+            c_step_coords: vec![],
+            u_offset: 0,
+            u_len: 0,
             c: inp.c.clone(),
             X: inp.X.clone(),
             r: r_prime.to_vec(),
@@ -1287,3 +1306,4 @@ where
     let ok_c = combined_c == parent.c;
     (children, ok_y, ok_X, ok_c)
 }
+

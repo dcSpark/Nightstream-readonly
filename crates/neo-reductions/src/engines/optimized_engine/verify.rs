@@ -15,6 +15,8 @@ use neo_math::KExtensions;
 use crate::error::PiCcsError;
 use crate::optimized_engine::PiCcsProof;
 
+use crate::engines::utils;
+
 /// Paper-exact verify implementation.
 ///
 /// This function verifies the sumcheck proof using the paper-exact
@@ -28,10 +30,10 @@ pub fn paper_exact_verify(
     me_outputs: &[MeInstance<Cmt, F, K>],
     proof: &PiCcsProof,
 ) -> Result<bool, PiCcsError> {
-    let dims = crate::engines::utils::build_dims_and_policy(params, s)?;
-    crate::engines::utils::bind_header_and_instances(tr, params, s, mcs_list, dims.ell, dims.d_sc, 0)?;
-    crate::engines::utils::bind_me_inputs(tr, me_inputs)?;
-    let ch = crate::engines::utils::sample_challenges(tr, dims.ell_d, dims.ell)?;
+    let dims = utils::build_dims_and_policy(params, s)?;
+    utils::bind_header_and_instances(tr, params, s, mcs_list, dims.ell, dims.d_sc, 0)?;
+    utils::bind_me_inputs(tr, me_inputs)?;
+    let ch = utils::sample_challenges(tr, dims.ell_d, dims.ell)?;
 
     // Compute the public claimed sum T from ME inputs and α
     // (this is the only legitimate initial sum for sumcheck).

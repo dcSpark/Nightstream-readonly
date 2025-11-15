@@ -13,7 +13,7 @@ use neo_math::{K, D};
 use p3_field::{Field, PrimeCharacteristicRing};
 
 use crate::sumcheck::RoundOracle;
-use crate::optimized_engine::transcript::Challenges;
+use crate::optimized_engine::Challenges;
 use neo_ccs::{CcsStructure, McsWitness, Mat};
 
 #[cfg(feature = "paper-exact")]

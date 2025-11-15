@@ -81,7 +81,7 @@ fn parameter_boundary_conditions() {
     assert!(matches!(NeoParams::new(q, eta, d, kappa, m, 1, k, t, s, lambda).unwrap_err(), 
                     ParamsError::Invalid("b must be >= 2")));
     assert!(matches!(NeoParams::new(q, eta, d, kappa, m, b, 0, t, s, lambda).unwrap_err(), 
-                    ParamsError::Invalid("k must be > 0")));
+                    ParamsError::Invalid("k_rho must be > 0")));
     assert!(matches!(NeoParams::new(q, eta, d, kappa, m, b, k, 0, s, lambda).unwrap_err(), 
                     ParamsError::Invalid("T must be > 0")));
     assert!(matches!(NeoParams::new(q, eta, d, kappa, m, b, k, t, 3, lambda).unwrap_err(), 
@@ -97,7 +97,7 @@ fn goldilocks_preset_security_invariants() {
     let p = NeoParams::goldilocks_127();
     
     // Verify the guard inequality is satisfied with margin
-    let lhs = (p.k as u128 + 1) * (p.T as u128) * ((p.b as u128) - 1);
+    let lhs = (p.k_rho as u128 + 1) * (p.T as u128) * ((p.b as u128) - 1);
     let rhs = p.B as u128;
     assert!(lhs < rhs, "Guard inequality must hold: {lhs} < {rhs}");
     
@@ -131,7 +131,7 @@ fn parameter_overflow_boundary_test() {
         m: 4,
         lambda: 128, // Very high security parameter
         s: 2,
-        k: 1,
+        k_rho: 1,
         T: 256,
         b: 2,
         B: 1024,
@@ -157,7 +157,7 @@ fn parameter_overflow_boundary_test() {
         m: 4,
         lambda: 127, // Challenging security parameter
         s: 2,
-        k: 1, 
+        k_rho: 1, 
         T: 256,
         b: 2,
         B: 1024,

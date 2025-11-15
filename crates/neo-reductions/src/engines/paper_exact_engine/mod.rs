@@ -28,6 +28,9 @@ pub use paper_exact::{
     // Terminal identity (verifier RHS)
     rhs_terminal_identity_paper_exact,
 
+    // Public claimed sum for sumcheck
+    claimed_initial_sum_from_inputs,
+
     // Step 3 outputs
     build_me_outputs_paper_exact,
 
