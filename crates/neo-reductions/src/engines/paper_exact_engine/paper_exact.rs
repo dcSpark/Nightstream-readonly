@@ -294,7 +294,7 @@ where
                 inner += weight * e_ij;
             }
         }
-        // Paper-exact: multiply entire Eval block by outer γ^k
+        // Paper-exact: multiply the inner weighted sum by a single outer γ^k.
         acc += gamma_to_k * inner;
     }
 
@@ -583,16 +583,10 @@ where
         eprintln!("  [Paper-exact] Eval' (weighted ME evaluations, before outer γ^k) = {:?}", eval_sum);
     }
 
-    // Outer γ^k
+    // Paper-exact assembly of LHS:
+    // Q(α', r') = eq((α',r'), β)·(F' + NC') + γ^k · eq((α',r'), (α,r)) · Eval'.
     let mut gamma_to_k_outer = K::ONE;
     for _ in 0..k_total { gamma_to_k_outer *= ch.gamma; }
-
-    if detailed_log {
-        eprintln!("  [Paper-exact] gamma_to_k_outer (γ^k_total) = {:?}", gamma_to_k_outer);
-        eprintln!("  [Paper-exact] Eval' (after multiplying by γ^k_total) = {:?}", gamma_to_k_outer * eval_sum);
-    }
-
-    // Paper-exact assembly of LHS:
     let lhs = eq_beta * (F_prime + nc_sum) + eq_ar * (gamma_to_k_outer * eval_sum);
 
     if detailed_log {
@@ -734,15 +728,10 @@ where
     }
 
     // Assemble RHS exactly like the paper:
-    // v = eq((α',r'), β)·(F' + Σ γ^i N_i') + γ^k · eq((α',r'), (α,r)) · [Σ ...]
-    eq_aprp_beta * (F_prime + nc_prime_sum) + eq_aprp_ar * (if me_inputs_r_opt.is_some() && k_total >= 2 {
-        // Paper-exact: multiply entire Eval block by outer γ^k
-        let mut gamma_to_k = K::ONE;
-        for _ in 0..k_total { gamma_to_k *= ch.gamma; }
-        gamma_to_k * eval_sum
-    } else {
-        eval_sum
-    })
+    // v = eq((α',r'), β)·(F' + Σ γ^i N_i') + γ^k · eq((α',r'), (α,r)) · Eval'.
+    let mut gamma_to_k_outer = K::ONE;
+    for _ in 0..k_total { gamma_to_k_outer *= ch.gamma; }
+    eq_aprp_beta * (F_prime + nc_prime_sum) + eq_aprp_ar * (gamma_to_k_outer * eval_sum)
 }
 
 /// --- Public claimed sum T for sumcheck ------------------------------------
@@ -847,15 +836,15 @@ where
         }
     }
     
-    let result = gamma_to_k * inner;
-    
+    // Paper-exact: T = γ^k · inner, matching T = γ^k Σ γ^{i+(j-1)k-1} ẏ_{(i,j)}(α).
     #[cfg(feature = "debug-logs")]
     {
-        eprintln!("[claimed_initial_sum] inner sum (before outer γ^k) = {:?}", inner);
-        eprintln!("[claimed_initial_sum] T = γ^k * inner = {:?}", result);
+        eprintln!("[claimed_initial_sum] inner sum (Eval' weighted, before outer γ^k) = {:?}", inner);
+        eprintln!("[claimed_initial_sum] T = γ^k * inner = {:?}", gamma_to_k * inner);
         eprintln!("[claimed_initial_sum] === Done ===\n");
     }
     
+    let result = gamma_to_k * inner;
     result
 }
 

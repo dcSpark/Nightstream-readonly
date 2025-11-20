@@ -1,0 +1,51 @@
+[package]
+name = "neo-spartan-bridge"
+edition = { workspace = true }
+version = { workspace = true }
+authors = { workspace = true }
+license = "Apache-2.0"
+
+[lints]
+workspace = true
+
+[features]
+default = []
+# Enable verbose logging for debugging
+debug-logs = []
+# Experimental engine abstraction (not wired to Spartan2 yet)
+experimental-engine = []
+# Unsafe gadgets that use cs.get() (TestConstraintSystem only)
+unsafe-gadgets = []
+
+[dependencies]
+# Neo dependencies
+neo-math = { path = "../neo-math" }
+neo-ajtai = { path = "../neo-ajtai" }
+neo-ccs = { path = "../neo-ccs" }
+neo-params = { path = "../neo-params" }
+neo-reductions = { path = "../neo-reductions" }
+neo-fold = { path = "../neo-fold" }
+neo-transcript = { path = "../neo-transcript" }
+
+# Spartan2 and circuit dependencies
+spartan2 = { workspace = true }
+bellpepper-core = { workspace = true }
+ff = { workspace = true }
+
+# Plonky3 dependencies
+p3-field = { workspace = true }
+p3-goldilocks = { workspace = true }
+p3-poseidon2 = { workspace = true }
+p3-symmetric = { workspace = true }
+
+# Utilities
+rand = { workspace = true }
+rand_chacha = { workspace = true }
+thiserror = { workspace = true }
+serde = { workspace = true }
+bincode = { workspace = true }
+blake3 = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+proptest = { workspace = true }

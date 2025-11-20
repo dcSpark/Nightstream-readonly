@@ -155,7 +155,7 @@ fn sparse_thresh() -> f32 {
 
 /// Cache of sparse matrix formats to avoid rebuilding on every eval_q_ext call.
 #[derive(Clone)]
-pub struct SparseCache<Ff> {
+struct SparseCache<Ff> {
     // For each j: None (identity), or Some(CSC)
     csc: Vec<Option<CscMat<Ff>>>,
     // Density per matrix (nnz / (n*m))
@@ -816,7 +816,7 @@ where
                     }
                     inner += sum_j;
                 }
-                out += gamma_to_k * eq_ar_px * inner;
+                out += eq_ar_px * (gamma_to_k * inner);
             }
 
             out

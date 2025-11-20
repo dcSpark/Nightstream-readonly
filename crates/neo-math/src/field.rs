@@ -37,6 +37,12 @@ pub trait KExtensions {
     fn real(&self) -> Fq { self.as_coeffs()[0] }
     /// Imaginary part (convenience)
     fn imag(&self) -> Fq { self.as_coeffs()[1] }
+    /// Extract limbs as u64 tuple (c0, c1) for circuit gadgets
+    fn to_limbs_u64(&self) -> (u64, u64) {
+        use p3_field::PrimeField64;
+        let coeffs = self.as_coeffs();
+        (coeffs[0].as_canonical_u64(), coeffs[1].as_canonical_u64())
+    }
 }
 
 impl KExtensions for K {
