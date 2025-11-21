@@ -243,6 +243,7 @@ pub fn prove_fold_run(
             let coeff_circ = CircuitF::from(term.coeff.as_canonical_u64());
             CircuitPolyTerm {
                 coeff: coeff_circ,
+                coeff_native: term.coeff,
                 exps: term.exps.iter().map(|e| *e as u32).collect(),
             }
         })

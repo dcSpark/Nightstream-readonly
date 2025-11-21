@@ -32,7 +32,10 @@ use spartan2::traits::circuit::SpartanCircuit as SpartanCircuitTrait;
 /// Each term is coeff * ∏_j m_j^{exps[j]}.
 #[derive(Clone, Debug)]
 pub struct CircuitPolyTerm {
+    /// Coefficient in the circuit field (Spartan's Goldilocks).
     pub coeff: CircuitF,
+    /// Same coefficient in Neo's base field, for native K computations.
+    pub coeff_native: NeoF,
     pub exps: Vec<u32>,
 }
 
@@ -639,8 +642,24 @@ impl FoldRunCircuit {
             }
         }
 
-        // T = inner (weights already include the γ^k factor as in the paper-exact engine).
-        Ok(inner)
+        // T = γ^{k_total} * inner, matching the native `claimed_initial_sum_from_inputs`.
+        let gamma_k_var = helpers::alloc_k_from_neo(
+            cs,
+            gamma_to_k_val,
+            &format!("step_{}_T_gamma_to_k", step_idx),
+        )?;
+
+        let (t_var, _t_val) = helpers::k_mul_with_hint(
+            cs,
+            &gamma_k_var,
+            gamma_to_k_val,
+            &inner,
+            inner_val,
+            self.delta,
+            &format!("step_{}_T_scale_by_gamma_k", step_idx),
+        )?;
+
+        Ok(t_var)
     }
 
     /// Build χ-table for an Ajtai challenge vector (α or α') using native K values.
@@ -735,117 +754,297 @@ impl FoldRunCircuit {
         Ok(acc_var)
     }
 
-    /// Range product gadget: ∏_{t=-(b-1)}^{b-1} (val - t) over K.
+    /// Recompose a single Ajtai y-row in base-b into a K element:
+    /// m = Σ_{ℓ} b^ℓ · y[ℓ], using native K hints for the result and
+    /// enforcing linear relations on the limbs.
+    fn recompose_y_row_base_b<CS: ConstraintSystem<CircuitF>>(
+        &self,
+        cs: &mut CS,
+        step_idx: usize,
+        _j: usize,
+        y_row_vars: &[KNumVar],
+        y_row_vals: &[neo_math::K],
+        label: &str,
+    ) -> Result<(KNumVar, neo_math::K)> {
+        use neo_math::{F as NeoF, K as NeoK};
+
+        let len = core::cmp::min(y_row_vars.len(), y_row_vals.len());
+        if len == 0 {
+            let zero = helpers::k_zero(
+                cs,
+                &format!("step_{}_{}_empty_row", step_idx, label),
+            )?;
+            return Ok((zero, NeoK::ZERO));
+        }
+
+        // Native recomposition in K: m_native = Σ b^ℓ * y[ℓ].
+        let base_native_f: NeoF = NeoF::from_u64(self.base_b as u64);
+        let base_native_k: NeoK = NeoK::from(base_native_f);
+
+        let mut pow_k = NeoK::ONE;
+        let mut m_native = NeoK::ZERO;
+        for ell in 0..len {
+            m_native += pow_k * y_row_vals[ell];
+            pow_k *= base_native_k;
+        }
+
+        // Allocate m with the correct native value as a hint.
+        let m_var = helpers::alloc_k_from_neo(
+            cs,
+            m_native,
+            &format!("step_{}_{}_val", step_idx, label),
+        )?;
+
+        // Enforce limb-wise base-b recomposition:
+        // m.c0 = Σ b^ℓ * y[ℓ].c0,  m.c1 = Σ b^ℓ * y[ℓ].c1.
+        let base_circ = CircuitF::from(self.base_b as u64);
+
+        // c0 component
+        cs.enforce(
+            || format!("step_{}_{}_recompose_c0", step_idx, label),
+            |lc| {
+                let mut res = lc;
+                // ℓ = 0 term has coefficient 1.
+                res = res + (CircuitF::from(1u64), y_row_vars[0].c0);
+                let mut pow = base_circ;
+                for ell in 1..len {
+                    res = res + (pow, y_row_vars[ell].c0);
+                    pow *= base_circ;
+                }
+                res
+            },
+            |lc| lc + CS::one(),
+            |lc| lc + m_var.c0,
+        );
+
+        // c1 component
+        cs.enforce(
+            || format!("step_{}_{}_recompose_c1", step_idx, label),
+            |lc| {
+                let mut res = lc;
+                res = res + (CircuitF::from(1u64), y_row_vars[0].c1);
+                let mut pow = base_circ;
+                for ell in 1..len {
+                    res = res + (pow, y_row_vars[ell].c1);
+                    pow *= base_circ;
+                }
+                res
+            },
+            |lc| lc + CS::one(),
+            |lc| lc + m_var.c1,
+        );
+
+        Ok((m_var, m_native))
+    }
+
+    /// Range product gadget: ∏_{t=-(b-1)}^{b-1} (val - t) over K, using native
+    /// K hints and explicit limb-wise linear constraints for (val - t).
     #[allow(dead_code)]
     fn range_product<CS: ConstraintSystem<CircuitF>>(
         &self,
         cs: &mut CS,
         step_idx: usize,
         val: &KNumVar,
+        val_native: neo_math::K,
         label: &str,
-    ) -> Result<KNumVar> {
-        let mut acc = helpers::k_one(
+    ) -> Result<(KNumVar, neo_math::K)> {
+        use neo_math::{F as NeoF, K as NeoK};
+
+        let mut acc_var = helpers::k_one(
             cs,
             &format!("step_{}_{}_range_init", step_idx, label),
         )?;
+        let mut acc_native = NeoK::ONE;
 
         let b = self.base_b as i32;
+        let minus_one = CircuitF::from(0u64) - CircuitF::from(1u64);
+
         for t in (-(b - 1))..=(b - 1) {
             let abs = t.abs() as u64;
-            let base = if t >= 0 {
-                CircuitF::from(abs)
+            let base_f: NeoF = NeoF::from_u64(abs);
+            let t_native = if t >= 0 {
+                NeoK::from(base_f)
             } else {
-                CircuitF::from(0u64) - CircuitF::from(abs)
+                NeoK::from(base_f) * NeoK::from(NeoF::from_u64(0u64)) - NeoK::from(base_f)
             };
-            let t_k = helpers::k_const(
-                cs,
-                base,
-                &format!("step_{}_{}_t_{}", step_idx, label, t),
-            )?;
 
-            let diff = helpers::k_sub(
+            let diff_native = val_native - t_native;
+
+            // Allocate diff with its native value.
+            let diff_var = helpers::alloc_k_from_neo(
                 cs,
-                val,
-                &t_k,
+                diff_native,
                 &format!("step_{}_{}_val_minus_t_{}", step_idx, label, t),
             )?;
 
-            acc = helpers::k_mul(
+            // Enforce diff = val - t limb-wise in K.
+            let t_var = helpers::alloc_k_from_neo(
                 cs,
-                &acc,
-                &diff,
+                t_native,
+                &format!("step_{}_{}_t_{}", step_idx, label, t),
+            )?;
+
+            // c0: diff.c0 = val.c0 - t.c0
+            cs.enforce(
+                || format!("step_{}_{}_range_diff_t{}_c0", step_idx, label, t),
+                |lc| lc + val.c0 + (minus_one, t_var.c0),
+                |lc| lc + CS::one(),
+                |lc| lc + diff_var.c0,
+            );
+            // c1: diff.c1 = val.c1 - t.c1
+            cs.enforce(
+                || format!("step_{}_{}_range_diff_t{}_c1", step_idx, label, t),
+                |lc| lc + val.c1 + (minus_one, t_var.c1),
+                |lc| lc + CS::one(),
+                |lc| lc + diff_var.c1,
+            );
+
+            // acc *= diff with native hints.
+            let (new_acc_var, new_acc_native) = helpers::k_mul_with_hint(
+                cs,
+                &acc_var,
+                acc_native,
+                &diff_var,
+                diff_native,
                 self.delta,
                 &format!("step_{}_{}_range_acc_{}", step_idx, label, t),
             )?;
+            acc_var = new_acc_var;
+            acc_native = new_acc_native;
         }
 
-        Ok(acc)
+        Ok((acc_var, acc_native))
     }
 
-    /// Evaluate the CCS polynomial f at the given m-values in K.
+    /// Evaluate the CCS polynomial f at the given m-values in K, using native K
+    /// hints for all intermediate products to keep the witness consistent.
     #[allow(dead_code)]
     fn eval_poly_f_in_k<CS: ConstraintSystem<CircuitF>>(
         &self,
         cs: &mut CS,
         step_idx: usize,
         m_vals: &[KNumVar],
-    ) -> Result<KNumVar> {
-        let mut acc = helpers::k_zero(
-            cs,
-            &format!("step_{}_F_prime_init", step_idx),
-        )?;
+        m_vals_native: &[neo_math::K],
+    ) -> Result<(KNumVar, neo_math::K)> {
+        use neo_math::K as NeoK;
+
+        if m_vals.len() != m_vals_native.len() {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "eval_poly_f_in_k length mismatch at step {}: m_vals={}, m_vals_native={}",
+                step_idx,
+                m_vals.len(),
+                m_vals_native.len()
+            )));
+        }
+
+        // Compute each monomial term_val = ∏_j m_j^{exp_j} with K hints.
+        let mut term_vars: Vec<KNumVar> = Vec::with_capacity(self.poly_f.len());
+        let mut term_natives: Vec<NeoK> = Vec::with_capacity(self.poly_f.len());
 
         for (term_idx, term) in self.poly_f.iter().enumerate() {
-            // term_val = ∏_j m_j^{exp_j}
-            let mut term_val = helpers::k_one(
+            let mut term_var = helpers::k_one(
                 cs,
                 &format!("step_{}_F_term{}_init", step_idx, term_idx),
             )?;
+            let mut term_native = NeoK::ONE;
 
             for (var_idx, &exp) in term.exps.iter().enumerate() {
                 if exp == 0 {
                     continue;
                 }
-                let base = &m_vals[var_idx];
-                let pow = helpers::k_pow(
+                let base_var = &m_vals[var_idx];
+                let base_native = m_vals_native[var_idx];
+
+                // pow = base^exp
+                let mut pow_var = helpers::k_one(
                     cs,
-                    base,
-                    exp,
-                    self.delta,
                     &format!(
-                        "step_{}_F_term{}_var{}_pow",
+                        "step_{}_F_term{}_var{}_pow_init",
                         step_idx, term_idx, var_idx
                     ),
                 )?;
-                term_val = helpers::k_mul(
+                let mut pow_native = NeoK::ONE;
+                for e in 0..exp {
+                    let (new_pow_var, new_pow_native) = helpers::k_mul_with_hint(
+                        cs,
+                        &pow_var,
+                        pow_native,
+                        base_var,
+                        base_native,
+                        self.delta,
+                        &format!(
+                            "step_{}_F_term{}_var{}_pow_mul{}",
+                            step_idx, term_idx, var_idx, e
+                        ),
+                    )?;
+                    pow_var = new_pow_var;
+                    pow_native = new_pow_native;
+                }
+
+                // term *= pow
+                let (new_term_var, new_term_native) = helpers::k_mul_with_hint(
                     cs,
-                    &term_val,
-                    &pow,
+                    &term_var,
+                    term_native,
+                    &pow_var,
+                    pow_native,
                     self.delta,
                     &format!(
                         "step_{}_F_term{}_var{}_mul",
                         step_idx, term_idx, var_idx
                     ),
                 )?;
+                term_var = new_term_var;
+                term_native = new_term_native;
             }
 
-            // Scale by coefficient.
-            let scaled = helpers::k_scalar_mul(
-                cs,
-                term.coeff,
-                &term_val,
-                &format!("step_{}_F_term{}_scaled", step_idx, term_idx),
-            )?;
-
-            acc = helpers::k_add(
-                cs,
-                &acc,
-                &scaled,
-                &format!("step_{}_F_acc_term{}", step_idx, term_idx),
-            )?;
+            term_vars.push(term_var);
+            term_natives.push(term_native);
         }
 
-        Ok(acc)
+        // Native F' value: F'(m) = Σ coeff * term_native.
+        let mut F_prime_native = NeoK::ZERO;
+        for (term_idx, term) in self.poly_f.iter().enumerate() {
+            let coeff_k: NeoK = NeoK::from(term.coeff_native);
+            F_prime_native += coeff_k * term_natives[term_idx];
+        }
+
+        let F_prime_var = helpers::alloc_k_from_neo(
+            cs,
+            F_prime_native,
+            &format!("step_{}_F_prime", step_idx),
+        )?;
+
+        // Enforce F' limb-wise as Σ coeff * term_j.
+        cs.enforce(
+            || format!("step_{}_F_prime_c0_check", step_idx),
+            |lc| {
+                let mut res = lc;
+                for (term_idx, term) in self.poly_f.iter().enumerate() {
+                    let coeff_circ = term.coeff;
+                    res = res + (coeff_circ, term_vars[term_idx].c0);
+                }
+                res
+            },
+            |lc| lc + CS::one(),
+            |lc| lc + F_prime_var.c0,
+        );
+
+        cs.enforce(
+            || format!("step_{}_F_prime_c1_check", step_idx),
+            |lc| {
+                let mut res = lc;
+                for (term_idx, term) in self.poly_f.iter().enumerate() {
+                    let coeff_circ = term.coeff;
+                    res = res + (coeff_circ, term_vars[term_idx].c1);
+                }
+                res
+            },
+            |lc| lc + CS::one(),
+            |lc| lc + F_prime_var.c1,
+        );
+
+        Ok((F_prime_var, F_prime_native))
     }
 
     /// Verify Π-CCS terminal identity for a step:
@@ -989,9 +1188,10 @@ impl FoldRunCircuit {
         )?;
 
         // --- Allocate γ and precompute γ^k_total in K ---
+        let gamma_val = challenges.gamma;
         let gamma_var = helpers::alloc_k_from_neo(
             cs,
-            challenges.gamma,
+            gamma_val,
             &format!("step_{}_gamma_terminal", step_idx),
         )?;
 
@@ -1000,7 +1200,7 @@ impl FoldRunCircuit {
         // introducing additional K-multiplication constraints here.
         let mut gamma_k_total_val = neo_math::K::ONE;
         for _ in 0..k_total {
-            gamma_k_total_val *= challenges.gamma;
+            gamma_k_total_val *= gamma_val;
         }
         let gamma_k_total = helpers::alloc_k_from_neo(
             cs,
@@ -1013,15 +1213,22 @@ impl FoldRunCircuit {
         // Recompose m_j from Ajtai digits with base-b using only the first D
         // digits, then evaluate f via poly_f in K.
         let t = out_me[0].y.len();
-        let F_prime = if t == 0 {
-            helpers::k_zero(cs, &format!("step_{}_F_prime_zero", step_idx))?
+        let (F_prime, F_prime_native) = if t == 0 {
+            (
+                helpers::k_zero(cs, &format!("step_{}_F_prime_zero", step_idx))?,
+                NeoK::ZERO,
+            )
         } else {
             // Use the shared y-table allocation for the first output.
             let first_out_y = &out_y_vars[0];
             let d_pad = first_out_y[0].len();
             let d_ring = D.min(d_pad);
 
+            // Native y-table for the first output (for K hints).
+            let first_out_y_vals = &out_me[0].y;
+
             let mut m_vals: Vec<KNumVar> = Vec::with_capacity(t);
+            let mut m_vals_native: Vec<NeoK> = Vec::with_capacity(t);
             for j in 0..t {
                 if first_out_y[j].len() != d_pad {
                     return Err(SpartanBridgeError::InvalidInput(format!(
@@ -1029,57 +1236,127 @@ impl FoldRunCircuit {
                         step_idx, j
                     )));
                 }
-                let m_j = crate::gadgets::pi_ccs::base_b_recompose_k(
+                 if first_out_y_vals[j].len() != d_pad {
+                     return Err(SpartanBridgeError::InvalidInput(format!(
+                         "Terminal identity at step {}: inconsistent y row length in output 0 values (j={})",
+                         step_idx, j
+                     )));
+                 }
+                let (m_j, m_j_native) = self.recompose_y_row_base_b(
                     cs,
+                    step_idx,
+                    j,
                     &first_out_y[j][..d_ring],
-                    self.base_b,
-                    self.delta,
+                    &first_out_y_vals[j][..d_ring],
                     &format!("step_{}_F_m_j{}", step_idx, j),
                 )?;
                 m_vals.push(m_j);
+                m_vals_native.push(m_j_native);
             }
 
             self.eval_poly_f_in_k(
                 cs,
                 step_idx,
                 &m_vals,
+                &m_vals_native,
             )?
         };
 
         // --- χ_{α'} table in K for Ajtai domain ---
+        //
+        // χ_{α'}[ρ] = ∏_bit (α'_bit if ρ_bit=1 else 1-α'_bit), with explicit
+        // K equality constraints using native K hints (mirrors χ_α gadget).
         let d_sz = 1usize << challenges.alpha_prime.len();
         let mut chi_alpha_prime: Vec<KNumVar> = Vec::with_capacity(d_sz);
+        let mut chi_alpha_prime_vals: Vec<NeoK> = Vec::with_capacity(d_sz);
         for rho in 0..d_sz {
-            let mut w = helpers::k_one(
+            let mut w_val = NeoK::ONE;
+            let w_hint = KNum::<CircuitF>::from_neo_k(w_val);
+            let mut w_var = alloc_k(
                 cs,
+                Some(w_hint),
                 &format!("step_{}_chi_alpha_prime_{}_init", step_idx, rho),
-            )?;
-            for (bit, a_bit) in alpha_prime_vars.iter().enumerate() {
+            )
+            .map_err(SpartanBridgeError::BellpepperError)?;
+
+            for (bit, (a_var, &a_val)) in alpha_prime_vars
+                .iter()
+                .zip(challenges.alpha_prime.iter())
+                .enumerate()
+            {
                 let bit_is_one = ((rho >> bit) & 1) == 1;
-                let factor = if bit_is_one {
-                    a_bit.clone()
+                // Factor value in K.
+                let (factor_var, factor_val) = if bit_is_one {
+                    (a_var.clone(), a_val)
                 } else {
-                    helpers::k_one_minus(
+                    // factor = 1 - α'_bit, enforced via factor + α'_bit = 1 in K.
+                    let factor_val = NeoK::ONE - a_val;
+                    let factor_hint = KNum::<CircuitF>::from_neo_k(factor_val);
+                    let factor_var = alloc_k(
                         cs,
-                        a_bit,
+                        Some(factor_hint),
+                        &format!(
+                            "step_{}_chi_alpha_prime_{}_bit{}_factor",
+                            step_idx, rho, bit
+                        ),
+                    )
+                    .map_err(SpartanBridgeError::BellpepperError)?;
+
+                    // one_var with explicit K value 1.
+                    let one_hint = KNum::<CircuitF>::from_neo_k(NeoK::ONE);
+                    let one_var = alloc_k(
+                        cs,
+                        Some(one_hint),
+                        &format!(
+                            "step_{}_chi_alpha_prime_{}_bit{}_one",
+                            step_idx, rho, bit
+                        ),
+                    )
+                    .map_err(SpartanBridgeError::BellpepperError)?;
+
+                    // sum = factor + α'_bit with native hint, enforce sum == 1.
+                    let sum_val = factor_val + a_val;
+                    let sum_hint = KNum::<CircuitF>::from_neo_k(sum_val);
+                    let sum_var = k_add_raw(
+                        cs,
+                        &factor_var,
+                        a_var,
+                        Some(sum_hint),
+                        &format!(
+                            "step_{}_chi_alpha_prime_{}_bit{}_sum",
+                            step_idx, rho, bit
+                        ),
+                    )
+                    .map_err(SpartanBridgeError::BellpepperError)?;
+                    helpers::enforce_k_eq(
+                        cs,
+                        &sum_var,
+                        &one_var,
                         &format!(
                             "step_{}_chi_alpha_prime_{}_bit{}_one_minus",
                             step_idx, rho, bit
                         ),
-                    )?
+                    );
+
+                    (factor_var, factor_val)
                 };
-                w = helpers::k_mul(
+
+                // w <- w * factor with native hint.
+                let (new_w_var, new_w_val) = helpers::k_mul_with_hint(
                     cs,
-                    &w,
-                    &factor,
+                    &w_var,
+                    w_val,
+                    &factor_var,
+                    factor_val,
                     self.delta,
-                    &format!(
-                        "step_{}_chi_alpha_prime_{}_bit{}",
-                        step_idx, rho, bit
-                    ),
+                    &format!("step_{}_chi_alpha_prime_{}_bit{}", step_idx, rho, bit),
                 )?;
+                w_var = new_w_var;
+                w_val = new_w_val;
             }
-            chi_alpha_prime.push(w);
+
+            chi_alpha_prime.push(w_var);
+            chi_alpha_prime_vals.push(w_val);
         }
 
         // --- Σ γ^i · N_i' over outputs, in K ---
@@ -1089,9 +1366,11 @@ impl FoldRunCircuit {
             cs,
             &format!("step_{}_N_prime_sum_init", step_idx),
         )?;
+        let mut nc_prime_sum_native = NeoK::ZERO;
 
         // g = γ^1
         let mut g = gamma_var.clone();
+        let mut g_native = challenges.gamma;
         for (i_idx, out_y) in out_y_vars.iter().enumerate() {
             // ẏ'_{(i,1)}(α') uses j = 0 row.
             if out_y.is_empty() {
@@ -1107,58 +1386,78 @@ impl FoldRunCircuit {
                 cs,
                 &format!("step_{}_N_y_eval_i{}", step_idx, i_idx),
             )?;
+            let mut y_eval_val = NeoK::ZERO;
             for rho in 0..limit {
-                let prod = helpers::k_mul(
+                let y1_val = out_me[i_idx].y[0][rho];
+                let chi_val = chi_alpha_prime_vals[rho];
+                let (prod_var, prod_val) = helpers::k_mul_with_hint(
                     cs,
                     &y1[rho],
+                    y1_val,
                     &chi_alpha_prime[rho],
+                    chi_val,
                     self.delta,
                     &format!(
                         "step_{}_N_y_eval_i{}_rho{}",
                         step_idx, i_idx, rho
                     ),
                 )?;
-                y_eval = helpers::k_add(
+                y_eval_val += prod_val;
+                let hint = KNum::<CircuitF>::from_neo_k(y_eval_val);
+                y_eval = k_add_raw(
                     cs,
                     &y_eval,
-                    &prod,
+                    &prod_var,
+                    Some(hint),
                     &format!(
                         "step_{}_N_y_eval_acc_i{}_rho{}",
                         step_idx, i_idx, rho
                     ),
-                )?;
+                )
+                .map_err(SpartanBridgeError::BellpepperError)?;
             }
 
-            let Ni = self.range_product(
+            let (Ni, Ni_native) = self.range_product(
                 cs,
                 step_idx,
                 &y_eval,
+                y_eval_val,
                 &format!("step_{}_N_range_i{}", step_idx, i_idx),
             )?;
 
-            let gNi = helpers::k_mul(
+            let (gNi, gNi_native) = helpers::k_mul_with_hint(
                 cs,
                 &g,
+                g_native,
                 &Ni,
+                Ni_native,
                 self.delta,
                 &format!("step_{}_N_weighted_i{}", step_idx, i_idx),
             )?;
 
-            nc_prime_sum = helpers::k_add(
+            nc_prime_sum_native += gNi_native;
+            let nc_hint = KNum::<CircuitF>::from_neo_k(nc_prime_sum_native);
+            nc_prime_sum = k_add_raw(
                 cs,
                 &nc_prime_sum,
                 &gNi,
+                Some(nc_hint),
                 &format!("step_{}_N_acc_i{}", step_idx, i_idx),
-            )?;
+            )
+            .map_err(SpartanBridgeError::BellpepperError)?;
 
-            // g <- g * γ
-            g = helpers::k_mul(
+            // g <- g * γ with hint
+            let (new_g, new_g_native) = helpers::k_mul_with_hint(
                 cs,
                 &g,
+                g_native,
                 &gamma_var,
+                challenges.gamma,
                 self.delta,
                 &format!("step_{}_N_gamma_step_i{}", step_idx, i_idx),
             )?;
+            g = new_g;
+            g_native = new_g_native;
         }
 
         // --- Eval' block in K ---
@@ -1169,19 +1468,23 @@ impl FoldRunCircuit {
             cs,
             &format!("step_{}_Eval_sum_init", step_idx),
         )?;
+        let mut eval_sum_native = NeoK::ZERO;
 
         if me_inputs.first().is_some() && k_total >= 2 {
             for j in 0..t {
                 // Precompute (γ^k_total)^j once per j and reuse across outputs.
+                let mut gamma_k_j_val = NeoK::ONE;
                 let mut gamma_k_j = helpers::k_one(
                     cs,
                     &format!("step_{}_Eval_gamma_k_j_init_j{}", step_idx, j),
                 )?;
                 for pow_idx in 0..j {
-                    gamma_k_j = helpers::k_mul(
+                    let (new_gamma_k_j, new_gamma_k_j_val) = helpers::k_mul_with_hint(
                         cs,
                         &gamma_k_j,
+                        gamma_k_j_val,
                         &gamma_k_total,
+                        gamma_k_total_val,
                         self.delta,
                         &format!(
                             "step_{}_Eval_gamma_k_j_step_j{}_{}",
@@ -1190,6 +1493,8 @@ impl FoldRunCircuit {
                             pow_idx
                         ),
                     )?;
+                    gamma_k_j = new_gamma_k_j;
+                    gamma_k_j_val = new_gamma_k_j_val;
                 }
 
                 for (i_abs, out_y) in out_y_vars.iter().enumerate().skip(1) {
@@ -1206,26 +1511,35 @@ impl FoldRunCircuit {
                         cs,
                         &format!("step_{}_Eval_y_eval_j{}_i{}", step_idx, j, i_abs),
                     )?;
+                    let mut y_eval_val = NeoK::ZERO;
                     for rho in 0..limit {
-                        let prod = helpers::k_mul(
+                        let y_val = out_me[i_abs].y[j][rho];
+                        let chi_val = chi_alpha_prime_vals[rho];
+                        let (prod_var, prod_val) = helpers::k_mul_with_hint(
                             cs,
                             &row[rho],
+                            y_val,
                             &chi_alpha_prime[rho],
+                            chi_val,
                             self.delta,
                             &format!(
                                 "step_{}_Eval_y_eval_j{}_i{}_rho{}",
                                 step_idx, j, i_abs, rho
                             ),
                         )?;
-                        y_eval = helpers::k_add(
+                        y_eval_val += prod_val;
+                        let hint = KNum::<CircuitF>::from_neo_k(y_eval_val);
+                        y_eval = k_add_raw(
                             cs,
                             &y_eval,
-                            &prod,
+                            &prod_var,
+                            Some(hint),
                             &format!(
                                 "step_{}_Eval_y_eval_acc_j{}_i{}_rho{}",
                                 step_idx, j, i_abs, rho
                             ),
-                        )?;
+                        )
+                        .map_err(SpartanBridgeError::BellpepperError)?;
                     }
 
                     // weight = γ^{i_abs} * (γ^k_total)^j  (0-based indices)
@@ -1233,11 +1547,14 @@ impl FoldRunCircuit {
                         cs,
                         &format!("step_{}_Eval_gamma_i_init_j{}_i{}", step_idx, j, i_abs),
                     )?;
+                    let mut gamma_i_val = NeoK::ONE;
                     for pow_idx in 0..i_abs {
-                        gamma_i = helpers::k_mul(
+                        let (new_gamma_i, new_gamma_i_val) = helpers::k_mul_with_hint(
                             cs,
                             &gamma_i,
+                            gamma_i_val,
                             &gamma_var,
+                            gamma_val,
                             self.delta,
                             &format!(
                                 "step_{}_Eval_gamma_i_step_j{}_i{}_{}",
@@ -1247,72 +1564,99 @@ impl FoldRunCircuit {
                                 pow_idx
                             ),
                         )?;
+                        gamma_i = new_gamma_i;
+                        gamma_i_val = new_gamma_i_val;
                     }
 
-                    let weight = helpers::k_mul(
+                    let (weight, weight_val) = helpers::k_mul_with_hint(
                         cs,
                         &gamma_i,
+                        gamma_i_val,
                         &gamma_k_j,
+                        gamma_k_j_val,
                         self.delta,
                         &format!("step_{}_Eval_weight_j{}_i{}", step_idx, j, i_abs),
                     )?;
 
-                    let contrib = helpers::k_mul(
+                    let (contrib, contrib_val) = helpers::k_mul_with_hint(
                         cs,
                         &weight,
+                        weight_val,
                         &y_eval,
+                        y_eval_val,
                         self.delta,
                         &format!("step_{}_Eval_contrib_j{}_i{}", step_idx, j, i_abs),
                     )?;
 
-                    eval_sum = helpers::k_add(
+                    eval_sum_native += contrib_val;
+                    let eval_hint = KNum::<CircuitF>::from_neo_k(eval_sum_native);
+                    eval_sum = k_add_raw(
                         cs,
                         &eval_sum,
                         &contrib,
+                        Some(eval_hint),
                         &format!("step_{}_Eval_acc_j{}_i{}", step_idx, j, i_abs),
-                    )?;
+                    )
+                    .map_err(SpartanBridgeError::BellpepperError)?;
                 }
             }
         }
 
         // Assemble RHS in K:
         // v = eq((α',r'), β)·(F' + Σ γ^i N_i') + γ^k · eq((α',r'), (α,r)) · Eval'.
-        let F_plus_N = helpers::k_add(
+        // F_plus_N = F' + Σ γ^i N'_i with native hint.
+        let F_plus_N_native = F_prime_native + nc_prime_sum_native;
+        let F_plus_N_hint = KNum::<CircuitF>::from_neo_k(F_plus_N_native);
+        let F_plus_N = k_add_raw(
             cs,
             &F_prime,
             &nc_prime_sum,
+            Some(F_plus_N_hint),
             &format!("step_{}_RHS_F_plus_N", step_idx),
-        )?;
-        let left = helpers::k_mul(
+        )
+        .map_err(SpartanBridgeError::BellpepperError)?;
+
+        let (left, left_native) = helpers::k_mul_with_hint(
             cs,
             &eq_aprp_beta,
+            eq_aprp_beta_native,
             &F_plus_N,
+            F_plus_N_native,
             self.delta,
             &format!("step_{}_RHS_left", step_idx),
         )?;
 
         // Eval' := γ^k · Σ_{j,i} γ^{i-1 + j·k} · ẏ'_{(i,j)}(α').
-        let eval_sum_scaled = helpers::k_mul(
+        let (eval_sum_scaled, eval_sum_scaled_native) = helpers::k_mul_with_hint(
             cs,
             &gamma_k_total,
+            gamma_k_total_val,
             &eval_sum,
+            eval_sum_native,
             self.delta,
             &format!("step_{}_Eval_sum_scaled", step_idx),
         )?;
-        let right = helpers::k_mul(
+        let (right, right_native) = helpers::k_mul_with_hint(
             cs,
             &eq_aprp_ar,
+            eq_aprp_ar_native,
             &eval_sum_scaled,
+            eval_sum_scaled_native,
             self.delta,
             &format!("step_{}_RHS_right", step_idx),
         )?;
 
-        let rhs = helpers::k_add(
+        // rhs = left + right with native hint.
+        let rhs_native = left_native + right_native;
+        let rhs_hint = KNum::<CircuitF>::from_neo_k(rhs_native);
+        let rhs = k_add_raw(
             cs,
             &left,
             &right,
+            Some(rhs_hint),
             &format!("step_{}_RHS_total", step_idx),
-        )?;
+        )
+        .map_err(SpartanBridgeError::BellpepperError)?;
 
         // Enforce that the in-circuit final running sum from sumcheck
         // rounds equals the RHS terminal identity.
