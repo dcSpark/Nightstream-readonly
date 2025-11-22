@@ -11,7 +11,7 @@ use rand::SeedableRng;
 use p3_field::PrimeCharacteristicRing;
 
 // Constants
-const N_STEPS: usize = 100;
+const N_STEPS: usize = 1_000;
 
 struct FibonacciStep {
     n_vars: usize,
@@ -22,10 +22,10 @@ impl FibonacciStep {
     fn new() -> Self {
         // z structure: [1, F_i, F_{i+1}, F_{i+2}]
         // Constraints: (F_i + F_{i+1}) * 1 = F_{i+2}
-        // n=1, m=4
+        // n=4 (padded to match m for identity-first CCS), m=4
         Self {
             n_vars: 4,
-            n_constraints: 1,
+            n_constraints: 4,
         }
     }
 }
@@ -102,12 +102,14 @@ fn test_perf_fibonacci_10k_optimized() {
     
     // Params
     // Ensure we have enough rows/cols. n=1, m=4.
-    let params = NeoParams::goldilocks_auto_r1cs_ccs(stepper.n_constraints.max(stepper.n_vars))
+    let mut params = NeoParams::goldilocks_auto_r1cs_ccs(stepper.n_constraints.max(stepper.n_vars))
         .expect("params");
-    
+
+    params.b = 4;
+
     // Setup Ajtai
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-    let pp = ajtai_setup(&mut rng, D, 4, stepper.n_vars).expect("Ajtai setup");
+    let pp = ajtai_setup(&mut rng, D, 16, stepper.n_vars).expect("Ajtai setup");
     let _ = set_global_pp(pp);
     let l = AjtaiSModule::from_global_for_dims(D, stepper.n_vars).expect("AjtaiSModule");
 
@@ -117,23 +119,23 @@ fn test_perf_fibonacci_10k_optimized() {
     let start = Instant::now();
 
     for _ in 0..N_STEPS {
-        session.prove_step(&mut stepper, &()).expect("prove_step failed");
+        session.add_step(&mut stepper, &()).expect("add_step failed");
     }
 
-    let folding_time = start.elapsed();
-    println!("Folding {} steps took {:?}", N_STEPS, folding_time);
+    let accumulate_time = start.elapsed();
+    println!("Accumulating {} steps took {:?}", N_STEPS, accumulate_time);
 
-    // Finalize
-    println!("Finalizing...");
+    // Fold and prove
+    println!("Folding and proving...");
     let start_fin = Instant::now();
     
-    // Use a dummy step to get the CCS structure for finalize
+    // Use a dummy step to get the CCS structure for fold_and_prove
     let dummy = stepper.synthesize_step(0, &[F::ZERO, F::ONE], &());
-    let run = session.finalize(&dummy.ccs).expect("finalize failed");
+    let run = session.fold_and_prove(&dummy.ccs).expect("fold_and_prove failed");
     
-    let finalize_time = start_fin.elapsed();
-    println!("Finalize took {:?}", finalize_time);
-    println!("Total time: {:?}", folding_time + finalize_time);
+    let fold_prove_time = start_fin.elapsed();
+    println!("Fold and prove took {:?}", fold_prove_time);
+    println!("Total time: {:?}", accumulate_time + fold_prove_time);
     
     // Verify
     let public_mcss = session.mcss_public();
