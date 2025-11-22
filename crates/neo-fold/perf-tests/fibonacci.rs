@@ -115,49 +115,26 @@ fn test_perf_fibonacci_10k_optimized() {
 
     let mut session = FoldingSession::new(FoldingMode::Optimized, params, l);
 
-    println!("Starting {} steps of Fibonacci...", N_STEPS);
-    let start = Instant::now();
-
-    let mut fold_times = Vec::with_capacity(N_STEPS);
+    println!("Accumulating {} steps...", N_STEPS);
     
-    for i in 0..N_STEPS {
-        let fold_start = Instant::now();
+    for _ in 0..N_STEPS {
         session.add_step(&mut stepper, &()).expect("add_step failed");
-        let fold_time = fold_start.elapsed();
-        fold_times.push(fold_time);
-        
-        // Print every 100 steps
-        if (i + 1) % 100 == 0 {
-            println!("Step {}: {:?}", i + 1, fold_time);
-        }
     }
 
-    let accumulate_time = start.elapsed();
-    println!("\n=== Accumulation Statistics ===");
-    println!("Total accumulation time: {:?}", accumulate_time);
-    
-    // Calculate statistics
-    let total_nanos: u128 = fold_times.iter().map(|d| d.as_nanos()).sum();
-    let avg_nanos = total_nanos / N_STEPS as u128;
-    let min_time = fold_times.iter().min().unwrap();
-    let max_time = fold_times.iter().max().unwrap();
-    
-    println!("Average time per fold: {:?}", std::time::Duration::from_nanos(avg_nanos as u64));
-    println!("Min time per fold: {:?}", min_time);
-    println!("Max time per fold: {:?}", max_time);
-    println!("Total steps: {}", N_STEPS);
-
     // Fold and prove
-    println!("Folding and proving...");
-    let start_fin = Instant::now();
+    println!("\n=== Folding ===");
+    let start_fold = Instant::now();
     
     // Use a dummy step to get the CCS structure for fold_and_prove
     let dummy = stepper.synthesize_step(0, &[F::ZERO, F::ONE], &());
     let run = session.fold_and_prove(&dummy.ccs).expect("fold_and_prove failed");
     
-    let fold_prove_time = start_fin.elapsed();
-    println!("Fold and prove took {:?}", fold_prove_time);
-    println!("Total time: {:?}", accumulate_time + fold_prove_time);
+    let fold_time = start_fold.elapsed();
+    let time_per_fold = fold_time / N_STEPS as u32;
+    
+    println!("Total folding time: {:?}", fold_time);
+    println!("Number of folds: {}", N_STEPS);
+    println!("Time per fold: {:?}", time_per_fold);
     
     // Verify
     let public_mcss = session.mcss_public();
