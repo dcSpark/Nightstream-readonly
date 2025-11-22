@@ -8,8 +8,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-TEST_NAME="test_starstream_tx_valid_optimized"
-TEST_PATH="crates/neo-fold/starstream-tests"
+TEST_NAME="test_perf_fibonacci"
+TEST_PATH="crates/neo-fold/perf-tests"
 PROFILE_MODE="${1:-flamegraph}"
 
 echo "🔍 Profiling test: $TEST_NAME"

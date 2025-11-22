@@ -118,12 +118,34 @@ fn test_perf_fibonacci_10k_optimized() {
     println!("Starting {} steps of Fibonacci...", N_STEPS);
     let start = Instant::now();
 
-    for _ in 0..N_STEPS {
+    let mut fold_times = Vec::with_capacity(N_STEPS);
+    
+    for i in 0..N_STEPS {
+        let fold_start = Instant::now();
         session.add_step(&mut stepper, &()).expect("add_step failed");
+        let fold_time = fold_start.elapsed();
+        fold_times.push(fold_time);
+        
+        // Print every 100 steps
+        if (i + 1) % 100 == 0 {
+            println!("Step {}: {:?}", i + 1, fold_time);
+        }
     }
 
     let accumulate_time = start.elapsed();
-    println!("Accumulating {} steps took {:?}", N_STEPS, accumulate_time);
+    println!("\n=== Accumulation Statistics ===");
+    println!("Total accumulation time: {:?}", accumulate_time);
+    
+    // Calculate statistics
+    let total_nanos: u128 = fold_times.iter().map(|d| d.as_nanos()).sum();
+    let avg_nanos = total_nanos / N_STEPS as u128;
+    let min_time = fold_times.iter().min().unwrap();
+    let max_time = fold_times.iter().max().unwrap();
+    
+    println!("Average time per fold: {:?}", std::time::Duration::from_nanos(avg_nanos as u64));
+    println!("Min time per fold: {:?}", min_time);
+    println!("Max time per fold: {:?}", max_time);
+    println!("Total steps: {}", N_STEPS);
 
     // Fold and prove
     println!("Folding and proving...");
