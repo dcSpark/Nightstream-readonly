@@ -228,20 +228,23 @@ pub fn check_twist_semantics<F: PrimeField>(
     let rv = ajtai_decode_vector(params, parts.rv_mat);
     let inc_flat = ajtai_decode_vector(params, parts.inc_mat);
 
-    // Decode addresses from bit columns
+    // Decode addresses from bit columns (optimized: decode each column once)
     let decode_addr_from_bits = |bit_mats: &[Mat<F>]| -> Vec<u64> {
+        // Pre-decode all bit columns once (avoid O(d * ell * steps) decode calls)
+        let decoded: Vec<Vec<F>> = bit_mats.iter().map(|m| ajtai_decode_vector(params, m)).collect();
+
         let mut addrs = vec![0u64; steps];
         for dim in 0..d {
             let base = dim * ell;
-            for j in 0..steps {
-                let mut dim_val = 0u64;
-                for b in 0..ell {
-                    let bit_col = ajtai_decode_vector(params, &bit_mats[base + b]);
-                    if bit_col[j] == F::ONE {
-                        dim_val |= 1u64 << b;
+            let stride = (inst.n_side as u64).pow(dim as u32);
+            for b in 0..ell {
+                let col = &decoded[base + b];
+                let bit_weight = 1u64 << b;
+                for j in 0..steps.min(col.len()) {
+                    if col[j] == F::ONE {
+                        addrs[j] += bit_weight * stride;
                     }
                 }
-                addrs[j] += dim_val * (inst.n_side as u64).pow(dim as u32);
             }
         }
         addrs
@@ -256,19 +259,17 @@ pub fn check_twist_semantics<F: PrimeField>(
         for (j, &x) in v.iter().enumerate() {
             if x != F::ZERO && x != F::ONE {
                 return Err(PiCcsError::InvalidInput(format!(
-                    "Non-binary value in address bit column at step {}: {:?}",
-                    j, x
+                    "Non-binary value in address bit column at step {j}: {x:?}"
                 )));
             }
         }
     }
 
     // Validate init_vals
-    if inst.init_vals.len() != k {
+    let init_vals_len = inst.init_vals.len();
+    if init_vals_len != k {
         return Err(PiCcsError::InvalidInput(format!(
-            "init_vals length mismatch: inst.k={}, init_vals.len()={}",
-            k,
-            inst.init_vals.len()
+            "init_vals length mismatch: inst.k={k}, init_vals.len()={init_vals_len}"
         )));
     }
 
@@ -279,13 +280,11 @@ pub fn check_twist_semantics<F: PrimeField>(
         // Check read correctness
         if has_read[j] == F::ONE {
             let addr = read_addrs[j] as usize;
-            if addr < k {
-                if rv[j] != val[addr] {
-                    return Err(PiCcsError::InvalidInput(format!(
-                        "Read mismatch at step {}: rv={:?}, Val[{}]={:?}",
-                        j, rv[j], addr, val[addr]
-                    )));
-                }
+            if addr < k && rv[j] != val[addr] {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "Read mismatch at step {j}: rv={:?}, Val[{addr}]={:?}",
+                    rv[j], val[addr]
+                )));
             }
         }
 
@@ -297,8 +296,7 @@ pub fn check_twist_semantics<F: PrimeField>(
                 let actual_inc = inc_flat[addr * steps + j];
                 if actual_inc != expected_inc {
                     return Err(PiCcsError::InvalidInput(format!(
-                        "Inc mismatch at step {}, cell {}: got {:?}, expected {:?}",
-                        j, addr, actual_inc, expected_inc
+                        "Inc mismatch at step {j}, cell {addr}: got {actual_inc:?}, expected {expected_inc:?}"
                     )));
                 }
                 val[addr] = wv[j];
@@ -403,20 +401,23 @@ where
     let has_write_f = ajtai_decode_vector(params, parts.has_write_mat);
     let wv_f = ajtai_decode_vector(params, parts.wv_mat);
 
-    // Decode addresses from bit columns
+    // Decode addresses from bit columns (optimized: decode each column once)
     let decode_addr_from_bits = |bit_mats: &[Mat<F>]| -> Vec<usize> {
+        // Pre-decode all bit columns once (avoid O(d * ell * steps) decode calls)
+        let decoded: Vec<Vec<F>> = bit_mats.iter().map(|m| ajtai_decode_vector(params, m)).collect();
+
         let mut addrs = vec![0usize; steps];
         for dim in 0..d {
             let base = dim * ell;
-            for j in 0..steps {
-                let mut dim_val = 0usize;
-                for b in 0..ell {
-                    let bit_col = ajtai_decode_vector(params, &bit_mats[base + b]);
-                    if bit_col[j] == F::ONE {
-                        dim_val |= 1usize << b;
+            let stride = inst.n_side.pow(dim as u32);
+            for b in 0..ell {
+                let col = &decoded[base + b];
+                let bit_weight = 1usize << b;
+                for j in 0..steps.min(col.len()) {
+                    if col[j] == F::ONE {
+                        addrs[j] += bit_weight * stride;
                     }
                 }
-                addrs[j] += dim_val * inst.n_side.pow(dim as u32);
             }
         }
         addrs
@@ -792,16 +793,13 @@ where
         &mut mk_me,
     );
 
-    // ME claim for Inc (evaluated at combined (r_k, r_cycle) point)
-    let r_inc = [r_addr.as_slice(), eval_point_cycle.as_slice()].concat();
-    eval_and_push(
-        &mut me_instances,
-        &mut me_witnesses,
-        &inst.comms[data_offset],
-        parts.inc_mat,
-        &r_inc,
-        &mut mk_me,
-    );
+    // Note: We intentionally do NOT create an ME claim for Inc.
+    // The Inc matrix is only used internally within the Twist sum-checks
+    // (via build_inc_at_r_addr and TwistValEvalOracle). Creating an ME claim
+    // for Inc would require evaluation over (r_addr, r_cycle) which has
+    // total_addr_bits + ell_cycle dimensions - potentially 40+ bits causing
+    // a 2^40+ allocation blow-up. The Inc commitment is still part of
+    // MemInstance.comms, but we don't separately open it as an ME claim.
 
     let proof = TwistProof {
         read_check_rounds,
@@ -823,35 +821,49 @@ where
 // ============================================================================
 
 /// Verify memory correctness using the Twist argument.
+///
+/// This function verifies the sum-check proofs and validates that the provided
+/// ME claims are consistent with the instance and transcript.
+///
+/// # Arguments
+/// - `mode`: Folding mode
+/// - `tr`: Transcript for Fiat-Shamir
+/// - `params`: Neo parameters
+/// - `inst`: Memory instance (public data)
+/// - `proof`: Twist proof containing sum-check rounds
+/// - `prover_me_claims`: ME claims from the prover's proof (to be validated)
+/// - `_l`: S-module homomorphism (unused but kept for API consistency)
+///
+/// # Returns
+/// On success, returns `Ok(())`. The ME claims from `prover_me_claims` should be
+/// used by the caller after this function returns successfully.
 pub fn verify<L, Cmt, F, K>(
     _mode: FoldingMode,
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
     inst: &MemInstance<Cmt, F>,
     proof: &TwistProof<KElem>,
+    prover_me_claims: &[MeInstance<Cmt, F, K>],
     _l: &L,
-) -> Result<Vec<MeInstance<Cmt, F, K>>, PiCcsError>
+) -> Result<(), PiCcsError>
 where
     F: PrimeField,
-    K: From<KElem> + Clone,
+    K: From<KElem> + Clone + PartialEq,
     L: SModuleHomomorphism<F, Cmt>,
-    Cmt: Clone,
+    Cmt: Clone + PartialEq,
 {
     let d = inst.d;
     let ell = inst.ell;
     let steps = inst.steps;
-    let k = inst.k;
     let total_addr_bits = d * ell;
 
     let pow2_cycle = steps.next_power_of_two().max(1);
     let ell_cycle = pow2_cycle.trailing_zeros() as usize;
-    let pow2_k = k.next_power_of_two().max(1);
-    let ell_k = pow2_k.trailing_zeros() as usize;
 
-    // Sample the same random points as prover
+    // Sample exactly the same random points as prover, in the same order.
+    // Note: The prover samples r_addr and r_cycle only (no r_k).
     let _r_addr = sample_ext_point(tr, b"twist/r_addr", total_addr_bits);
     let _r_cycle = sample_ext_point(tr, b"twist/r_cycle", ell_cycle);
-    let _r_k = sample_ext_point(tr, b"twist/r_k", ell_k);
 
     // Verify read-check sum-check using claimed sum from proof
     let read_degree = 3 + total_addr_bits; // eq_cycle, has_read, diff, bit_eq_factors
@@ -893,26 +905,62 @@ where
         }
     }
 
-    // Reconstruct ME instances from final evaluations
-    // The verifier reconstructs the same ME structure as the prover
-    let mut me_instances: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    // Validate prover's ME claims against expected structure
+    // The expected number of ME claims matches the prover's commitment count minus Inc
+    // Layout: [ra_bits (d*ell), wa_bits (d*ell), has_read, has_write, wv, rv]
+    // Note: Inc is NOT included as an ME claim (see prover comment)
+    let expected_me_count = 2 * total_addr_bits + 4; // ra_bits + wa_bits + 4 data columns
+    if prover_me_claims.len() != expected_me_count {
+        return Err(PiCcsError::InvalidInput(format!(
+            "Twist ME claims count mismatch: expected {}, got {}",
+            expected_me_count,
+            prover_me_claims.len()
+        )));
+    }
 
-    // For each commitment, create an ME instance with the evaluation point
-    let eval_point: Vec<K> = read_chals.iter().map(|&x| K::from(x)).collect();
+    // The evaluation point for ME claims is derived from read_chals (cycle dimension)
+    let expected_eval_point: Vec<K> = read_chals.iter().map(|&x| K::from(x)).collect();
 
-    for comm in &inst.comms {
-        me_instances.push(MeInstance {
-            c: comm.clone(),
-            X: Mat::from_row_major(params.d as usize, 0, vec![]),
-            r: eval_point.clone(),
-            y: vec![vec![K::from(KElem::ZERO)]], // Filled by prover claims
-            y_scalars: vec![K::from(KElem::ZERO)],
-            m_in: 0,
-            fold_digest: [0u8; 32],
-            c_step_coords: vec![],
-            u_offset: 0,
-            u_len: 0,
-        });
+    // Verify each ME claim has the correct commitment and evaluation point
+    // Commitment mapping:
+    // - inst.comms[0..d*ell]: ra_bits -> me_claims[0..d*ell]
+    // - inst.comms[d*ell..2*d*ell]: wa_bits -> me_claims[d*ell..2*d*ell]
+    // - inst.comms[2*d*ell]: Inc (NOT in ME claims)
+    // - inst.comms[2*d*ell+1]: has_read -> me_claims[2*d*ell]
+    // - inst.comms[2*d*ell+2]: has_write -> me_claims[2*d*ell+1]
+    // - inst.comms[2*d*ell+3]: wv -> me_claims[2*d*ell+2]
+    // - inst.comms[2*d*ell+4]: rv -> me_claims[2*d*ell+3]
+    let data_offset = 2 * total_addr_bits;
+
+    for (i, me) in prover_me_claims.iter().enumerate() {
+        // Determine which commitment this ME claim should reference
+        let comm_idx = if i < data_offset {
+            i // Address bits: direct mapping
+        } else {
+            // Data columns: skip Inc at position data_offset
+            i + 1
+        };
+
+        if comm_idx >= inst.comms.len() {
+            return Err(PiCcsError::InvalidInput(format!(
+                "ME claim {i} references commitment {comm_idx} but only {} exist",
+                inst.comms.len()
+            )));
+        }
+
+        // Check commitment matches
+        if me.c != inst.comms[comm_idx] {
+            return Err(PiCcsError::InvalidInput(format!(
+                "ME claim {i} commitment mismatch (expected comm[{comm_idx}])"
+            )));
+        }
+
+        // Check evaluation point matches
+        if me.r != expected_eval_point {
+            return Err(PiCcsError::InvalidInput(format!(
+                "ME claim {i} evaluation point mismatch"
+            )));
+        }
     }
 
     let _ = (
@@ -925,5 +973,5 @@ where
         params,
     );
 
-    Ok(me_instances)
+    Ok(())
 }

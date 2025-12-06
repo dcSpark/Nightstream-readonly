@@ -137,6 +137,9 @@ fn decode_has_lookup<F: PrimeField>(params: &NeoParams, addr_bit_mats: &[Mat<F>]
 }
 
 /// Decode addresses from bit columns.
+///
+/// This function pre-decodes all bit columns once to avoid O(d * ell * steps)
+/// Ajtai decode calls. Instead, we do O(d * ell) decodes upfront.
 fn decode_addrs_from_bits<F: PrimeField>(
     params: &NeoParams,
     addr_bit_mats: &[Mat<F>],
@@ -145,21 +148,28 @@ fn decode_addrs_from_bits<F: PrimeField>(
     n_side: usize,
     steps: usize,
 ) -> Vec<u64> {
+    // Pre-decode all bit columns once (avoid O(d * ell * steps) decode calls)
+    let decoded: Vec<Vec<F>> = addr_bit_mats
+        .iter()
+        .map(|m| ajtai_decode_vector(params, m))
+        .collect();
+
     let mut addrs = vec![0u64; steps];
 
     for dim in 0..d {
         let base = dim * ell;
-        for j in 0..steps {
-            let mut dim_val = 0u64;
-            for b in 0..ell {
-                if base + b < addr_bit_mats.len() {
-                    let bit_col = ajtai_decode_vector(params, &addr_bit_mats[base + b]);
-                    if j < bit_col.len() && bit_col[j] == F::ONE {
-                        dim_val |= 1u64 << b;
+        let stride = (n_side as u64).pow(dim as u32);
+        for b in 0..ell {
+            let col_idx = base + b;
+            if col_idx < decoded.len() {
+                let col = &decoded[col_idx];
+                let bit_weight = 1u64 << b;
+                for j in 0..steps.min(col.len()) {
+                    if col[j] == F::ONE {
+                        addrs[j] += bit_weight * stride;
                     }
                 }
             }
-            addrs[j] += dim_val * (n_side as u64).pow(dim as u32);
         }
     }
 
@@ -176,12 +186,39 @@ fn decode_addrs_from_bits<F: PrimeField>(
 /// - Address bit columns are binary
 /// - has_lookup column is binary
 /// - When has_lookup=1, the committed val matches Table[addr]
+///
+/// ## Address/Table Mapping
+///
+/// The address bits encode a flattened index into the table:
+/// - For d dimensions with n_side elements each, the total address space is n_side^d
+/// - The table must have exactly k = n_side^d entries (or be padded to that size)
+/// - The first ell_table = ceil(log2(table.len())) bits of r_addr are used for table lookup
+/// - This means table indices and address bit encodings must use the same bijection
 pub fn check_shout_semantics<F: PrimeField>(
     params: &NeoParams,
     inst: &LutInstance<impl Clone, F>,
     wit: &LutWitness<F>,
     expected_vals: &[F],
 ) -> Result<(), PiCcsError> {
+    // Validate address space / table size relationship
+    let expected_k = inst.n_side.pow(inst.d as u32);
+    let k = inst.k;
+    let n_side = inst.n_side;
+    let d_dim = inst.d;
+    if k != expected_k {
+        return Err(PiCcsError::InvalidInput(format!(
+            "Shout: k={k} does not match n_side^d = {n_side}^{d_dim} = {expected_k}. \
+             Table size must equal the address space for index-bit addressing."
+        )));
+    }
+
+    let table_len = inst.table.len();
+    if table_len != k {
+        return Err(PiCcsError::InvalidInput(format!(
+            "Shout: table.len()={table_len} does not match k={k}. \
+             Table must be exactly k entries."
+        )));
+    }
     let parts = split_lut_mats(inst, wit);
     let steps = inst.steps;
     let d = inst.d;
@@ -261,6 +298,17 @@ pub fn check_shout_semantics<F: PrimeField>(
 // ============================================================================
 
 /// Prove lookup correctness using the Shout argument with index-bit addressing.
+///
+/// ## Address/Table Mapping Invariant
+///
+/// The index-bit encoding assumes a bijection between:
+/// - The d-dimensional address `(a_0, a_1, ..., a_{d-1})` with each `a_i < n_side`
+/// - The flattened table index `idx = Σ_i a_i * n_side^i`
+///
+/// This means:
+/// - The table must have exactly `k = n_side^d` entries
+/// - The first `ell_table = ceil(log2(k))` bits of `r_addr` correspond to the table index
+/// - All `d * ell` address bits participate in the eq(bits, r_addr) computation
 pub fn prove<L, Cmt, F, K>(
     _mode: FoldingMode,
     tr: &mut Poseidon2Transcript,
@@ -278,9 +326,24 @@ where
 
     let d = inst.d;
     let ell = inst.ell;
-    let _n_side = inst.n_side;
+    let n_side = inst.n_side;
     let steps = inst.steps;
     let total_addr_bits = d * ell;
+
+    // Validate address/table mapping invariant
+    let expected_k = n_side.pow(d as u32);
+    debug_assert_eq!(
+        inst.k, expected_k,
+        "Shout: k={} must equal n_side^d = {}^{} = {} for index-bit addressing",
+        inst.k, n_side, d, expected_k
+    );
+    debug_assert_eq!(
+        inst.table.len(),
+        inst.k,
+        "Shout: table.len()={} must equal k={}",
+        inst.table.len(),
+        inst.k
+    );
 
     let pow2_cycle = steps.next_power_of_two().max(1);
     let ell_cycle = pow2_cycle.trailing_zeros() as usize;
@@ -470,19 +533,36 @@ where
 // ============================================================================
 
 /// Verify lookup correctness using the Shout argument.
+///
+/// This function verifies the sum-check proofs and validates that the provided
+/// ME claims are consistent with the instance and transcript.
+///
+/// # Arguments
+/// - `mode`: Folding mode
+/// - `tr`: Transcript for Fiat-Shamir
+/// - `params`: Neo parameters
+/// - `inst`: Lookup instance (public data)
+/// - `proof`: Shout proof containing sum-check rounds
+/// - `prover_me_claims`: ME claims from the prover's proof (to be validated)
+/// - `_l`: S-module homomorphism (unused but kept for API consistency)
+///
+/// # Returns
+/// On success, returns `Ok(())`. The ME claims from `prover_me_claims` should be
+/// used by the caller after this function returns successfully.
 pub fn verify<L, Cmt, F, K>(
     _mode: FoldingMode,
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
     inst: &LutInstance<Cmt, F>,
     proof: &ShoutProof<KElem>,
+    prover_me_claims: &[MeInstance<Cmt, F, K>],
     _l: &L,
-) -> Result<Vec<MeInstance<Cmt, F, K>>, PiCcsError>
+) -> Result<(), PiCcsError>
 where
     F: PrimeField,
-    K: From<KElem> + Clone,
+    K: From<KElem> + Clone + PartialEq,
     L: SModuleHomomorphism<F, Cmt>,
-    Cmt: Clone,
+    Cmt: Clone + PartialEq,
 {
     let d = inst.d;
     let ell = inst.ell;
@@ -532,23 +612,41 @@ where
         }
     }
 
-    // Reconstruct ME instances
-    let mut me_instances: Vec<MeInstance<Cmt, F, K>> = Vec::new();
-    let eval_point: Vec<K> = adapter_chals.iter().map(|&x| K::from(x)).collect();
+    // Validate prover's ME claims against expected structure
+    // Layout: [addr_bits (d*ell), has_lookup, val]
+    let expected_me_count = total_addr_bits + 2; // addr_bits + has_lookup + val
+    let actual_me_count = prover_me_claims.len();
+    if actual_me_count != expected_me_count {
+        return Err(PiCcsError::InvalidInput(format!(
+            "Shout ME claims count mismatch: expected {expected_me_count}, got {actual_me_count}"
+        )));
+    }
 
-    for comm in &inst.comms {
-        me_instances.push(MeInstance {
-            c: comm.clone(),
-            X: Mat::from_row_major(params.d as usize, 0, vec![]),
-            r: eval_point.clone(),
-            y: vec![vec![K::from(KElem::ZERO)]],
-            y_scalars: vec![K::from(KElem::ZERO)],
-            m_in: 0,
-            fold_digest: [0u8; 32],
-            c_step_coords: vec![],
-            u_offset: 0,
-            u_len: 0,
-        });
+    // The evaluation point for ME claims is derived from adapter_chals
+    let expected_eval_point: Vec<K> = adapter_chals.iter().map(|&x| K::from(x)).collect();
+
+    // Verify each ME claim has the correct commitment and evaluation point
+    let comms_len = inst.comms.len();
+    for (i, me) in prover_me_claims.iter().enumerate() {
+        if i >= comms_len {
+            return Err(PiCcsError::InvalidInput(format!(
+                "ME claim {i} references commitment {i} but only {comms_len} exist"
+            )));
+        }
+
+        // Check commitment matches (direct 1:1 mapping for Shout)
+        if me.c != inst.comms[i] {
+            return Err(PiCcsError::InvalidInput(format!(
+                "Shout ME claim {i} commitment mismatch"
+            )));
+        }
+
+        // Check evaluation point matches
+        if me.r != expected_eval_point {
+            return Err(PiCcsError::InvalidInput(format!(
+                "Shout ME claim {i} evaluation point mismatch"
+            )));
+        }
     }
 
     let _ = (
@@ -561,5 +659,5 @@ where
         params,
     );
 
-    Ok(me_instances)
+    Ok(())
 }

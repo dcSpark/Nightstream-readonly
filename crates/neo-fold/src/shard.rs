@@ -431,7 +431,10 @@ where
         )));
     }
 
-    let mut mem_me_claims = Vec::new();
+    // Extract ME claims from proof, partitioned by protocol type
+    let prover_me_claims = &proof.mem_proof.me_claims;
+    let total_me_claims = prover_me_claims.len();
+    let mut me_claim_offset = 0;
     let mut idx = 0;
 
     // Shout (LUT) proofs first, in the same order as in `prove_memory_sidecar`
@@ -442,12 +445,29 @@ where
             MemOrLutProof::Shout(proof) => proof,
             _ => return Err(PiCcsError::InvalidInput("expected Shout proof for LUT instance".into())),
         };
-        // This must mirror `shout::prove`'s transcript usage exactly
-        let me = shout::verify(mode.clone(), tr, params, inst, shout_proof, l)?;
-        mem_me_claims.extend(me);
+
+        // Calculate expected ME claims for this Shout instance
+        let total_addr_bits = inst.d * inst.ell;
+        let shout_me_count = total_addr_bits + 2; // addr_bits + has_lookup + val
+
+        // Bounds check: ensure we have enough ME claims for this instance
+        if me_claim_offset + shout_me_count > total_me_claims {
+            return Err(PiCcsError::InvalidInput(format!(
+                "Not enough ME claims for Shout instance: need {} more, but only {} remain",
+                shout_me_count,
+                total_me_claims.saturating_sub(me_claim_offset)
+            )));
+        }
+
+        // Extract the slice of ME claims for this instance
+        let me_slice = &prover_me_claims[me_claim_offset..me_claim_offset + shout_me_count];
+        me_claim_offset += shout_me_count;
+
+        // Verify sum-checks AND validate ME claims against instance commitments
+        shout::verify(mode.clone(), tr, params, inst, shout_proof, me_slice, l)?;
     }
 
-    // Twist (mem) proofs next, again matching the prover’s order
+    // Twist (mem) proofs next, again matching the prover's order
     for inst in mem_instances {
         let p = &proofs[idx];
         idx += 1;
@@ -455,12 +475,37 @@ where
             MemOrLutProof::Twist(proof) => proof,
             _ => return Err(PiCcsError::InvalidInput("expected Twist proof for mem instance".into())),
         };
-        let me = twist::verify(mode.clone(), tr, params, inst, twist_proof, l)?;
-        mem_me_claims.extend(me);
+
+        // Calculate expected ME claims for this Twist instance
+        let total_addr_bits = inst.d * inst.ell;
+        let twist_me_count = 2 * total_addr_bits + 4; // ra_bits + wa_bits + 4 data columns (no Inc)
+
+        // Bounds check: ensure we have enough ME claims for this instance
+        if me_claim_offset + twist_me_count > total_me_claims {
+            return Err(PiCcsError::InvalidInput(format!(
+                "Not enough ME claims for Twist instance: need {} more, but only {} remain",
+                twist_me_count,
+                total_me_claims.saturating_sub(me_claim_offset)
+            )));
+        }
+
+        // Extract the slice of ME claims for this instance
+        let me_slice = &prover_me_claims[me_claim_offset..me_claim_offset + twist_me_count];
+        me_claim_offset += twist_me_count;
+
+        // Verify sum-checks AND validate ME claims against instance commitments
+        twist::verify(mode.clone(), tr, params, inst, twist_proof, me_slice, l)?;
     }
 
-    // Trust the prover’s ME claims after verification and use the stored ordering.
-    mem_me_claims = proof.mem_proof.me_claims.clone();
+    // Assert we consumed all ME claims (no unused claims from malformed proof)
+    if me_claim_offset != total_me_claims {
+        return Err(PiCcsError::InvalidInput(format!(
+            "Unused ME claims in memory sidecar: consumed {me_claim_offset}, but proof contains {total_me_claims}"
+        )));
+    }
+
+    // After verification, we trust the prover's ME claims (they've been validated)
+    let mem_me_claims = proof.mem_proof.me_claims.clone();
 
     // Now build the merged accumulator solely from verified data
     let mut all_me = accumulator.clone();

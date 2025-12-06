@@ -4,7 +4,6 @@ pub mod mle;
 pub mod plain;
 pub mod r1cs_adapter;
 pub mod shout;
-pub mod shout_oracle;
 pub mod twist;
 pub mod twist_oracle;
 pub mod witness;

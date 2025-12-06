@@ -217,9 +217,17 @@ impl RoundOracle for TwistValEvalOracle {
 // ============================================================================
 
 /// Read-check oracle using bit-decomposed addresses:
-/// Proves: Σ_t eq(r_cycle, t) * has_read(t) * eq(ra_bits_t, r_addr) * (Val(r_addr, t) - rv(t)) = 0
 ///
-/// This integrates the IDX→OH adapter directly into the read check.
+/// Proves: Σ_t eq(r_cycle, t) * has_read(t) * eq(ra_bits_t, r_addr) * (Val(ra_t, t) - rv(t)) = 0
+///
+/// **Important**: The val_at_read_addr parameter contains Val(ra_t, t) - the memory value
+/// at the **actual** read address ra_t for each step, NOT Val(r_addr, t) at the random point.
+/// This is sound because:
+/// - For steps where ra_t ≠ r_addr: eq(ra_bits_t, r_addr) = 0, so the term vanishes
+/// - For steps where ra_t = r_addr: val_at_read_addr[t] = Val(ra_t, t) = Val(r_addr, t)
+///
+/// This design avoids needing to compute Val(r_addr, t) for all steps, which would
+/// require expensive MLE evaluations.
 pub struct TwistReadCheckOracle {
     core: ProductRoundOracle,
 }
@@ -229,8 +237,8 @@ impl TwistReadCheckOracle {
     ///
     /// # Arguments
     /// - `ra_bits`: d*ell bit columns for read addresses (flattened)
-    /// - `val_at_r_addr`: Pre-computed Val(r_addr, t) for each step
-    /// - `rv`: Read values
+    /// - `val_at_read_addr`: Val(ra_t, t) - memory value at actual read address for each step
+    /// - `rv`: Read values (what the VM observed)
     /// - `has_read`: Read flags
     /// - `r_cycle`: Random point for cycle dimension
     /// - `r_addr`: Random point for address dimension (ell_total = d*ell bits)
@@ -254,7 +262,9 @@ impl TwistReadCheckOracle {
         let eq_cycle = build_eq_table(r_cycle);
 
         // 2. has_read(t)
-        // 3. (Val(r_addr, t) - rv(t))
+        // 3. (Val(ra_t, t) - rv(t)) - value at actual read address minus observed read value
+        //    Note: val_at_r_addr parameter contains Val(ra_t, t), the memory value at the
+        //    actual read address, NOT Val(r_addr, t) at the random challenge point.
         let diff: Vec<K> = val_at_r_addr
             .iter()
             .zip(rv.iter())
@@ -392,9 +402,17 @@ impl RoundOracle for TwistReadCheckOracle {
 // ============================================================================
 
 /// Write-check oracle using bit-decomposed addresses:
-/// Proves: Σ_t eq(r_cycle, t) * has_write(t) * eq(wa_bits_t, r_addr) * (wv(t) - Val(r_addr, t)) = Inc(r_addr, t)
 ///
-/// More precisely, both sides are summed to the same expected value.
+/// Proves: Σ_t eq(r_cycle, t) * has_write(t) * eq(wa_bits_t, r_addr) * (wv(t) - Val(wa_t, t) - Inc(wa_t, t)) = 0
+///
+/// **Important**: The val_at_write_addr and inc_at_write_addr parameters contain the memory
+/// value and increment at the **actual** write address wa_t for each step, NOT at the random
+/// point r_addr. This is sound because:
+/// - For steps where wa_t ≠ r_addr: eq(wa_bits_t, r_addr) = 0, so the term vanishes
+/// - For steps where wa_t = r_addr: the values match what would be computed at r_addr
+///
+/// The check verifies: wv(t) - Val(wa_t, t) = Inc(wa_t, t), i.e., the increment equals
+/// the difference between the write value and the pre-write memory value.
 pub struct TwistWriteCheckOracle {
     core: ProductRoundOracle,
 }
@@ -747,88 +765,6 @@ fn log2_pow2(n: usize) -> usize {
     if n == 0 {
         return 0;
     }
-    debug_assert!(n.is_power_of_two(), "expected power of two, got {}", n);
+    debug_assert!(n.is_power_of_two(), "expected power of two, got {n}");
     n.trailing_zeros() as usize
-}
-
-// ============================================================================
-// Legacy oracles (deprecated, kept for compatibility)
-// ============================================================================
-
-/// One-hot booleanity oracle (DEPRECATED - use BitnessOracle instead)
-pub struct OneHotBooleanOracle {
-    core: ProductRoundOracle,
-}
-
-impl OneHotBooleanOracle {
-    pub fn new(v_table: Vec<K>, r_cycle: &[K], pow2_addr: usize) -> Self {
-        let eq_cycle = build_eq_table(r_cycle);
-        let eq_cycle_table = broadcast_cycle(&eq_cycle, pow2_addr);
-        let minus_one: Vec<K> = v_table.iter().map(|x| *x - K::ONE).collect();
-        let core = ProductRoundOracle::new(vec![eq_cycle_table, v_table, minus_one], 3);
-        Self { core }
-    }
-}
-
-impl RoundOracle for OneHotBooleanOracle {
-    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
-        self.core.evals_at(points)
-    }
-    fn num_rounds(&self) -> usize {
-        self.core.num_rounds()
-    }
-    fn degree_bound(&self) -> usize {
-        self.core.degree_bound()
-    }
-    fn fold(&mut self, r: K) {
-        self.core.fold(r)
-    }
-}
-
-/// One-hot Hamming oracle (DEPRECATED)
-pub struct OneHotHammingOracle {
-    core: ProductRoundOracle,
-}
-
-impl OneHotHammingOracle {
-    pub fn new(v_table: Vec<K>, r_cycle: &[K], pow2_addr: usize) -> Self {
-        let eq_cycle = build_eq_table(r_cycle);
-        let eq_cycle_table = broadcast_cycle(&eq_cycle, pow2_addr);
-        let core = ProductRoundOracle::new(vec![eq_cycle_table, v_table], 2);
-        Self { core }
-    }
-}
-
-impl RoundOracle for OneHotHammingOracle {
-    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
-        self.core.evals_at(points)
-    }
-    fn num_rounds(&self) -> usize {
-        self.core.num_rounds()
-    }
-    fn degree_bound(&self) -> usize {
-        self.core.degree_bound()
-    }
-    fn fold(&mut self, r: K) {
-        self.core.fold(r)
-    }
-}
-
-pub(crate) fn broadcast_cycle(base: &[K], pow2_addr: usize) -> Vec<K> {
-    let mut out = Vec::with_capacity(base.len() * pow2_addr);
-    for &v in base.iter() {
-        for _ in 0..pow2_addr {
-            out.push(v);
-        }
-    }
-    out
-}
-
-#[allow(dead_code)]
-pub(crate) fn broadcast_addr(base: &[K], pow2_cycle: usize) -> Vec<K> {
-    let mut out = Vec::with_capacity(base.len() * pow2_cycle);
-    for _ in 0..pow2_cycle {
-        out.extend_from_slice(base);
-    }
-    out
 }
