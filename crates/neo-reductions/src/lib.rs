@@ -29,4 +29,4 @@ pub use engines::optimized_engine::{
 pub use error::PiCcsError;
 
 // Re-export common utilities
-pub use common::{sample_rot_rhos, split_b_matrix_k, RotRing};
+pub use common::{sample_rot_rhos, sample_rot_rhos_n, split_b_matrix_k, RotRing};

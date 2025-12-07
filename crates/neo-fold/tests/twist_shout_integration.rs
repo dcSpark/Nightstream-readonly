@@ -337,7 +337,13 @@ fn twist_shout_trace_to_witness_smoke() {
     // full verification requires ME instance checking.
     let mut tr = Poseidon2Transcript::new(b"t&s-smoke");
 
-    // Run Shout prove
+    // Compute ell_cycle - must be large enough to cover steps
+    let max_steps = mem_inst.steps.max(lut_inst.steps);
+    let ell_cycle = max_steps.next_power_of_two().max(1).trailing_zeros() as usize;
+    // For isolation testing, m_in = 0 (no CPU integration)
+    let m_in = 0;
+
+    // Run Shout prove (None = no external r_cycle, isolation test)
     let shout_result = shout::prove::<DummyCommit, Cmt, F, KElem>(
         FoldingMode::PaperExact,
         &mut tr,
@@ -345,10 +351,14 @@ fn twist_shout_trace_to_witness_smoke() {
         &lut_inst,
         &lut_wit,
         &dummy,
+        ell_cycle,
+        m_in,
+        None, // No external r_cycle - testing in isolation
+        None, // No external r_addr - testing in isolation
     );
     assert!(shout_result.is_ok(), "Shout prove should not panic");
 
-    // Run Twist prove
+    // Run Twist prove (None = no external r_cycle, isolation test)
     let twist_result = twist::prove::<DummyCommit, Cmt, F, KElem>(
         FoldingMode::PaperExact,
         &mut tr,
@@ -356,6 +366,10 @@ fn twist_shout_trace_to_witness_smoke() {
         &mem_inst,
         &mem_wit,
         &dummy,
+        ell_cycle,
+        m_in,
+        None, // No external r_cycle - testing in isolation
+        None, // No external r_addr - testing in isolation
     );
     assert!(
         twist_result.is_ok(),

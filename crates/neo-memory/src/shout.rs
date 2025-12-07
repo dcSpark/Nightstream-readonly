@@ -19,20 +19,41 @@
 
 use crate::twist::ajtai_decode_vector;
 use crate::witness::{LutInstance, LutWitness};
+use neo_ajtai::Commitment as AjtaiCmt;
 use neo_ccs::matrix::Mat;
 use neo_ccs::relations::MeInstance;
 use neo_params::NeoParams;
 use neo_reductions::api::FoldingMode;
 use neo_reductions::error::PiCcsError;
-use neo_transcript::{Poseidon2Transcript, Transcript};
+use neo_transcript::{Poseidon2Transcript, Transcript, TranscriptProtocol};
 use p3_field::{PrimeCharacteristicRing, PrimeField};
 use serde::{Deserialize, Serialize};
 
 use crate::mle::{build_chi_table, mle_eval};
 use crate::twist_oracle::{BitnessOracle, IndexAdapterOracle, ShoutLookupOracle};
 use neo_ccs::traits::SModuleHomomorphism;
-use neo_math::{from_complex, K as KElem};
+use neo_math::{from_complex, F as BaseField, K as KElem};
 use neo_reductions::sumcheck::run_sumcheck_prover;
+
+// ============================================================================
+// Commitment Absorption (for Fiat-Shamir soundness)
+// ============================================================================
+
+/// Absorb all Shout commitments into the transcript.
+///
+/// **MUST be called BEFORE deriving any random challenge that will be used
+/// for opening these commitments** (e.g., the canonical `r_cycle` from CPU folding).
+///
+/// This ensures Fiat-Shamir soundness: the prover cannot choose commitments
+/// after seeing the evaluation point.
+pub fn absorb_commitments<F>(tr: &mut Poseidon2Transcript, inst: &LutInstance<AjtaiCmt, F>) {
+    tr.append_message(b"shout/absorb_commitments", &(inst.comms.len() as u64).to_le_bytes());
+    for (i, comm) in inst.comms.iter().enumerate() {
+        tr.append_message(b"shout/comm_idx", &(i as u64).to_le_bytes());
+        // Absorb the commitment's field elements
+        tr.absorb_commit_coords(&comm.data);
+    }
+}
 
 /// Proof for the Shout lookup argument.
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -111,6 +132,16 @@ fn sample_ext_point(tr: &mut Poseidon2Transcript, label: &'static [u8], len: usi
         let c0 = tr.challenge_field(b"shout/coord/0");
         let c1 = tr.challenge_field(b"shout/coord/1");
         out.push(from_complex(c0, c1));
+    }
+    out
+}
+
+fn sample_base_addr_point(tr: &mut Poseidon2Transcript, label: &'static [u8], len: usize) -> Vec<KElem> {
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        tr.append_message(label, &i.to_le_bytes());
+        let c0 = tr.challenge_field(b"shout/coord/0");
+        out.push(from_complex(c0, BaseField::ZERO));
     }
     out
 }
@@ -309,6 +340,14 @@ pub fn check_shout_semantics<F: PrimeField>(
 /// - The table must have exactly `k = n_side^d` entries
 /// - The first `ell_table = ceil(log2(k))` bits of `r_addr` correspond to the table index
 /// - All `d * ell` address bits participate in the eq(bits, r_addr) computation
+///
+/// # Parameters
+/// - `ell_cycle`: The log₂ of the cycle domain size (must match `ell_n` from the ME structure)
+/// - `m_in`: The number of public input columns (must match the ME structure for X shape)
+/// - `external_r_cycle`: If provided, use this as `r_cycle` instead of sampling from transcript.
+///   This is used for r-alignment when merging CPU and memory ME claims via RLC.
+///   **Soundness requirement**: When using external `r_cycle`, the caller must ensure
+///   it was derived AFTER all Shout commitments were absorbed into the transcript.
 pub fn prove<L, Cmt, F, K>(
     _mode: FoldingMode,
     tr: &mut Poseidon2Transcript,
@@ -316,6 +355,10 @@ pub fn prove<L, Cmt, F, K>(
     inst: &LutInstance<Cmt, F>,
     wit: &LutWitness<F>,
     _l: &L,
+    ell_cycle: usize,
+    m_in: usize,
+    external_r_cycle: Option<&[KElem]>,
+    external_r_addr: Option<&[KElem]>,
 ) -> Result<(Vec<MeInstance<Cmt, F, K>>, Vec<Mat<F>>, ShoutProof<KElem>), PiCcsError>
 where
     F: PrimeField + Into<KElem> + Copy,
@@ -345,14 +388,43 @@ where
         inst.k
     );
 
-    let pow2_cycle = steps.next_power_of_two().max(1);
-    let ell_cycle = pow2_cycle.trailing_zeros() as usize;
+    // Use the provided ell_cycle (should match ell_n from the ME structure)
+    let pow2_cycle = 1usize << ell_cycle;
+    if steps > pow2_cycle {
+        return Err(PiCcsError::InvalidInput(format!(
+            "Shout: steps={steps} exceeds 2^ell_cycle={pow2_cycle} (ell_cycle={ell_cycle})"
+        )));
+    }
 
     // =========================================================================
-    // Phase 1: Sample random points
+    // Phase 1: Sample random points (or use external r_cycle for r-alignment)
     // =========================================================================
-    let r_cycle = sample_ext_point(tr, b"shout/r_cycle", ell_cycle);
-    let r_addr = sample_ext_point(tr, b"shout/r_addr", total_addr_bits);
+    
+    // Use external r_cycle if provided (for r-alignment with CPU), otherwise sample
+    let r_cycle: Vec<KElem> = match external_r_cycle {
+        Some(ext_r) => {
+            if ext_r.len() != ell_cycle {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "Shout: external_r_cycle.len()={} != ell_cycle={}", ext_r.len(), ell_cycle
+                )));
+            }
+            ext_r.to_vec()
+        }
+        None => sample_ext_point(tr, b"shout/r_cycle", ell_cycle),
+    };
+    let r_addr: Vec<KElem> = match external_r_addr {
+        Some(ext_r) => {
+            if ext_r.len() != total_addr_bits {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "Shout: external_r_addr.len()={} != total_addr_bits={}",
+                    ext_r.len(),
+                    total_addr_bits
+                )));
+            }
+            ext_r.to_vec()
+        }
+        None => sample_base_addr_point(tr, b"shout/r_addr", total_addr_bits),
+    };
 
     // =========================================================================
     // Phase 2: Decode witness from committed columns
@@ -487,11 +559,12 @@ where
 
         MeInstance {
             c: comm.clone(),
-            X: Mat::from_row_major(params.d as usize, 0, vec![]),
+            // X is present but irrelevant for Shout; fill with zeros to match ME structure shape
+            X: Mat::zero(params.d as usize, m_in, F::ZERO),
             r: r.iter().map(|&x| K::from(x)).collect(),
             y: vec![y_vec],
             y_scalars: vec![K::from(y_eval)],
-            m_in: 0,
+            m_in,
             fold_digest,
             c_step_coords: vec![],
             u_offset: 0,
@@ -499,22 +572,27 @@ where
         }
     };
 
+    // Use r_cycle as the evaluation point for ME claims (for r-alignment with CPU)
+    // This ensures all ME claims (CPU + memory) share the same `r` for RLC merge.
+    let eval_point = &r_cycle;
+
     // ME claims for address bits
     for (i, bits) in addr_bits.iter().enumerate() {
-        me_instances.push(create_me(&inst.comms[i], bits, &adapter_chals));
+        me_instances.push(create_me(&inst.comms[i], bits, eval_point));
         me_witnesses.push(parts.addr_bit_mats[i].clone());
     }
 
     // ME claim for has_lookup
     let has_lookup_idx = total_addr_bits;
-    me_instances.push(create_me(&inst.comms[has_lookup_idx], &has_lookup, &adapter_chals));
+    me_instances.push(create_me(&inst.comms[has_lookup_idx], &has_lookup, eval_point));
     me_witnesses.push(parts.has_lookup_mat.clone());
 
     // ME claim for val
     let val_idx = total_addr_bits + 1;
-    me_instances.push(create_me(&inst.comms[val_idx], &val_vec, &adapter_chals));
+    me_instances.push(create_me(&inst.comms[val_idx], &val_vec, eval_point));
     me_witnesses.push(parts.val_mat.clone());
 
+    let _ = adapter_chals; // Suppress warning
     let _ = lookup_chals; // Suppress warning
 
     let proof = ShoutProof {
@@ -545,6 +623,8 @@ where
 /// - `proof`: Shout proof containing sum-check rounds
 /// - `prover_me_claims`: ME claims from the prover's proof (to be validated)
 /// - `_l`: S-module homomorphism (unused but kept for API consistency)
+/// - `ell_cycle`: The log₂ of the cycle domain size (must match `ell_n` from the ME structure)
+/// - `external_r_cycle`: If provided, expect ME claims to use this as `r` (for r-alignment).
 ///
 /// # Returns
 /// On success, returns `Ok(())`. The ME claims from `prover_me_claims` should be
@@ -557,6 +637,9 @@ pub fn verify<L, Cmt, F, K>(
     proof: &ShoutProof<KElem>,
     prover_me_claims: &[MeInstance<Cmt, F, K>],
     _l: &L,
+    ell_cycle: usize,
+    external_r_cycle: Option<&[KElem]>,
+    external_r_addr: Option<&[KElem]>,
 ) -> Result<(), PiCcsError>
 where
     F: PrimeField,
@@ -569,12 +652,39 @@ where
     let steps = inst.steps;
     let total_addr_bits = d * ell;
 
-    let pow2_cycle = steps.next_power_of_two().max(1);
-    let ell_cycle = pow2_cycle.trailing_zeros() as usize;
+    // Use the provided ell_cycle (should match ell_n from the ME structure)
+    let pow2_cycle = 1usize << ell_cycle;
+    if steps > pow2_cycle {
+        return Err(PiCcsError::InvalidInput(format!(
+            "Shout verify: steps={steps} exceeds 2^ell_cycle={pow2_cycle} (ell_cycle={ell_cycle})"
+        )));
+    }
 
     // Sample the same random points
-    let r_cycle = sample_ext_point(tr, b"shout/r_cycle", ell_cycle);
-    let r_addr = sample_ext_point(tr, b"shout/r_addr", total_addr_bits);
+    let r_cycle = match external_r_cycle {
+        Some(ext_r) => {
+            if ext_r.len() != ell_cycle {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "Shout verify: external_r_cycle.len()={} != ell_cycle={}", ext_r.len(), ell_cycle
+                )));
+            }
+            ext_r.to_vec()
+        }
+        None => sample_ext_point(tr, b"shout/r_cycle", ell_cycle),
+    };
+    let r_addr = match external_r_addr {
+        Some(ext_r) => {
+            if ext_r.len() != total_addr_bits {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "Shout verify: external_r_addr.len()={} != total_addr_bits={}",
+                    ext_r.len(),
+                    total_addr_bits
+                )));
+                }
+            ext_r.to_vec()
+        }
+        None => sample_base_addr_point(tr, b"shout/r_addr", total_addr_bits),
+    };
 
     // Verify adapter sum-check using claimed sum from proof
     let adapter_degree = 1 + total_addr_bits;
@@ -589,7 +699,8 @@ where
     }
 
     // Verify lookup sum-check using claimed sum from proof
-    let lookup_degree = 2 + total_addr_bits;
+    // Degree = eq_cycle (1) + has_lookup (1) + delta (1) + bit_eq_factors (total_addr_bits)
+    let lookup_degree = 3 + total_addr_bits;
     let (lookup_chals, lookup_final, lookup_ok) = neo_reductions::sumcheck::verify_sumcheck_rounds(
         tr,
         lookup_degree,
@@ -622,8 +733,14 @@ where
         )));
     }
 
-    // The evaluation point for ME claims is derived from adapter_chals
-    let expected_eval_point: Vec<K> = adapter_chals.iter().map(|&x| K::from(x)).collect();
+    // The evaluation point for ME claims:
+    // - If external_r_cycle is provided (r-alignment mode), use that
+    // - Otherwise, use r_cycle sampled from transcript
+    let expected_eval_point: Vec<K> = match external_r_cycle {
+        Some(ext_r) => ext_r.iter().map(|&x| K::from(x)).collect(),
+        None => r_cycle.iter().map(|&x| K::from(x)).collect(),
+    };
+    let _ = adapter_chals; // Suppress warning
 
     // Verify each ME claim has the correct commitment and evaluation point
     let comms_len = inst.comms.len();
@@ -657,6 +774,7 @@ where
         lookup_final,
         lookup_chals,
         params,
+        pow2_cycle,
     );
 
     Ok(())

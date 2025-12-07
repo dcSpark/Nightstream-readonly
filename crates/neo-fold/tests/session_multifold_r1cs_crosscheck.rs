@@ -113,8 +113,10 @@ fn test_session_multifold_k3_three_steps_r1cs_crosscheck() {
             params.k_rho
         );
     }
+    // Final outputs are the dec_children of the last step
+    let final_outputs = &run.steps.last().unwrap().dec_children;
     assert_eq!(
-        run.final_outputs.len(),
+        final_outputs.len(),
         params.k_rho as usize,
         "final outputs should have k_rho={}",
         params.k_rho

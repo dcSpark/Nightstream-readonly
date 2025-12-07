@@ -307,26 +307,35 @@ fn draw_alphabet_vector(
     out
 }
 
-/// Sample rotation matrices ρ_i = rot(a_i) for ΠRLC with a_i having small coefficients.
+/// Sample `count` rotation matrices ρ_i = rot(a_i) for ΠRLC with a_i having small coefficients.
 ///
 /// This is the **paper-compliant** ΠRLC sampler (Section 4.5, Definition 14).
 ///
-/// Properties:
-/// - Strong sampling set: differences (ρ_i - ρ_j) are invertible for distinct i,j (Theorem 1).
-/// - Expansion factor T: Computed from ring/alphabet via Theorem 3: T ≤ 2·φ(η)·max|coeff|.
-/// - ΠRLC bound: Enforces (k_rho+1)·T·(b-1) < b^{k_rho} where k_rho = params.k_rho.
+/// ## Key Insight: Decoupling `count` from `k_rho`
+///
+/// - `k_rho` controls the **DEC exponent** (accumulator width, B = b^{k_rho})
+/// - `count` is the **number of ME claims being RLC'd** (can be different from k_rho+1)
+///
+/// The soundness constraint is: `count · T · (b-1) < b^{k_rho}`
+/// - If this fails, you need to increase `k_rho` or reduce `count` (e.g., hierarchical merging)
+///
+/// ## Properties
+/// - Strong sampling set: differences (ρ_i - ρ_j) are invertible for distinct i,j (Theorem 1)
+/// - Expansion factor T: Computed from ring/alphabet via Theorem 3: T ≤ 2·φ(η)·max|coeff|
 ///
 /// # Arguments
 /// * `tr` - Fiat-Shamir transcript for deterministic randomness
-/// * `params` - Neo parameters (params.k_rho determines the number of challenges: k_rho+1)
+/// * `params` - Neo parameters (k_rho determines norm bound B = b^{k_rho})
 /// * `ring` - Ring metadata (cyclotomic polynomial and coefficient alphabet)
+/// * `count` - Number of rhos to sample (= number of ME claims being RLC'd)
 ///
 /// # Returns
-/// `params.k_rho + 1` rotation matrices ρ_i ∈ S ⊆ F^{D×D}, or error if parameter checks fail.
-pub fn sample_rot_rhos(
+/// `count` rotation matrices ρ_i ∈ S ⊆ F^{D×D}, or error if soundness checks fail.
+pub fn sample_rot_rhos_n(
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
     ring: &RotRing,
+    count: usize,
 ) -> Result<Vec<Mat<F>>, PiCcsError> {
     // ---- Sanity checks ----
     if ring.phi_coeffs.len() != D {
@@ -338,6 +347,9 @@ pub fn sample_rot_rhos(
     }
     if ring.alphabet.is_empty() {
         return Err(PiCcsError::InvalidInput("alphabet is empty".into()));
+    }
+    if count == 0 {
+        return Err(PiCcsError::InvalidInput("count must be > 0".into()));
     }
 
     // ---- Strong sampling set check (Definition 14 + Theorem 1) ----
@@ -353,39 +365,53 @@ pub fn sample_rot_rhos(
         }
     }
 
-    // ---- ΠRLC bound check (Section 4.3) ----
-    // T is the expansion factor from Theorem 3: T ≤ 2·φ(η)·max|coeff|
-    // This is a property of the rotation matrices, NOT a folding parameter
+    // ---- ΠRLC norm bound check (Section 4.3) ----
+    // The REAL constraint: count · T · (b-1) < b^{k_rho}
+    // This ensures the combined witness after RLC stays within norm bound B = b^{k_rho}
     let T = expansion_factor_T(ring.alphabet);
-
-    // ΠRLC precondition: (k_rho+1)·T·(b-1) < b^{k_rho}
-    // where k_rho = params.k_rho (the decomposition exponent from the preset)
     let b = params.b as u128;
-    let k_rho = params.k_rho as u128;
-    let lhs = (k_rho + 1) * T * (b.saturating_sub(1));
-
-    let mut b_pow_k = 1u128;
-    for _ in 0..params.k_rho {
-        b_pow_k = b_pow_k.saturating_mul(b);
-    }
-
+    let k_rho = params.k_rho;
+    
+    // Compute b^{k_rho} carefully to avoid overflow
+    let b_pow_k: u128 = if k_rho >= 64 {
+        // For k_rho >= 64 with b=2, b^k would overflow u128
+        // But we also need B < q/2, so this is already invalid
+        return Err(PiCcsError::InvalidInput(format!(
+            "k_rho={} is too large (b^k_rho would overflow); max is ~62 for b=2",
+            k_rho
+        )));
+    } else {
+        (b as u128).checked_pow(k_rho).ok_or_else(|| {
+            PiCcsError::InvalidInput(format!("b^k_rho overflow: b={}, k_rho={}", b, k_rho))
+        })?
+    };
+    
+    let lhs = (count as u128) * T * (b.saturating_sub(1));
+    
     if lhs >= b_pow_k {
         return Err(PiCcsError::InvalidInput(format!(
-            "ΠRLC bound violated: (k_rho+1)·T·(b-1) = {}·{}·{} = {} must be < b^{{k_rho}} = {} (Section 4.3)\n\
-             where k_rho={} is params.k_rho (preset decomposition exponent), T={} is the expansion factor (Theorem 3)",
-            k_rho + 1,
+            "ΠRLC norm bound violated: count·T·(b-1) = {}·{}·{} = {} must be < b^{{k_rho}} = {} (Section 4.3)\n\
+             count={} is the number of ME claims being RLC'd\n\
+             k_rho={} controls the norm bound B = b^k_rho = {}\n\
+             T={} is the expansion factor (Theorem 3)\n\
+             \n\
+             Solutions:\n\
+             1. Increase k_rho to allow more claims (increases accumulator size)\n\
+             2. Use hierarchical merging to reduce count\n\
+             3. Reduce the number of memory ME claims",
+            count,
             T,
             b - 1,
             lhs,
             b_pow_k,
-            params.k_rho,
+            count,
+            k_rho,
+            b_pow_k,
             T
         )));
     }
 
     // ---- Sample ρ_i = rot(a_i) ----
-    // Paper ΠRLC: V samples p_1,...,p_{k_rho+1} ← C (Section 4.5)
-    let count = (params.k_rho as usize) + 1;
     let mut out = Vec::with_capacity(count);
 
     for i in 0..count {
@@ -404,6 +430,18 @@ pub fn sample_rot_rhos(
     }
 
     Ok(out)
+}
+
+/// Sample `k_rho + 1` rotation matrices (legacy API for backwards compatibility).
+///
+/// This is equivalent to `sample_rot_rhos_n(tr, params, ring, params.k_rho + 1)`.
+/// For new code, prefer `sample_rot_rhos_n` with explicit count.
+pub fn sample_rot_rhos(
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    ring: &RotRing,
+) -> Result<Vec<Mat<F>>, PiCcsError> {
+    sample_rot_rhos_n(tr, params, ring, (params.k_rho as usize) + 1)
 }
 
 // ---------------------------------------------------------------------------

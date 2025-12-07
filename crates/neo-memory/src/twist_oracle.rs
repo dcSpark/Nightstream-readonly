@@ -244,15 +244,15 @@ impl TwistReadCheckOracle {
     /// - `r_addr`: Random point for address dimension (ell_total = d*ell bits)
     pub fn new(
         ra_bits: &[Vec<K>],
-        val_at_r_addr: Vec<K>,
+        val_at_read_addr: Vec<K>,
         rv: Vec<K>,
         has_read: Vec<K>,
         r_cycle: &[K],
         r_addr: &[K],
     ) -> Self {
         let pow2_cycle = 1usize << r_cycle.len();
-        let n = val_at_r_addr.len();
-        assert_eq!(n, pow2_cycle, "val_at_r_addr length must match cycle domain");
+        let n = val_at_read_addr.len();
+        assert_eq!(n, pow2_cycle, "val_at_read_addr length must match cycle domain");
         assert_eq!(rv.len(), pow2_cycle, "rv length must match cycle domain");
         assert_eq!(has_read.len(), pow2_cycle, "has_read length must match cycle domain");
         assert_eq!(ra_bits.len(), r_addr.len(), "ra_bits count must match r_addr length");
@@ -263,9 +263,9 @@ impl TwistReadCheckOracle {
 
         // 2. has_read(t)
         // 3. (Val(ra_t, t) - rv(t)) - value at actual read address minus observed read value
-        //    Note: val_at_r_addr parameter contains Val(ra_t, t), the memory value at the
+        //    Note: val_at_read_addr parameter contains Val(ra_t, t), the memory value at the
         //    actual read address, NOT Val(r_addr, t) at the random challenge point.
-        let diff: Vec<K> = val_at_r_addr
+        let diff: Vec<K> = val_at_read_addr
             .iter()
             .zip(rv.iter())
             .map(|(v, r)| *v - *r)
@@ -292,8 +292,8 @@ impl TwistReadCheckOracle {
 
             // Show first few values of each input
             eprintln!(
-                "  val_at_r_addr[0..4]: [{}]",
-                val_at_r_addr
+                "  val_at_read_addr[0..4]: [{}]",
+                val_at_read_addr
                     .iter()
                     .take(4)
                     .map(|v| format_k(v))

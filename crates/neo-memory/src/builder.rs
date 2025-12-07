@@ -1,12 +1,13 @@
 use crate::encode::{encode_lut_for_shout, encode_mem_for_twist};
-use crate::plain::{build_plain_lut_traces, build_plain_mem_traces, LutTable, PlainMemLayout};
-use crate::witness::ShardWitnessBundle;
+use crate::plain::{build_plain_lut_traces, build_plain_mem_traces, LutTable, PlainMemLayout, PlainLutTrace, PlainMemTrace};
+use crate::witness::StepWitnessBundle;
 use neo_vm_trace::VmTrace;
 
 use neo_ccs::matrix::Mat;
 use neo_ccs::relations::{McsInstance, McsWitness};
 use neo_params::NeoParams;
 use p3_goldilocks::Goldilocks;
+use p3_field::PrimeCharacteristicRing;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
@@ -41,7 +42,7 @@ pub fn build_shard_witness<V, Cmt, L, K, A, Tw, Sh>(
     params: &NeoParams,
     commit: &L,
     cpu_arith: &A,
-) -> Result<ShardWitnessBundle<Cmt, Goldilocks, K>, ShardBuildError>
+) -> Result<Vec<StepWitnessBundle<Cmt, Goldilocks, K>>, ShardBuildError>
 where
     V: neo_vm_trace::VmCpu<u64, u64>,
     Tw: neo_vm_trace::Twist<u64, u64>,
@@ -70,30 +71,85 @@ where
     let plain_mem = build_plain_mem_traces::<Goldilocks>(&trace, mem_layouts, initial_mem);
     let plain_lut = build_plain_lut_traces::<Goldilocks>(&trace, &table_sizes);
 
-    // 4) Encode Twist: one MemInstance per mem_id
-    let mut mem_shard_instances = Vec::new();
-    for (mem_id, plain) in plain_mem.iter() {
-        let layout = mem_layouts
-            .get(mem_id)
-            .ok_or_else(|| ShardBuildError::MissingLayout(format!("missing PlainMemLayout for twist_id {}", mem_id)))?;
-        let (inst, wit) = encode_mem_for_twist(params, layout, plain, commit);
-        mem_shard_instances.push((inst, wit));
+    // 4) Encode per-step Twist/Shout instances
+    let steps_len = trace.steps.len();
+    if mcss.len() != steps_len {
+        return Err(ShardBuildError::CcsError(format!(
+            "cpu arithmetization returned {} steps, trace has {}",
+            mcss.len(),
+            steps_len
+        )));
     }
 
-    // 5) Encode Shout: one LutInstance per table
-    let mut lut_shard_instances = Vec::new();
-    for (table_id, plain) in plain_lut.iter() {
-        let table = lut_tables
-            .get(table_id)
-            .ok_or_else(|| ShardBuildError::MissingTable(format!("missing LutTable for shout_id {}", table_id)))?;
-        let (inst, wit) = encode_lut_for_shout(params, table, plain, commit);
-        lut_shard_instances.push((inst, wit));
+    // Track rolling memory state so each per-step witness has the correct init_vals
+    let mut mem_states: HashMap<u32, Vec<Goldilocks>> = HashMap::new();
+    for (mem_id, plain) in &plain_mem {
+        mem_states.insert(*mem_id, plain.init_vals.clone());
     }
 
-    Ok(ShardWitnessBundle {
-        mcss,
-        lut_shard_instances,
-        mem_shard_instances,
-        _phantom: PhantomData,
-    })
+    let mut step_bundles = Vec::with_capacity(steps_len);
+
+    for (step_idx, mcs) in mcss.into_iter().enumerate() {
+        // Build per-step memory witnesses
+        let mut mem_instances = Vec::new();
+        for (mem_id, plain) in &plain_mem {
+            let layout = mem_layouts
+                .get(mem_id)
+                .ok_or_else(|| ShardBuildError::MissingLayout(format!("missing PlainMemLayout for twist_id {}", mem_id)))?;
+            let mut state = mem_states
+                .get(mem_id)
+                .cloned()
+                .ok_or_else(|| ShardBuildError::MissingLayout(format!("missing mem state for twist_id {}", mem_id)))?;
+
+            let single_plain = PlainMemTrace {
+                init_vals: state.clone(),
+                steps: 1,
+                has_read: vec![plain.has_read[step_idx]],
+                has_write: vec![plain.has_write[step_idx]],
+                read_addr: vec![plain.read_addr[step_idx]],
+                write_addr: vec![plain.write_addr[step_idx]],
+                read_val: vec![plain.read_val[step_idx]],
+                write_val: vec![plain.write_val[step_idx]],
+                inc: plain.inc.iter().map(|row| vec![row[step_idx]]).collect(),
+            };
+
+            let (inst, wit) = encode_mem_for_twist(params, layout, &single_plain, commit);
+            mem_instances.push((inst, wit));
+
+            // Advance memory state for the next step
+            if plain.has_write[step_idx] == Goldilocks::ONE {
+                let addr = plain.write_addr[step_idx] as usize;
+                if addr < state.len() {
+                    state[addr] = plain.write_val[step_idx];
+                    mem_states.insert(*mem_id, state);
+                }
+            }
+        }
+
+        // Build per-step lookup witnesses
+        let mut lut_instances = Vec::new();
+        for (table_id, plain) in &plain_lut {
+            let table = lut_tables
+                .get(table_id)
+                .ok_or_else(|| ShardBuildError::MissingTable(format!("missing LutTable for shout_id {}", table_id)))?;
+
+            let single_plain = PlainLutTrace {
+                has_lookup: vec![plain.has_lookup[step_idx]],
+                addr: vec![plain.addr[step_idx]],
+                val: vec![plain.val[step_idx]],
+            };
+
+            let (inst, wit) = encode_lut_for_shout(params, table, &single_plain, commit);
+            lut_instances.push((inst, wit));
+        }
+
+        step_bundles.push(StepWitnessBundle {
+            mcs,
+            lut_instances,
+            mem_instances,
+            _phantom: PhantomData,
+        });
+    }
+
+    Ok(step_bundles)
 }

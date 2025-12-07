@@ -26,12 +26,13 @@
 //! - `2*d*ell + 4`:          rv(j)
 
 use crate::witness::{MemInstance, MemWitness};
+use neo_ajtai::Commitment as AjtaiCmt;
 use neo_ccs::matrix::Mat;
 use neo_ccs::relations::MeInstance;
 use neo_params::NeoParams;
 use neo_reductions::api::FoldingMode;
 use neo_reductions::error::PiCcsError;
-use neo_transcript::{Poseidon2Transcript, Transcript};
+use neo_transcript::{Poseidon2Transcript, Transcript, TranscriptProtocol};
 use p3_field::{PrimeCharacteristicRing, PrimeField};
 use serde::{Deserialize, Serialize};
 
@@ -44,7 +45,7 @@ use crate::twist_oracle::{
 use neo_ccs::traits::SModuleHomomorphism;
 #[cfg(feature = "debug-logs")]
 use neo_math::KExtensions;
-use neo_math::{from_complex, K as KElem};
+use neo_math::{from_complex, F as BaseField, K as KElem};
 use neo_reductions::sumcheck::run_sumcheck_prover;
 
 // ============================================================================
@@ -104,6 +105,16 @@ fn sample_ext_point(tr: &mut Poseidon2Transcript, label: &'static [u8], len: usi
     out
 }
 
+fn sample_base_addr_point(tr: &mut Poseidon2Transcript, label: &'static [u8], len: usize) -> Vec<KElem> {
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        tr.append_message(label, &i.to_le_bytes());
+        let c0 = tr.challenge_field(b"twist/coord/0");
+        out.push(from_complex(c0, BaseField::ZERO));
+    }
+    out
+}
+
 /// Pad a vector to the given length with zeros.
 pub fn pad_to_pow2<T: Clone + Default>(v: &[T], pow2_len: usize) -> Vec<T> {
     let mut out = v.to_vec();
@@ -116,6 +127,26 @@ pub fn pad_cycle_k(v: &[KElem], pow2_cycle: usize) -> Vec<KElem> {
     let mut out = v.to_vec();
     out.resize(pow2_cycle, KElem::ZERO);
     out
+}
+
+// ============================================================================
+// Commitment Absorption (for Fiat-Shamir soundness)
+// ============================================================================
+
+/// Absorb all Twist commitments into the transcript.
+///
+/// **MUST be called BEFORE deriving any random challenge that will be used
+/// for opening these commitments** (e.g., the canonical `r_cycle` from CPU folding).
+///
+/// This ensures Fiat-Shamir soundness: the prover cannot choose commitments
+/// after seeing the evaluation point.
+pub fn absorb_commitments<F>(tr: &mut Poseidon2Transcript, inst: &MemInstance<AjtaiCmt, F>) {
+    tr.append_message(b"twist/absorb_commitments", &(inst.comms.len() as u64).to_le_bytes());
+    for (i, comm) in inst.comms.iter().enumerate() {
+        tr.append_message(b"twist/comm_idx", &(i as u64).to_le_bytes());
+        // Absorb the commitment's field elements
+        tr.absorb_commit_coords(&comm.data);
+    }
 }
 
 // ============================================================================
@@ -315,6 +346,14 @@ pub fn check_twist_semantics<F: PrimeField>(
 ///
 /// Returns ME instances that reduce the Twist claim to commitments openings,
 /// which can then be folded using Neo's standard RLC→DEC pipeline.
+///
+/// # Parameters
+/// - `ell_cycle`: The log₂ of the cycle domain size (must match `ell_n` from the ME structure)
+/// - `m_in`: The number of public input columns (must match the ME structure for X shape)
+/// - `external_r_cycle`: If provided, use this as `r_cycle` instead of sampling from transcript.
+///   This is used for r-alignment when merging CPU and memory ME claims via RLC.
+///   **Soundness requirement**: When using external `r_cycle`, the caller must ensure
+///   it was derived AFTER all Twist commitments were absorbed into the transcript.
 pub fn prove<L, Cmt, F, K>(
     _mode: FoldingMode,
     tr: &mut Poseidon2Transcript,
@@ -322,6 +361,10 @@ pub fn prove<L, Cmt, F, K>(
     inst: &MemInstance<Cmt, F>,
     wit: &MemWitness<F>,
     _l: &L,
+    ell_cycle: usize,
+    m_in: usize,
+    external_r_cycle: Option<&[KElem]>,
+    external_r_addr: Option<&[KElem]>,
 ) -> Result<(Vec<MeInstance<Cmt, F, K>>, Vec<Mat<F>>, TwistProof<KElem>), PiCcsError>
 where
     F: PrimeField + Into<KElem> + Copy,
@@ -340,16 +383,45 @@ where
     let steps = inst.steps;
     let total_addr_bits = d * ell;
 
-    let pow2_cycle = steps.next_power_of_two().max(1);
-    let ell_cycle = pow2_cycle.trailing_zeros() as usize;
+    // Use the provided ell_cycle (should match ell_n from the ME structure)
+    let pow2_cycle = 1usize << ell_cycle;
+    if steps > pow2_cycle {
+        return Err(PiCcsError::InvalidInput(format!(
+            "Twist: steps={steps} exceeds 2^ell_cycle={pow2_cycle} (ell_cycle={ell_cycle})"
+        )));
+    }
 
     // =========================================================================
-    // Phase 1: Sample random points
+    // Phase 1: Sample random points (or use external r_cycle for r-alignment)
     // =========================================================================
 
     // r_addr has total_addr_bits components (for the bit-decomposed address)
-    let r_addr = sample_ext_point(tr, b"twist/r_addr", total_addr_bits);
-    let r_cycle = sample_ext_point(tr, b"twist/r_cycle", ell_cycle);
+    let r_addr: Vec<KElem> = match external_r_addr {
+        Some(ext_r) => {
+            if ext_r.len() != total_addr_bits {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "Twist: external_r_addr.len()={} != total_addr_bits={}",
+                    ext_r.len(),
+                    total_addr_bits
+                )));
+            }
+            ext_r.to_vec()
+        }
+        None => sample_base_addr_point(tr, b"twist/r_addr", total_addr_bits),
+    };
+    
+    // Use external r_cycle if provided (for r-alignment with CPU), otherwise sample
+    let r_cycle: Vec<KElem> = match external_r_cycle {
+        Some(ext_r) => {
+            if ext_r.len() != ell_cycle {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "Twist: external_r_cycle.len()={} != ell_cycle={}", ext_r.len(), ell_cycle
+                )));
+            }
+            ext_r.to_vec()
+        }
+        None => sample_ext_point(tr, b"twist/r_cycle", ell_cycle),
+    };
 
     // =========================================================================
     // Phase 2: Decode witness and build tables
@@ -618,7 +690,7 @@ where
         &r_cycle,
         &r_addr,
     );
-    let (read_check_rounds, read_chals) = run_sumcheck_prover(tr, &mut read_oracle, KElem::ZERO)
+    let (read_check_rounds, _read_chals) = run_sumcheck_prover(tr, &mut read_oracle, KElem::ZERO)
         .map_err(|e| PiCcsError::SumcheckError(format!("read-check: {e}")))?;
 
     // =========================================================================
@@ -680,8 +752,9 @@ where
     let mut me_instances: Vec<MeInstance<Cmt, F, K>> = Vec::new();
     let mut me_witnesses: Vec<Mat<F>> = Vec::new();
 
-    // Combine all challenges into evaluation points
-    let eval_point_cycle = read_chals.clone(); // All sum-checks use cycle dimension
+    // Use r_cycle as the evaluation point for ME claims (for r-alignment with CPU)
+    // This ensures all ME claims (CPU + memory) share the same `r` for RLC merge.
+    let eval_point_cycle = r_cycle.clone();
 
     // Y padding length for the ME relation (padded to next power of two over D rows)
     let d = params.d as usize;
@@ -704,11 +777,12 @@ where
 
         MeInstance {
             c: comm.clone(),
-            X: Mat::from_row_major(d, 0, vec![]),
+            // X is present but irrelevant for Twist; fill with zeros to match ME structure shape
+            X: Mat::zero(d, m_in, F::ZERO),
             r: r.iter().map(|&x| K::from(x)).collect(),
             y: vec![y_vec],
             y_scalars: vec![y_scalar],
-            m_in: 0,
+            m_in,
             fold_digest,
             c_step_coords: vec![],
             u_offset: 0,
@@ -760,6 +834,16 @@ where
 
     // ME claims for data columns
     let data_offset = 2 * total_addr_bits;
+    // Inc
+    eval_and_push(
+        &mut me_instances,
+        &mut me_witnesses,
+        &inst.comms[data_offset],
+        parts.inc_mat,
+        &eval_point_cycle,
+        &mut mk_me,
+    );
+    // has_read
     eval_and_push(
         &mut me_instances,
         &mut me_witnesses,
@@ -768,6 +852,7 @@ where
         &eval_point_cycle,
         &mut mk_me,
     );
+    // has_write
     eval_and_push(
         &mut me_instances,
         &mut me_witnesses,
@@ -776,6 +861,7 @@ where
         &eval_point_cycle,
         &mut mk_me,
     );
+    // wv
     eval_and_push(
         &mut me_instances,
         &mut me_witnesses,
@@ -784,6 +870,7 @@ where
         &eval_point_cycle,
         &mut mk_me,
     );
+    // rv
     eval_and_push(
         &mut me_instances,
         &mut me_witnesses,
@@ -792,14 +879,6 @@ where
         &eval_point_cycle,
         &mut mk_me,
     );
-
-    // Note: We intentionally do NOT create an ME claim for Inc.
-    // The Inc matrix is only used internally within the Twist sum-checks
-    // (via build_inc_at_r_addr and TwistValEvalOracle). Creating an ME claim
-    // for Inc would require evaluation over (r_addr, r_cycle) which has
-    // total_addr_bits + ell_cycle dimensions - potentially 40+ bits causing
-    // a 2^40+ allocation blow-up. The Inc commitment is still part of
-    // MemInstance.comms, but we don't separately open it as an ME claim.
 
     let proof = TwistProof {
         read_check_rounds,
@@ -833,6 +912,8 @@ where
 /// - `proof`: Twist proof containing sum-check rounds
 /// - `prover_me_claims`: ME claims from the prover's proof (to be validated)
 /// - `_l`: S-module homomorphism (unused but kept for API consistency)
+/// - `ell_cycle`: The log₂ of the cycle domain size (must match `ell_n` from the ME structure)
+/// - `external_r_cycle`: If provided, expect ME claims to use this as `r` (for r-alignment).
 ///
 /// # Returns
 /// On success, returns `Ok(())`. The ME claims from `prover_me_claims` should be
@@ -845,6 +926,9 @@ pub fn verify<L, Cmt, F, K>(
     proof: &TwistProof<KElem>,
     prover_me_claims: &[MeInstance<Cmt, F, K>],
     _l: &L,
+    ell_cycle: usize,
+    external_r_cycle: Option<&[KElem]>,
+    external_r_addr: Option<&[KElem]>,
 ) -> Result<(), PiCcsError>
 where
     F: PrimeField,
@@ -857,13 +941,43 @@ where
     let steps = inst.steps;
     let total_addr_bits = d * ell;
 
-    let pow2_cycle = steps.next_power_of_two().max(1);
-    let ell_cycle = pow2_cycle.trailing_zeros() as usize;
+    // Use the provided ell_cycle (should match ell_n from the ME structure)
+    let pow2_cycle = 1usize << ell_cycle;
+    if steps > pow2_cycle {
+        return Err(PiCcsError::InvalidInput(format!(
+            "Twist verify: steps={steps} exceeds 2^ell_cycle={pow2_cycle} (ell_cycle={ell_cycle})"
+        )));
+    }
 
     // Sample exactly the same random points as prover, in the same order.
-    // Note: The prover samples r_addr and r_cycle only (no r_k).
-    let _r_addr = sample_ext_point(tr, b"twist/r_addr", total_addr_bits);
-    let _r_cycle = sample_ext_point(tr, b"twist/r_cycle", ell_cycle);
+    // Note: The prover samples r_addr; r_cycle may be external (for r-alignment).
+    match external_r_addr {
+        Some(ext_r) => {
+            if ext_r.len() != total_addr_bits {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "Twist verify: external_r_addr.len()={} != total_addr_bits={}",
+                    ext_r.len(),
+                    total_addr_bits
+                )));
+            }
+        }
+        None => {
+            let _ = sample_base_addr_point(tr, b"twist/r_addr", total_addr_bits);
+        }
+    }
+    
+    // Use external r_cycle if provided (for r-alignment with CPU), otherwise sample
+    let r_cycle: Vec<KElem> = match external_r_cycle {
+        Some(ext_r) => {
+            if ext_r.len() != ell_cycle {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "Twist verify: external_r_cycle.len()={} != ell_cycle={}", ext_r.len(), ell_cycle
+                )));
+            }
+            ext_r.to_vec()
+        }
+        None => sample_ext_point(tr, b"twist/r_cycle", ell_cycle),
+    };
 
     // Verify read-check sum-check using claimed sum from proof
     let read_degree = 3 + total_addr_bits; // eq_cycle, has_read, diff, bit_eq_factors
@@ -909,7 +1023,7 @@ where
     // The expected number of ME claims matches the prover's commitment count minus Inc
     // Layout: [ra_bits (d*ell), wa_bits (d*ell), has_read, has_write, wv, rv]
     // Note: Inc is NOT included as an ME claim (see prover comment)
-    let expected_me_count = 2 * total_addr_bits + 4; // ra_bits + wa_bits + 4 data columns
+    let expected_me_count = 2 * total_addr_bits + 5; // ra_bits + wa_bits + Inc + 4 data columns
     if prover_me_claims.len() != expected_me_count {
         return Err(PiCcsError::InvalidInput(format!(
             "Twist ME claims count mismatch: expected {}, got {}",
@@ -918,18 +1032,19 @@ where
         )));
     }
 
-    // The evaluation point for ME claims is derived from read_chals (cycle dimension)
-    let expected_eval_point: Vec<K> = read_chals.iter().map(|&x| K::from(x)).collect();
+    // The evaluation point for ME claims is r_cycle (for r-alignment with CPU)
+    let expected_eval_point: Vec<K> = r_cycle.iter().map(|&x| K::from(x)).collect();
+    let _ = read_chals; // Suppress warning
 
     // Verify each ME claim has the correct commitment and evaluation point
     // Commitment mapping:
     // - inst.comms[0..d*ell]: ra_bits -> me_claims[0..d*ell]
     // - inst.comms[d*ell..2*d*ell]: wa_bits -> me_claims[d*ell..2*d*ell]
-    // - inst.comms[2*d*ell]: Inc (NOT in ME claims)
-    // - inst.comms[2*d*ell+1]: has_read -> me_claims[2*d*ell]
-    // - inst.comms[2*d*ell+2]: has_write -> me_claims[2*d*ell+1]
-    // - inst.comms[2*d*ell+3]: wv -> me_claims[2*d*ell+2]
-    // - inst.comms[2*d*ell+4]: rv -> me_claims[2*d*ell+3]
+    // - inst.comms[2*d*ell]: Inc -> me_claims[2*d*ell]
+    // - inst.comms[2*d*ell+1]: has_read -> me_claims[2*d*ell+1]
+    // - inst.comms[2*d*ell+2]: has_write -> me_claims[2*d*ell+2]
+    // - inst.comms[2*d*ell+3]: wv -> me_claims[2*d*ell+3]
+    // - inst.comms[2*d*ell+4]: rv -> me_claims[2*d*ell+4]
     let data_offset = 2 * total_addr_bits;
 
     for (i, me) in prover_me_claims.iter().enumerate() {
@@ -937,8 +1052,7 @@ where
         let comm_idx = if i < data_offset {
             i // Address bits: direct mapping
         } else {
-            // Data columns: skip Inc at position data_offset
-            i + 1
+            data_offset + (i - data_offset)
         };
 
         if comm_idx >= inst.comms.len() {
@@ -971,6 +1085,7 @@ where
         write_chals,
         val_chals,
         params,
+        pow2_cycle,
     );
 
     Ok(())

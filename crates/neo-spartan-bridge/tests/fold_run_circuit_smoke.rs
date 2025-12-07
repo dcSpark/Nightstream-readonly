@@ -104,20 +104,20 @@ fn build_trivial_fold_run_and_instance() -> (FoldRunInstance, FoldRunWitness) {
         dec_children: dec_children.clone(),
     };
 
-    // FoldRun with one step and final outputs equal to DEC children.
+    // FoldRun with one step (final outputs computed from steps).
     let run = FoldRun {
         steps: vec![step],
-        final_outputs: dec_children.clone(),
     };
 
-    // Public instance: empty initial accumulator, final accumulator = final_outputs,
+    // Public instance: empty initial accumulator, final accumulator = DEC children,
     // and zero-valued Π-CCS challenges for the single step.
+    let initial_accumulator: Vec<MeInstance<Cmt, F, K>> = Vec::new();
     let instance = FoldRunInstance {
         params_digest: [0u8; 32],
         ccs_digest: [0u8; 32],
         mcs_digest: [0u8; 32],
-        initial_accumulator: Vec::new(),
-        final_accumulator: run.final_outputs.clone(),
+        initial_accumulator: initial_accumulator.clone(),
+        final_accumulator: run.compute_final_outputs(&initial_accumulator),
         pi_ccs_challenges: vec![dummy_pi_ccs_challenges_zero()],
     };
 

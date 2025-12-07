@@ -40,12 +40,22 @@ pub struct FoldStep {
     pub dec_children: Vec<MeInstance<Cmt, F, K>>,
 }
 
-/// Entire multi-fold run.
+/// Entire multi-fold run (public proof data only - no witnesses).
 #[derive(Clone, Debug)]
 pub struct FoldRun {
     pub steps: Vec<FoldStep>,
-    /// Alias to the last step's children (final outputs)
-    pub final_outputs: Vec<MeInstance<Cmt, F, K>>,
+}
+
+impl FoldRun {
+    /// Compute the final accumulator from the verified steps.
+    /// This is the ground truth - use this instead of any user-provided field.
+    pub fn compute_final_outputs(&self, acc_init: &[MeInstance<Cmt, F, K>]) -> Vec<MeInstance<Cmt, F, K>> {
+        if self.steps.is_empty() {
+            acc_init.to_vec()
+        } else {
+            self.steps.last().unwrap().dec_children.clone()
+        }
+    }
 }
 
 /// Commitment mixers so the coordinator stays scheme-agnostic.
@@ -71,16 +81,13 @@ pub fn plan_num_folds(mcs_count: usize) -> usize {
 // Prover orchestration
 // ---------------------------------------------------------------------------
 
-/// Run all folds (one per MCS). The fan-in `k` is inferred: `k = acc_init.len() + 1`.
+/// Run all folds (one per MCS), returning both the public proof and the final witnesses.
 ///
-/// Inputs:
-/// - `mode`: which Π_CCS engine to use (Optimized / PaperExact / Crosscheck).
-/// - `mcss`: Vec of (MCS instance, witness) to be folded, in order.
-/// - `acc_init`: initial accumulator (k-1 ME(b,L) instances).
-/// - `acc_wit_init`: witnesses Z for the initial accumulator (same order/length as `acc_init`).
-/// - `l`: S-module homomorphism (commitment map) to open children in DEC.
-/// - `mixers`: commitment mixers for RLC and DEC checks.
-pub fn fold_many_prove<L, MR, MB>(
+/// This is the prover's internal function. Use `fold_many_prove` if you only need the proof.
+///
+/// Returns: `(FoldRun, final_witnesses)` where `final_witnesses` are the Z matrices
+/// for the final accumulator (needed for subsequent merge operations).
+pub fn fold_many_prove_with_witnesses<L, MR, MB>(
     mode: FoldingMode,
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
@@ -90,7 +97,7 @@ pub fn fold_many_prove<L, MR, MB>(
     acc_wit_init: &[Mat<F>],
     l: &L,
     mixers: CommitMixers<MR, MB>,
-) -> Result<FoldRun, PiCcsError>
+) -> Result<(FoldRun, Vec<Mat<F>>), PiCcsError>
 where
     F: PrimeField64 + PrimeCharacteristicRing + Copy,
     L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>,
@@ -146,12 +153,12 @@ where
 
         // --- RLC (via facade): pick ρ, combine k → parent
         // Use paper-compliant rotation matrix sampler (Section 4.5, Definition 14)
-        // Paper ΠRLC: V samples p_1,...,p_{k_rho+1} ← C where k_rho = params.k_rho
+        // Sample exactly k rhos (not k_rho+1) - we only need as many as ME claims being merged
         let ring = ccs::RotRing::goldilocks();
-        let rhos = ccs::sample_rot_rhos(tr, params, &ring)?;
+        let rhos = ccs::sample_rot_rhos_n(tr, params, &ring, k)?;
 
-        // Use only the first k rhos for the actual RLC (k = runtime folding count)
-        let rhos_for_rlc = &rhos[..k];
+        // rhos is exactly k elements (sample_rot_rhos_n enforces norm bound check)
+        let rhos_for_rlc = &rhos[..];
         // Compute parent via RLC and combined witness Z_mix = Σ ρ_i·Z_i
         let (parent_pub, Z_mix) = ccs::rlc_with_commit(
             mode.clone(),
@@ -206,16 +213,39 @@ where
         tr.append_message(b"fold/step_done", &(idx as u64).to_le_bytes());
     }
 
-    let final_outputs = accumulator.clone();
-    Ok(FoldRun { steps, final_outputs })
+    let final_witnesses = accumulator_wit;
+    Ok((FoldRun { steps }, final_witnesses))
+}
+
+/// Convenience wrapper: run all folds, returning only the public proof (discards witnesses).
+pub fn fold_many_prove<L, MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_in: &CcsStructure<F>,
+    mcss: &[(McsInstance<Cmt, F>, McsWitness<F>)],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_wit_init: &[Mat<F>],
+    l: &L,
+    mixers: CommitMixers<MR, MB>,
+) -> Result<FoldRun, PiCcsError>
+where
+    F: PrimeField64 + PrimeCharacteristicRing + Copy,
+    L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>,
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    Ok(fold_many_prove_with_witnesses(mode, tr, params, s_in, mcss, acc_init, acc_wit_init, l, mixers)?.0)
 }
 
 // ---------------------------------------------------------------------------
 // Verifier orchestration
 // ---------------------------------------------------------------------------
 
-/// Verify a multi-fold run end-to-end.
-/// Fan-in `k` is inferred from the initial accumulator: `k = acc_init.len() + 1`.
+/// Verify a multi-fold run end-to-end and return the computed final accumulator.
+///
+/// The returned accumulator is computed from the verified steps (ground truth),
+/// not from any user-provided proof field. Use this for subsequent operations.
 pub fn fold_many_verify<MR, MB>(
     mode: FoldingMode,
     tr: &mut Poseidon2Transcript,
@@ -225,7 +255,7 @@ pub fn fold_many_verify<MR, MB>(
     acc_init: &[MeInstance<Cmt, F, K>],
     run: &FoldRun,
     mixers: CommitMixers<MR, MB>,
-) -> Result<bool, PiCcsError>
+) -> Result<Vec<MeInstance<Cmt, F, K>>, PiCcsError>
 where
     F: PrimeField64 + PrimeCharacteristicRing + Copy,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
@@ -269,22 +299,13 @@ where
 
         // 1b) Sample RLC ρ from transcript and verify they match what the prover used.
         //     This binds the ρ to the Fiat-Shamir transcript, preventing adversarial ρ selection.
+        //     Sample exactly k rhos (same as prover) to keep transcripts synchronized.
         let ring = ccs::RotRing::goldilocks();
-        let rhos_from_tr = ccs::sample_rot_rhos(tr, params, &ring)?;
         let k = step.rlc_rhos.len();
-        if rhos_from_tr.len() < k {
-            return Err(PiCcsError::ProtocolError(format!(
-                "Insufficient RLC rhos sampled: got {}, need {}",
-                rhos_from_tr.len(),
-                k
-            )));
-        }
-        // Check that the first k rhos match (these are the ones used for RLC)
-        for (j, (sampled, stored)) in rhos_from_tr[..k]
-            .iter()
-            .zip(step.rlc_rhos.iter())
-            .enumerate()
-        {
+        let rhos_from_tr = ccs::sample_rot_rhos_n(tr, params, &ring, k)?;
+        
+        // Check that all k rhos match exactly
+        for (j, (sampled, stored)) in rhos_from_tr.iter().zip(step.rlc_rhos.iter()).enumerate() {
             if sampled.as_slice() != stored.as_slice() {
                 return Err(PiCcsError::ProtocolError(format!(
                     "RLC ρ #{} mismatch: transcript vs proof",
@@ -304,7 +325,7 @@ where
             ell_d,
         );
 
-        // Check X, c, r (Π_DEC will validate y)
+        // Check ALL public fields of the RLC parent (X, c, r, y, y_scalars)
         if parent_pub.X.as_slice() != step.rlc_parent.X.as_slice() {
             return Err(PiCcsError::ProtocolError("RLC X mismatch".into()));
         }
@@ -313,6 +334,13 @@ where
         }
         if parent_pub.r != step.rlc_parent.r {
             return Err(PiCcsError::ProtocolError("RLC r mismatch".into()));
+        }
+        // y and y_scalars must match (critical - RLC determines these)
+        if parent_pub.y != step.rlc_parent.y {
+            return Err(PiCcsError::ProtocolError("RLC y mismatch".into()));
+        }
+        if parent_pub.y_scalars != step.rlc_parent.y_scalars {
+            return Err(PiCcsError::ProtocolError("RLC y_scalars mismatch".into()));
         }
 
         // 3) Verify DEC publicly (X, y, c)
@@ -333,5 +361,6 @@ where
         tr.append_message(b"fold/step_done", &(i as u64).to_le_bytes());
     }
 
-    Ok(true)
+    // Return the verified final accumulator (computed from steps, not from proof fields)
+    Ok(accumulator)
 }

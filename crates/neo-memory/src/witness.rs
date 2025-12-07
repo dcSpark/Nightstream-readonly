@@ -52,3 +52,13 @@ pub struct ShardWitnessBundle<Cmt, F, K> {
     #[serde(skip)]
     pub _phantom: PhantomData<K>,
 }
+
+/// Per-step bundle that carries CPU + memory witnesses for a single folding step.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct StepWitnessBundle<Cmt, F, K> {
+    pub mcs: (McsInstance<Cmt, F>, McsWitness<F>),
+    pub lut_instances: Vec<(LutInstance<Cmt, F>, LutWitness<F>)>,
+    pub mem_instances: Vec<(MemInstance<Cmt, F>, MemWitness<F>)>,
+    #[serde(skip)]
+    pub _phantom: PhantomData<K>,
+}

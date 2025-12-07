@@ -2,6 +2,11 @@
 
 This summary outlines the strategy for implementing the Twist and Shout (T&S) memory-checking arguments within the Neo codebase. It is intended for review and validation by researchers familiar with folding schemes, zkVMs, and the relevant literature.
 
+**Terminology upfront (to avoid overload):**
+
+- *Folding step* / *folding chunk*: the unit processed by one iteration of the folding loop (one call to Π_CCS/Π_Twist/Π_Shout). A chunk can be one VM step or a user-defined batch of VM steps.
+- *Shard* (in the code): a trace segment represented as a **collection** of folding chunks. Each chunk is a `StepWitnessBundle` containing one MCS plus the matching Twist/Shout instances for that same chunk. The folding loop advances chunk-by-chunk through the shard; there are no shard-wide Twist/Shout instances, only per-chunk ones.
+
 ### Summary: Integrating Twist and Shout into the Neo Folding Scheme (with index-based addressing + SPARK-style adapter)
 
 #### 1. Context and Problem Statement
@@ -33,7 +38,7 @@ T&S rely on:
 * Sparse increments (Twist),
 * Virtual polynomials (read values, full memory state) accessed via sum-check rather than committed.
 
-Twist models R/W memory via a recurrence: the memory state at step i equals the previous state plus a sparse increment, Val_{i+1} = Val_i + Inc_i. The full memory state vector is never committed; only the sparse increment columns are committed, and Val is computed virtually during sum-check as the prefix-sum of increments. This "rollover" semantic means that each step's memory state carries forward to the next, and the entire trace is validated by a single Twist instance covering all steps.
+Twist models R/W memory via a recurrence: the memory state at step i equals the previous state plus a sparse increment, Val_{i+1} = Val_i + Inc_i. The full memory state vector is never committed; only the sparse increment columns are committed, and Val is computed virtually during sum-check as the prefix-sum of increments. This "rollover" semantic means that each chunk's memory state carries forward to the next; the builder advances `init_vals` between folding chunks so the recurrence spans the whole execution.
 
 #### 3. The Integration Strategy: Unified Folding Interface
 
@@ -46,14 +51,13 @@ The core integration remains unchanged:
 \rightsquigarrow \mathsf{ME}(b,\mathcal{L})^{t_{\mathsf{twi}}}.
 ]
 
-In this design we instantiate **one Twist relation and one Shout relation per shard (per memory/table id)**, each defined over the entire execution trace of that shard. We do *not* define per-step relations TWI\_i/SHO\_i; instead, we run Π_{\mathsf{Twist}} and Π_{\mathsf{Shout}} once per shard, obtaining a batch of (\mathsf{ME}(b,\mathcal{L})) claims that summarize all memory/lookup constraints for that shard.
+We instantiate Twist and Shout **per folding chunk**, not once for the whole shard. Each chunk carries its own Twist/Shout instance (per memory/table id), built from the slice of the trace that belongs to that chunk, with `init_vals` rolled forward from the previous chunk.
 
-At the level of the folding interface, all such ME claims (from CCS and from T&S) are treated uniformly. Conceptually, at a folding step we aggregate:
+At the level of the folding interface, all ME claims (from CCS and from T&S) are treated uniformly. At a folding step we aggregate:
 
 1. (k) running (\mathsf{ME}) instances,
 2. fresh (\mathsf{ME}) instances from (\Pi_{\mathsf{CCS}}),
-3. any fresh (\mathsf{ME}) instances from (\Pi_{\mathsf{Twist}}) and (\Pi_{\mathsf{Shout}}),
-4. fresh (\mathsf{ME}) instances from an Index→OneHot adapter (below),
+3. fresh (\mathsf{ME}) instances from (\Pi_{\mathsf{Twist}}) and (\Pi_{\mathsf{Shout}}) for this chunk (including their committed columns like addr bits, flags/values, Inc, and any adapter-derived openings),
 
 and then fold the full batch using the standard Neo pipeline:
 [
@@ -61,7 +65,7 @@ and then fold the full batch using the standard Neo pipeline:
 \xrightarrow{\Pi_{\mathsf{DEC}}} \mathsf{ME}(b,\mathcal{L}).
 ]
 
-**Instantiation choice (current implementation – updated).** We now run Twist and Shout *per folding step*, over per-step witnesses that slice the VM trace at that step. For each step (i):
+**Instantiation choice (current implementation – updated).** We now run Twist and Shout *per folding step*, over per-step witnesses that slice the VM trace at that folding chunk. A “step” here means a folding chunk chosen by the arithmetization/front-end; it can be one VM step or a user-defined batch of VM steps. For each step (i):
 
 * Π_{\mathsf{CCS}} runs on MCS\_i and the current accumulator,
 * Π_{\mathsf{Twist}} runs on the step-i memory slice (with rolled-forward `init_vals`),
@@ -79,7 +83,7 @@ Step i:
   - ME from Π_{\mathsf{Shout}}(chunk i)
   → Π_{\mathsf{RLC}} → Π_{\mathsf{DEC}} → k children
 
-**Terminology note.** In the code, a “shard” now aligns with the same granularity as a folding step: each `StepWitnessBundle` holds exactly one MCS (CPU chunk) plus the Twist/Shout instances for that *same* VM step. There are no shard-wide Twist/Shout instances; the shard is just the collection of per-step bundles that drive the folding loop.
+**Terminology note.** A shard is a trace segment modeled as a collection of folding chunks. Each `StepWitnessBundle` holds exactly one MCS (CPU chunk) plus the Twist/Shout instances for that *same folding chunk*. A folding chunk can be one VM step or a user-chosen grouping of VM steps. The folding loop consumes one chunk at a time from the shard. There are no shard-wide Twist/Shout instances—only per-chunk ones.
 
 No modification to (\Pi_{\mathsf{RLC}}) or (\Pi_{\mathsf{DEC}}) is required.
 
@@ -185,8 +189,6 @@ Twist and Shout integrate cleanly into Neo's folding architecture because they r
 
 * Do **not** commit to conceptual one-hot address vectors.
 * Commit to compact index representations (bit-/digit-decomposed, low-norm).
-* Add a **foldable Index→OneHot adapter** ("SPARK-style bridge") proving that MLE evaluations of the conceptual one-hot objects used by Twist/Shout are consistent with the committed indices.
+* Add a **foldable Index→OneHot adapter** ("SPARK-style bridge") proving that MLE evaluations of the conceptual one-hot objects used by Twist/Shout are consistent with the committed indices. In the intended shape, adapter-derived openings (and Inc for Twist) are just additional ME claims emitted by Π_{\mathsf{Twist}}/Π_{\mathsf{Shout}} and folded alongside their other columns—no separate adapter batch is required.
 
-In our instantiation, each shard has a **single** Twist instance and a **single** Shout instance (per memory/table id), both defined over the entire execution trace. Π_{\mathsf{Twist}} and Π_{\mathsf{Shout}} are run once per shard to produce ME claims, and these memory ME claims are injected into the folding pipeline once (together with the first CCS folding step) and thereafter propagated by the standard (\Pi_{\mathsf{RLC}}\rightarrow\Pi_{\mathsf{DEC}}) loop. All resulting (\mathsf{ME}) claims—CCS, Twist, Shout, and the adapter—are folded using Neo's existing pipeline without modifying the core folding logic.
-
-All resulting (\mathsf{ME}) claims—CCS, Twist, Shout, and the adapter—are folded using Neo’s existing (\Pi_{\mathsf{RLC}}\rightarrow\Pi_{\mathsf{DEC}}) loop without modifying the core folding logic.
+In our instantiation, each folding chunk has its own Twist and Shout instances (per memory/table id), scoped to that chunk’s trace slice. Π_{\mathsf{Twist}} and Π_{\mathsf{Shout}} run once per chunk to produce ME claims, and these memory ME claims are folded together with CCS in that step’s (\Pi_{\mathsf{RLC}}\rightarrow\Pi_{\mathsf{DEC}}) round. All resulting (\mathsf{ME}) claims—CCS, Twist, Shout, and the adapter—are folded using Neo’s existing (\Pi_{\mathsf{RLC}}\rightarrow\Pi_{\mathsf{DEC}}) loop without modifying the core folding logic.

@@ -872,7 +872,8 @@ where
             None => (vec![], vec![]), // k=1
         };
 
-        folding::fold_many_verify(
+        // fold_many_verify returns the verified final accumulator on success
+        let _verified_final = folding::fold_many_verify(
             self.mode.clone(),
             tr,
             &self.params,
@@ -881,6 +882,7 @@ where
             &seed_me,
             run,
             self.mixers,
-        )
+        )?;
+        Ok(true)
     }
 }

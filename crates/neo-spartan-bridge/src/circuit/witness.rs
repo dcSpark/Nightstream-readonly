@@ -90,7 +90,7 @@ impl FoldRunInstance {
         initial_accumulator: Vec<MeInstance<Cmt, F, K>>,
         pi_ccs_challenges: Vec<PiCcsChallenges>,
     ) -> Self {
-        let final_accumulator = run.final_outputs.clone();
+        let final_accumulator = run.compute_final_outputs(&initial_accumulator);
 
         Self {
             params_digest,
