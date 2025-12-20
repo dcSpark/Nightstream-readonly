@@ -12,8 +12,9 @@
 use crate::ajtai::decode_vector as ajtai_decode_vector;
 use crate::ts_common as ts;
 use crate::twist_oracle::{
-    build_eq_table, build_val_table_pre_write, IndexAdapterOracle, LazyBitnessOracle, ProductRoundOracle,
-    TwistReadCheck2DOracle, TwistWriteCheck2DOracle,
+    build_eq_table, build_val_table_pre_write_from_inc, compute_eq_from_bits, table_mle_eval, IndexAdapterOracle,
+    LazyBitnessOracle, ProductRoundOracle, TwistReadCheck2DOracle, TwistReadCheckAddrOracle, TwistReadCheckOracle,
+    TwistWriteCheck2DOracle, TwistWriteCheckAddrOracle, TwistWriteCheckOracle,
 };
 use crate::witness::{MemInstance, MemWitness};
 use neo_ajtai::Commitment as AjtaiCmt;
@@ -474,11 +475,11 @@ pub fn build_route_a_twist_oracles_v2<Cmt: Clone>(
 
     let init_table_k: Vec<KElem> = inst.init_vals.iter().map(|&v| v.into()).collect();
     let pow2_time = expected_pow2_cycle;
-    let val_table_pre_write = build_val_table_pre_write(
+    let val_table_pre_write = build_val_table_pre_write_from_inc(
         &init_table_k,
         &decoded.has_write,
         &decoded.wa_bits,
-        &decoded.wv,
+        &decoded.inc_at_write_addr,
         pow2_time,
         pow2_addr,
     );
@@ -519,6 +520,178 @@ pub fn build_route_a_twist_oracles_v2<Cmt: Clone>(
     Ok(RouteATwistOraclesV2 {
         read_check,
         write_check,
+        bitness,
+        ell_addr,
+    })
+}
+
+// ============================================================================
+// Route A oracles v3 (Phase 2): addr-pre + time-only checks (no time×addr table).
+// ============================================================================
+
+pub struct RouteATwistOraclesV3 {
+    pub read_check: TwistReadCheckOracle,
+    pub read_check_claim_sum: KElem,
+    pub write_check: TwistWriteCheckOracle,
+    pub write_check_claim_sum: KElem,
+    pub bitness: Vec<LazyBitnessOracle>,
+    pub ell_addr: usize,
+}
+
+pub struct RouteATwistAddrOraclesV3 {
+    pub read_addr: TwistReadCheckAddrOracle,
+    pub write_addr: TwistWriteCheckAddrOracle,
+    pub ell_addr: usize,
+}
+
+pub fn build_route_a_twist_addr_oracles_v3<Cmt: Clone>(
+    inst: &MemInstance<Cmt, BaseField>,
+    decoded: &TwistDecodedCols,
+    r_cycle: &[KElem],
+) -> Result<RouteATwistAddrOraclesV3, PiCcsError> {
+    validate_index_bit_addressing(inst)?;
+    let ell_addr = inst.d * inst.ell;
+    let pow2_addr = 1usize
+        .checked_shl(ell_addr as u32)
+        .ok_or_else(|| PiCcsError::InvalidInput("Twist(Route A): 2^ell_addr overflow".into()))?;
+
+    let expected_pow2_time = 1usize << r_cycle.len();
+    if decoded.has_read.len() != expected_pow2_time
+        || decoded.has_write.len() != expected_pow2_time
+        || decoded.rv.len() != expected_pow2_time
+        || decoded.wv.len() != expected_pow2_time
+        || decoded.inc_at_write_addr.len() != expected_pow2_time
+    {
+        return Err(PiCcsError::InvalidInput(format!(
+            "Twist(Route A): decoded column length mismatch with r_cycle (expected {}, got has_read={}, has_write={}, rv={}, wv={}, inc_at_write_addr={})",
+            expected_pow2_time,
+            decoded.has_read.len(),
+            decoded.has_write.len(),
+            decoded.rv.len(),
+            decoded.wv.len(),
+            decoded.inc_at_write_addr.len()
+        )));
+    }
+
+    let init_table_k: Vec<KElem> = inst.init_vals.iter().map(|&v| v.into()).collect();
+    if init_table_k.len() != pow2_addr {
+        return Err(PiCcsError::InvalidInput(format!(
+            "Twist(Route A): init table length mismatch (got {}, expected pow2_addr={})",
+            init_table_k.len(),
+            pow2_addr
+        )));
+    }
+
+    let read_addr = TwistReadCheckAddrOracle::new(
+        init_table_k.clone(),
+        r_cycle,
+        decoded.has_read.clone(),
+        decoded.rv.clone(),
+        &decoded.ra_bits,
+        decoded.has_write.clone(),
+        &decoded.wa_bits,
+        decoded.inc_at_write_addr.clone(),
+    );
+
+    let write_addr = TwistWriteCheckAddrOracle::new(
+        init_table_k,
+        r_cycle,
+        decoded.has_write.clone(),
+        decoded.wv.clone(),
+        &decoded.wa_bits,
+        decoded.inc_at_write_addr.clone(),
+    );
+
+    Ok(RouteATwistAddrOraclesV3 {
+        read_addr,
+        write_addr,
+        ell_addr,
+    })
+}
+
+pub fn build_route_a_twist_oracles_v3<Cmt: Clone>(
+    inst: &MemInstance<Cmt, BaseField>,
+    decoded: &TwistDecodedCols,
+    r_cycle: &[KElem],
+    r_addr: &[KElem],
+    read_check_claim_sum: KElem,
+    write_check_claim_sum: KElem,
+) -> Result<RouteATwistOraclesV3, PiCcsError> {
+    validate_index_bit_addressing(inst)?;
+    let ell_addr = inst.d * inst.ell;
+    if r_addr.len() != ell_addr {
+        return Err(PiCcsError::InvalidInput(format!(
+            "Twist(Route A): r_addr.len()={}, expected ell_addr={}",
+            r_addr.len(),
+            ell_addr
+        )));
+    }
+
+    let expected_pow2_time = 1usize << r_cycle.len();
+    if decoded.has_read.len() != expected_pow2_time
+        || decoded.has_write.len() != expected_pow2_time
+        || decoded.rv.len() != expected_pow2_time
+        || decoded.wv.len() != expected_pow2_time
+        || decoded.inc_at_write_addr.len() != expected_pow2_time
+    {
+        return Err(PiCcsError::InvalidInput(format!(
+            "Twist(Route A): decoded column length mismatch with r_cycle (expected {}, got has_read={}, has_write={}, rv={}, wv={}, inc_at_write_addr={})",
+            expected_pow2_time,
+            decoded.has_read.len(),
+            decoded.has_write.len(),
+            decoded.rv.len(),
+            decoded.wv.len(),
+            decoded.inc_at_write_addr.len()
+        )));
+    }
+
+    // Compute Val_pre(r_addr, t) for all boolean time indices t.
+    let init_table_k: Vec<KElem> = inst.init_vals.iter().map(|&v| v.into()).collect();
+    let init_at_r_addr = table_mle_eval(&init_table_k, r_addr);
+    let eq_wa = compute_eq_from_bits(&decoded.wa_bits, r_addr);
+    let mut cur = init_at_r_addr;
+    let mut val_pre_at_r_addr: Vec<KElem> = Vec::with_capacity(expected_pow2_time);
+    for t in 0..expected_pow2_time {
+        val_pre_at_r_addr.push(cur);
+        cur += decoded.has_write[t] * decoded.inc_at_write_addr[t] * eq_wa[t];
+    }
+
+    let read_check = TwistReadCheckOracle::new(
+        &decoded.ra_bits,
+        val_pre_at_r_addr.clone(),
+        decoded.rv.clone(),
+        decoded.has_read.clone(),
+        r_cycle,
+        r_addr,
+    );
+    let write_check = TwistWriteCheckOracle::new(
+        &decoded.wa_bits,
+        decoded.wv.clone(),
+        val_pre_at_r_addr,
+        decoded.inc_at_write_addr.clone(),
+        decoded.has_write.clone(),
+        r_cycle,
+        r_addr,
+    );
+
+    // Bitness for ra_bits + wa_bits + has_read + has_write, χ_{r_cycle}-weighted.
+    let mut bitness = Vec::with_capacity(2 * ell_addr + 2);
+    for bits in decoded
+        .ra_bits
+        .iter()
+        .cloned()
+        .chain(decoded.wa_bits.iter().cloned())
+    {
+        bitness.push(LazyBitnessOracle::new_with_cycle(r_cycle, bits));
+    }
+    bitness.push(LazyBitnessOracle::new_with_cycle(r_cycle, decoded.has_read.clone()));
+    bitness.push(LazyBitnessOracle::new_with_cycle(r_cycle, decoded.has_write.clone()));
+
+    Ok(RouteATwistOraclesV3 {
+        read_check,
+        read_check_claim_sum,
+        write_check,
+        write_check_claim_sum,
         bitness,
         ell_addr,
     })

@@ -236,11 +236,18 @@ pub fn build_shout_addr_oracle<Cmt: Clone>(
     inst: &LutInstance<Cmt, BaseField>,
     decoded: &ShoutDecodedCols,
     r_cycle: &[KElem],
+    table_k: &[KElem],
 ) -> Result<(AddressLookupOracle, KElem), PiCcsError> {
     let ell_addr = inst.d * inst.ell;
-    let table_k: Vec<KElem> = inst.table.iter().map(|&v| v.into()).collect();
+    if table_k.len() != inst.table.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "Shout: table_k.len()={} != inst.table.len()={}",
+            table_k.len(),
+            inst.table.len()
+        )));
+    }
     let (oracle, addr_claim_sum) =
-        AddressLookupOracle::new(&decoded.addr_bits, &decoded.has_lookup, &table_k, r_cycle, ell_addr);
+        AddressLookupOracle::new(&decoded.addr_bits, &decoded.has_lookup, table_k, r_cycle, ell_addr);
     Ok((oracle, addr_claim_sum))
 }
 

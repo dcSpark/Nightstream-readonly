@@ -373,6 +373,55 @@ pub fn build_val_table_pre_write(
     out
 }
 
+/// Build Val(k, t) table (pre-write) over flattened time×addr domain, time bits first,
+/// using sparse increments as the source of truth.
+///
+/// Semantics: `out[addr * pow2_time + t]` equals the memory value at `addr`
+/// immediately before applying the write at time `t`.
+///
+/// - `init` may be empty (treated as zeros) for Option A.
+pub fn build_val_table_pre_write_from_inc(
+    init: &[K],
+    has_write: &[K],
+    wa_bits: &[Vec<K>],
+    inc_at_write_addr: &[K],
+    pow2_time: usize,
+    pow2_addr: usize,
+) -> Vec<K> {
+    assert_eq!(has_write.len(), pow2_time, "has_write length mismatch");
+    assert_eq!(inc_at_write_addr.len(), pow2_time, "inc_at_write_addr length mismatch");
+    for col in wa_bits {
+        assert_eq!(col.len(), pow2_time, "wa_bits column length mismatch");
+    }
+
+    let mut mem = vec![K::ZERO; pow2_addr];
+    if !init.is_empty() {
+        let init_len = init.len().min(pow2_addr);
+        mem[..init_len].copy_from_slice(&init[..init_len]);
+    }
+
+    let mut out = vec![K::ZERO; pow2_time * pow2_addr];
+    for t in 0..pow2_time {
+        for addr in 0..pow2_addr {
+            out[addr * pow2_time + t] = mem[addr];
+        }
+
+        if has_write[t] == K::ONE {
+            let mut addr = 0usize;
+            for (b, col) in wa_bits.iter().enumerate() {
+                if col[t] == K::ONE {
+                    addr |= 1usize << b;
+                }
+            }
+            if addr < pow2_addr {
+                mem[addr] += inc_at_write_addr[t];
+            }
+        }
+    }
+
+    out
+}
+
 // ============================================================================
 // Val-Evaluation Oracle (unchanged from original)
 // ============================================================================
@@ -532,12 +581,7 @@ impl TwistTotalIncOracleSparse {
     /// # Returns
     /// - The oracle for sum-check over the time variables
     /// - The claimed total increment (= Σ_t Inc(r_addr, t))
-    pub fn new(
-        wa_bits: &[Vec<K>],
-        has_write: Vec<K>,
-        inc_at_write_addr: Vec<K>,
-        r_addr: &[K],
-    ) -> (Self, K) {
+    pub fn new(wa_bits: &[Vec<K>], has_write: Vec<K>, inc_at_write_addr: Vec<K>, r_addr: &[K]) -> (Self, K) {
         let pow2_cycle = has_write.len();
 
         assert_eq!(wa_bits.len(), r_addr.len(), "wa_bits count must match r_addr length");
@@ -922,6 +966,370 @@ impl TwistWriteCheckOracle {
 }
 
 impl_round_oracle_via_core!(TwistWriteCheckOracle);
+
+// ============================================================================
+// Address-Lane Oracles (addr rounds first, time summed)
+// ============================================================================
+//
+// These are used by the "Phase 2" Route A integration to avoid materializing a
+// time×addr table when Twist must share `r_time` with CCS:
+//   1) Run an address-lane sum-check first (ell_addr rounds) to bind `r_addr`
+//      and produce the *time-lane claimed sums* (one per check).
+//   2) Run a time-lane sum-check (ell_n rounds) at the fixed `r_addr`.
+//
+// Concretely, these oracles implement the address-lane prefix of the same
+// read/write check polynomials as the 2D oracles, but with the time variables
+// summed internally. This keeps address rounds efficient and avoids allocating
+// `pow2_time * pow2_addr`.
+//
+// Degree in each address variable is ≤ 2:
+// - `Val_pre(addr, t)` is multilinear in `addr` (degree 1 per bit),
+// - `eq(addr, bits(t))` is multilinear in `addr`,
+// so their product has degree ≤ 2 per address bit.
+//
+// Variable order is little-endian address bits (bit 0 first), matching the
+// rest of the module.
+
+fn addrs_from_bits(bit_cols: &[Vec<K>]) -> Vec<usize> {
+    let n = bit_cols.first().map(|c| c.len()).unwrap_or(0);
+    let mut out = vec![0usize; n];
+    for (b, col) in bit_cols.iter().enumerate() {
+        for (t, &v) in col.iter().enumerate() {
+            if v == K::ONE {
+                out[t] |= 1usize << b;
+            }
+        }
+    }
+    out
+}
+
+fn fold_table_in_place(table: &mut Vec<K>, r: K) {
+    let len = table.len();
+    debug_assert!(len.is_power_of_two());
+    if len <= 1 {
+        return;
+    }
+    let half = len / 2;
+    for i in 0..half {
+        let f0 = table[2 * i];
+        let f1 = table[2 * i + 1];
+        table[i] = f0 + (f1 - f0) * r;
+    }
+    table.truncate(half);
+}
+
+fn update_prefix_weights_in_place(weights: &mut [K], addrs: &[usize], bit_idx: usize, r: K) {
+    let r0 = K::ONE - r;
+    for (w, &a) in weights.iter_mut().zip(addrs.iter()) {
+        if ((a >> bit_idx) & 1) == 1 {
+            *w *= r;
+        } else {
+            *w *= r0;
+        }
+    }
+}
+
+/// Address-lane prefix oracle for the Twist read-check.
+///
+/// Sums over time internally, and runs sum-check over address bits:
+///   H(addr) = Σ_t χ_{r_cycle}(t)·has_read(t)·eq(addr, ra_bits(t))·(Val_pre(addr,t) - rv(t)).
+///
+/// The sum-check binds `addr = r_addr` and returns the time-lane claimed sum:
+///   Σ_t χ_{r_cycle}(t)·has_read(t)·eq(r_addr, ra_bits(t))·(Val_pre(r_addr,t) - rv(t)).
+pub struct TwistReadCheckAddrOracle {
+    ell_addr: usize,
+    bit_idx: usize,
+    degree_bound: usize,
+
+    eq_cycle: Vec<K>,
+    has_read: Vec<K>,
+    rv: Vec<K>,
+
+    has_write: Vec<K>,
+    inc_at_write_addr: Vec<K>,
+
+    ra_addrs: Vec<usize>,
+    wa_addrs: Vec<usize>,
+
+    init_fold: Vec<K>,
+    ra_prefix_w: Vec<K>,
+    wa_prefix_w: Vec<K>,
+}
+
+impl TwistReadCheckAddrOracle {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        init: Vec<K>,
+        r_cycle: &[K],
+        has_read: Vec<K>,
+        rv: Vec<K>,
+        ra_bits: &[Vec<K>],
+        has_write: Vec<K>,
+        wa_bits: &[Vec<K>],
+        inc_at_write_addr: Vec<K>,
+    ) -> Self {
+        let pow2_time = 1usize << r_cycle.len();
+        assert_eq!(has_read.len(), pow2_time, "has_read length must match time domain");
+        assert_eq!(rv.len(), pow2_time, "rv length must match time domain");
+        assert_eq!(has_write.len(), pow2_time, "has_write length must match time domain");
+        assert_eq!(
+            inc_at_write_addr.len(),
+            pow2_time,
+            "inc_at_write_addr length must match time domain"
+        );
+
+        let ell_addr = ra_bits.len();
+        assert_eq!(wa_bits.len(), ell_addr, "wa_bits/ra_bits length mismatch");
+        let pow2_addr = 1usize << ell_addr;
+        assert_eq!(init.len(), pow2_addr, "init length must match address domain");
+
+        for col in ra_bits {
+            assert_eq!(col.len(), pow2_time, "ra_bits column length mismatch");
+        }
+        for col in wa_bits {
+            assert_eq!(col.len(), pow2_time, "wa_bits column length mismatch");
+        }
+
+        let eq_cycle = build_eq_table(r_cycle);
+        let ra_addrs = addrs_from_bits(ra_bits);
+        let wa_addrs = addrs_from_bits(wa_bits);
+
+        Self {
+            ell_addr,
+            bit_idx: 0,
+            degree_bound: 2,
+            eq_cycle,
+            has_read,
+            rv,
+            has_write,
+            inc_at_write_addr,
+            ra_addrs,
+            wa_addrs,
+            init_fold: init,
+            ra_prefix_w: vec![K::ONE; pow2_time],
+            wa_prefix_w: vec![K::ONE; pow2_time],
+        }
+    }
+}
+
+impl RoundOracle for TwistReadCheckAddrOracle {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.num_rounds() == 0 {
+            // Constant polynomial; return value for all points.
+            let mut ys = vec![K::ZERO; points.len()];
+            let mut mem = self.init_fold.clone();
+            for t in 0..self.eq_cycle.len() {
+                let val = mem[0];
+                let diff = val - self.rv[t];
+                ys[0] += self.eq_cycle[t] * self.has_read[t] * self.ra_prefix_w[t] * diff;
+
+                let has_w = self.has_write[t];
+                if has_w != K::ZERO {
+                    mem[0] += self.inc_at_write_addr[t] * has_w * self.wa_prefix_w[t];
+                }
+            }
+            let val = ys[0];
+            return vec![val; points.len()];
+        }
+
+        let bit_idx = self.bit_idx;
+        let mut ys = vec![K::ZERO; points.len()];
+        let mut mem = self.init_fold.clone();
+
+        for t in 0..self.eq_cycle.len() {
+            let eq_t = self.eq_cycle[t];
+            let gate = self.has_read[t];
+            if gate != K::ZERO {
+                let ra = self.ra_addrs[t];
+                let base = ra >> (bit_idx + 1);
+                let idx0 = base * 2;
+                let idx1 = idx0 + 1;
+                let v0 = mem[idx0];
+                let v1 = mem[idx1];
+                let dv = v1 - v0;
+                let rv_t = self.rv[t];
+                let prefix = self.ra_prefix_w[t];
+                let bit = (ra >> bit_idx) & 1;
+
+                for (i, &x) in points.iter().enumerate() {
+                    let val_x = v0 + dv * x;
+                    let addr_factor = if bit == 1 { x } else { K::ONE - x };
+                    let term = eq_t * gate * prefix * addr_factor * (val_x - rv_t);
+                    ys[i] += term;
+                }
+            }
+
+            let has_w = self.has_write[t];
+            if has_w != K::ZERO {
+                let wa = self.wa_addrs[t];
+                let idx = wa >> bit_idx;
+                mem[idx] += self.inc_at_write_addr[t] * has_w * self.wa_prefix_w[t];
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.ell_addr.saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        fold_table_in_place(&mut self.init_fold, r);
+        update_prefix_weights_in_place(&mut self.ra_prefix_w, &self.ra_addrs, self.bit_idx, r);
+        update_prefix_weights_in_place(&mut self.wa_prefix_w, &self.wa_addrs, self.bit_idx, r);
+        self.bit_idx += 1;
+    }
+}
+
+/// Address-lane prefix oracle for the Twist write-check.
+///
+/// Sums over time internally, and runs sum-check over address bits:
+///   H(addr) = Σ_t χ_{r_cycle}(t)·has_write(t)·eq(addr, wa_bits(t))·(wv(t) - Val_pre(addr,t) - inc(t)).
+///
+/// The sum-check binds `addr = r_addr` and returns the time-lane claimed sum:
+///   Σ_t χ_{r_cycle}(t)·has_write(t)·eq(r_addr, wa_bits(t))·(wv(t) - Val_pre(r_addr,t) - inc(t)).
+pub struct TwistWriteCheckAddrOracle {
+    ell_addr: usize,
+    bit_idx: usize,
+    degree_bound: usize,
+
+    eq_cycle: Vec<K>,
+    has_write: Vec<K>,
+    wv: Vec<K>,
+    inc_at_write_addr: Vec<K>,
+
+    wa_addrs: Vec<usize>,
+
+    init_fold: Vec<K>,
+    wa_prefix_w: Vec<K>,
+}
+
+impl TwistWriteCheckAddrOracle {
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        init: Vec<K>,
+        r_cycle: &[K],
+        has_write: Vec<K>,
+        wv: Vec<K>,
+        wa_bits: &[Vec<K>],
+        inc_at_write_addr: Vec<K>,
+    ) -> Self {
+        let pow2_time = 1usize << r_cycle.len();
+        assert_eq!(has_write.len(), pow2_time, "has_write length must match time domain");
+        assert_eq!(wv.len(), pow2_time, "wv length must match time domain");
+        assert_eq!(
+            inc_at_write_addr.len(),
+            pow2_time,
+            "inc_at_write_addr length must match time domain"
+        );
+
+        let ell_addr = wa_bits.len();
+        let pow2_addr = 1usize << ell_addr;
+        assert_eq!(init.len(), pow2_addr, "init length must match address domain");
+        for col in wa_bits {
+            assert_eq!(col.len(), pow2_time, "wa_bits column length mismatch");
+        }
+
+        let eq_cycle = build_eq_table(r_cycle);
+        let wa_addrs = addrs_from_bits(wa_bits);
+
+        Self {
+            ell_addr,
+            bit_idx: 0,
+            degree_bound: 2,
+            eq_cycle,
+            has_write,
+            wv,
+            inc_at_write_addr,
+            wa_addrs,
+            init_fold: init,
+            wa_prefix_w: vec![K::ONE; pow2_time],
+        }
+    }
+}
+
+impl RoundOracle for TwistWriteCheckAddrOracle {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.num_rounds() == 0 {
+            let mut mem = self.init_fold.clone();
+            let mut sum = K::ZERO;
+            for t in 0..self.eq_cycle.len() {
+                let val = mem[0];
+                let delta = self.wv[t] - val - self.inc_at_write_addr[t];
+                sum += self.eq_cycle[t] * self.has_write[t] * self.wa_prefix_w[t] * delta;
+
+                let has_w = self.has_write[t];
+                if has_w != K::ZERO {
+                    mem[0] += self.inc_at_write_addr[t] * has_w * self.wa_prefix_w[t];
+                }
+            }
+            return vec![sum; points.len()];
+        }
+
+        let bit_idx = self.bit_idx;
+        let mut ys = vec![K::ZERO; points.len()];
+        let mut mem = self.init_fold.clone();
+
+        for t in 0..self.eq_cycle.len() {
+            let eq_t = self.eq_cycle[t];
+            let gate = self.has_write[t];
+            if gate != K::ZERO {
+                let wa = self.wa_addrs[t];
+                let base = wa >> (bit_idx + 1);
+                let idx0 = base * 2;
+                let idx1 = idx0 + 1;
+                let v0 = mem[idx0];
+                let v1 = mem[idx1];
+                let dv = v1 - v0;
+                let wv_t = self.wv[t];
+                let inc_t = self.inc_at_write_addr[t];
+                let prefix = self.wa_prefix_w[t];
+                let bit = (wa >> bit_idx) & 1;
+
+                for (i, &x) in points.iter().enumerate() {
+                    let val_x = v0 + dv * x;
+                    let addr_factor = if bit == 1 { x } else { K::ONE - x };
+                    let term = eq_t * gate * prefix * addr_factor * (wv_t - val_x - inc_t);
+                    ys[i] += term;
+                }
+            }
+
+            let has_w = self.has_write[t];
+            if has_w != K::ZERO {
+                let wa = self.wa_addrs[t];
+                let idx = wa >> bit_idx;
+                mem[idx] += self.inc_at_write_addr[t] * has_w * self.wa_prefix_w[t];
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.ell_addr.saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        fold_table_in_place(&mut self.init_fold, r);
+        update_prefix_weights_in_place(&mut self.wa_prefix_w, &self.wa_addrs, self.bit_idx, r);
+        self.bit_idx += 1;
+    }
+}
 
 // ============================================================================
 // Index Adapter Oracle (IDX→OH Bridge)
@@ -1698,4 +2106,46 @@ pub struct LazyShoutOracles {
     pub bitness: Vec<LazyBitnessOracle>,
     /// Cached data for finalization
     pub r_addr: Vec<K>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use p3_field::PrimeCharacteristicRing;
+
+    #[test]
+    fn val_table_pre_write_from_inc_matches_expected() {
+        let pow2_addr = 4;
+        let pow2_time = 4;
+
+        let init = vec![K::from_u64(10), K::from_u64(20), K::from_u64(30), K::from_u64(40)];
+
+        // Writes at t=1 and t=3 to addr=2.
+        let has_write = vec![K::ZERO, K::ONE, K::ZERO, K::ONE];
+        let wa_bits = vec![
+            // bit0 (LSB): addr=2 -> 0
+            vec![K::ZERO, K::ZERO, K::ZERO, K::ZERO],
+            // bit1 (MSB): addr=2 -> 1
+            vec![K::ZERO, K::ONE, K::ZERO, K::ONE],
+        ];
+        let inc_at_write_addr = vec![K::ZERO, K::from_u64(5), K::ZERO, -K::from_u64(7)];
+
+        let table =
+            build_val_table_pre_write_from_inc(&init, &has_write, &wa_bits, &inc_at_write_addr, pow2_time, pow2_addr);
+        assert_eq!(table.len(), pow2_time * pow2_addr);
+
+        // addr 2 pre-write values: [30, 30, 35, 35]
+        let a2 = 2usize;
+        assert_eq!(table[a2 * pow2_time + 0], K::from_u64(30));
+        assert_eq!(table[a2 * pow2_time + 1], K::from_u64(30));
+        assert_eq!(table[a2 * pow2_time + 2], K::from_u64(35));
+        assert_eq!(table[a2 * pow2_time + 3], K::from_u64(35));
+
+        // Other addresses remain unchanged across time.
+        for t in 0..pow2_time {
+            assert_eq!(table[0 * pow2_time + t], K::from_u64(10));
+            assert_eq!(table[1 * pow2_time + t], K::from_u64(20));
+            assert_eq!(table[3 * pow2_time + t], K::from_u64(40));
+        }
+    }
 }

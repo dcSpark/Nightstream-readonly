@@ -20,6 +20,11 @@
 #![allow(non_snake_case)]
 
 use crate::folding::{CommitMixers, FoldStep};
+use crate::memory_sidecar::memory::TimeBatchedClaims;
+use crate::memory_sidecar::sumcheck_ds::{
+    run_batched_sumcheck_prover_ds, run_sumcheck_prover_ds, verify_batched_sumcheck_rounds_ds,
+    verify_sumcheck_rounds_ds,
+};
 use crate::memory_sidecar::utils::RoundOraclePrefix;
 use crate::pi_ccs::{self as ccs, FoldingMode};
 pub use crate::shard_proof_types::{
@@ -29,7 +34,7 @@ use crate::PiCcsError;
 use neo_ajtai::Commitment as Cmt;
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::{CcsStructure, Mat, MeInstance};
-use neo_math::{from_complex, KExtensions, D, F, K};
+use neo_math::{KExtensions, D, F, K};
 use neo_memory::ts_common as ts;
 use neo_memory::twist_oracle::table_mle_eval;
 use neo_memory::witness::StepWitnessBundle;
@@ -38,10 +43,7 @@ use neo_reductions::engines::utils;
 use neo_reductions::paper_exact_engine::{
     build_me_outputs_paper_exact, claimed_initial_sum_from_inputs, rhs_terminal_identity_paper_exact,
 };
-use neo_reductions::sumcheck::{
-    interpolate_from_evals, poly_eval_k, verify_batched_sumcheck_rounds, verify_sumcheck_rounds, BatchedClaim,
-    RoundOracle,
-};
+use neo_reductions::sumcheck::{poly_eval_k, BatchedClaim, RoundOracle};
 use neo_transcript::{Poseidon2Transcript, Transcript};
 use p3_field::PrimeCharacteristicRing;
 
@@ -50,6 +52,31 @@ use p3_field::PrimeCharacteristicRing;
 // ============================================================================
 
 pub use crate::memory_sidecar::memory::absorb_step_memory_commitments;
+
+fn digest_fields(label: &'static [u8], fs: &[F]) -> [u8; 32] {
+    let mut h = Poseidon2Transcript::new(b"memory/public_digest");
+    h.append_message(b"digest/label", label);
+    h.append_message(b"digest/len", &(fs.len() as u64).to_le_bytes());
+    h.append_fields(b"digest/fields", fs);
+    h.digest32()
+}
+
+fn absorb_twist_rollover_lookahead(
+    tr: &mut Poseidon2Transcript,
+    step_idx: usize,
+    next_step: &StepWitnessBundle<Cmt, F, K>,
+) {
+    tr.append_message(b"twist/rollover/lookahead", &(step_idx as u64).to_le_bytes());
+    tr.append_message(
+        b"twist/rollover/mem_count",
+        &(next_step.mem_instances.len() as u64).to_le_bytes(),
+    );
+    for (mem_idx, (next_inst, _)) in next_step.mem_instances.iter().enumerate() {
+        tr.append_message(b"twist/rollover/mem_idx", &(mem_idx as u64).to_le_bytes());
+        let digest = digest_fields(b"twist/rollover/init_vals", &next_inst.init_vals);
+        tr.append_message(b"twist/rollover/init_vals_digest", &digest);
+    }
+}
 
 pub fn normalize_me_claims(
     me_claims: &mut [MeInstance<Cmt, F, K>],
@@ -254,6 +281,12 @@ where
 
     for (idx, step) in steps.iter().enumerate() {
         absorb_step_memory_commitments(tr, step);
+        if idx + 1 < steps.len() {
+            let next_step = steps
+                .get(idx + 1)
+                .ok_or_else(|| PiCcsError::ProtocolError("missing next step".into()))?;
+            absorb_twist_rollover_lookahead(tr, idx, next_step);
+        }
 
         let (mcs_inst, mcs_wit) = &step.mcs;
 
@@ -329,8 +362,15 @@ where
 
         let shout_pre = crate::memory_sidecar::memory::prove_shout_addr_pre_time(tr, params, step, ell_n, &r_cycle)?;
         let twist_decoded = crate::memory_sidecar::memory::decode_twist_pre_time(params, step, ell_n)?;
+        let twist_pre = crate::memory_sidecar::memory::prove_twist_addr_pre_time(tr, step, &twist_decoded, &r_cycle)?;
         let mut mem_oracles = crate::memory_sidecar::memory::build_route_a_memory_oracles(
-            params, step, ell_n, &r_cycle, &shout_pre, &twist_decoded,
+            params,
+            step,
+            ell_n,
+            &r_cycle,
+            &shout_pre,
+            &twist_pre,
+            &twist_decoded,
         )?;
 
         // Run the batched time/row sumcheck in a tight scope to satisfy Rust borrow rules.
@@ -354,20 +394,21 @@ where
                 label: b"ccs/time",
             });
 
-            let mut shout_guard =
-                crate::memory_sidecar::memory::build_route_a_shout_time_claims_guard(&mut mem_oracles.shout, ell_n);
-            crate::memory_sidecar::memory::append_route_a_shout_time_claims(
-                &mut shout_guard,
+            let mut shout_protocol =
+                crate::memory_sidecar::memory::ShoutRouteAProtocol::new(&mut mem_oracles.shout, ell_n);
+            shout_protocol.append_time_claims(
+                ell_n,
                 &mut claimed_sums,
                 &mut degree_bounds,
                 &mut labels,
                 &mut claim_is_dynamic,
                 &mut claims,
             );
-            let mut twist_guard =
-                crate::memory_sidecar::memory::build_route_a_twist_time_claims_guard_v2(&mut mem_oracles.twist, ell_n);
-            crate::memory_sidecar::memory::append_route_a_twist_time_claims_v2(
-                &mut twist_guard,
+
+            let mut twist_protocol =
+                crate::memory_sidecar::memory::TwistRouteAProtocol::new(&mut mem_oracles.twist, ell_n);
+            twist_protocol.append_time_claims(
+                ell_n,
                 &mut claimed_sums,
                 &mut degree_bounds,
                 &mut labels,
@@ -403,8 +444,7 @@ where
             // Run batched sum-check prover (shared r_time challenges)
             bind_batched_dynamic_claims(tr, &claimed_sums, &labels, &claim_is_dynamic);
             let (r_time, per_claim_results) =
-                neo_reductions::sumcheck::run_batched_sumcheck_prover(tr, claims.as_mut_slice())
-                    .map_err(|e| PiCcsError::SumcheckError(format!("batched time sumcheck: {e}")))?;
+                run_batched_sumcheck_prover_ds(tr, b"shard/batched_time", idx, claims.as_mut_slice())?;
 
             if r_time.len() != ell_n {
                 return Err(PiCcsError::ProtocolError(format!(
@@ -433,37 +473,20 @@ where
             .unwrap_or_default();
         let mut sumcheck_rounds = ccs_time_rounds;
         let mut sumcheck_chals = r_time.clone();
-        let mut running_sum = per_claim_results
+        let ajtai_initial_sum = per_claim_results
             .first()
             .map(|r| r.final_value)
             .unwrap_or(ccs_initial_sum);
 
-        for ajtai_round in 0..ell_d {
-            let deg = ccs_oracle.degree_bound();
-            let xs: Vec<K> = (0..=deg).map(|t| K::from(F::from_u64(t as u64))).collect();
-            let ys = ccs_oracle.evals_at(&xs);
-
-            let sum_at_01 = ys[0] + ys[1];
-            if sum_at_01 != running_sum {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "CCS Ajtai round {} invariant failed at step {}: expected {}, got {}",
-                    ajtai_round, idx, running_sum, sum_at_01
-                )));
-            }
-
-            let coeffs = interpolate_from_evals(&xs, &ys);
-            for &c in coeffs.iter() {
-                tr.append_fields(b"sumcheck/round/coeff", &c.as_coeffs());
-            }
-            let c0 = tr.challenge_field(b"sumcheck/challenge/0");
-            let c1 = tr.challenge_field(b"sumcheck/challenge/1");
-            let r_i = from_complex(c0, c1);
-            sumcheck_chals.push(r_i);
-
-            running_sum = poly_eval_k(&coeffs, r_i);
-            ccs_oracle.fold(r_i);
-            sumcheck_rounds.push(coeffs);
+        let mut ccs_ajtai = RoundOraclePrefix::new(ccs_oracle.as_mut(), ell_d);
+        let (ajtai_rounds, ajtai_chals) =
+            run_sumcheck_prover_ds(tr, b"ccs/ajtai", idx, &mut ccs_ajtai, ajtai_initial_sum)?;
+        let mut running_sum = ajtai_initial_sum;
+        for (round_poly, &r_i) in ajtai_rounds.iter().zip(ajtai_chals.iter()) {
+            running_sum = poly_eval_k(round_poly, r_i);
         }
+        sumcheck_rounds.extend_from_slice(&ajtai_rounds);
+        sumcheck_chals.extend_from_slice(&ajtai_chals);
 
         // CCS oracle borrows accumulator_wit; drop before updating accumulator_wit at the end.
         drop(ccs_oracle);
@@ -502,7 +525,6 @@ where
         outs_Z.extend(accumulator_wit.iter().cloned());
 
         // Memory sidecar: emit ME claims at the shared r_time (no fixed-challenge sumcheck).
-        let time_final_values: Vec<K> = per_claim_results.iter().map(|r| r.final_value).collect();
         let mut mem_out = crate::memory_sidecar::memory::finalize_route_a_memory_prover(
             tr,
             params,
@@ -510,10 +532,9 @@ where
             step,
             &mut mem_oracles,
             &shout_pre,
+            &twist_pre,
             &twist_decoded,
             &r_time,
-            &time_final_values,
-            1, // claim 0 is CCS/time
             mcs_inst.m_in,
         )?;
 
@@ -690,6 +711,12 @@ where
 
     for (idx, (step, step_proof)) in steps.iter().zip(proof.steps.iter()).enumerate() {
         absorb_step_memory_commitments(tr, step);
+        if idx + 1 < steps.len() {
+            let next_step = steps
+                .get(idx + 1)
+                .ok_or_else(|| PiCcsError::ProtocolError("missing next step".into()))?;
+            absorb_twist_rollover_lookahead(tr, idx, next_step);
+        }
 
         let (mcs_inst, _mcs_wit) = &step.mcs;
 
@@ -805,6 +832,7 @@ where
         }
 
         let shout_pre = crate::memory_sidecar::memory::verify_shout_addr_pre_time(tr, step, &step_proof.mem)?;
+        let twist_pre = crate::memory_sidecar::memory::verify_twist_addr_pre_time(tr, step, &step_proof.mem)?;
         // Verify the batched time/row sumcheck rounds (derives shared r_time).
         bind_batched_dynamic_claims(
             tr,
@@ -812,8 +840,10 @@ where
             &expected_labels,
             &claim_is_dynamic,
         );
-        let (r_time, final_values, ok) = verify_batched_sumcheck_rounds(
+        let (r_time, final_values, ok) = verify_batched_sumcheck_rounds_ds(
             tr,
+            b"shard/batched_time",
+            idx,
             &step_proof.batched_time.round_polys,
             &step_proof.batched_time.claimed_sums,
             &expected_labels,
@@ -905,7 +935,8 @@ where
 
         // Finish CCS Ajtai rounds alone (continuing transcript state after batched rounds).
         let ajtai_rounds = &step_proof.fold.ccs_proof.sumcheck_rounds[ell_n..];
-        let (ajtai_chals, running_sum, ok) = verify_sumcheck_rounds(tr, d_sc, final_values[0], ajtai_rounds);
+        let (ajtai_chals, running_sum, ok) =
+            verify_sumcheck_rounds_ds(tr, b"ccs/ajtai", idx, d_sc, final_values[0], ajtai_rounds);
         if !ok {
             return Err(PiCcsError::SumcheckError("Π_CCS Ajtai rounds invalid".into()));
         }
@@ -970,6 +1001,7 @@ where
             1, // claim 0 is CCS/time
             &step_proof.mem,
             &shout_pre,
+            &twist_pre,
         )?;
         let crate::memory_sidecar::memory::RouteAMemoryVerifyOutput {
             collected_me_time,
@@ -1159,7 +1191,11 @@ where
                 }
 
                 let rhos_from_tr = ccs::sample_rot_rhos_n(tr, params, &ring, collected_me_val.len())?;
-                for (j, (sampled, stored)) in rhos_from_tr.iter().zip(val_fold.rlc_rhos.iter()).enumerate() {
+                for (j, (sampled, stored)) in rhos_from_tr
+                    .iter()
+                    .zip(val_fold.rlc_rhos.iter())
+                    .enumerate()
+                {
                     if sampled.as_slice() != stored.as_slice() {
                         return Err(PiCcsError::ProtocolError(format!(
                             "step {}: val-lane RLC ρ #{} mismatch: transcript vs proof",
@@ -1181,9 +1217,7 @@ where
                     return Err(PiCcsError::ProtocolError("val-lane RLC X mismatch".into()));
                 }
                 if parent_pub.c != val_fold.rlc_parent.c {
-                    return Err(PiCcsError::ProtocolError(
-                        "val-lane RLC commitment mismatch".into(),
-                    ));
+                    return Err(PiCcsError::ProtocolError("val-lane RLC commitment mismatch".into()));
                 }
                 if parent_pub.r != val_fold.rlc_parent.r {
                     return Err(PiCcsError::ProtocolError("val-lane RLC r mismatch".into()));
@@ -1192,9 +1226,7 @@ where
                     return Err(PiCcsError::ProtocolError("val-lane RLC y mismatch".into()));
                 }
                 if parent_pub.y_scalars != val_fold.rlc_parent.y_scalars {
-                    return Err(PiCcsError::ProtocolError(
-                        "val-lane RLC y_scalars mismatch".into(),
-                    ));
+                    return Err(PiCcsError::ProtocolError("val-lane RLC y_scalars mismatch".into()));
                 }
 
                 if !ccs::verify_dec_public(
@@ -1205,9 +1237,7 @@ where
                     mixers.combine_b_pows,
                     ell_d,
                 ) {
-                    return Err(PiCcsError::ProtocolError(
-                        "val-lane DEC public check failed".into(),
-                    ));
+                    return Err(PiCcsError::ProtocolError("val-lane DEC public check failed".into()));
                 }
             }
         }

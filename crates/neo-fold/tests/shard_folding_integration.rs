@@ -317,11 +317,7 @@ impl TwistRolloverHarness {
         )
     }
 
-    fn verify_with(
-        &self,
-        steps: &[StepWitnessBundle<Cmt, F, K>],
-        proof: &ShardProof,
-    ) -> Result<(), PiCcsError> {
+    fn verify_with(&self, steps: &[StepWitnessBundle<Cmt, F, K>], proof: &ShardProof) -> Result<(), PiCcsError> {
         let mut tr = Poseidon2Transcript::new(b"twist-rollover");
         fold_shard_verify(
             FoldingMode::PaperExact,
@@ -342,7 +338,48 @@ impl TwistRolloverHarness {
 fn test_twist_rollover_two_steps_prove_verify() {
     let ctx = TwistRolloverHarness::new();
     let proof = ctx.prove().expect("prove should succeed");
-    ctx.verify_with(&ctx.steps, &proof).expect("verify should succeed");
+    ctx.verify_with(&ctx.steps, &proof)
+        .expect("verify should succeed");
+}
+
+#[test]
+#[cfg(feature = "paper-exact")]
+fn test_twist_rollover_lookahead_binding_changes_r_addr() {
+    let ctx = TwistRolloverHarness::new();
+    let proof_a = ctx.prove().expect("prove should succeed");
+
+    // Change step 1 init_vals. With lookahead binding, this must influence the
+    // transcript before step 0 samples r_addr, so step 0's r_addr should change.
+    let mut steps_b = ctx.steps.clone();
+    steps_b[1].mem_instances[0].0.init_vals[0] += F::ONE;
+
+    let mut tr_b = Poseidon2Transcript::new(b"twist-rollover");
+    let proof_b = fold_shard_prove(
+        FoldingMode::PaperExact,
+        &mut tr_b,
+        &ctx.params,
+        &ctx.ccs,
+        &steps_b,
+        &ctx.acc_init,
+        &ctx.acc_wit_init,
+        &ctx.l,
+        ctx.mixers,
+    )
+    .expect("prove should succeed");
+
+    let twist_a = match proof_a.steps[0].mem.proofs.first().expect("one mem proof") {
+        MemOrLutProof::Twist(p) => p,
+        _ => panic!("expected Twist proof"),
+    };
+    let twist_b = match proof_b.steps[0].mem.proofs.first().expect("one mem proof") {
+        MemOrLutProof::Twist(p) => p,
+        _ => panic!("expected Twist proof"),
+    };
+
+    assert_ne!(
+        twist_a.addr_batch.r_addr, twist_b.addr_batch.r_addr,
+        "step 0 r_addr should change when next-step init_vals change"
+    );
 }
 
 #[test]
@@ -369,7 +406,12 @@ fn test_twist_rollover_mutated_next_init_vals_fails() {
     };
     let val_eval = twist_proof.val_eval.as_mut().expect("val_eval present");
     let r_addr = &twist_proof.addr_batch.r_addr;
-    let init_k: Vec<K> = steps[1].mem_instances[0].0.init_vals.iter().map(|&v| v.into()).collect();
+    let init_k: Vec<K> = steps[1].mem_instances[0]
+        .0
+        .init_vals
+        .iter()
+        .map(|&v| v.into())
+        .collect();
     let init_at_r_addr = neo_memory::twist_oracle::table_mle_eval(&init_k, r_addr);
     val_eval.claimed_val = init_at_r_addr + val_eval.claimed_inc_sum_lt;
 
@@ -424,6 +466,23 @@ fn test_twist_only_route_a_mutated_rv_fails() {
 
 #[test]
 #[cfg(feature = "paper-exact")]
+fn test_twist_only_route_a_mutated_wv_fails() {
+    let ctx = TwistOnlyHarness::new();
+    let mut proof = ctx.prove().expect("prove should succeed");
+
+    let inst = &ctx.steps[0].mem_instances[0].0;
+    let ell_addr = inst.d * inst.ell;
+    let wv_idx = 2 * ell_addr + 2;
+    proof.steps[0].mem.me_claims_time[wv_idx].y_scalars[0] += K::ONE;
+
+    assert!(
+        ctx.verify(&proof).is_err(),
+        "verification should fail when wv opening is corrupted"
+    );
+}
+
+#[test]
+#[cfg(feature = "paper-exact")]
 fn test_twist_only_route_a_mutated_addr_bit_fails() {
     let ctx = TwistOnlyHarness::new();
     let mut proof = ctx.prove().expect("prove should succeed");
@@ -433,6 +492,24 @@ fn test_twist_only_route_a_mutated_addr_bit_fails() {
     assert!(
         ctx.verify(&proof).is_err(),
         "verification should fail when address bit opening is corrupted"
+    );
+}
+
+#[test]
+#[cfg(feature = "paper-exact")]
+fn test_twist_only_route_a_mutated_write_addr_bit_fails() {
+    let ctx = TwistOnlyHarness::new();
+    let mut proof = ctx.prove().expect("prove should succeed");
+
+    let inst = &ctx.steps[0].mem_instances[0].0;
+    let ell_addr = inst.d * inst.ell;
+    let wa_idx = ell_addr; // first write-address bit column
+    let bit = &mut proof.steps[0].mem.me_claims_time[wa_idx].y_scalars[0];
+    *bit = K::ONE - *bit; // flip bitness
+
+    assert!(
+        ctx.verify(&proof).is_err(),
+        "verification should fail when write-address bit opening is corrupted"
     );
 }
 
@@ -564,7 +641,10 @@ fn test_twist_only_route_a_mutated_val_eval_claim_fails() {
         MemOrLutProof::Twist(p) => p,
         _ => panic!("expected Twist proof"),
     };
-    let val_eval = twist_proof.val_eval.as_mut().expect("Phase 2 requires val_eval");
+    let val_eval = twist_proof
+        .val_eval
+        .as_mut()
+        .expect("Phase 2 requires val_eval");
     val_eval.claimed_inc_sum_lt += K::ONE;
 
     assert!(
@@ -855,7 +935,8 @@ fn test_shard_cpu_only_folding() {
         "No memory sidecar proofs"
     );
     assert!(
-        proof.steps
+        proof
+            .steps
             .iter()
             .all(|s| s.mem.me_claims_time.is_empty() && s.mem.me_claims_val.is_empty()),
         "No memory ME claims"

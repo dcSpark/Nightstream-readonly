@@ -23,3 +23,6 @@ neo-reductions = { path = "../neo-reductions" }
 p3-field = { workspace = true }
 p3-matrix = { workspace = true }
 p3-goldilocks = { workspace = true } # Added
+
+[lints]
+workspace = true
