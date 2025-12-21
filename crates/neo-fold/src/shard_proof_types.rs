@@ -7,6 +7,26 @@ pub type TwistProofK = neo_memory::twist::TwistProof<K>;
 pub type ShoutProofK = neo_memory::shout::ShoutProof<K>;
 
 #[derive(Clone, Debug)]
+pub struct ShardFoldOutputs<C, FF, KK> {
+    /// The shard's final main accumulator (the normal folding lane).
+    pub final_main_acc: Vec<MeInstance<C, FF, KK>>,
+    /// Additional ME instances that must be satisfied for Twist val-eval (the `r_val` lane).
+    ///
+    /// These are the Π_DEC children produced by each step's `val_fold` proof, concatenated
+    /// in step order. They cannot be merged into the main accumulator because `r_val` differs
+    /// from the shared `r_time`.
+    pub val_lane_obligations: Vec<MeInstance<C, FF, KK>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ShardFoldWitnesses<FF> {
+    /// Witnesses for `ShardFoldOutputs::final_main_acc` (one per ME instance).
+    pub final_main_wits: Vec<Mat<FF>>,
+    /// Witnesses for `ShardFoldOutputs::val_lane_obligations` (one per ME instance).
+    pub val_lane_wits: Vec<Mat<FF>>,
+}
+
+#[derive(Clone, Debug)]
 pub enum MemOrLutProof {
     Twist(TwistProofK),
     Shout(ShoutProofK),
@@ -63,10 +83,36 @@ pub struct ShardProof {
 }
 
 impl ShardProof {
+    /// Returns the final main accumulator only.
+    ///
+    /// If Twist val-eval is enabled, this does **not** include the additional `r_val`-lane
+    /// ME obligations; use `compute_fold_outputs` to obtain the full set of obligations.
     pub fn compute_final_children(&self, acc_init: &[MeInstance<Cmt, F, K>]) -> Vec<MeInstance<Cmt, F, K>> {
-        if self.steps.is_empty() {
-            return acc_init.to_vec();
+        self.compute_fold_outputs(acc_init).final_main_acc
+    }
+
+    pub fn compute_fold_outputs(&self, acc_init: &[MeInstance<Cmt, F, K>]) -> ShardFoldOutputs<Cmt, F, K> {
+        let final_main_acc = if self.steps.is_empty() {
+            acc_init.to_vec()
+        } else {
+            self.steps
+                .last()
+                .expect("non-empty")
+                .fold
+                .dec_children
+                .clone()
+        };
+
+        let mut val_lane_obligations = Vec::new();
+        for step in &self.steps {
+            if let Some(val_fold) = &step.val_fold {
+                val_lane_obligations.extend_from_slice(&val_fold.dec_children);
+            }
         }
-        self.steps.last().unwrap().fold.dec_children.clone()
+
+        ShardFoldOutputs {
+            final_main_acc,
+            val_lane_obligations,
+        }
     }
 }

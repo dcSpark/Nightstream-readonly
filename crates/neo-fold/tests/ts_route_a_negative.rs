@@ -1,5 +1,8 @@
 #![allow(non_snake_case)]
 
+mod common;
+
+use common::twist_oracle_2d::{build_val_table_pre_write_from_inc, TwistReadCheck2DOracle, TwistWriteCheck2DOracle};
 use neo_fold::memory_sidecar::sumcheck_ds::{
     run_batched_sumcheck_prover_ds, run_sumcheck_prover_ds, verify_batched_sumcheck_rounds_ds,
     verify_sumcheck_rounds_ds,
@@ -7,8 +10,7 @@ use neo_fold::memory_sidecar::sumcheck_ds::{
 use neo_fold::memory_sidecar::utils::RoundOraclePrefix;
 use neo_math::{F, K};
 use neo_memory::twist_oracle::{
-    build_eq_table, build_val_table_pre_write_from_inc, table_mle_eval, AddressLookupOracle, IndexAdapterOracle,
-    LazyBitnessOracle, ProductRoundOracle, TwistReadCheck2DOracle, TwistWriteCheck2DOracle,
+    build_eq_table, table_mle_eval, AddressLookupOracle, IndexAdapterOracle, LazyBitnessOracle, ProductRoundOracle,
 };
 use neo_reductions::sumcheck::{BatchedClaim, RoundOracle};
 use neo_transcript::{Poseidon2Transcript, Transcript};

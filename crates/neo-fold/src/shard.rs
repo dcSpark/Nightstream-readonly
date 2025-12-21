@@ -28,7 +28,8 @@ use crate::memory_sidecar::sumcheck_ds::{
 use crate::memory_sidecar::utils::RoundOraclePrefix;
 use crate::pi_ccs::{self as ccs, FoldingMode};
 pub use crate::shard_proof_types::{
-    BatchedTimeProof, MemOrLutProof, MemSidecarProof, RlcDecProof, ShardProof, ShoutProofK, StepProof, TwistProofK,
+    BatchedTimeProof, MemOrLutProof, MemSidecarProof, RlcDecProof, ShardFoldOutputs, ShardFoldWitnesses, ShardProof,
+    ShoutProofK, StepProof, TwistProofK,
 };
 use crate::PiCcsError;
 use neo_ajtai::Commitment as Cmt;
@@ -242,7 +243,8 @@ fn validate_me_batch_invariants(batch: &[MeInstance<Cmt, F, K>], context: &str) 
 // Shard Proving
 // ============================================================================
 
-pub fn fold_shard_prove<L, MR, MB>(
+fn fold_shard_prove_impl<L, MR, MB>(
+    collect_val_lane_wits: bool,
     mode: FoldingMode,
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
@@ -252,7 +254,7 @@ pub fn fold_shard_prove<L, MR, MB>(
     acc_wit_init: &[Mat<F>],
     l: &L,
     mixers: CommitMixers<MR, MB>,
-) -> Result<ShardProof, PiCcsError>
+) -> Result<(ShardProof, Vec<Mat<F>>, Vec<Mat<F>>), PiCcsError>
 where
     L: SModuleHomomorphism<F, Cmt>,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
@@ -278,6 +280,7 @@ where
     let mut accumulator_wit = acc_wit_init.to_vec();
 
     let mut step_proofs = Vec::with_capacity(steps.len());
+    let mut val_lane_wits: Vec<Mat<F>> = Vec::new();
 
     for (idx, step) in steps.iter().enumerate() {
         absorb_step_memory_commitments(tr, step);
@@ -617,7 +620,7 @@ where
                 mixers.mix_rhos_commits,
             );
 
-            let Z_split = ccs::split_b_matrix_k(&Z_mix, k_dec, params.b)?;
+            let mut Z_split = ccs::split_b_matrix_k(&Z_mix, k_dec, params.b)?;
             let child_cs: Vec<Cmt> = Z_split.iter().map(|Zi| l.commit(Zi)).collect();
             let (val_children, ok_y, ok_X, ok_c) = ccs::dec_children_with_commit(
                 mode.clone(),
@@ -634,6 +637,10 @@ where
                     "DEC(val) public check failed at step {} (y={}, X={}, c={})",
                     idx, ok_y, ok_X, ok_c
                 )));
+            }
+
+            if collect_val_lane_wits {
+                val_lane_wits.extend(Z_split.drain(..));
             }
 
             Some(RlcDecProof {
@@ -662,7 +669,71 @@ where
         tr.append_message(b"fold/step_done", &(idx as u64).to_le_bytes());
     }
 
-    Ok(ShardProof { steps: step_proofs })
+    Ok((ShardProof { steps: step_proofs }, accumulator_wit, val_lane_wits))
+}
+
+pub fn fold_shard_prove<L, MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepWitnessBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_wit_init: &[Mat<F>],
+    l: &L,
+    mixers: CommitMixers<MR, MB>,
+) -> Result<ShardProof, PiCcsError>
+where
+    L: SModuleHomomorphism<F, Cmt>,
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    let (proof, _final_main_wits, _val_lane_wits) =
+        fold_shard_prove_impl(false, mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)?;
+    Ok(proof)
+}
+
+pub fn fold_shard_prove_with_witnesses<L, MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepWitnessBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_wit_init: &[Mat<F>],
+    l: &L,
+    mixers: CommitMixers<MR, MB>,
+) -> Result<(ShardProof, ShardFoldOutputs<Cmt, F, K>, ShardFoldWitnesses<F>), PiCcsError>
+where
+    L: SModuleHomomorphism<F, Cmt>,
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    let (proof, final_main_wits, val_lane_wits) =
+        fold_shard_prove_impl(true, mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)?;
+    let outputs = proof.compute_fold_outputs(acc_init);
+    if outputs.final_main_acc.len() != final_main_wits.len() {
+        return Err(PiCcsError::ProtocolError(format!(
+            "final main witness count mismatch (have {}, need {})",
+            final_main_wits.len(),
+            outputs.final_main_acc.len()
+        )));
+    }
+    if outputs.val_lane_obligations.len() != val_lane_wits.len() {
+        return Err(PiCcsError::ProtocolError(format!(
+            "val-lane witness count mismatch (have {}, need {})",
+            val_lane_wits.len(),
+            outputs.val_lane_obligations.len()
+        )));
+    }
+    Ok((
+        proof,
+        outputs,
+        ShardFoldWitnesses {
+            final_main_wits,
+            val_lane_wits,
+        },
+    ))
 }
 
 // ============================================================================
@@ -680,6 +751,25 @@ pub fn fold_shard_verify<L, MR, MB>(
     _l: &L,
     mixers: CommitMixers<MR, MB>,
 ) -> Result<(), PiCcsError>
+where
+    L: SModuleHomomorphism<F, Cmt>,
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    fold_shard_verify_with_outputs(_mode, tr, params, s_me, steps, acc_init, proof, _l, mixers).map(|_| ())
+}
+
+pub fn fold_shard_verify_with_outputs<L, MR, MB>(
+    _mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepWitnessBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    proof: &ShardProof,
+    _l: &L,
+    mixers: CommitMixers<MR, MB>,
+) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
 where
     L: SModuleHomomorphism<F, Cmt>,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
@@ -708,6 +798,7 @@ where
     }
 
     let mut accumulator = acc_init.to_vec();
+    let mut val_lane_obligations: Vec<MeInstance<Cmt, F, K>> = Vec::new();
 
     for (idx, (step, step_proof)) in steps.iter().zip(proof.steps.iter()).enumerate() {
         absorb_step_memory_commitments(tr, step);
@@ -1239,11 +1330,16 @@ where
                 ) {
                     return Err(PiCcsError::ProtocolError("val-lane DEC public check failed".into()));
                 }
+
+                val_lane_obligations.extend_from_slice(&val_fold.dec_children);
             }
         }
 
         tr.append_message(b"fold/step_done", &(idx as u64).to_le_bytes());
     }
 
-    Ok(())
+    Ok(ShardFoldOutputs {
+        final_main_acc: accumulator,
+        val_lane_obligations,
+    })
 }

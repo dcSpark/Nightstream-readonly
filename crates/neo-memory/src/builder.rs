@@ -30,8 +30,6 @@ pub enum ShardBuildError {
     MissingTable(String),
 }
 
-pub trait Program {}
-
 /// Build shard witness with optional CCS width alignment.
 ///
 /// # Parameters

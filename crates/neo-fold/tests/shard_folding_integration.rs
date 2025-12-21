@@ -31,11 +31,14 @@ use std::marker::PhantomData;
 use neo_ajtai::Commitment as Cmt;
 use neo_ccs::matrix::Mat;
 use neo_ccs::poly::SparsePoly;
-use neo_ccs::relations::{CcsStructure, McsInstance, McsWitness, MeInstance};
+use neo_ccs::relations::{check_me_consistency, CcsStructure, McsInstance, McsWitness, MeInstance, MeWitness};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_fold::folding::CommitMixers;
 use neo_fold::pi_ccs::FoldingMode;
-use neo_fold::shard::{fold_shard_prove, fold_shard_verify, MemOrLutProof, ShardProof};
+use neo_fold::shard::{
+    fold_shard_prove, fold_shard_prove_with_witnesses, fold_shard_verify, fold_shard_verify_with_outputs,
+    MemOrLutProof, ShardProof,
+};
 use neo_fold::PiCcsError;
 use neo_math::{D, F, K};
 use neo_memory::encode::{encode_lut_for_shout, encode_mem_for_twist};
@@ -662,6 +665,105 @@ fn test_twist_only_route_a_mutated_val_lane_opening_fails() {
     assert!(
         ctx.verify(&proof).is_err(),
         "verification should fail when r_val ME opening is corrupted"
+    );
+}
+
+#[test]
+#[cfg(feature = "paper-exact")]
+fn test_twist_only_route_a_exports_val_lane_obligations() {
+    fn trim_y_to_d(mut inst: MeInstance<Cmt, F, K>) -> MeInstance<Cmt, F, K> {
+        for row in inst.y.iter_mut() {
+            row.truncate(D);
+        }
+        inst
+    }
+
+    let ctx = TwistOnlyHarness::new();
+
+    let mut tr_prove = Poseidon2Transcript::new(b"twist-only-obligations");
+    let (proof, outputs_prove, wits) = fold_shard_prove_with_witnesses(
+        FoldingMode::PaperExact,
+        &mut tr_prove,
+        &ctx.params,
+        &ctx.ccs,
+        &ctx.steps,
+        &ctx.acc_init,
+        &ctx.acc_wit_init,
+        &ctx.l,
+        ctx.mixers,
+    )
+    .expect("prove_with_witnesses should succeed");
+
+    let mut tr_verify = Poseidon2Transcript::new(b"twist-only-obligations");
+    let outputs_verify = fold_shard_verify_with_outputs(
+        FoldingMode::PaperExact,
+        &mut tr_verify,
+        &ctx.params,
+        &ctx.ccs,
+        &ctx.steps,
+        &ctx.acc_init,
+        &proof,
+        &ctx.l,
+        ctx.mixers,
+    )
+    .expect("verify_with_outputs should succeed");
+
+    assert_eq!(
+        outputs_verify.final_main_acc, outputs_prove.final_main_acc,
+        "final main accumulator mismatch"
+    );
+    assert_eq!(
+        outputs_verify.val_lane_obligations, outputs_prove.val_lane_obligations,
+        "val-lane obligations mismatch"
+    );
+    assert!(
+        !outputs_verify.val_lane_obligations.is_empty(),
+        "expected Twist val-lane obligations"
+    );
+    assert_eq!(
+        outputs_verify.final_main_acc.len(),
+        wits.final_main_wits.len(),
+        "main witness count mismatch"
+    );
+    assert_eq!(
+        outputs_verify.val_lane_obligations.len(),
+        wits.val_lane_wits.len(),
+        "val-lane witness count mismatch"
+    );
+
+    for (inst, Z) in outputs_verify
+        .final_main_acc
+        .iter()
+        .cloned()
+        .map(trim_y_to_d)
+        .zip(wits.final_main_wits.iter().cloned())
+    {
+        check_me_consistency(&ctx.ccs, &ctx.l, &inst, &MeWitness { Z }).expect("main ME consistency");
+    }
+
+    for (inst, Z) in outputs_verify
+        .val_lane_obligations
+        .iter()
+        .cloned()
+        .map(trim_y_to_d)
+        .zip(wits.val_lane_wits.iter().cloned())
+    {
+        check_me_consistency(&ctx.ccs, &ctx.l, &inst, &MeWitness { Z }).expect("val-lane ME consistency");
+    }
+
+    let mut inst_bad = trim_y_to_d(outputs_verify.val_lane_obligations[0].clone());
+    inst_bad.y[0][0] += K::ONE;
+    assert!(
+        check_me_consistency(
+            &ctx.ccs,
+            &ctx.l,
+            &inst_bad,
+            &MeWitness {
+                Z: wits.val_lane_wits[0].clone()
+            }
+        )
+        .is_err(),
+        "expected base-case ME consistency to fail for corrupted val-lane obligation"
     );
 }
 

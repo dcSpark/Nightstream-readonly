@@ -1,3 +1,4 @@
+use crate::memory_sidecar::claim_plan::RouteATimeClaimPlan;
 use crate::memory_sidecar::sumcheck_ds::{
     run_batched_sumcheck_prover_ds, run_sumcheck_prover_ds, verify_batched_sumcheck_rounds_ds,
     verify_sumcheck_rounds_ds,
@@ -616,142 +617,6 @@ pub fn append_route_a_shout_time_claims<'a>(
     }
 }
 
-pub struct RouteATwistTimeClaimsGuard<'a> {
-    pub read_value_prefixes: Vec<RoundOraclePrefix<'a>>,
-    pub read_adapter_prefixes: Vec<RoundOraclePrefix<'a>>,
-    pub write_value_prefixes: Vec<RoundOraclePrefix<'a>>,
-    pub write_adapter_prefixes: Vec<RoundOraclePrefix<'a>>,
-    pub read_value_claims: Vec<K>,
-    pub read_adapter_claims: Vec<K>,
-    pub write_value_claims: Vec<K>,
-    pub write_adapter_claims: Vec<K>,
-    pub bitness: Vec<Vec<LazyBitnessOracle>>,
-}
-
-pub fn build_route_a_twist_time_claims_guard_v1<'a>(
-    twist_oracles: &'a mut [twist::RouteATwistOraclesV1],
-    ell_n: usize,
-) -> RouteATwistTimeClaimsGuard<'a> {
-    let mut read_value_prefixes: Vec<RoundOraclePrefix<'a>> = Vec::with_capacity(twist_oracles.len());
-    let mut read_adapter_prefixes: Vec<RoundOraclePrefix<'a>> = Vec::with_capacity(twist_oracles.len());
-    let mut write_value_prefixes: Vec<RoundOraclePrefix<'a>> = Vec::with_capacity(twist_oracles.len());
-    let mut write_adapter_prefixes: Vec<RoundOraclePrefix<'a>> = Vec::with_capacity(twist_oracles.len());
-    let mut read_value_claims: Vec<K> = Vec::with_capacity(twist_oracles.len());
-    let mut read_adapter_claims: Vec<K> = Vec::with_capacity(twist_oracles.len());
-    let mut write_value_claims: Vec<K> = Vec::with_capacity(twist_oracles.len());
-    let mut write_adapter_claims: Vec<K> = Vec::with_capacity(twist_oracles.len());
-    let mut bitness: Vec<Vec<LazyBitnessOracle>> = Vec::with_capacity(twist_oracles.len());
-
-    for o in twist_oracles.iter_mut() {
-        bitness.push(core::mem::take(&mut o.bitness));
-        read_value_claims.push(o.read_value_claim);
-        read_adapter_claims.push(o.read_adapter_claim);
-        write_value_claims.push(o.write_value_claim);
-        write_adapter_claims.push(o.write_adapter_claim);
-        read_value_prefixes.push(RoundOraclePrefix::new(&mut o.read_value, ell_n));
-        read_adapter_prefixes.push(RoundOraclePrefix::new(&mut o.read_adapter, ell_n));
-        write_value_prefixes.push(RoundOraclePrefix::new(&mut o.write_value, ell_n));
-        write_adapter_prefixes.push(RoundOraclePrefix::new(&mut o.write_adapter, ell_n));
-    }
-
-    RouteATwistTimeClaimsGuard {
-        read_value_prefixes,
-        read_adapter_prefixes,
-        write_value_prefixes,
-        write_adapter_prefixes,
-        read_value_claims,
-        read_adapter_claims,
-        write_value_claims,
-        write_adapter_claims,
-        bitness,
-    }
-}
-
-pub fn append_route_a_twist_time_claims_v1<'a>(
-    guard: &'a mut RouteATwistTimeClaimsGuard<'_>,
-    claimed_sums: &mut Vec<K>,
-    degree_bounds: &mut Vec<usize>,
-    labels: &mut Vec<&'static [u8]>,
-    claim_is_dynamic: &mut Vec<bool>,
-    claims: &mut Vec<BatchedClaim<'a>>,
-) {
-    let claim_iter = guard
-        .read_value_claims
-        .iter()
-        .zip(guard.read_adapter_claims.iter())
-        .zip(guard.write_value_claims.iter())
-        .zip(guard.write_adapter_claims.iter());
-
-    for (
-        (((read_value_time, read_adapter_time), write_value_time), write_adapter_time),
-        (bitness_vec, (((read_value_claim, read_adapter_claim), write_value_claim), write_adapter_claim)),
-    ) in guard
-        .read_value_prefixes
-        .iter_mut()
-        .zip(guard.read_adapter_prefixes.iter_mut())
-        .zip(guard.write_value_prefixes.iter_mut())
-        .zip(guard.write_adapter_prefixes.iter_mut())
-        .zip(guard.bitness.iter_mut().zip(claim_iter))
-    {
-        claimed_sums.push(*read_value_claim);
-        degree_bounds.push(read_value_time.degree_bound());
-        labels.push(b"twist/read_value");
-        claim_is_dynamic.push(true);
-        claims.push(BatchedClaim {
-            oracle: read_value_time,
-            claimed_sum: *read_value_claim,
-            label: b"twist/read_value",
-        });
-
-        claimed_sums.push(*read_adapter_claim);
-        degree_bounds.push(read_adapter_time.degree_bound());
-        labels.push(b"twist/read_adapter");
-        claim_is_dynamic.push(true);
-        claims.push(BatchedClaim {
-            oracle: read_adapter_time,
-            claimed_sum: *read_adapter_claim,
-            label: b"twist/read_adapter",
-        });
-
-        claimed_sums.push(*write_value_claim);
-        degree_bounds.push(write_value_time.degree_bound());
-        labels.push(b"twist/write_value");
-        claim_is_dynamic.push(true);
-        claims.push(BatchedClaim {
-            oracle: write_value_time,
-            claimed_sum: *write_value_claim,
-            label: b"twist/write_value",
-        });
-
-        claimed_sums.push(*write_adapter_claim);
-        degree_bounds.push(write_adapter_time.degree_bound());
-        labels.push(b"twist/write_adapter");
-        claim_is_dynamic.push(true);
-        claims.push(BatchedClaim {
-            oracle: write_adapter_time,
-            claimed_sum: *write_adapter_claim,
-            label: b"twist/write_adapter",
-        });
-
-        for bit_oracle in bitness_vec.iter_mut() {
-            debug_assert_eq!(
-                bit_oracle.compute_claim(),
-                K::ZERO,
-                "lazy twist bitness claim should be 0"
-            );
-            claimed_sums.push(K::ZERO);
-            degree_bounds.push(bit_oracle.degree_bound());
-            labels.push(b"twist/bitness");
-            claim_is_dynamic.push(false);
-            claims.push(BatchedClaim {
-                oracle: bit_oracle,
-                claimed_sum: K::ZERO,
-                label: b"twist/bitness",
-            });
-        }
-    }
-}
-
 pub struct RouteATwistTimeClaimsGuardV2<'a> {
     pub read_check_prefixes: Vec<RoundOraclePrefix<'a>>,
     pub write_check_prefixes: Vec<RoundOraclePrefix<'a>>,
@@ -1242,7 +1107,21 @@ pub fn verify_route_a_memory_step(
     let mut me_val_offset = 0usize;
     let mut collected_me_time = Vec::new();
     let mut collected_me_val = Vec::new();
-    let mut claim_idx = claim_idx_start;
+    let claim_plan = RouteATimeClaimPlan::build(step, claim_idx_start)?;
+    if claim_plan.claim_idx_end > batched_final_values.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "batched_final_values too short (need at least {}, have {})",
+            claim_plan.claim_idx_end,
+            batched_final_values.len()
+        )));
+    }
+    if claim_plan.claim_idx_end > batched_claimed_sums.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "batched_claimed_sums too short (need at least {}, have {})",
+            claim_plan.claim_idx_end,
+            batched_claimed_sums.len()
+        )));
+    }
 
     let expected_proofs = step.lut_instances.len() + step.mem_instances.len();
     if proofs_mem.len() != expected_proofs {
@@ -1294,16 +1173,19 @@ pub fn verify_route_a_memory_step(
             .get(proof_idx)
             .ok_or_else(|| PiCcsError::InvalidInput(format!("missing pre-time Shout data at index {}", proof_idx)))?;
 
+        let shout_claims = claim_plan
+            .shout
+            .get(proof_idx)
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("missing Shout claim schedule at index {}", proof_idx)))?;
+
         // Route A Shout ordering in batched_time:
         // - value (time rounds only)
         // - adapter (time rounds only)
         // - bitness for addr_bits then has_lookup
-        let value_claim = batched_claimed_sums[claim_idx];
-        let value_final = batched_final_values[claim_idx];
-        claim_idx += 1;
-        let adapter_claim = batched_claimed_sums[claim_idx];
-        let adapter_final = batched_final_values[claim_idx];
-        claim_idx += 1;
+        let value_claim = batched_claimed_sums[shout_claims.value];
+        let value_final = batched_final_values[shout_claims.value];
+        let adapter_claim = batched_claimed_sums[shout_claims.adapter];
+        let adapter_final = batched_final_values[shout_claims.adapter];
 
         for j in 0..ell_addr {
             let b_open = *me_slice[j]
@@ -1311,13 +1193,17 @@ pub fn verify_route_a_memory_step(
                 .get(0)
                 .ok_or_else(|| PiCcsError::ProtocolError("ME.y_scalars missing identity-first entry".into()))?;
             let expected_eval = chi_cycle_at_r_time * b_open * (b_open - K::ONE);
-            if expected_eval != batched_final_values[claim_idx] {
+            let bitness_idx = shout_claims
+                .bitness_addr_bits
+                .start
+                .checked_add(j)
+                .ok_or_else(|| PiCcsError::ProtocolError("bitness index overflow".into()))?;
+            if expected_eval != batched_final_values[bitness_idx] {
                 return Err(PiCcsError::ProtocolError(format!(
                     "shout bitness final value mismatch at addr_bit {}",
                     j
                 )));
             }
-            claim_idx += 1;
         }
         let has_lookup_open = *me_slice[ell_addr]
             .y_scalars
@@ -1325,12 +1211,11 @@ pub fn verify_route_a_memory_step(
             .ok_or_else(|| PiCcsError::ProtocolError("ME.y_scalars missing identity-first entry".into()))?;
         {
             let expected_eval = chi_cycle_at_r_time * has_lookup_open * (has_lookup_open - K::ONE);
-            if expected_eval != batched_final_values[claim_idx] {
+            if expected_eval != batched_final_values[shout_claims.bitness_has_lookup] {
                 return Err(PiCcsError::ProtocolError(
                     "shout bitness final value mismatch at has_lookup".into(),
                 ));
             }
-            claim_idx += 1;
         }
 
         let addr_bits_open: Vec<K> = me_slice[..ell_addr]
@@ -1438,16 +1323,19 @@ pub fn verify_route_a_memory_step(
             )));
         }
 
+        let twist_claims = claim_plan
+            .twist
+            .get(i_mem)
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("missing Twist claim schedule at index {}", i_mem)))?;
+
         // Route A Twist ordering in batched_time:
         // - read_check (time rounds only)
         // - write_check (time rounds only)
         // - bitness for ra_bits then wa_bits then has_read then has_write (time-only)
-        let read_check_claim = batched_claimed_sums[claim_idx];
-        let read_check_final = batched_final_values[claim_idx];
-        claim_idx += 1;
-        let write_check_claim = batched_claimed_sums[claim_idx];
-        let write_check_final = batched_final_values[claim_idx];
-        claim_idx += 1;
+        let read_check_claim = batched_claimed_sums[twist_claims.read_check];
+        let read_check_final = batched_final_values[twist_claims.read_check];
+        let write_check_claim = batched_claimed_sums[twist_claims.write_check];
+        let write_check_final = batched_final_values[twist_claims.write_check];
 
         let ra_bits_open: Vec<K> = me_slice[..ell_addr]
             .iter()
@@ -1497,13 +1385,29 @@ pub fn verify_route_a_memory_step(
             .enumerate()
         {
             let expected_eval = chi_cycle_at_r_time * *col_open * (*col_open - K::ONE);
-            if expected_eval != batched_final_values[claim_idx] {
+            let bitness_idx = if j < twist_claims.ell_addr {
+                twist_claims
+                    .bitness_ra_bits
+                    .start
+                    .checked_add(j)
+                    .ok_or_else(|| PiCcsError::ProtocolError("bitness index overflow".into()))?
+            } else if j < 2 * twist_claims.ell_addr {
+                twist_claims
+                    .bitness_wa_bits
+                    .start
+                    .checked_add(j - twist_claims.ell_addr)
+                    .ok_or_else(|| PiCcsError::ProtocolError("bitness index overflow".into()))?
+            } else if j == 2 * twist_claims.ell_addr {
+                twist_claims.bitness_has_read
+            } else {
+                twist_claims.bitness_has_write
+            };
+            if expected_eval != batched_final_values[bitness_idx] {
                 return Err(PiCcsError::ProtocolError(format!(
                     "twist/bitness terminal value mismatch at chunk {}",
                     j
                 )));
             }
-            claim_idx += 1;
         }
 
         if read_check_claim != pre.read_check_claim_sum {
@@ -1775,7 +1679,7 @@ pub fn verify_route_a_memory_step(
     Ok(RouteAMemoryVerifyOutput {
         collected_me_time,
         collected_me_val,
-        claim_idx_end: claim_idx,
+        claim_idx_end: claim_plan.claim_idx_end,
         twist_rollover,
     })
 }

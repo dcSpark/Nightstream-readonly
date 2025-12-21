@@ -70,7 +70,7 @@ and then fold the full batch using the standard Neo pipeline:
 * Π_{\mathsf{CCS}} runs on MCS\_i and the current accumulator,
 * Π_{\mathsf{Twist}} runs on the step-i memory slice (with rolled-forward `init_vals`),
 * Π_{\mathsf{Shout}} runs on the step-i lookup slice,
-* all resulting ME claims (running + CCS + Twist + Shout + any IDX→OH) are batched into a single Π_{\mathsf{RLC}} → Π_{\mathsf{DEC}} to produce the next k children.
+* all resulting ME claims evaluated at the **shared time point** `r_time` (running + CCS + Twist/Shout time-lane + any IDX→OH) are batched into a single Π_{\mathsf{RLC}} → Π_{\mathsf{DEC}} to produce the next k children (the “main lane”).
 
 There is no shard-wide “memory sidecar merge”; Twist/Shout participate in the same per-step folding loop as CCS.
 
@@ -79,13 +79,45 @@ There is no shard-wide “memory sidecar merge”; Twist/Shout participate in th
 Step i:
   - k running ME
   - ME from Π_{\mathsf{CCS}}(chunk i)
-  - ME from Π_{\mathsf{Twist}}(chunk i)
-  - ME from Π_{\mathsf{Shout}}(chunk i)
+  - ME from Π_{\mathsf{Twist}}(chunk i) at `r_time` (read/write checks + bitness)
+  - ME from Π_{\mathsf{Shout}}(chunk i) at `r_time` (lookup checks + bitness)
   → Π_{\mathsf{RLC}} → Π_{\mathsf{DEC}} → k children
 
 **Terminology note.** A shard is a trace segment modeled as a collection of folding chunks. Each `StepWitnessBundle` holds exactly one MCS (CPU chunk) plus the Twist/Shout instances for that *same folding chunk*. A folding chunk can be one VM step or a user-chosen grouping of VM steps. The folding loop consumes one chunk at a time from the shard. There are no shard-wide Twist/Shout instances—only per-chunk ones.
 
-No modification to (\Pi_{\mathsf{RLC}}) or (\Pi_{\mathsf{DEC}}) is required.
+No modification to (\Pi_{\mathsf{RLC}}) or (\Pi_{\mathsf{DEC}}) is required; however, Twist introduces one unavoidable multi-point complication described next.
+
+#### 3.1 Twist’s Second Evaluation Point (`r_val`) and the “Val Lane” of ME Obligations
+
+Twist’s read/write time-lane checks at the shared point `r_time` require access to the (virtual) memory value
+(\widetilde{\mathrm{Val}}(r_{\mathrm{addr}}, r_{\mathrm{time}})), which is not itself a committed column. Instead, Twist reconstructs it from committed sparse increments using an LT-weighted prefix-sum identity:
+[
+\widetilde{\mathrm{Val}}(r_{\mathrm{addr}}, r_{\mathrm{time}})
+\;=\;
+\widetilde{\mathrm{Init}}(r_{\mathrm{addr}})
+\;+\;
+\sum_{t\in\{0,1\}^{\ell_n}}
+\mathrm{has\_write}(t)\cdot \mathrm{inc}(t)\cdot
+\mathrm{eq}(\mathrm{wa}(t),r_{\mathrm{addr}})\cdot
+\widetilde{LT}(t,r_{\mathrm{time}}).
+]
+
+This reconstruction is proven by a separate sum-check (the “val-eval” subprotocol) over the Boolean hypercube in the time index (t). The val-eval sum-check introduces *fresh* verifier challenges (\rho_1,\dots,\rho_{\ell_n}) (one per round); define its terminal point as:
+[
+r_{\mathrm{val}} := (\rho_1,\dots,\rho_{\ell_n}) \in K^{\ell_n}.
+]
+Because `r_time` is already fixed and known to the prover by the time val-eval begins, these sum-check challenges cannot be reused from `r_time` without weakening sum-check soundness (challenge freshness / transcript order). Verifying the val-eval terminal identity therefore requires ME openings evaluated at `r_val` for the committed columns appearing in the integrand (e.g., `has_write`, `inc`, and the write-address bits used to form (\mathrm{eq}(\mathrm{wa}(\cdot),r_{\mathrm{addr}}))), and/or a precomputed `inc_at_write_addr` column if we commit to that product.
+
+This creates two groups of ME instances that are both required for soundness:
+
+- **Main lane** (shared `r_time`): ME openings used by CCS + Shout + Twist read/write checks at `r_time`, which can be folded together via one Π_{\mathsf{RLC}}→Π_{\mathsf{DEC}} per step.
+- **Val lane** (`r_val`): ME openings used to validate Twist val-eval at `r_val` (the terminal point of the val-eval sum-check).
+
+Neo’s (\mathsf{ME}) relation is a *single-point* evaluation relation, and Π_{\mathsf{RLC}} requires all inputs to share the same extension point `r`. Therefore, ME openings at `r_val` cannot be mixed into the main Π_{\mathsf{RLC}} batch at `r_time` without changing the underlying relation/protocol (e.g., to a multi-point ME/DEC).
+
+**Solution (two-lane folding):** keep the standard per-step fold for the main lane, and additionally run a second Π_{\mathsf{RLC}}→Π_{\mathsf{DEC}} lane per step for the val-eval ME claims at `r_val`. This produces a set of (\mathsf{ME}(b,\mathcal{L})) “val-lane children” (obligations).
+
+**Soundness requirement (important):** these val-lane children must be enforced by whatever final mechanism ultimately checks all ME instances (a base-case verifier, recursion circuit, etc.). It is not sufficient to only check sum-check transcripts and folding algebra; the verification pipeline must also expose/propagate the val-lane obligations so they cannot be accidentally dropped. (In the codebase, this corresponds to carrying the `r_val`-lane children alongside the main accumulator outputs.)
 
 #### 4. Trace Generation and Commitments (Updated Address Handling)
 
