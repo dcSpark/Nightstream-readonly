@@ -553,6 +553,18 @@ fn test_twist_only_route_a_mutated_val_lane_opening_fails() {
 
 #[test]
 #[cfg(feature = "paper-exact")]
+fn test_twist_only_route_a_mutated_val_lane_commitment_fails() {
+    let ctx = TwistOnlyHarness::new();
+    let mut proof = ctx.prove().expect("prove should succeed");
+    proof.steps[0].mem.me_claims_val[0].c.data[0] += F::ONE;
+    assert!(
+        ctx.verify(&proof).is_err(),
+        "verification should fail when r_val ME commitment is corrupted"
+    );
+}
+
+#[test]
+#[cfg(feature = "paper-exact")]
 fn test_twist_only_route_a_exports_val_lane_obligations() {
     fn trim_y_to_d(mut inst: MeInstance<Cmt, F, K>) -> MeInstance<Cmt, F, K> {
         for row in inst.y.iter_mut() {

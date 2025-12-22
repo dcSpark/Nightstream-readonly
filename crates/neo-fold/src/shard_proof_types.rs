@@ -22,6 +22,24 @@ impl<C, FF, KK> ShardObligations<C, FF, KK> {
         self.main.iter().chain(self.val.iter())
     }
 
+    pub fn require_all_finalized(
+        &self,
+        did_finalize_main: bool,
+        did_finalize_val: bool,
+    ) -> Result<(), crate::PiCcsError> {
+        if !self.main.is_empty() && !did_finalize_main {
+            return Err(crate::PiCcsError::ProtocolError(
+                "finalizer did not process main obligations".into(),
+            ));
+        }
+        if !self.val.is_empty() && !did_finalize_val {
+            return Err(crate::PiCcsError::ProtocolError(
+                "finalizer did not process val-lane obligations".into(),
+            ));
+        }
+        Ok(())
+    }
+
     pub fn split(self) -> (Vec<MeInstance<C, FF, KK>>, Vec<MeInstance<C, FF, KK>>) {
         (self.main, self.val)
     }
@@ -112,7 +130,8 @@ impl ShardProof {
 If you truly want main only, call compute_final_main_children()."
     )]
     pub fn compute_final_children(&self, acc_init: &[MeInstance<Cmt, F, K>]) -> Vec<MeInstance<Cmt, F, K>> {
-        self.compute_final_main_children(acc_init)
+        let ShardObligations { main, val } = self.compute_fold_outputs(acc_init).obligations;
+        main.into_iter().chain(val).collect()
     }
 
     pub fn compute_fold_outputs(&self, acc_init: &[MeInstance<Cmt, F, K>]) -> ShardFoldOutputs<Cmt, F, K> {

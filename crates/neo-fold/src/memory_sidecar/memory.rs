@@ -1062,38 +1062,65 @@ pub fn finalize_route_a_memory_prover(
 
         // Emit only the columns needed to verify Twist's val-eval terminal check at r_val:
         // wa_bits, has_write, inc_at_write_addr.
-        if !r_val.is_empty() {
+        if r_val.len() != r_time.len() {
+            return Err(PiCcsError::ProtocolError(format!(
+                "twist val-eval r_val.len()={}, expected ell_n={}",
+                r_val.len(),
+                r_time.len()
+            )));
+        }
+        emit_twist_val_lane_openings(
+            tr,
+            params,
+            s,
+            mem_inst,
+            mem_wit,
+            &r_val,
+            m_in,
+            &mut me_claims_val,
+            &mut me_wits_val,
+        )?;
+        if let Some(prev) = prev_step {
+            let (prev_inst, prev_wit) = prev
+                .mem_instances
+                .get(idx)
+                .ok_or_else(|| PiCcsError::ProtocolError("missing prev mem instance".into()))?;
             emit_twist_val_lane_openings(
                 tr,
                 params,
                 s,
-                mem_inst,
-                mem_wit,
+                prev_inst,
+                prev_wit,
                 &r_val,
                 m_in,
                 &mut me_claims_val,
                 &mut me_wits_val,
             )?;
-            if let Some(prev) = prev_step {
-                let (prev_inst, prev_wit) = prev
-                    .mem_instances
-                    .get(idx)
-                    .ok_or_else(|| PiCcsError::ProtocolError("missing prev mem instance".into()))?;
-                emit_twist_val_lane_openings(
-                    tr,
-                    params,
-                    s,
-                    prev_inst,
-                    prev_wit,
-                    &r_val,
-                    m_in,
-                    &mut me_claims_val,
-                    &mut me_wits_val,
-                )?;
-            }
         }
 
         proofs.push(MemOrLutProof::Twist(proof));
+    }
+
+    if step.mem_instances.is_empty() {
+        if !twist_val_eval_proofs.is_empty() {
+            return Err(PiCcsError::ProtocolError(
+                "twist val-eval proofs must be empty when no mem instances are present".into(),
+            ));
+        }
+        if !r_val.is_empty() {
+            return Err(PiCcsError::ProtocolError(
+                "twist r_val must be empty when no mem instances are present".into(),
+            ));
+        }
+        if !me_claims_val.is_empty() || !me_wits_val.is_empty() {
+            return Err(PiCcsError::ProtocolError(
+                "twist val-lane ME claims must be empty when no mem instances are present".into(),
+            ));
+        }
+    } else if me_claims_val.is_empty() || me_wits_val.is_empty() {
+        return Err(PiCcsError::ProtocolError(
+            "twist val-eval requires non-empty val-lane ME claims".into(),
+        ));
     }
 
     Ok(RouteAMemoryProverOutput {
@@ -1620,8 +1647,20 @@ pub fn verify_route_a_memory_step(
     // Verify val-eval terminal identity against ME openings at r_val.
     let mut twist_total_inc_sums: Vec<K> = Vec::with_capacity(step.mem_insts.len());
     let lt = if step.mem_insts.is_empty() {
+        if !r_val.is_empty() {
+            return Err(PiCcsError::ProtocolError(
+                "twist val-eval produced r_val but no mem instances are present".into(),
+            ));
+        }
         K::ZERO
     } else {
+        if r_val.len() != r_time.len() {
+            return Err(PiCcsError::ProtocolError(format!(
+                "twist val-eval r_val.len()={}, expected ell_n={}",
+                r_val.len(),
+                r_time.len()
+            )));
+        }
         lt_eval(&r_val, r_time)
     };
     for (i_mem, inst) in step.mem_insts.iter().enumerate() {
