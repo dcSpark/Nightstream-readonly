@@ -125,7 +125,7 @@ This document describes the high‑level architecture of Nightstream's lattice S
 ### Stage 1 — Π\_CCS (with Sumcheck)
 
 * Encode the CCS into a **Q polynomial** and prove its correct evaluation via **sumcheck** over the hypercube.
-* Outputs **k ME claims** (matrix extension claims) representing multilinear evaluations.
+* Outputs **k ME claims** (multilinear evaluation claims).
 
 **Optional memory arguments** (compatible with Nightstream):
 
