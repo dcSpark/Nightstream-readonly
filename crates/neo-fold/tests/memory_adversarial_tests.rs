@@ -251,7 +251,6 @@ fn memory_cross_step_read_consistency() {
         &steps_public,
         &acc_init,
         &proof,
-        &l,
         mixers,
     )
     .expect("verify should succeed for valid cross-step memory");
@@ -331,7 +330,6 @@ fn memory_read_uninitialized_returns_zero() {
         &steps_public,
         &acc_init,
         &proof,
-        &l,
         mixers,
     )
     .expect("verify should succeed for uninitialized read returning zero");
@@ -433,7 +431,6 @@ fn memory_tamper_read_value_fails() {
                     &steps_public,
                     &acc_init,
                     &proof,
-                    &l,
                     mixers,
                 );
 
@@ -539,7 +536,6 @@ fn memory_tamper_write_increment_fails() {
                     &steps_public,
                     &acc_init,
                     &proof,
-                    &l,
                     mixers,
                 );
 
@@ -651,7 +647,6 @@ fn memory_multiple_regions_same_step() {
         &steps_public,
         &acc_init,
         &proof,
-        &l,
         mixers,
     )
     .expect("verify should succeed with multiple memory regions");
@@ -733,11 +728,9 @@ fn memory_sparse_initialization() {
         &steps_public,
         &acc_init,
         &proof,
-        &l,
         mixers,
     )
     .expect("verify should succeed with sparse initialization");
 
     println!("✓ memory_sparse_initialization: Sparse init (ROM-like) verified");
 }
-

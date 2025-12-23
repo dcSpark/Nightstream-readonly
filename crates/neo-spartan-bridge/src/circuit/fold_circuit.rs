@@ -15,7 +15,7 @@ use crate::gadgets::pi_ccs::{sumcheck_eval_gadget, sumcheck_round_gadget};
 use crate::CircuitF;
 use bellpepper_core::{ConstraintSystem, SynthesisError};
 use neo_ccs::Mat;
-use neo_fold::folding::FoldStep;
+use neo_fold::shard::FoldStep;
 use neo_math::F as NeoF;
 use p3_field::PrimeCharacteristicRing;
 
@@ -134,7 +134,7 @@ impl FoldRunCircuit {
         &self,
         cs: &mut CS,
         step_idx: usize,
-        step: &neo_fold::folding::FoldStep,
+        step: &FoldStep,
         witness: &FoldRunWitness,
     ) -> Result<()> {
         // Get the Π-CCS proof and challenges for this step

@@ -14,7 +14,7 @@ use crate::error::{Result, SpartanBridgeError};
 use crate::CircuitF;
 use neo_ajtai::Commitment as Cmt;
 use neo_ccs::{CcsStructure, MeInstance};
-use neo_fold::folding::FoldRun;
+use neo_fold::shard::ShardProof as FoldRun;
 use neo_math::{F as NeoF, K as NeoK};
 use neo_params::NeoParams;
 use neo_reductions::common::format_ext;

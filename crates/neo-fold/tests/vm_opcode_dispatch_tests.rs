@@ -280,7 +280,6 @@ fn vm_simple_add_program() {
         &steps_public,
         &acc_init,
         &proof,
-        &l,
         mixers,
     )
     .expect("verify should succeed for VM add program");
@@ -437,7 +436,6 @@ fn vm_register_file_operations() {
         &steps_public,
         &acc_init,
         &proof,
-        &l,
         mixers,
     )
     .expect("verify should succeed for register file operations");
@@ -549,7 +547,6 @@ fn vm_combined_bytecode_and_data_memory() {
         &steps_public,
         &acc_init,
         &proof,
-        &l,
         mixers,
     )
     .expect("verify should succeed for combined ROM+RAM access");
@@ -566,6 +563,7 @@ fn vm_invalid_opcode_claim_fails() {
     params.k_rho = 16;
 
     let l = setup_ajtai_pp(ccs.m, 0x4001);
+    let mixers = default_mixers();
     let commit_fn = |mat: &Mat<F>| l.commit(mat);
 
     let bytecode = build_bytecode_table();
@@ -579,15 +577,61 @@ fn vm_invalid_opcode_claim_fails() {
 
     let (mcs, _mcs_wit) = create_mcs(&params, &ccs, &l, 0);
 
-    // Should panic during encoding
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         encode_lut_for_shout(&params, &bytecode, &bad_trace, &commit_fn, Some(ccs.m), mcs.m_in)
     }));
+    let (bytecode_inst, bytecode_wit) = match result {
+        Ok(x) => x,
+        Err(_) => {
+            println!("✓ vm_invalid_opcode_claim_fails: Encoding rejected invalid witness");
+            return;
+        }
+    };
 
-    assert!(
-        result.is_err(),
-        "Encoding should panic when claimed opcode doesn't match bytecode table"
+    // If encoding doesn't panic (e.g. release builds), proving or verification must fail.
+    let (mcs, mcs_wit) = create_mcs(&params, &ccs, &l, 0);
+
+    let step_bundle = StepWitnessBundle {
+        mcs: (mcs, mcs_wit),
+        lut_instances: vec![(bytecode_inst, bytecode_wit)],
+        mem_instances: vec![],
+        _phantom: PhantomData::<K>,
+    };
+
+    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_wit_init: Vec<Mat<F>> = Vec::new();
+
+    let mut tr_prove = Poseidon2Transcript::new(b"vm-invalid-opcode-claim");
+    let proof_result = fold_shard_prove(
+        FoldingMode::PaperExact,
+        &mut tr_prove,
+        &params,
+        &ccs,
+        &[step_bundle.clone()],
+        &acc_init,
+        &acc_wit_init,
+        &l,
+        mixers,
     );
+
+    if let Ok(proof) = proof_result {
+        let mut tr_verify = Poseidon2Transcript::new(b"vm-invalid-opcode-claim");
+        let steps_public = [StepInstanceBundle::from(&step_bundle)];
+        assert!(
+            fold_shard_verify(
+                FoldingMode::PaperExact,
+                &mut tr_verify,
+                &params,
+                &ccs,
+                &steps_public,
+                &acc_init,
+                &proof,
+                mixers,
+            )
+            .is_err(),
+            "verification should fail on wrong opcode claim"
+        );
+    }
 
     println!("✓ vm_invalid_opcode_claim_fails: Wrong opcode claim correctly rejected");
 }
@@ -686,11 +730,9 @@ fn vm_multi_instruction_sequence() {
         &steps_public,
         &acc_init,
         &proof,
-        &l,
         mixers,
     )
     .expect("verify should succeed for multi-instruction sequence");
 
     println!("✓ vm_multi_instruction_sequence: NOP→ADD→NOP→HALT sequence verified");
 }
-

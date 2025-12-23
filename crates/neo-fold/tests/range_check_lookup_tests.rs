@@ -207,7 +207,6 @@ fn range_check_4bit_valid() {
             &steps_public,
             &acc_init,
             &proof,
-            &l,
             mixers,
         )
         .expect(&format!("verify should succeed for range check of {}", val));
@@ -229,25 +228,78 @@ fn range_check_4bit_invalid_value_fails() {
 
     let range_table = build_4bit_range_table();
 
-    // Invalid: claim 20 is in [0..16)
-    // This requires claiming table[20] = 20, but table only has 16 entries
+    // Invalid: claim 20 is in [0..16). For Shout, this becomes a bogus lookup witness.
     let bad_trace = PlainLutTrace {
         has_lookup: vec![F::ONE],
         addr: vec![20], // Out of bounds!
         val: vec![F::from_u64(20)],
     };
 
-    let (mcs, _mcs_wit) = create_mcs(&params, &ccs, &l, 20);
+    let (mcs, mcs_wit) = create_mcs(&params, &ccs, &l, 20);
 
-    // Should panic during encoding due to out-of-bounds address
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let mem_layout = PlainMemLayout { k: 2, d: 1, n_side: 2 };
+    let mem_init = MemInit::Zero;
+    let (mem_inst, mem_wit) = encode_mem_for_twist(
+        &params,
+        &mem_layout,
+        &mem_init,
+        &empty_mem_trace(),
+        &commit_fn,
+        Some(ccs.m),
+        mcs.m_in,
+    );
+    let range_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         encode_lut_for_shout(&params, &range_table, &bad_trace, &commit_fn, Some(ccs.m), mcs.m_in)
     }));
+    let (range_inst, range_wit) = match range_result {
+        Ok(x) => x,
+        Err(_) => {
+            println!("✓ range_check_4bit_invalid_value_fails: Encoding rejected invalid witness");
+            return;
+        }
+    };
 
-    assert!(
-        result.is_err(),
-        "Encoding should panic on out-of-bounds range check"
+    let step_bundle = StepWitnessBundle {
+        mcs: (mcs, mcs_wit),
+        lut_instances: vec![(range_inst, range_wit)],
+        mem_instances: vec![(mem_inst, mem_wit)],
+        _phantom: PhantomData::<K>,
+    };
+
+    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_wit_init: Vec<Mat<F>> = Vec::new();
+
+    let mut tr_prove = Poseidon2Transcript::new(b"range-4bit-invalid");
+    let proof_result = fold_shard_prove(
+        FoldingMode::PaperExact,
+        &mut tr_prove,
+        &params,
+        &ccs,
+        &[step_bundle.clone()],
+        &acc_init,
+        &acc_wit_init,
+        &l,
+        default_mixers(),
     );
+
+    if let Ok(proof) = proof_result {
+        let mut tr_verify = Poseidon2Transcript::new(b"range-4bit-invalid");
+        let steps_public = [StepInstanceBundle::from(&step_bundle)];
+        assert!(
+            fold_shard_verify(
+                FoldingMode::PaperExact,
+                &mut tr_verify,
+                &params,
+                &ccs,
+                &steps_public,
+                &acc_init,
+                &proof,
+                default_mixers(),
+            )
+            .is_err(),
+            "verification should fail on invalid range-check witness"
+        );
+    }
 
     println!("✓ range_check_4bit_invalid_value_fails: Out-of-range value correctly rejected");
 }
@@ -354,7 +406,6 @@ fn range_check_nibble_decomposition() {
         &steps_public,
         &acc_init,
         &proof,
-        &l,
         mixers,
     )
     .expect("verify should succeed for nibble decomposition");
@@ -485,7 +536,6 @@ fn range_check_combined_with_addition() {
         &steps_public,
         &acc_init,
         &proof,
-        &l,
         mixers,
     )
     .expect("verify should succeed for range-checked addition");
@@ -517,17 +567,71 @@ fn range_check_wrong_value_claimed_fails() {
         val: vec![F::from_u64(10)], // WRONG: should be 5
     };
 
-    let (mcs, _mcs_wit) = create_mcs(&params, &ccs, &l, 5);
+    let (mcs, mcs_wit) = create_mcs(&params, &ccs, &l, 5);
 
-    // Should panic during encoding (semantic check catches it)
-    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+    let mem_layout = PlainMemLayout { k: 2, d: 1, n_side: 2 };
+    let mem_init = MemInit::Zero;
+    let (mem_inst, mem_wit) = encode_mem_for_twist(
+        &params,
+        &mem_layout,
+        &mem_init,
+        &empty_mem_trace(),
+        &commit_fn,
+        Some(ccs.m),
+        mcs.m_in,
+    );
+    let range_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         encode_lut_for_shout(&params, &range_table, &bad_trace, &commit_fn, Some(ccs.m), mcs.m_in)
     }));
+    let (range_inst, range_wit) = match range_result {
+        Ok(x) => x,
+        Err(_) => {
+            println!("✓ range_check_wrong_value_claimed_fails: Encoding rejected invalid witness");
+            return;
+        }
+    };
 
-    assert!(
-        result.is_err(),
-        "Encoding should panic when claimed value doesn't match table"
+    let step_bundle = StepWitnessBundle {
+        mcs: (mcs, mcs_wit),
+        lut_instances: vec![(range_inst, range_wit)],
+        mem_instances: vec![(mem_inst, mem_wit)],
+        _phantom: PhantomData::<K>,
+    };
+
+    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_wit_init: Vec<Mat<F>> = Vec::new();
+
+    let mut tr_prove = Poseidon2Transcript::new(b"range-wrong-value-claimed");
+    let proof_result = fold_shard_prove(
+        FoldingMode::PaperExact,
+        &mut tr_prove,
+        &params,
+        &ccs,
+        &[step_bundle.clone()],
+        &acc_init,
+        &acc_wit_init,
+        &l,
+        default_mixers(),
     );
+
+    if let Ok(proof) = proof_result {
+        let mut tr_verify = Poseidon2Transcript::new(b"range-wrong-value-claimed");
+        let steps_public = [StepInstanceBundle::from(&step_bundle)];
+        assert!(
+            fold_shard_verify(
+                FoldingMode::PaperExact,
+                &mut tr_verify,
+                &params,
+                &ccs,
+                &steps_public,
+                &acc_init,
+                &proof,
+                default_mixers(),
+            )
+            .is_err(),
+            "verification should fail when claimed value doesn't match table"
+        );
+    }
 
     println!("✓ range_check_wrong_value_claimed_fails: Mismatched table value correctly rejected");
 }
@@ -615,11 +719,9 @@ fn range_check_boundary_values() {
         &steps_public,
         &acc_init,
         &proof,
-        &l,
         mixers,
     )
     .expect("verify should succeed for boundary values");
 
     println!("✓ range_check_boundary_values: Min (0) and max (15) boundary values verified");
 }
-

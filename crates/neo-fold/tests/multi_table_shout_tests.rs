@@ -234,7 +234,6 @@ fn multi_table_shout_two_tables() {
         &steps_public,
         &acc_init,
         &proof,
-        &l,
         mixers,
     )
     .expect("verify should succeed with two tables");
@@ -399,7 +398,6 @@ fn multi_table_shout_three_tables_interleaved() {
         &steps_public,
         &acc_init,
         &proof,
-        &l,
         mixers,
     )
     .expect("verify should succeed with three tables");
@@ -532,7 +530,6 @@ fn multi_table_wrong_table_value_fails() {
                     &steps_public,
                     &acc_init,
                     &proof,
-                    &l,
                     mixers,
                 );
 
@@ -683,11 +680,9 @@ fn multi_table_optional_lookups() {
         &steps_public,
         &acc_init,
         &proof,
-        &l,
         mixers,
     )
     .expect("verify should succeed with optional lookups");
 
     println!("✓ multi_table_optional_lookups: Optional (skipped) lookups verified correctly");
 }
-
