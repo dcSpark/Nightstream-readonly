@@ -1151,6 +1151,93 @@ pub struct RouteAMemoryVerifyOutput<C> {
     pub twist_total_inc_sums: Vec<K>,
 }
 
+fn take_me_slice<'a, C>(
+    all: &'a [MeInstance<C, F, K>],
+    offset: &mut usize,
+    count: usize,
+    ctx: &'static str,
+) -> Result<&'a [MeInstance<C, F, K>], PiCcsError> {
+    let end = offset
+        .checked_add(count)
+        .ok_or_else(|| PiCcsError::ProtocolError(format!("{ctx}: ME slice offset overflow")))?;
+    let slice = all.get(*offset..end).ok_or_else(|| {
+        PiCcsError::InvalidInput(format!(
+            "{ctx}: not enough ME claims (need {count} at offset {}, have {})",
+            *offset,
+            all.len()
+        ))
+    })?;
+    *offset = end;
+    Ok(slice)
+}
+
+fn check_me_r_and_comms(
+    me_slice: &[MeInstance<Cmt, F, K>],
+    expected_r: &[K],
+    expected_comms: &[Cmt],
+    ctx: &'static str,
+) -> Result<(), PiCcsError> {
+    if me_slice.len() != expected_comms.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "{ctx}: ME claim count {} != comms.len() {}",
+            me_slice.len(),
+            expected_comms.len()
+        )));
+    }
+    for (j, me) in me_slice.iter().enumerate() {
+        if me.r.as_slice() != expected_r {
+            return Err(PiCcsError::ProtocolError(format!("{ctx}: ME[{j}] r mismatch")));
+        }
+        if me.c != expected_comms[j] {
+            return Err(PiCcsError::ProtocolError(format!(
+                "{ctx}: ME[{j}] commitment mismatch"
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn check_twist_val_lane_me_alignment(
+    me_slice: &[MeInstance<Cmt, F, K>],
+    inst: &MemInstance<Cmt, F>,
+    expected_r: &[K],
+    ctx: &'static str,
+) -> Result<(), PiCcsError> {
+    let layout = inst.twist_layout();
+    let ell_addr = layout.ell_addr;
+    if me_slice.len() != layout.val_lane_len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "{ctx}: ME claim count {} != expected val lane len {}",
+            me_slice.len(),
+            layout.val_lane_len()
+        )));
+    }
+    for (j, me) in me_slice.iter().enumerate() {
+        if me.r.as_slice() != expected_r {
+            return Err(PiCcsError::ProtocolError(format!("{ctx}: ME[{j}] r mismatch")));
+        }
+        let want_comm = if j < ell_addr {
+            inst.comms
+                .get(layout.wa_bits.start + j)
+                .ok_or_else(|| PiCcsError::InvalidInput(format!("{ctx}: comms too short")))?
+        } else if j == ell_addr {
+            inst.comms
+                .get(layout.has_write)
+                .ok_or_else(|| PiCcsError::InvalidInput(format!("{ctx}: comms too short")))?
+        } else {
+            inst.comms
+                .get(layout.inc_at_write_addr)
+                .ok_or_else(|| PiCcsError::InvalidInput(format!("{ctx}: comms too short")))?
+        };
+        if me.c != *want_comm {
+            return Err(PiCcsError::ProtocolError(format!(
+                "{ctx}: ME[{j}] commitment mismatch"
+            )));
+        }
+    }
+    Ok(())
+}
+
 pub fn verify_route_a_memory_step(
     tr: &mut Poseidon2Transcript,
     _params: &NeoParams,
@@ -1238,26 +1325,12 @@ pub fn verify_route_a_memory_step(
         };
 
         let shout_me_count = inst.comms.len();
-        let me_slice = mem_proof
-            .me_claims_time
-            .get(me_time_offset..me_time_offset + shout_me_count)
-            .ok_or_else(|| {
-                PiCcsError::InvalidInput(format!(
-                    "Not enough ME claims for Shout: need {} at offset {}, have {}",
-                    shout_me_count,
-                    me_time_offset,
-                    mem_proof.me_claims_time.len()
-                ))
-            })?;
-        me_time_offset += shout_me_count;
-
-        if me_slice.len() != inst.comms.len() {
-            return Err(PiCcsError::InvalidInput(format!(
-                "Shout: ME claim count {} != comms.len() {}",
-                me_slice.len(),
-                inst.comms.len()
-            )));
-        }
+        let me_slice = take_me_slice(
+            &mem_proof.me_claims_time,
+            &mut me_time_offset,
+            shout_me_count,
+            "Shout(time)",
+        )?;
 
         let layout = inst.shout_layout();
         let ell_addr = layout.ell_addr;
@@ -1344,20 +1417,7 @@ pub fn verify_route_a_memory_step(
             return Err(PiCcsError::ProtocolError("shout addr terminal value mismatch".into()));
         }
 
-        for (j, me) in me_slice.iter().enumerate() {
-            if me.r != *r_time {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "Shout ME[{}] r != r_time (Route A requires shared r)",
-                    j
-                )));
-            }
-            if me.c != inst.comms[j] {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "Shout ME[{}] commitment mismatch",
-                    j
-                )));
-            }
-        }
+        check_me_r_and_comms(me_slice, r_time, &inst.comms, "Shout(time)")?;
 
         collected_me_time.extend_from_slice(me_slice);
     }
@@ -1375,26 +1435,12 @@ pub fn verify_route_a_memory_step(
         };
 
         let twist_me_count = inst.comms.len();
-        let me_slice = mem_proof
-            .me_claims_time
-            .get(me_time_offset..me_time_offset + twist_me_count)
-            .ok_or_else(|| {
-                PiCcsError::InvalidInput(format!(
-                    "Not enough ME claims for Twist: need {} at offset {}, have {}",
-                    twist_me_count,
-                    me_time_offset,
-                    mem_proof.me_claims_time.len()
-                ))
-            })?;
-        me_time_offset += twist_me_count;
-
-        if me_slice.len() != inst.comms.len() {
-            return Err(PiCcsError::InvalidInput(format!(
-                "Twist: ME claim count {} != comms.len() {}",
-                me_slice.len(),
-                inst.comms.len()
-            )));
-        }
+        let me_slice = take_me_slice(
+            &mem_proof.me_claims_time,
+            &mut me_time_offset,
+            twist_me_count,
+            "Twist(time)",
+        )?;
 
         let layout = inst.twist_layout();
         let ell_addr = layout.ell_addr;
@@ -1537,20 +1583,7 @@ pub fn verify_route_a_memory_step(
         }
 
         // Enforce r/commitment alignment for the r_time ME claims.
-        for (j, me) in me_slice.iter().enumerate() {
-            if me.r != *r_time {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "Twist ME[{}] r != r_time (Route A requires shared r)",
-                    j
-                )));
-            }
-            if me.c != inst.comms[j] {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "Twist ME[{}] commitment mismatch",
-                    j
-                )));
-            }
-        }
+        check_me_r_and_comms(me_slice, r_time, &inst.comms, "Twist(time)")?;
 
         collected_me_time.extend_from_slice(me_slice);
     }
@@ -1680,32 +1713,19 @@ pub fn verify_route_a_memory_step(
         let layout = inst.twist_layout();
         let ell_addr = layout.ell_addr;
         let val_me_count = layout.val_lane_len();
-        let me_cur_slice = mem_proof
-            .me_claims_val
-            .get(me_val_offset..me_val_offset + val_me_count)
-            .ok_or_else(|| {
-                PiCcsError::InvalidInput(format!(
-                    "Not enough ME claims for Twist val lane (current): need {} at offset {}, have {}",
-                    val_me_count,
-                    me_val_offset,
-                    mem_proof.me_claims_val.len()
-                ))
-            })?;
-        me_val_offset += val_me_count;
+        let me_cur_slice = take_me_slice(
+            &mem_proof.me_claims_val,
+            &mut me_val_offset,
+            val_me_count,
+            "Twist(val/current)",
+        )?;
         let me_prev_slice = if has_prev {
-            let slice = mem_proof
-                .me_claims_val
-                .get(me_val_offset..me_val_offset + val_me_count)
-                .ok_or_else(|| {
-                    PiCcsError::InvalidInput(format!(
-                        "Not enough ME claims for Twist val lane (prev): need {} at offset {}, have {}",
-                        val_me_count,
-                        me_val_offset,
-                        mem_proof.me_claims_val.len()
-                    ))
-                })?;
-            me_val_offset += val_me_count;
-            Some(slice)
+            Some(take_me_slice(
+                &mem_proof.me_claims_val,
+                &mut me_val_offset,
+                val_me_count,
+                "Twist(val/prev)",
+            )?)
         } else {
             None
         };
@@ -1748,30 +1768,7 @@ pub fn verify_route_a_memory_step(
         twist_total_inc_sums.push(val_eval.claimed_inc_sum_total);
 
         // Enforce r/commitment alignment for the r_val ME claims.
-        for (j, me) in me_cur_slice.iter().enumerate() {
-            if me.r != r_val {
-                return Err(PiCcsError::ProtocolError(format!("Twist(val) ME[{}] r != r_val", j)));
-            }
-            let want_comm = if j < ell_addr {
-                inst.comms
-                    .get(layout.wa_bits.start + j)
-                    .ok_or_else(|| PiCcsError::InvalidInput("Twist(val): comms too short".into()))?
-            } else if j == ell_addr {
-                inst.comms
-                    .get(layout.has_write)
-                    .ok_or_else(|| PiCcsError::InvalidInput("Twist(val): comms too short".into()))?
-            } else {
-                inst.comms
-                    .get(layout.inc_at_write_addr)
-                    .ok_or_else(|| PiCcsError::InvalidInput("Twist(val): comms too short".into()))?
-            };
-            if me.c != *want_comm {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "Twist(val) ME[{}] commitment mismatch",
-                    j
-                )));
-            }
-        }
+        check_twist_val_lane_me_alignment(me_cur_slice, inst, &r_val, "Twist(val/current)")?;
 
         collected_me_val.extend_from_slice(me_cur_slice);
 
@@ -1812,37 +1809,7 @@ pub fn verify_route_a_memory_step(
             }
 
             // Enforce r/commitment alignment for the previous-step r_val ME claims.
-            let layout = prev_inst.twist_layout();
-            for (j, me) in prev_slice.iter().enumerate() {
-                if me.r != r_val {
-                    return Err(PiCcsError::ProtocolError(format!(
-                        "Twist(val/prev) ME[{}] r != r_val",
-                        j
-                    )));
-                }
-                let want_comm = if j < ell_addr {
-                    prev_inst
-                        .comms
-                        .get(layout.wa_bits.start + j)
-                        .ok_or_else(|| PiCcsError::InvalidInput("Twist(val/prev): comms too short".into()))?
-                } else if j == ell_addr {
-                    prev_inst
-                        .comms
-                        .get(layout.has_write)
-                        .ok_or_else(|| PiCcsError::InvalidInput("Twist(val/prev): comms too short".into()))?
-                } else {
-                    prev_inst
-                        .comms
-                        .get(layout.inc_at_write_addr)
-                        .ok_or_else(|| PiCcsError::InvalidInput("Twist(val/prev): comms too short".into()))?
-                };
-                if me.c != *want_comm {
-                    return Err(PiCcsError::ProtocolError(format!(
-                        "Twist(val/prev) ME[{}] commitment mismatch",
-                        j
-                    )));
-                }
-            }
+            check_twist_val_lane_me_alignment(prev_slice, prev_inst, &r_val, "Twist(val/prev)")?;
 
             collected_me_val.extend_from_slice(prev_slice);
         }

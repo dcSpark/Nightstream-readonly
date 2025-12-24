@@ -617,16 +617,12 @@ impl_round_oracle_via_core!(TwistReadCheckOracle);
 
 /// Write-check oracle using bit-decomposed addresses:
 ///
-/// Proves: Σ_t eq(r_cycle, t) * has_write(t) * eq(wa_bits_t, r_addr) * (wv(t) - Val(wa_t, t) - Inc(wa_t, t)) = 0
+/// Proves (time-lane after `r_addr` is bound):
+/// `Σ_t χ_{r_cycle}(t) * has_write(t) * eq(wa_bits(t), r_addr) * (wv(t) - Val_pre(r_addr,t) - inc_at_write_addr(t)) = 0`.
 ///
-/// **Important**: The val_at_write_addr and inc_at_write_addr parameters contain the memory
-/// value and increment at the **actual** write address wa_t for each step, NOT at the random
-/// point r_addr. This is sound because:
-/// - For steps where wa_t ≠ r_addr: eq(wa_bits_t, r_addr) = 0, so the term vanishes
-/// - For steps where wa_t = r_addr: the values match what would be computed at r_addr
-///
-/// The check verifies: wv(t) - Val(wa_t, t) = Inc(wa_t, t), i.e., the increment equals
-/// the difference between the write value and the pre-write memory value.
+/// Here:
+/// - `val_at_r_addr[t]` is `Val_pre(r_addr, t)` (the value at the random address point),
+/// - `inc_at_write_addr[t]` is the committed increment for the write at time `t` (unweighted).
 pub struct TwistWriteCheckOracle {
     core: ProductRoundOracle,
 }
@@ -637,7 +633,7 @@ impl TwistWriteCheckOracle {
         wa_bits: &[Vec<K>],
         wv: Vec<K>,
         val_at_r_addr: Vec<K>,
-        inc_at_r_addr: Vec<K>,
+        inc_at_write_addr: Vec<K>,
         has_write: Vec<K>,
         r_cycle: &[K],
         r_addr: &[K],
@@ -649,16 +645,16 @@ impl TwistWriteCheckOracle {
         assert_eq!(has_write.len(), pow2_cycle, "has_write length must match cycle domain");
         assert_eq!(wa_bits.len(), r_addr.len(), "wa_bits count must match r_addr length");
         assert_eq!(
-            inc_at_r_addr.len(),
+            inc_at_write_addr.len(),
             pow2_cycle,
-            "inc_at_r_addr length must match cycle domain"
+            "inc_at_write_addr length must match cycle domain"
         );
 
         // delta(t) = (wv - Val) - Inc
         let delta: Vec<K> = wv
             .iter()
             .zip(val_at_r_addr.iter())
-            .zip(inc_at_r_addr.iter())
+            .zip(inc_at_write_addr.iter())
             .map(|((w, v), inc)| *w - *v - *inc)
             .collect();
         let core = build_cycle_gate_diff_bits_oracle(r_cycle, has_write, delta, wa_bits, r_addr);

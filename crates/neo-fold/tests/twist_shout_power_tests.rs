@@ -7,7 +7,7 @@ use fixtures::{
     build_twist_shout_2step_fixture, build_twist_shout_2step_fixture_bad_lookup, prove, verify, verify_and_finalize,
 };
 use neo_ajtai::Commitment as Cmt;
-use neo_fold::finalize::ObligationFinalizer;
+use neo_fold::finalize::{FinalizeReport, ObligationFinalizer};
 use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::shard::ShardObligations;
 use neo_fold::PiCcsError;
@@ -19,13 +19,16 @@ struct RequireValLane;
 impl ObligationFinalizer<Cmt, F, K> for RequireValLane {
     type Error = PiCcsError;
 
-    fn finalize(&mut self, obligations: &ShardObligations<Cmt, F, K>) -> Result<(), Self::Error> {
+    fn finalize(&mut self, obligations: &ShardObligations<Cmt, F, K>) -> Result<FinalizeReport, Self::Error> {
         if obligations.val.is_empty() {
             return Err(PiCcsError::ProtocolError(
                 "expected non-empty val-lane obligations for Twist".into(),
             ));
         }
-        Ok(())
+        Ok(FinalizeReport {
+            did_finalize_main: !obligations.main.is_empty(),
+            did_finalize_val: !obligations.val.is_empty(),
+        })
     }
 }
 

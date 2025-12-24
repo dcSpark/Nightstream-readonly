@@ -1165,6 +1165,9 @@ where
     Fin: ObligationFinalizer<Cmt, F, K, Error = PiCcsError>,
 {
     let outputs = fold_shard_verify(mode, tr, params, s_me, steps, acc_init, proof, mixers)?;
-    finalizer.finalize(&outputs.obligations)?;
+    let report = finalizer.finalize(&outputs.obligations)?;
+    outputs
+        .obligations
+        .require_all_finalized(report.did_finalize_main, report.did_finalize_val)?;
     Ok(())
 }

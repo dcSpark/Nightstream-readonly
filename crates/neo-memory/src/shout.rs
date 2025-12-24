@@ -24,19 +24,6 @@ use serde::{Deserialize, Serialize};
 // Input validation
 // ============================================================================
 
-fn validate_index_bit_addressing<Cmt, F>(inst: &LutInstance<Cmt, F>) -> Result<(), PiCcsError> {
-    crate::addr::validate_pow2_bit_addressing("Shout", inst.n_side, inst.d, inst.ell, inst.k)?;
-    if inst.table.len() != inst.k {
-        return Err(PiCcsError::InvalidInput(format!(
-            "Shout: table.len()={} must equal k={} for bit addressing",
-            inst.table.len(),
-            inst.k
-        )));
-    }
-
-    Ok(())
-}
-
 // ============================================================================
 // Transcript binding
 // ============================================================================
@@ -120,7 +107,7 @@ pub fn decode_shout_cols<Cmt: Clone>(
     wit: &LutWitness<BaseField>,
     ell_cycle: usize,
 ) -> Result<ShoutDecodedCols, PiCcsError> {
-    validate_index_bit_addressing(inst)?;
+    crate::addr::validate_shout_bit_addressing(inst)?;
     let parts = split_lut_mats(inst, wit);
 
     let pow2_cycle = 1usize << ell_cycle;
@@ -152,7 +139,7 @@ pub fn check_shout_semantics<F: PrimeField>(
     wit: &LutWitness<F>,
     expected_vals: &[F],
 ) -> Result<(), PiCcsError> {
-    validate_index_bit_addressing(inst)?;
+    crate::addr::validate_shout_bit_addressing(inst)?;
 
     let parts = split_lut_mats(inst, wit);
     let steps = inst.steps;
@@ -250,7 +237,7 @@ pub fn build_route_a_shout_oracles<Cmt: Clone>(
     r_cycle: &[KElem],
     r_addr: &[KElem],
 ) -> Result<RouteAShoutOracles, PiCcsError> {
-    validate_index_bit_addressing(inst)?;
+    crate::addr::validate_shout_bit_addressing(inst)?;
     let ell_addr = inst.d * inst.ell;
     if r_addr.len() != ell_addr {
         return Err(PiCcsError::InvalidInput(format!(

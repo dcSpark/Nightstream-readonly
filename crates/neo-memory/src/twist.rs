@@ -32,15 +32,6 @@ use serde::{Deserialize, Serialize};
 // Input validation
 // ============================================================================
 
-fn validate_index_bit_addressing<Cmt, F: PrimeCharacteristicRing + PartialEq>(
-    inst: &MemInstance<Cmt, F>,
-) -> Result<(), PiCcsError> {
-    crate::addr::validate_pow2_bit_addressing("Twist", inst.n_side, inst.d, inst.ell, inst.k)?;
-    inst.init.validate(inst.k)?;
-
-    Ok(())
-}
-
 // ============================================================================
 // Transcript binding
 // ============================================================================
@@ -144,7 +135,7 @@ pub fn check_twist_semantics<F: PrimeField>(
     inst: &MemInstance<impl Clone, F>,
     wit: &MemWitness<F>,
 ) -> Result<(), PiCcsError> {
-    validate_index_bit_addressing(inst)?;
+    crate::addr::validate_twist_bit_addressing(inst)?;
 
     let parts = split_mem_mats(inst, wit);
     let steps = inst.steps;
@@ -277,7 +268,7 @@ pub fn decode_twist_cols<Cmt: Clone>(
     wit: &MemWitness<BaseField>,
     ell_cycle: usize,
 ) -> Result<TwistDecodedCols, PiCcsError> {
-    validate_index_bit_addressing(inst)?;
+    crate::addr::validate_twist_bit_addressing(inst)?;
 
     #[cfg(debug_assertions)]
     check_twist_semantics(params, inst, wit)?;
@@ -341,7 +332,7 @@ pub fn build_route_a_twist_oracles<Cmt: Clone>(
     r_addr: &[KElem],
     init_at_r_addr: KElem,
 ) -> Result<RouteATwistOracles, PiCcsError> {
-    validate_index_bit_addressing(inst)?;
+    crate::addr::validate_twist_bit_addressing(inst)?;
     let ell_addr = inst.d * inst.ell;
     if r_addr.len() != ell_addr {
         return Err(PiCcsError::InvalidInput(format!(

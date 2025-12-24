@@ -9,9 +9,10 @@ use neo_ccs::{
     poly::SparsePoly,
     relations::{CcsStructure, McsInstance, McsWitness, MeInstance},
 };
+use neo_fold::finalize::{FinalizeReport, ObligationFinalizer};
 use neo_fold::shard::{fold_shard_prove, fold_shard_verify, fold_shard_verify_and_finalize, ShardObligations};
 use neo_fold::shard::CommitMixers;
-use neo_fold::{finalize::ObligationFinalizer, PiCcsError};
+use neo_fold::PiCcsError;
 use neo_math::{D, K};
 use neo_memory::encode::{encode_lut_for_shout, encode_mem_for_twist};
 use neo_memory::plain::{PlainLutTrace, PlainMemLayout, PlainMemTrace};
@@ -597,13 +598,16 @@ fn verify_and_finalize_receives_val_lane() {
     impl ObligationFinalizer<Cmt, F, K> for RequireValLane {
         type Error = PiCcsError;
 
-        fn finalize(&mut self, obligations: &ShardObligations<Cmt, F, K>) -> Result<(), Self::Error> {
+        fn finalize(&mut self, obligations: &ShardObligations<Cmt, F, K>) -> Result<FinalizeReport, Self::Error> {
             if obligations.val.is_empty() {
                 return Err(PiCcsError::ProtocolError(
                     "expected non-empty val-lane obligations for Twist".into(),
                 ));
             }
-            Ok(())
+            Ok(FinalizeReport {
+                did_finalize_main: !obligations.main.is_empty(),
+                did_finalize_val: !obligations.val.is_empty(),
+            })
         }
     }
 
@@ -638,6 +642,58 @@ fn verify_and_finalize_receives_val_lane() {
         &mut fin,
     )
     .expect("verify_and_finalize should succeed");
+}
+
+#[test]
+fn main_only_finalizer_is_rejected_when_val_lane_present() {
+    struct MainOnly;
+
+    impl ObligationFinalizer<Cmt, F, K> for MainOnly {
+        type Error = PiCcsError;
+
+        fn finalize(&mut self, obligations: &ShardObligations<Cmt, F, K>) -> Result<FinalizeReport, Self::Error> {
+            Ok(FinalizeReport {
+                did_finalize_main: !obligations.main.is_empty(),
+                did_finalize_val: false,
+            })
+        }
+    }
+
+    let (params, ccs, step_bundle, acc_init, acc_wit_init, l, mixers, _out_val) = build_single_chunk_inputs();
+
+    let mut tr_prove = Poseidon2Transcript::new(b"full-fold-finalizer-main-only");
+    let proof = fold_shard_prove(
+        FoldingMode::PaperExact,
+        &mut tr_prove,
+        &params,
+        &ccs,
+        &[step_bundle.clone()],
+        &acc_init,
+        &acc_wit_init,
+        &l,
+        mixers,
+    )
+    .expect("prove should succeed");
+
+    let mut tr_verify = Poseidon2Transcript::new(b"full-fold-finalizer-main-only");
+    let steps_public = [StepInstanceBundle::from(&step_bundle)];
+    let mut fin = MainOnly;
+    let res = fold_shard_verify_and_finalize(
+        FoldingMode::PaperExact,
+        &mut tr_verify,
+        &params,
+        &ccs,
+        &steps_public,
+        &acc_init,
+        &proof,
+        mixers,
+        &mut fin,
+    );
+
+    assert!(
+        res.is_err(),
+        "finalizer that does not finalize val-lane obligations must be rejected"
+    );
 }
 
 #[test]
