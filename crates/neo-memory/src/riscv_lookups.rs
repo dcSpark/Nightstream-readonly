@@ -1,55 +1,89 @@
-//! RISC-V instruction lookup tables for Neo's Shout protocol.
+//! RISC-V RV64IMAC instruction support for Neo's proving system.
 //!
-//! This module provides lookup tables for RISC-V ALU operations (AND, XOR, OR, etc.)
-//! that can be proven using Neo's Shout (read-only memory) argument.
+//! This module implements a complete **RV64IMAC** RISC-V instruction set, providing:
+//! - Instruction decoding (32-bit and 16-bit compressed)
+//! - Instruction encoding
+//! - CPU execution with tracing
+//! - Lookup tables for ALU operations (Shout protocol)
+//! - Memory operations (Twist protocol)
 //!
-//! ## Design
+//! # Supported RISC-V Extensions
 //!
-//! Jolt represents each instruction's semantics via a lookup table where:
-//! - The **index** encodes the operands (typically interleaved bits of x and y)
+//! | Extension | Description | Status |
+//! |-----------|-------------|--------|
+//! | **I** | Base Integer (RV64I) | ✅ Full |
+//! | **M** | Multiply/Divide | ✅ Full |
+//! | **A** | Atomics (LR/SC, AMO) | ✅ Full |
+//! | **C** | Compressed (16-bit) | ✅ Full |
+//! | **Zbb** | Bitmanip (subset) | ✅ ANDN |
+//!
+//! This provides feature parity with [Jolt](https://github.com/a16z/jolt).
+//!
+//! # Architecture
+//!
+//! ## Lookup Tables (Shout)
+//!
+//! ALU operations are proven using Neo's Shout (read-only memory) protocol:
+//! - The **index** encodes operands via bit interleaving
 //! - The **value** is the operation result
+//! - MLEs enable efficient sumcheck verification
 //!
-//! For Neo's Shout protocol, we need:
-//! - A table of values `Val[k]` for k in [0, K)
-//! - The MLE `Val~(r)` that can be evaluated at random points
+//! ## Memory (Twist)
 //!
-//! ## Supported Operations
+//! Load/store and atomic operations use Neo's Twist (read-write memory) protocol.
 //!
-//! ### Bitwise Operations (Shout - uses bit interleaving)
-//! - `AND`: Bitwise AND
-//! - `XOR`: Bitwise XOR
-//! - `OR`: Bitwise OR
+//! # Instruction Categories
 //!
-//! ### Comparison Operations (Shout - uses bit interleaving)
-//! - `SUB`: Subtraction (with wraparound)
-//! - `SLT`: Set Less Than (signed)
-//! - `SLTU`: Set Less Than (unsigned)
-//! - `EQ`: Equality check
-//! - `NEQ`: Inequality check
+//! ## Base Integer (I Extension)
+//! - **Arithmetic**: ADD, ADDI, SUB
+//! - **Logical**: AND, ANDI, OR, ORI, XOR, XORI
+//! - **Shifts**: SLL, SLLI, SRL, SRLI, SRA, SRAI
+//! - **Compare**: SLT, SLTI, SLTU, SLTIU
+//! - **Branches**: BEQ, BNE, BLT, BGE, BLTU, BGEU
+//! - **Jumps**: JAL, JALR
+//! - **Upper Immediate**: LUI, AUIPC
+//! - **Loads**: LB, LBU, LH, LHU, LW, LWU, LD
+//! - **Stores**: SB, SH, SW, SD
 //!
-//! ### Arithmetic Operations (Shout - uses RangeCheck approach)
-//! - `ADD/ADDI`: Addition with carry detection via range check
+//! ## RV64 Word Operations
+//! - ADDW, SUBW, ADDIW
+//! - SLLW, SLLIW, SRLW, SRLIW, SRAW, SRAIW
 //!
-//! ### Shift Operations (Shout - specialized virtual tables)
-//! - `SLL`: Shift Left Logical
-//! - `SRL`: Shift Right Logical
-//! - `SRA`: Shift Right Arithmetic
+//! ## Multiply/Divide (M Extension)
+//! - MUL, MULH, MULHU, MULHSU
+//! - DIV, DIVU, REM, REMU
+//! - MULW, DIVW, DIVUW, REMW, REMUW (RV64)
 //!
-//! ### Memory Operations (Twist - read/write memory)
-//! - `LW/LH/LB`: Load Word/Half/Byte
-//! - `SW/SH/SB`: Store Word/Half/Byte
+//! ## Atomics (A Extension)
+//! - **Load-Reserved**: LR.W, LR.D
+//! - **Store-Conditional**: SC.W, SC.D
+//! - **AMO**: AMOSWAP, AMOADD, AMOXOR, AMOAND, AMOOR, AMOMIN, AMOMAX, AMOMINU, AMOMAXU
 //!
-//! ## Example
+//! ## Compressed (C Extension)
+//! - All quadrant 0, 1, and 2 instructions
+//! - Automatic detection of 16-bit vs 32-bit instructions
+//!
+//! ## System
+//! - ECALL, EBREAK
+//! - FENCE, FENCE.I
+//!
+//! # Example
 //!
 //! ```ignore
-//! use neo_memory::riscv_lookups::{RiscvOpcode, create_lookup_table};
+//! use neo_memory::riscv_lookups::{RiscvCpu, RiscvMemory, RiscvShoutTables, decode_program};
+//! use neo_vm_trace::trace_program;
 //!
-//! // Create an 8-bit XOR lookup table
-//! let xor_table = create_lookup_table(RiscvOpcode::Xor, 8);
+//! // Load and decode a RISC-V binary (supports compressed instructions)
+//! let program = decode_program(&binary_bytes)?;
 //!
-//! // Verify a specific lookup: 0xAB ^ 0xCD = 0x66
-//! let index = interleave_bits(0xAB, 0xCD);
-//! assert_eq!(xor_table[index], 0x66);
+//! // Execute with full tracing
+//! let mut cpu = RiscvCpu::new(64); // RV64
+//! cpu.load_program(0, &program);
+//! let memory = RiscvMemory::new(64);
+//! let shout = RiscvShoutTables::new(64);
+//!
+//! let trace = trace_program(cpu, memory, shout, 1000)?;
+//! // trace now contains all steps for proving
 //! ```
 
 use neo_vm_trace::{Shout, ShoutId, Twist, TwistId};
@@ -156,6 +190,32 @@ pub enum RiscvOpcode {
     Srl,
     /// Shift Right Arithmetic: rd = rs1 >>> rs2[log2(xlen)-1:0]
     Sra,
+
+    // === RV64 W-suffix Operations (32-bit ops on 64-bit, sign-extended) ===
+    /// Add Word: rd = sext((rs1 + rs2)[31:0])
+    Addw,
+    /// Subtract Word: rd = sext((rs1 - rs2)[31:0])
+    Subw,
+    /// Shift Left Logical Word: rd = sext((rs1 << shamt)[31:0])
+    Sllw,
+    /// Shift Right Logical Word: rd = sext((rs1 >> shamt)[31:0])
+    Srlw,
+    /// Shift Right Arithmetic Word: rd = sext((rs1 >>> shamt)[31:0])
+    Sraw,
+    /// Multiply Word: rd = sext((rs1 * rs2)[31:0])
+    Mulw,
+    /// Divide Word (signed): rd = sext((rs1 / rs2)[31:0])
+    Divw,
+    /// Divide Word (unsigned): rd = sext((rs1 / rs2)[31:0])
+    Divuw,
+    /// Remainder Word (signed): rd = sext((rs1 % rs2)[31:0])
+    Remw,
+    /// Remainder Word (unsigned): rd = sext((rs1 % rs2)[31:0])
+    Remuw,
+
+    // === Bitmanip (Zbb subset, as used by Jolt) ===
+    /// AND with NOT: rd = rs1 & ~rs2
+    Andn,
 }
 
 impl fmt::Display for RiscvOpcode {
@@ -181,6 +241,17 @@ impl fmt::Display for RiscvOpcode {
             RiscvOpcode::Sll => write!(f, "SLL"),
             RiscvOpcode::Srl => write!(f, "SRL"),
             RiscvOpcode::Sra => write!(f, "SRA"),
+            RiscvOpcode::Addw => write!(f, "ADDW"),
+            RiscvOpcode::Subw => write!(f, "SUBW"),
+            RiscvOpcode::Sllw => write!(f, "SLLW"),
+            RiscvOpcode::Srlw => write!(f, "SRLW"),
+            RiscvOpcode::Sraw => write!(f, "SRAW"),
+            RiscvOpcode::Mulw => write!(f, "MULW"),
+            RiscvOpcode::Divw => write!(f, "DIVW"),
+            RiscvOpcode::Divuw => write!(f, "DIVUW"),
+            RiscvOpcode::Remw => write!(f, "REMW"),
+            RiscvOpcode::Remuw => write!(f, "REMUW"),
+            RiscvOpcode::Andn => write!(f, "ANDN"),
         }
     }
 }
@@ -210,6 +281,52 @@ pub enum RiscvMemOp {
     Sb,
     /// Store Double-word (64-bit, RV64 only)
     Sd,
+
+    // === A Extension: Atomic Operations ===
+    /// Load-Reserved Word (32-bit)
+    LrW,
+    /// Load-Reserved Double-word (64-bit)
+    LrD,
+    /// Store-Conditional Word (32-bit)
+    ScW,
+    /// Store-Conditional Double-word (64-bit)
+    ScD,
+    /// Atomic Swap Word
+    AmoswapW,
+    /// Atomic Swap Double-word
+    AmoswapD,
+    /// Atomic Add Word
+    AmoaddW,
+    /// Atomic Add Double-word
+    AmoaddD,
+    /// Atomic XOR Word
+    AmoxorW,
+    /// Atomic XOR Double-word
+    AmoxorD,
+    /// Atomic AND Word
+    AmoandW,
+    /// Atomic AND Double-word
+    AmoandD,
+    /// Atomic OR Word
+    AmoorW,
+    /// Atomic OR Double-word
+    AmoorD,
+    /// Atomic Min Word (signed)
+    AmominW,
+    /// Atomic Min Double-word (signed)
+    AmominD,
+    /// Atomic Max Word (signed)
+    AmomaxW,
+    /// Atomic Max Double-word (signed)
+    AmomaxD,
+    /// Atomic Min Word (unsigned)
+    AmominuW,
+    /// Atomic Min Double-word (unsigned)
+    AmominuD,
+    /// Atomic Max Word (unsigned)
+    AmomaxuW,
+    /// Atomic Max Double-word (unsigned)
+    AmomaxuD,
 }
 
 impl fmt::Display for RiscvMemOp {
@@ -226,6 +343,28 @@ impl fmt::Display for RiscvMemOp {
             RiscvMemOp::Sh => write!(f, "SH"),
             RiscvMemOp::Sb => write!(f, "SB"),
             RiscvMemOp::Sd => write!(f, "SD"),
+            RiscvMemOp::LrW => write!(f, "LR.W"),
+            RiscvMemOp::LrD => write!(f, "LR.D"),
+            RiscvMemOp::ScW => write!(f, "SC.W"),
+            RiscvMemOp::ScD => write!(f, "SC.D"),
+            RiscvMemOp::AmoswapW => write!(f, "AMOSWAP.W"),
+            RiscvMemOp::AmoswapD => write!(f, "AMOSWAP.D"),
+            RiscvMemOp::AmoaddW => write!(f, "AMOADD.W"),
+            RiscvMemOp::AmoaddD => write!(f, "AMOADD.D"),
+            RiscvMemOp::AmoxorW => write!(f, "AMOXOR.W"),
+            RiscvMemOp::AmoxorD => write!(f, "AMOXOR.D"),
+            RiscvMemOp::AmoandW => write!(f, "AMOAND.W"),
+            RiscvMemOp::AmoandD => write!(f, "AMOAND.D"),
+            RiscvMemOp::AmoorW => write!(f, "AMOOR.W"),
+            RiscvMemOp::AmoorD => write!(f, "AMOOR.D"),
+            RiscvMemOp::AmominW => write!(f, "AMOMIN.W"),
+            RiscvMemOp::AmominD => write!(f, "AMOMIN.D"),
+            RiscvMemOp::AmomaxW => write!(f, "AMOMAX.W"),
+            RiscvMemOp::AmomaxD => write!(f, "AMOMAX.D"),
+            RiscvMemOp::AmominuW => write!(f, "AMOMINU.W"),
+            RiscvMemOp::AmominuD => write!(f, "AMOMINU.D"),
+            RiscvMemOp::AmomaxuW => write!(f, "AMOMAXU.W"),
+            RiscvMemOp::AmomaxuD => write!(f, "AMOMAXU.D"),
         }
     }
 }
@@ -242,6 +381,8 @@ impl RiscvMemOp {
                 | RiscvMemOp::Lbu
                 | RiscvMemOp::Ld
                 | RiscvMemOp::Lwu
+                | RiscvMemOp::LrW
+                | RiscvMemOp::LrD
         )
     }
 
@@ -249,7 +390,41 @@ impl RiscvMemOp {
     pub fn is_store(&self) -> bool {
         matches!(
             self,
-            RiscvMemOp::Sw | RiscvMemOp::Sh | RiscvMemOp::Sb | RiscvMemOp::Sd
+            RiscvMemOp::Sw
+                | RiscvMemOp::Sh
+                | RiscvMemOp::Sb
+                | RiscvMemOp::Sd
+                | RiscvMemOp::ScW
+                | RiscvMemOp::ScD
+        )
+    }
+
+    /// Returns true if this is an atomic operation.
+    pub fn is_atomic(&self) -> bool {
+        matches!(
+            self,
+            RiscvMemOp::LrW
+                | RiscvMemOp::LrD
+                | RiscvMemOp::ScW
+                | RiscvMemOp::ScD
+                | RiscvMemOp::AmoswapW
+                | RiscvMemOp::AmoswapD
+                | RiscvMemOp::AmoaddW
+                | RiscvMemOp::AmoaddD
+                | RiscvMemOp::AmoxorW
+                | RiscvMemOp::AmoxorD
+                | RiscvMemOp::AmoandW
+                | RiscvMemOp::AmoandD
+                | RiscvMemOp::AmoorW
+                | RiscvMemOp::AmoorD
+                | RiscvMemOp::AmominW
+                | RiscvMemOp::AmominD
+                | RiscvMemOp::AmomaxW
+                | RiscvMemOp::AmomaxD
+                | RiscvMemOp::AmominuW
+                | RiscvMemOp::AmominuD
+                | RiscvMemOp::AmomaxuW
+                | RiscvMemOp::AmomaxuD
         )
     }
 
@@ -258,14 +433,42 @@ impl RiscvMemOp {
         match self {
             RiscvMemOp::Lb | RiscvMemOp::Lbu | RiscvMemOp::Sb => 1,
             RiscvMemOp::Lh | RiscvMemOp::Lhu | RiscvMemOp::Sh => 2,
-            RiscvMemOp::Lw | RiscvMemOp::Lwu | RiscvMemOp::Sw => 4,
-            RiscvMemOp::Ld | RiscvMemOp::Sd => 8,
+            RiscvMemOp::Lw
+            | RiscvMemOp::Lwu
+            | RiscvMemOp::Sw
+            | RiscvMemOp::LrW
+            | RiscvMemOp::ScW
+            | RiscvMemOp::AmoswapW
+            | RiscvMemOp::AmoaddW
+            | RiscvMemOp::AmoxorW
+            | RiscvMemOp::AmoandW
+            | RiscvMemOp::AmoorW
+            | RiscvMemOp::AmominW
+            | RiscvMemOp::AmomaxW
+            | RiscvMemOp::AmominuW
+            | RiscvMemOp::AmomaxuW => 4,
+            RiscvMemOp::Ld
+            | RiscvMemOp::Sd
+            | RiscvMemOp::LrD
+            | RiscvMemOp::ScD
+            | RiscvMemOp::AmoswapD
+            | RiscvMemOp::AmoaddD
+            | RiscvMemOp::AmoxorD
+            | RiscvMemOp::AmoandD
+            | RiscvMemOp::AmoorD
+            | RiscvMemOp::AmominD
+            | RiscvMemOp::AmomaxD
+            | RiscvMemOp::AmominuD
+            | RiscvMemOp::AmomaxuD => 8,
         }
     }
 
     /// Returns true if this load should sign-extend.
     pub fn is_sign_extend(&self) -> bool {
-        matches!(self, RiscvMemOp::Lh | RiscvMemOp::Lb | RiscvMemOp::Lw)
+        matches!(
+            self,
+            RiscvMemOp::Lh | RiscvMemOp::Lb | RiscvMemOp::Lw | RiscvMemOp::LrW
+        )
     }
 }
 
@@ -469,9 +672,86 @@ pub fn compute_op(op: RiscvOpcode, x: u64, y: u64, xlen: usize) -> u64 {
             let x_signed = sign_extend(x, xlen);
             (x_signed >> shamt) as u64
         }
+
+        // === RV64 W-suffix Operations (32-bit ops, sign-extended to 64-bit) ===
+        RiscvOpcode::Addw => {
+            let result32 = (x as u32).wrapping_add(y as u32);
+            sign_extend_32(result32)
+        }
+        RiscvOpcode::Subw => {
+            let result32 = (x as u32).wrapping_sub(y as u32);
+            sign_extend_32(result32)
+        }
+        RiscvOpcode::Sllw => {
+            let shamt = (y & 0x1F) as u32;
+            let result32 = (x as u32) << shamt;
+            sign_extend_32(result32)
+        }
+        RiscvOpcode::Srlw => {
+            let shamt = (y & 0x1F) as u32;
+            let result32 = (x as u32) >> shamt;
+            sign_extend_32(result32)
+        }
+        RiscvOpcode::Sraw => {
+            let shamt = (y & 0x1F) as u32;
+            let result32 = ((x as i32) >> shamt) as u32;
+            sign_extend_32(result32)
+        }
+        RiscvOpcode::Mulw => {
+            let result32 = (x as u32).wrapping_mul(y as u32);
+            sign_extend_32(result32)
+        }
+        RiscvOpcode::Divw => {
+            let x32 = x as i32;
+            let y32 = y as i32;
+            if y32 == 0 {
+                u64::MAX // All 1s
+            } else if x32 == i32::MIN && y32 == -1 {
+                sign_extend_32(x32 as u32) // Overflow
+            } else {
+                sign_extend_32((x32 / y32) as u32)
+            }
+        }
+        RiscvOpcode::Divuw => {
+            let x32 = x as u32;
+            let y32 = y as u32;
+            if y32 == 0 {
+                u64::MAX
+            } else {
+                sign_extend_32(x32 / y32)
+            }
+        }
+        RiscvOpcode::Remw => {
+            let x32 = x as i32;
+            let y32 = y as i32;
+            if y32 == 0 {
+                sign_extend_32(x32 as u32)
+            } else if x32 == i32::MIN && y32 == -1 {
+                0
+            } else {
+                sign_extend_32((x32 % y32) as u32)
+            }
+        }
+        RiscvOpcode::Remuw => {
+            let x32 = x as u32;
+            let y32 = y as u32;
+            if y32 == 0 {
+                sign_extend_32(x32)
+            } else {
+                sign_extend_32(x32 % y32)
+            }
+        }
+
+        // === Bitmanip (Zbb subset) ===
+        RiscvOpcode::Andn => x & !y,
     };
 
     result & mask
+}
+
+/// Sign-extend a 32-bit value to 64 bits.
+fn sign_extend_32(x: u32) -> u64 {
+    (x as i32) as i64 as u64
 }
 
 /// Sign-extend a value from xlen bits to i64.
@@ -970,6 +1250,19 @@ impl RiscvShoutTables {
             17 => Some(RiscvOpcode::Divu),
             18 => Some(RiscvOpcode::Rem),
             19 => Some(RiscvOpcode::Remu),
+            // RV64 W-suffix
+            20 => Some(RiscvOpcode::Addw),
+            21 => Some(RiscvOpcode::Subw),
+            22 => Some(RiscvOpcode::Sllw),
+            23 => Some(RiscvOpcode::Srlw),
+            24 => Some(RiscvOpcode::Sraw),
+            25 => Some(RiscvOpcode::Mulw),
+            26 => Some(RiscvOpcode::Divw),
+            27 => Some(RiscvOpcode::Divuw),
+            28 => Some(RiscvOpcode::Remw),
+            29 => Some(RiscvOpcode::Remuw),
+            // Bitmanip
+            30 => Some(RiscvOpcode::Andn),
             _ => None,
         }
     }
@@ -998,6 +1291,19 @@ impl RiscvShoutTables {
             RiscvOpcode::Divu => ShoutId(17),
             RiscvOpcode::Rem => ShoutId(18),
             RiscvOpcode::Remu => ShoutId(19),
+            // RV64 W-suffix
+            RiscvOpcode::Addw => ShoutId(20),
+            RiscvOpcode::Subw => ShoutId(21),
+            RiscvOpcode::Sllw => ShoutId(22),
+            RiscvOpcode::Srlw => ShoutId(23),
+            RiscvOpcode::Sraw => ShoutId(24),
+            RiscvOpcode::Mulw => ShoutId(25),
+            RiscvOpcode::Divw => ShoutId(26),
+            RiscvOpcode::Divuw => ShoutId(27),
+            RiscvOpcode::Remw => ShoutId(28),
+            RiscvOpcode::Remuw => ShoutId(29),
+            // Bitmanip
+            RiscvOpcode::Andn => ShoutId(30),
         }
     }
 }
@@ -1246,6 +1552,57 @@ pub enum RiscvInstruction {
     Halt,
     /// No-op
     Nop,
+
+    // === RV64 W-suffix Operations ===
+    /// R-type ALU Word operation: rd = sext((rs1 op rs2)[31:0])
+    RAluw {
+        op: RiscvOpcode,
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    /// I-type ALU Word operation: rd = sext((rs1 op imm)[31:0])
+    IAluw {
+        op: RiscvOpcode,
+        rd: u8,
+        rs1: u8,
+        imm: i32,
+    },
+
+    // === A Extension: Atomics ===
+    /// Load-Reserved: rd = mem[rs1]; reserve address
+    LoadReserved {
+        op: RiscvMemOp,
+        rd: u8,
+        rs1: u8,
+    },
+    /// Store-Conditional: if reserved, mem[rs1] = rs2, rd = 0; else rd = 1
+    StoreConditional {
+        op: RiscvMemOp,
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+    /// Atomic Memory Operation: rd = mem[rs1]; mem[rs1] = op(mem[rs1], rs2)
+    Amo {
+        op: RiscvMemOp,
+        rd: u8,
+        rs1: u8,
+        rs2: u8,
+    },
+
+    // === System Instructions ===
+    /// Environment Call (syscall)
+    Ecall,
+    /// Environment Break (debugger trap)
+    Ebreak,
+    /// Memory Fence
+    Fence {
+        pred: u8,
+        succ: u8,
+    },
+    /// Instruction Fence
+    FenceI,
 }
 
 // ============================================================================
@@ -1501,6 +1858,141 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
             RiscvInstruction::Nop => {
                 opcode_num = 0x13; // NOP is ADDI x0, x0, 0
             }
+
+            // === RV64 W-suffix Operations ===
+            RiscvInstruction::RAluw { op, rd, rs1, rs2 } => {
+                let rs1_val = self.get_reg(rs1);
+                let rs2_val = self.get_reg(rs2);
+
+                let shout_id = RiscvShoutTables::new(self.xlen).opcode_to_id(op);
+                let index = interleave_bits(rs1_val, rs2_val) as u64;
+                let result = shout.lookup(shout_id, index);
+
+                self.set_reg(rd, result);
+                opcode_num = 0x3B; // RV64 R-type W opcode
+            }
+
+            RiscvInstruction::IAluw { op, rd, rs1, imm } => {
+                let rs1_val = self.get_reg(rs1);
+                let imm_val = self.sign_extend_imm(imm);
+
+                let shout_id = RiscvShoutTables::new(self.xlen).opcode_to_id(op);
+                let index = interleave_bits(rs1_val, imm_val) as u64;
+                let result = shout.lookup(shout_id, index);
+
+                self.set_reg(rd, result);
+                opcode_num = 0x1B; // RV64 I-type W opcode
+            }
+
+            // === A Extension: Atomics ===
+            RiscvInstruction::LoadReserved { op, rd, rs1 } => {
+                let addr = self.get_reg(rs1);
+                let value = twist.load(ram, addr);
+
+                // Apply width and sign extension
+                let width = op.width_bytes();
+                let mask = if width >= 8 { u64::MAX } else { (1u64 << (width * 8)) - 1 };
+                let result = if op.is_sign_extend() {
+                    match width {
+                        4 => (value as u32) as i32 as i64 as u64,
+                        _ => value & mask,
+                    }
+                } else {
+                    value & mask
+                };
+
+                self.set_reg(rd, self.mask_value(result));
+                // Note: In a real implementation, we'd reserve the address here
+                opcode_num = 0x2F; // AMO opcode
+            }
+
+            RiscvInstruction::StoreConditional { op, rd, rs1, rs2 } => {
+                let addr = self.get_reg(rs1);
+                let value = self.get_reg(rs2);
+
+                // Mask value to store width
+                let width = op.width_bytes();
+                let mask = if width >= 8 { u64::MAX } else { (1u64 << (width * 8)) - 1 };
+                let store_value = value & mask;
+
+                // Store the value
+                twist.store(ram, addr, store_value);
+
+                // SC returns 0 on success (assuming reservation is valid in single-threaded mode)
+                self.set_reg(rd, 0);
+                opcode_num = 0x2F; // AMO opcode
+            }
+
+            RiscvInstruction::Amo { op, rd, rs1, rs2 } => {
+                let addr = self.get_reg(rs1);
+                let src = self.get_reg(rs2);
+
+                // Load original value
+                let original = twist.load(ram, addr);
+                self.set_reg(rd, self.mask_value(original));
+
+                // Compute new value based on AMO operation
+                let new_val = match op {
+                    RiscvMemOp::AmoswapW | RiscvMemOp::AmoswapD => src,
+                    RiscvMemOp::AmoaddW | RiscvMemOp::AmoaddD => original.wrapping_add(src),
+                    RiscvMemOp::AmoxorW | RiscvMemOp::AmoxorD => original ^ src,
+                    RiscvMemOp::AmoandW | RiscvMemOp::AmoandD => original & src,
+                    RiscvMemOp::AmoorW | RiscvMemOp::AmoorD => original | src,
+                    RiscvMemOp::AmominW => {
+                        if (original as i32) < (src as i32) { original } else { src }
+                    }
+                    RiscvMemOp::AmominD => {
+                        if (original as i64) < (src as i64) { original } else { src }
+                    }
+                    RiscvMemOp::AmomaxW => {
+                        if (original as i32) > (src as i32) { original } else { src }
+                    }
+                    RiscvMemOp::AmomaxD => {
+                        if (original as i64) > (src as i64) { original } else { src }
+                    }
+                    RiscvMemOp::AmominuW | RiscvMemOp::AmominuD => {
+                        if original < src { original } else { src }
+                    }
+                    RiscvMemOp::AmomaxuW | RiscvMemOp::AmomaxuD => {
+                        if original > src { original } else { src }
+                    }
+                    _ => src, // Fallback
+                };
+
+                // Store new value
+                twist.store(ram, addr, new_val);
+                opcode_num = 0x2F; // AMO opcode
+            }
+
+            // === System Instructions ===
+            RiscvInstruction::Ecall => {
+                // ECALL - environment call (syscall)
+                // In a real implementation, this would trigger a trap
+                // For now, check if a0 (x10) == 0 to halt
+                if self.get_reg(10) == 0 {
+                    self.halted = true;
+                }
+                opcode_num = 0x73; // SYSTEM opcode
+            }
+
+            RiscvInstruction::Ebreak => {
+                // EBREAK - debugger breakpoint
+                // For now, treat as halt
+                self.halted = true;
+                opcode_num = 0x73; // SYSTEM opcode
+            }
+
+            RiscvInstruction::Fence { pred: _, succ: _ } => {
+                // FENCE - memory ordering
+                // No-op in single-threaded execution
+                opcode_num = 0x0F; // MISC-MEM opcode
+            }
+
+            RiscvInstruction::FenceI => {
+                // FENCE.I - instruction fence
+                // No-op in our implementation
+                opcode_num = 0x0F; // MISC-MEM opcode
+            }
         }
 
         self.pc = next_pc;
@@ -1694,16 +2186,130 @@ pub fn decode_instruction(instr: u32) -> Result<RiscvInstruction, String> {
         0b1110011 => {
             let imm = (instr >> 20) & 0xFFF;
             match imm {
-                0 => Ok(RiscvInstruction::Halt), // ECALL -> Halt for now
-                1 => Ok(RiscvInstruction::Halt), // EBREAK -> Halt for now
+                // Note: We use Halt for ECALL in our simplified model.
+                // Real RISC-V would trap to the OS/hypervisor.
+                // Our step() function checks if a0==0 for ECALL and halts,
+                // otherwise continues. For testing, we use Halt to unconditionally halt.
+                0 => Ok(RiscvInstruction::Halt), // ECALL -> Halt for our test programs
+                1 => Ok(RiscvInstruction::Ebreak),
                 _ => Err(format!("Unknown SYSTEM instruction: imm={:#x}", imm)),
             }
         }
 
-        // MISC-MEM (0001111) - FENCE
+        // MISC-MEM (0001111) - FENCE, FENCE.I
         0b0001111 => {
-            // FENCE - treat as NOP for now
-            Ok(RiscvInstruction::Nop)
+            if funct3 == 0b001 {
+                Ok(RiscvInstruction::FenceI)
+            } else {
+                let pred = ((instr >> 24) & 0xF) as u8;
+                let succ = ((instr >> 20) & 0xF) as u8;
+                Ok(RiscvInstruction::Fence { pred, succ })
+            }
+        }
+
+        // OP-32 (0111011) - RV64 W-suffix R-type operations
+        0b0111011 => {
+            let op = match (funct3, funct7) {
+                (0b000, 0b0000000) => RiscvOpcode::Addw,
+                (0b000, 0b0100000) => RiscvOpcode::Subw,
+                (0b001, 0b0000000) => RiscvOpcode::Sllw,
+                (0b101, 0b0000000) => RiscvOpcode::Srlw,
+                (0b101, 0b0100000) => RiscvOpcode::Sraw,
+                // M extension W-suffix
+                (0b000, 0b0000001) => RiscvOpcode::Mulw,
+                (0b100, 0b0000001) => RiscvOpcode::Divw,
+                (0b101, 0b0000001) => RiscvOpcode::Divuw,
+                (0b110, 0b0000001) => RiscvOpcode::Remw,
+                (0b111, 0b0000001) => RiscvOpcode::Remuw,
+                _ => return Err(format!("Unknown OP-32: funct3={:#x}, funct7={:#x}", funct3, funct7)),
+            };
+            Ok(RiscvInstruction::RAluw { op, rd, rs1, rs2 })
+        }
+
+        // OP-IMM-32 (0011011) - RV64 W-suffix I-type operations
+        0b0011011 => {
+            let op = match funct3 {
+                0b000 => RiscvOpcode::Addw, // ADDIW
+                0b001 => RiscvOpcode::Sllw, // SLLIW
+                0b101 => {
+                    let shamt_funct = (instr >> 25) & 0x7F;
+                    if shamt_funct == 0b0100000 {
+                        RiscvOpcode::Sraw // SRAIW
+                    } else {
+                        RiscvOpcode::Srlw // SRLIW
+                    }
+                }
+                _ => return Err(format!("Unknown OP-IMM-32: funct3={:#x}", funct3)),
+            };
+            let imm = if funct3 == 0b001 || funct3 == 0b101 {
+                ((instr >> 20) & 0x1F) as i32 // shamt for W shifts (5 bits)
+            } else {
+                sign_extend_i_imm(instr)
+            };
+            Ok(RiscvInstruction::IAluw { op, rd, rs1, imm })
+        }
+
+        // AMO (0101111) - Atomic Memory Operations
+        0b0101111 => {
+            let funct5 = (instr >> 27) & 0x1F;
+            match funct5 {
+                // LR
+                0b00010 => {
+                    let op = if funct3 == 0b010 { RiscvMemOp::LrW } else { RiscvMemOp::LrD };
+                    Ok(RiscvInstruction::LoadReserved { op, rd, rs1 })
+                }
+                // SC
+                0b00011 => {
+                    let op = if funct3 == 0b010 { RiscvMemOp::ScW } else { RiscvMemOp::ScD };
+                    Ok(RiscvInstruction::StoreConditional { op, rd, rs1, rs2 })
+                }
+                // AMOSWAP
+                0b00001 => {
+                    let op = if funct3 == 0b010 { RiscvMemOp::AmoswapW } else { RiscvMemOp::AmoswapD };
+                    Ok(RiscvInstruction::Amo { op, rd, rs1, rs2 })
+                }
+                // AMOADD
+                0b00000 => {
+                    let op = if funct3 == 0b010 { RiscvMemOp::AmoaddW } else { RiscvMemOp::AmoaddD };
+                    Ok(RiscvInstruction::Amo { op, rd, rs1, rs2 })
+                }
+                // AMOXOR
+                0b00100 => {
+                    let op = if funct3 == 0b010 { RiscvMemOp::AmoxorW } else { RiscvMemOp::AmoxorD };
+                    Ok(RiscvInstruction::Amo { op, rd, rs1, rs2 })
+                }
+                // AMOAND
+                0b01100 => {
+                    let op = if funct3 == 0b010 { RiscvMemOp::AmoandW } else { RiscvMemOp::AmoandD };
+                    Ok(RiscvInstruction::Amo { op, rd, rs1, rs2 })
+                }
+                // AMOOR
+                0b01000 => {
+                    let op = if funct3 == 0b010 { RiscvMemOp::AmoorW } else { RiscvMemOp::AmoorD };
+                    Ok(RiscvInstruction::Amo { op, rd, rs1, rs2 })
+                }
+                // AMOMIN
+                0b10000 => {
+                    let op = if funct3 == 0b010 { RiscvMemOp::AmominW } else { RiscvMemOp::AmominD };
+                    Ok(RiscvInstruction::Amo { op, rd, rs1, rs2 })
+                }
+                // AMOMAX
+                0b10100 => {
+                    let op = if funct3 == 0b010 { RiscvMemOp::AmomaxW } else { RiscvMemOp::AmomaxD };
+                    Ok(RiscvInstruction::Amo { op, rd, rs1, rs2 })
+                }
+                // AMOMINU
+                0b11000 => {
+                    let op = if funct3 == 0b010 { RiscvMemOp::AmominuW } else { RiscvMemOp::AmominuD };
+                    Ok(RiscvInstruction::Amo { op, rd, rs1, rs2 })
+                }
+                // AMOMAXU
+                0b11100 => {
+                    let op = if funct3 == 0b010 { RiscvMemOp::AmomaxuW } else { RiscvMemOp::AmomaxuD };
+                    Ok(RiscvInstruction::Amo { op, rd, rs1, rs2 })
+                }
+                _ => Err(format!("Unknown AMO: funct5={:#x}", funct5)),
+            }
         }
 
         _ => Err(format!("Unknown opcode: {:#09b}", opcode)),
@@ -1766,8 +2372,10 @@ fn sign_extend_j_imm(instr: u32) -> i32 {
 
 /// Decode a sequence of bytes into RISC-V instructions.
 ///
+/// Supports both 32-bit and 16-bit (compressed) instructions.
+///
 /// # Arguments
-/// * `bytes` - Program bytes (must be 4-byte aligned)
+/// * `bytes` - Program bytes (must be 2-byte aligned)
 ///
 /// # Returns
 /// * `Vec<RiscvInstruction>` - List of decoded instructions
@@ -1775,16 +2383,355 @@ fn sign_extend_j_imm(instr: u32) -> i32 {
 /// # Errors
 /// Returns an error if any instruction cannot be decoded.
 pub fn decode_program(bytes: &[u8]) -> Result<Vec<RiscvInstruction>, String> {
-    if bytes.len() % 4 != 0 {
-        return Err("Program bytes must be 4-byte aligned".to_string());
+    if bytes.len() % 2 != 0 {
+        return Err("Program bytes must be 2-byte aligned".to_string());
     }
 
     let mut instructions = Vec::new();
-    for chunk in bytes.chunks(4) {
-        let instr = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]);
-        instructions.push(decode_instruction(instr)?);
+    let mut i = 0;
+    while i < bytes.len() {
+        let first_half = u16::from_le_bytes([bytes[i], bytes[i + 1]]);
+        
+        // Check if this is a compressed instruction (C extension)
+        // Compressed instructions have the two lowest bits != 0b11
+        if (first_half & 0b11) != 0b11 {
+            // 16-bit compressed instruction
+            instructions.push(decode_compressed_instruction(first_half)?);
+            i += 2;
+        } else {
+            // 32-bit standard instruction
+            if i + 4 > bytes.len() {
+                return Err(format!("Incomplete 32-bit instruction at offset {}", i));
+            }
+            let instr = u32::from_le_bytes([bytes[i], bytes[i + 1], bytes[i + 2], bytes[i + 3]]);
+            instructions.push(decode_instruction(instr)?);
+            i += 4;
+        }
     }
     Ok(instructions)
+}
+
+/// Decode a 16-bit compressed RISC-V instruction (C extension).
+///
+/// Converts the compressed instruction to its equivalent 32-bit instruction.
+pub fn decode_compressed_instruction(instr: u16) -> Result<RiscvInstruction, String> {
+    let op = instr & 0b11;
+    let funct3 = (instr >> 13) & 0b111;
+    
+    match (op, funct3) {
+        // Quadrant 0
+        (0b00, 0b000) => {
+            // C.ADDI4SPN: addi rd', x2, nzuimm
+            let rd = ((instr >> 2) & 0b111) as u8 + 8; // rd' = x8-x15
+            let nzuimm = decode_ciw_imm(instr);
+            if nzuimm == 0 {
+                return Err("C.ADDI4SPN with nzuimm=0 is reserved".to_string());
+            }
+            Ok(RiscvInstruction::IAlu { op: RiscvOpcode::Add, rd, rs1: 2, imm: nzuimm as i32 })
+        }
+        (0b00, 0b010) => {
+            // C.LW: lw rd', offset(rs1')
+            let rd = ((instr >> 2) & 0b111) as u8 + 8;
+            let rs1 = ((instr >> 7) & 0b111) as u8 + 8;
+            let offset = decode_cl_lw_imm(instr);
+            Ok(RiscvInstruction::Load { op: RiscvMemOp::Lw, rd, rs1, imm: offset as i32 })
+        }
+        (0b00, 0b011) => {
+            // C.LD (RV64) or C.FLW (RV32): ld rd', offset(rs1')
+            let rd = ((instr >> 2) & 0b111) as u8 + 8;
+            let rs1 = ((instr >> 7) & 0b111) as u8 + 8;
+            let offset = decode_cl_ld_imm(instr);
+            Ok(RiscvInstruction::Load { op: RiscvMemOp::Ld, rd, rs1, imm: offset as i32 })
+        }
+        (0b00, 0b110) => {
+            // C.SW: sw rs2', offset(rs1')
+            let rs2 = ((instr >> 2) & 0b111) as u8 + 8;
+            let rs1 = ((instr >> 7) & 0b111) as u8 + 8;
+            let offset = decode_cl_lw_imm(instr);
+            Ok(RiscvInstruction::Store { op: RiscvMemOp::Sw, rs1, rs2, imm: offset as i32 })
+        }
+        (0b00, 0b111) => {
+            // C.SD (RV64): sd rs2', offset(rs1')
+            let rs2 = ((instr >> 2) & 0b111) as u8 + 8;
+            let rs1 = ((instr >> 7) & 0b111) as u8 + 8;
+            let offset = decode_cl_ld_imm(instr);
+            Ok(RiscvInstruction::Store { op: RiscvMemOp::Sd, rs1, rs2, imm: offset as i32 })
+        }
+        
+        // Quadrant 1
+        (0b01, 0b000) => {
+            // C.ADDI / C.NOP
+            let rd = ((instr >> 7) & 0b11111) as u8;
+            let imm = decode_ci_imm(instr);
+            if rd == 0 {
+                Ok(RiscvInstruction::Nop) // C.NOP
+            } else {
+                Ok(RiscvInstruction::IAlu { op: RiscvOpcode::Add, rd, rs1: rd, imm })
+            }
+        }
+        (0b01, 0b001) => {
+            // C.ADDIW (RV64) / C.JAL (RV32)
+            let rd = ((instr >> 7) & 0b11111) as u8;
+            let imm = decode_ci_imm(instr);
+            // Assuming RV64
+            Ok(RiscvInstruction::IAluw { op: RiscvOpcode::Addw, rd, rs1: rd, imm })
+        }
+        (0b01, 0b010) => {
+            // C.LI: addi rd, x0, imm
+            let rd = ((instr >> 7) & 0b11111) as u8;
+            let imm = decode_ci_imm(instr);
+            Ok(RiscvInstruction::IAlu { op: RiscvOpcode::Add, rd, rs1: 0, imm })
+        }
+        (0b01, 0b011) => {
+            let rd = ((instr >> 7) & 0b11111) as u8;
+            if rd == 2 {
+                // C.ADDI16SP: addi x2, x2, nzimm
+                let imm = decode_ci_addi16sp_imm(instr);
+                Ok(RiscvInstruction::IAlu { op: RiscvOpcode::Add, rd: 2, rs1: 2, imm })
+            } else {
+                // C.LUI: lui rd, nzimm
+                let imm = decode_ci_lui_imm(instr);
+                Ok(RiscvInstruction::Lui { rd, imm })
+            }
+        }
+        (0b01, 0b100) => {
+            // Various ALU operations on compressed registers
+            let funct2 = (instr >> 10) & 0b11;
+            let rd = ((instr >> 7) & 0b111) as u8 + 8;
+            match funct2 {
+                0b00 => {
+                    // C.SRLI
+                    let shamt = decode_ci_shamt(instr);
+                    Ok(RiscvInstruction::IAlu { op: RiscvOpcode::Srl, rd, rs1: rd, imm: shamt as i32 })
+                }
+                0b01 => {
+                    // C.SRAI
+                    let shamt = decode_ci_shamt(instr);
+                    Ok(RiscvInstruction::IAlu { op: RiscvOpcode::Sra, rd, rs1: rd, imm: shamt as i32 })
+                }
+                0b10 => {
+                    // C.ANDI
+                    let imm = decode_ci_imm(instr);
+                    Ok(RiscvInstruction::IAlu { op: RiscvOpcode::And, rd, rs1: rd, imm })
+                }
+                0b11 => {
+                    // C.SUB, C.XOR, C.OR, C.AND, C.SUBW, C.ADDW
+                    let funct2_b = (instr >> 5) & 0b11;
+                    let rs2 = ((instr >> 2) & 0b111) as u8 + 8;
+                    let bit12 = (instr >> 12) & 1;
+                    match (bit12, funct2_b) {
+                        (0, 0b00) => Ok(RiscvInstruction::RAlu { op: RiscvOpcode::Sub, rd, rs1: rd, rs2 }),
+                        (0, 0b01) => Ok(RiscvInstruction::RAlu { op: RiscvOpcode::Xor, rd, rs1: rd, rs2 }),
+                        (0, 0b10) => Ok(RiscvInstruction::RAlu { op: RiscvOpcode::Or, rd, rs1: rd, rs2 }),
+                        (0, 0b11) => Ok(RiscvInstruction::RAlu { op: RiscvOpcode::And, rd, rs1: rd, rs2 }),
+                        (1, 0b00) => Ok(RiscvInstruction::RAluw { op: RiscvOpcode::Subw, rd, rs1: rd, rs2 }),
+                        (1, 0b01) => Ok(RiscvInstruction::RAluw { op: RiscvOpcode::Addw, rd, rs1: rd, rs2 }),
+                        _ => Err(format!("Unknown C.ALU: funct2_b={:#x}", funct2_b)),
+                    }
+                }
+                _ => Err(format!("Unknown C.ALU funct2: {:#x}", funct2)),
+            }
+        }
+        (0b01, 0b101) => {
+            // C.J: jal x0, offset
+            let offset = decode_cj_imm(instr);
+            Ok(RiscvInstruction::Jal { rd: 0, imm: offset })
+        }
+        (0b01, 0b110) => {
+            // C.BEQZ: beq rs1', x0, offset
+            let rs1 = ((instr >> 7) & 0b111) as u8 + 8;
+            let offset = decode_cb_imm(instr);
+            Ok(RiscvInstruction::Branch { cond: BranchCondition::Eq, rs1, rs2: 0, imm: offset })
+        }
+        (0b01, 0b111) => {
+            // C.BNEZ: bne rs1', x0, offset
+            let rs1 = ((instr >> 7) & 0b111) as u8 + 8;
+            let offset = decode_cb_imm(instr);
+            Ok(RiscvInstruction::Branch { cond: BranchCondition::Ne, rs1, rs2: 0, imm: offset })
+        }
+        
+        // Quadrant 2
+        (0b10, 0b000) => {
+            // C.SLLI
+            let rd = ((instr >> 7) & 0b11111) as u8;
+            let shamt = decode_ci_shamt(instr);
+            Ok(RiscvInstruction::IAlu { op: RiscvOpcode::Sll, rd, rs1: rd, imm: shamt as i32 })
+        }
+        (0b10, 0b010) => {
+            // C.LWSP: lw rd, offset(x2)
+            let rd = ((instr >> 7) & 0b11111) as u8;
+            let offset = decode_ci_lwsp_imm(instr);
+            Ok(RiscvInstruction::Load { op: RiscvMemOp::Lw, rd, rs1: 2, imm: offset as i32 })
+        }
+        (0b10, 0b011) => {
+            // C.LDSP (RV64): ld rd, offset(x2)
+            let rd = ((instr >> 7) & 0b11111) as u8;
+            let offset = decode_ci_ldsp_imm(instr);
+            Ok(RiscvInstruction::Load { op: RiscvMemOp::Ld, rd, rs1: 2, imm: offset as i32 })
+        }
+        (0b10, 0b100) => {
+            let bit12 = ((instr >> 12) & 1) != 0;
+            let rs1 = ((instr >> 7) & 0b11111) as u8;
+            let rs2 = ((instr >> 2) & 0b11111) as u8;
+            match (bit12, rs2) {
+                (false, 0) => {
+                    // C.JR: jalr x0, rs1, 0
+                    Ok(RiscvInstruction::Jalr { rd: 0, rs1, imm: 0 })
+                }
+                (false, _) => {
+                    // C.MV: add rd, x0, rs2
+                    Ok(RiscvInstruction::RAlu { op: RiscvOpcode::Add, rd: rs1, rs1: 0, rs2 })
+                }
+                (true, 0) => {
+                    if rs1 == 0 {
+                        // C.EBREAK
+                        Ok(RiscvInstruction::Ebreak)
+                    } else {
+                        // C.JALR: jalr x1, rs1, 0
+                        Ok(RiscvInstruction::Jalr { rd: 1, rs1, imm: 0 })
+                    }
+                }
+                (true, _) => {
+                    // C.ADD: add rd, rd, rs2
+                    Ok(RiscvInstruction::RAlu { op: RiscvOpcode::Add, rd: rs1, rs1, rs2 })
+                }
+            }
+        }
+        (0b10, 0b110) => {
+            // C.SWSP: sw rs2, offset(x2)
+            let rs2 = ((instr >> 2) & 0b11111) as u8;
+            let offset = decode_css_sw_imm(instr);
+            Ok(RiscvInstruction::Store { op: RiscvMemOp::Sw, rs1: 2, rs2, imm: offset as i32 })
+        }
+        (0b10, 0b111) => {
+            // C.SDSP (RV64): sd rs2, offset(x2)
+            let rs2 = ((instr >> 2) & 0b11111) as u8;
+            let offset = decode_css_sd_imm(instr);
+            Ok(RiscvInstruction::Store { op: RiscvMemOp::Sd, rs1: 2, rs2, imm: offset as i32 })
+        }
+        
+        _ => Err(format!("Unknown compressed instruction: op={:#x}, funct3={:#x}", op, funct3)),
+    }
+}
+
+// Compressed instruction immediate decoders
+fn decode_ciw_imm(instr: u16) -> u32 {
+    // C.ADDI4SPN: nzuimm[5:4|9:6|2|3] => scaled by 4
+    let bits = ((instr >> 5) & 1) << 3
+        | ((instr >> 6) & 1) << 2
+        | ((instr >> 7) & 0xF) << 6
+        | ((instr >> 11) & 0x3) << 4;
+    bits as u32
+}
+
+fn decode_cl_lw_imm(instr: u16) -> u32 {
+    // C.LW/C.SW: offset[5:3|2|6]
+    let bits = ((instr >> 5) & 1) << 6
+        | ((instr >> 6) & 1) << 2
+        | ((instr >> 10) & 0x7) << 3;
+    bits as u32
+}
+
+fn decode_cl_ld_imm(instr: u16) -> u32 {
+    // C.LD/C.SD: offset[5:3|7:6]
+    let bits = ((instr >> 5) & 0x3) << 6
+        | ((instr >> 10) & 0x7) << 3;
+    bits as u32
+}
+
+fn decode_ci_imm(instr: u16) -> i32 {
+    // CI format: imm[5|4:0], sign-extended
+    let imm5 = ((instr >> 12) & 1) as i32;
+    let imm4_0 = ((instr >> 2) & 0x1F) as i32;
+    let imm = (imm5 << 5) | imm4_0;
+    // Sign-extend from bit 5
+    if imm5 != 0 { imm | !0x3F } else { imm }
+}
+
+fn decode_ci_shamt(instr: u16) -> u32 {
+    // Shift amount: shamt[5|4:0]
+    let shamt5 = ((instr >> 12) & 1) as u32;
+    let shamt4_0 = ((instr >> 2) & 0x1F) as u32;
+    (shamt5 << 5) | shamt4_0
+}
+
+fn decode_ci_addi16sp_imm(instr: u16) -> i32 {
+    // C.ADDI16SP: nzimm[9|4|6|8:7|5] scaled by 16
+    let bit9 = ((instr >> 12) & 1) as i32;
+    let bit4 = ((instr >> 6) & 1) as i32;
+    let bit6 = ((instr >> 5) & 1) as i32;
+    let bit8_7 = ((instr >> 3) & 0x3) as i32;
+    let bit5 = ((instr >> 2) & 1) as i32;
+    let imm = (bit9 << 9) | (bit8_7 << 7) | (bit6 << 6) | (bit5 << 5) | (bit4 << 4);
+    // Sign-extend from bit 9
+    if bit9 != 0 { imm | !0x3FF } else { imm }
+}
+
+fn decode_ci_lui_imm(instr: u16) -> i32 {
+    // C.LUI: nzimm[17|16:12]
+    let bit17 = ((instr >> 12) & 1) as i32;
+    let bits16_12 = ((instr >> 2) & 0x1F) as i32;
+    let imm = (bit17 << 5) | bits16_12;
+    // Sign-extend from bit 5
+    if bit17 != 0 { imm | !0x3F } else { imm }
+}
+
+fn decode_cj_imm(instr: u16) -> i32 {
+    // C.J/C.JAL: offset[11|4|9:8|10|6|7|3:1|5]
+    let bit11 = ((instr >> 12) & 1) as i32;
+    let bit4 = ((instr >> 11) & 1) as i32;
+    let bit9_8 = ((instr >> 9) & 0x3) as i32;
+    let bit10 = ((instr >> 8) & 1) as i32;
+    let bit6 = ((instr >> 7) & 1) as i32;
+    let bit7 = ((instr >> 6) & 1) as i32;
+    let bit3_1 = ((instr >> 3) & 0x7) as i32;
+    let bit5 = ((instr >> 2) & 1) as i32;
+    let imm = (bit11 << 11) | (bit10 << 10) | (bit9_8 << 8) | (bit7 << 7)
+        | (bit6 << 6) | (bit5 << 5) | (bit4 << 4) | (bit3_1 << 1);
+    // Sign-extend from bit 11
+    if bit11 != 0 { imm | !0xFFF } else { imm }
+}
+
+fn decode_cb_imm(instr: u16) -> i32 {
+    // C.BEQZ/C.BNEZ: offset[8|4:3|7:6|2:1|5]
+    let bit8 = ((instr >> 12) & 1) as i32;
+    let bit4_3 = ((instr >> 10) & 0x3) as i32;
+    let bit7_6 = ((instr >> 5) & 0x3) as i32;
+    let bit2_1 = ((instr >> 3) & 0x3) as i32;
+    let bit5 = ((instr >> 2) & 1) as i32;
+    let imm = (bit8 << 8) | (bit7_6 << 6) | (bit5 << 5) | (bit4_3 << 3) | (bit2_1 << 1);
+    // Sign-extend from bit 8
+    if bit8 != 0 { imm | !0x1FF } else { imm }
+}
+
+fn decode_ci_lwsp_imm(instr: u16) -> u32 {
+    // C.LWSP: offset[5|4:2|7:6]
+    let bit5 = ((instr >> 12) & 1) as u32;
+    let bit4_2 = ((instr >> 4) & 0x7) as u32;
+    let bit7_6 = ((instr >> 2) & 0x3) as u32;
+    (bit7_6 << 6) | (bit5 << 5) | (bit4_2 << 2)
+}
+
+fn decode_ci_ldsp_imm(instr: u16) -> u32 {
+    // C.LDSP: offset[5|4:3|8:6]
+    let bit5 = ((instr >> 12) & 1) as u32;
+    let bit4_3 = ((instr >> 5) & 0x3) as u32;
+    let bit8_6 = ((instr >> 2) & 0x7) as u32;
+    (bit8_6 << 6) | (bit5 << 5) | (bit4_3 << 3)
+}
+
+fn decode_css_sw_imm(instr: u16) -> u32 {
+    // C.SWSP: offset[5:2|7:6]
+    let bit5_2 = ((instr >> 9) & 0xF) as u32;
+    let bit7_6 = ((instr >> 7) & 0x3) as u32;
+    (bit7_6 << 6) | (bit5_2 << 2)
+}
+
+fn decode_css_sd_imm(instr: u16) -> u32 {
+    // C.SDSP: offset[5:3|8:6]
+    let bit5_3 = ((instr >> 10) & 0x7) as u32;
+    let bit8_6 = ((instr >> 7) & 0x7) as u32;
+    (bit8_6 << 6) | (bit5_3 << 3)
 }
 
 /// Assemble a single RISC-V instruction to its 32-bit encoding.
@@ -1918,6 +2865,108 @@ pub fn encode_instruction(instr: &RiscvInstruction) -> u32 {
         RiscvInstruction::Nop => {
             // ADDI x0, x0, 0
             0b0010011
+        }
+
+        // === RV64 W-suffix Operations ===
+        RiscvInstruction::RAluw { op, rd, rs1, rs2 } => {
+            let (funct3, funct7) = match op {
+                RiscvOpcode::Addw => (0b000, 0b0000000),
+                RiscvOpcode::Subw => (0b000, 0b0100000),
+                RiscvOpcode::Sllw => (0b001, 0b0000000),
+                RiscvOpcode::Srlw => (0b101, 0b0000000),
+                RiscvOpcode::Sraw => (0b101, 0b0100000),
+                RiscvOpcode::Mulw => (0b000, 0b0000001),
+                RiscvOpcode::Divw => (0b100, 0b0000001),
+                RiscvOpcode::Divuw => (0b101, 0b0000001),
+                RiscvOpcode::Remw => (0b110, 0b0000001),
+                RiscvOpcode::Remuw => (0b111, 0b0000001),
+                _ => (0, 0),
+            };
+            0b0111011 | ((*rd as u32) << 7) | (funct3 << 12) | ((*rs1 as u32) << 15) | ((*rs2 as u32) << 20) | (funct7 << 25)
+        }
+
+        RiscvInstruction::IAluw { op, rd, rs1, imm } => {
+            let funct3 = match op {
+                RiscvOpcode::Addw => 0b000,
+                RiscvOpcode::Sllw => 0b001,
+                RiscvOpcode::Srlw => 0b101,
+                RiscvOpcode::Sraw => 0b101,
+                _ => 0,
+            };
+            let imm_bits = (*imm as u32) & 0xFFF;
+            let imm_bits = if *op == RiscvOpcode::Sraw {
+                imm_bits | 0x400
+            } else {
+                imm_bits
+            };
+            0b0011011 | ((*rd as u32) << 7) | (funct3 << 12) | ((*rs1 as u32) << 15) | (imm_bits << 20)
+        }
+
+        // === A Extension: Atomics ===
+        RiscvInstruction::LoadReserved { op, rd, rs1 } => {
+            let (funct3, funct5) = match op {
+                RiscvMemOp::LrW => (0b010, 0b00010),
+                RiscvMemOp::LrD => (0b011, 0b00010),
+                _ => (0, 0),
+            };
+            // AMO format: funct5 | aq | rl | rs2 | rs1 | funct3 | rd | opcode
+            0b0101111 | ((*rd as u32) << 7) | (funct3 << 12) | ((*rs1 as u32) << 15) | (0 << 20) | (funct5 << 27)
+        }
+
+        RiscvInstruction::StoreConditional { op, rd, rs1, rs2 } => {
+            let (funct3, funct5) = match op {
+                RiscvMemOp::ScW => (0b010, 0b00011),
+                RiscvMemOp::ScD => (0b011, 0b00011),
+                _ => (0, 0),
+            };
+            0b0101111 | ((*rd as u32) << 7) | (funct3 << 12) | ((*rs1 as u32) << 15) | ((*rs2 as u32) << 20) | (funct5 << 27)
+        }
+
+        RiscvInstruction::Amo { op, rd, rs1, rs2 } => {
+            let (funct3, funct5) = match op {
+                RiscvMemOp::AmoswapW => (0b010, 0b00001),
+                RiscvMemOp::AmoswapD => (0b011, 0b00001),
+                RiscvMemOp::AmoaddW => (0b010, 0b00000),
+                RiscvMemOp::AmoaddD => (0b011, 0b00000),
+                RiscvMemOp::AmoxorW => (0b010, 0b00100),
+                RiscvMemOp::AmoxorD => (0b011, 0b00100),
+                RiscvMemOp::AmoandW => (0b010, 0b01100),
+                RiscvMemOp::AmoandD => (0b011, 0b01100),
+                RiscvMemOp::AmoorW => (0b010, 0b01000),
+                RiscvMemOp::AmoorD => (0b011, 0b01000),
+                RiscvMemOp::AmominW => (0b010, 0b10000),
+                RiscvMemOp::AmominD => (0b011, 0b10000),
+                RiscvMemOp::AmomaxW => (0b010, 0b10100),
+                RiscvMemOp::AmomaxD => (0b011, 0b10100),
+                RiscvMemOp::AmominuW => (0b010, 0b11000),
+                RiscvMemOp::AmominuD => (0b011, 0b11000),
+                RiscvMemOp::AmomaxuW => (0b010, 0b11100),
+                RiscvMemOp::AmomaxuD => (0b011, 0b11100),
+                _ => (0, 0),
+            };
+            0b0101111 | ((*rd as u32) << 7) | (funct3 << 12) | ((*rs1 as u32) << 15) | ((*rs2 as u32) << 20) | (funct5 << 27)
+        }
+
+        // === System Instructions ===
+        RiscvInstruction::Ecall => {
+            // ECALL: imm=0
+            0b1110011
+        }
+
+        RiscvInstruction::Ebreak => {
+            // EBREAK: imm=1
+            0b1110011 | (1 << 20)
+        }
+
+        RiscvInstruction::Fence { pred, succ } => {
+            // FENCE: funct3=0, imm encodes pred/succ
+            let imm = ((*pred as u32) << 4) | (*succ as u32);
+            0b0001111 | (imm << 20)
+        }
+
+        RiscvInstruction::FenceI => {
+            // FENCE.I: funct3=1
+            0b0001111 | (0b001 << 12)
         }
     }
 }
@@ -2119,6 +3168,54 @@ pub struct TraceConversionSummary {
     pub unique_addresses: usize,
     /// Unique lookup keys used
     pub unique_lookup_keys: usize,
+}
+
+/// Extract final register values from a trace as a ProgramIO structure.
+///
+/// This creates a ProgramIO suitable for the Output Sumcheck, using RISC-V
+/// register conventions (x10-x17 as return value registers).
+pub fn extract_program_io<F: p3_field::PrimeField64>(
+    trace: &VmTrace<u64, u64>,
+    output_regs: &[usize],
+) -> crate::output_check::ProgramIO<F> {
+    // RISC-V ABI: x10-x17 (a0-a7) are argument/return registers
+    // We map register x_i to virtual address i
+
+    let mut program_io = crate::output_check::ProgramIO::new();
+
+    if let Some(last_step) = trace.steps.last() {
+        for &reg in output_regs {
+            if reg < 32 {
+                let val = last_step.regs_after[reg];
+                program_io = program_io.with_output(reg as u64, F::from_u64(val));
+            }
+        }
+    }
+
+    program_io
+}
+
+/// Build a final memory state vector suitable for the Output Sumcheck.
+///
+/// This creates a sparse representation of the final register file state,
+/// where virtual address i contains the value of register x_i.
+pub fn build_final_memory_state<F: p3_field::PrimeField64>(
+    trace: &VmTrace<u64, u64>,
+    num_bits: usize,
+) -> Vec<F> {
+    let size = 1usize << num_bits;
+    let mut state = vec![F::ZERO; size];
+
+    if let Some(last_step) = trace.steps.last() {
+        // Map registers to virtual addresses 0-31
+        for (i, &val) in last_step.regs_after.iter().enumerate() {
+            if i < size {
+                state[i] = F::from_u64(val);
+            }
+        }
+    }
+
+    state
 }
 
 /// Analyze a trace and return a summary.

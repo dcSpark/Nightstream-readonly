@@ -346,6 +346,26 @@ fn test_twist_only_route_a_prove_verify() {
 
 #[test]
 #[cfg(feature = "paper-exact")]
+fn test_route_a_mem_cpu_linkage_corrupt_ccs_time_round_poly_fails() {
+    let ctx = TwistOnlyHarness::new();
+    let mut proof = ctx.prove().expect("prove should succeed");
+
+    // Corrupt the *CPU* time-round polynomial without touching the batched time proof.
+    // The verifier must reject because CCS time rounds must exactly match batched_time claim #0.
+    proof.steps[0].fold.ccs_proof.sumcheck_rounds[0][0] += K::ONE;
+
+    let err = ctx
+        .verify(&proof)
+        .expect_err("verification should fail when CCS time-round poly is corrupted");
+    let err_str = format!("{err}");
+    assert!(
+        err_str.contains("CCS time round poly mismatch"),
+        "unexpected error: {err_str}"
+    );
+}
+
+#[test]
+#[cfg(feature = "paper-exact")]
 fn test_twist_rollover_two_steps_consistent_init_passes() {
     let ctx = TwistRolloverHarness::new(false);
     let proof = ctx.prove().expect("prove should succeed");

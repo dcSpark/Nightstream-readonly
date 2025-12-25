@@ -718,7 +718,7 @@ where
         tr.append_message(b"fold/step_done", &(idx as u64).to_le_bytes());
     }
 
-    Ok((ShardProof { steps: step_proofs }, accumulator_wit, val_lane_wits))
+    Ok((ShardProof { steps: step_proofs, output_proof: None }, accumulator_wit, val_lane_wits))
 }
 
 pub fn fold_shard_prove<L, MR, MB>(
