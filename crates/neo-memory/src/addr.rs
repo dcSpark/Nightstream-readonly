@@ -1,4 +1,7 @@
 use neo_reductions::error::PiCcsError;
+use p3_field::PrimeCharacteristicRing;
+
+use crate::witness::{LutInstance, MemInstance};
 
 pub fn validate_pow2_bit_addressing(
     proto: &'static str,
@@ -32,5 +35,25 @@ pub fn validate_pow2_bit_addressing(
         )));
     }
 
+    Ok(())
+}
+
+pub fn validate_shout_bit_addressing<Cmt, F>(inst: &LutInstance<Cmt, F>) -> Result<(), PiCcsError> {
+    validate_pow2_bit_addressing("Shout", inst.n_side, inst.d, inst.ell, inst.k)?;
+    if inst.table.len() != inst.k {
+        return Err(PiCcsError::InvalidInput(format!(
+            "Shout: table.len()={} must equal k={} for bit addressing",
+            inst.table.len(),
+            inst.k
+        )));
+    }
+    Ok(())
+}
+
+pub fn validate_twist_bit_addressing<Cmt, F: PrimeCharacteristicRing>(
+    inst: &MemInstance<Cmt, F>,
+) -> Result<(), PiCcsError> {
+    validate_pow2_bit_addressing("Twist", inst.n_side, inst.d, inst.ell, inst.k)?;
+    inst.init.validate(inst.k)?;
     Ok(())
 }

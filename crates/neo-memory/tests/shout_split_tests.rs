@@ -11,6 +11,7 @@ fn split_lut_mats_orders_fields() {
     // Note: table_at_addr is NOT committed in address-domain architecture
     let inst: LutInstance<(), Goldilocks> = LutInstance {
         comms: vec![(); 5],
+        cpu_opening_base: None,
         k: 8,
         d: 3,
         n_side: 2,

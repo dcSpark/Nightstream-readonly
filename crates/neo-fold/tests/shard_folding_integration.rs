@@ -30,7 +30,7 @@ use std::marker::PhantomData;
 
 use neo_ajtai::Commitment as Cmt;
 use neo_ccs::matrix::Mat;
-use neo_ccs::poly::SparsePoly;
+use neo_ccs::poly::{SparsePoly, Term};
 use neo_ccs::relations::{check_me_consistency, CcsStructure, McsInstance, McsWitness, MeInstance, MeWitness};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_fold::pi_ccs::FoldingMode;
@@ -201,6 +201,136 @@ impl TwistOnlyHarness {
 }
 
 #[cfg(feature = "paper-exact")]
+struct CpuLinkedTwistHarness {
+    params: NeoParams,
+    ccs: CcsStructure<F>,
+    l: DummyCommit,
+    mixers: CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32) -> Cmt>,
+    steps: Vec<StepWitnessBundle<Cmt, F, K>>,
+}
+
+#[cfg(feature = "paper-exact")]
+impl CpuLinkedTwistHarness {
+    fn new() -> Self {
+        // Keep the domain tiny; this is a protocol/linkage test, not a performance test.
+        // Twist(d=1, n_side=2) => ell=1, ell_addr=1, witness columns = 2*ell_addr+5 = 7.
+        let mem_layout = PlainMemLayout { k: 2, d: 1, n_side: 2 };
+        // Make the trace self-consistent: read from addr 0 should see the init value.
+        let mem_init = MemInit::Sparse(vec![(0, F::from_u64(5))]);
+        let plain_mem = PlainMemTrace {
+            steps: 1,
+            has_read: vec![F::ONE],
+            has_write: vec![F::ONE],
+            read_addr: vec![0],
+            write_addr: vec![1],
+            read_val: vec![F::from_u64(5)],
+            write_val: vec![F::from_u64(9)],
+            inc_at_write_addr: vec![F::from_u64(9)],
+        };
+
+        // CPU-linked mode is only sound if the CPU CCS constraints *consume/constrain* the CPU-bus
+        // witness coordinates (otherwise the bus is a "dead witness" and CPU↔memory can fork).
+        //
+        // For this linkage harness, enforce a single simple constraint that touches the bus:
+        //   rv(bus) == 5
+        // This keeps the test small while ensuring the CPU constraint polynomial depends on the bus region.
+        let n = 8usize;
+        let m0 = Mat::identity(n);
+        // Matrix M1: replicate z[rv_idx] across all rows so the constraint can be row-uniform.
+        let mut m1 = Mat::zero(n, n, F::ZERO);
+        let bus_base = n - 7; // slots_total = Twist cols (7) * max_steps (1)
+        let rv_idx = bus_base + 5; // Twist layout: [ra, wa, has_r, has_w, wv, rv, inc]
+        for r in 0..n {
+            m1[(r, rv_idx)] = F::ONE;
+        }
+
+        let f = SparsePoly::new(
+            2,
+            vec![
+                Term {
+                    coeff: F::ONE,
+                    exps: vec![0, 1], // + y1
+                },
+                Term {
+                    coeff: F::ZERO - F::from_u64(5),
+                    exps: vec![0, 0], // - 5
+                },
+            ],
+        );
+        let ccs = CcsStructure::new(vec![m0, m1], f).expect("CCS");
+
+        let mut params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+        params.k_rho = 16;
+        let l = DummyCommit::default();
+        let mixers = default_mixers();
+
+        // Build a Twist witness (mats). CPU-linked mode will clear commitments and use CPU openings.
+        let commit_fn = |mat: &Mat<F>| l.commit(mat);
+        let (mem_inst, mem_wit) =
+            encode_mem_for_twist(&params, &mem_layout, &mem_init, &plain_mem, &commit_fn, Some(ccs.m), 0);
+
+        // Start with an all-zero CPU witness; `make_steps_cpu_linked` will pack Twist columns into it.
+        let z: Vec<F> = vec![F::ZERO; ccs.m];
+        let Z = neo_memory::encode::ajtai_encode_vector(&params, &z);
+        let c = l.commit(&Z);
+        let mcs_inst = McsInstance { c, x: vec![], m_in: 0 };
+        let mcs_wit = McsWitness { w: z, Z };
+
+        let mut steps = vec![StepWitnessBundle {
+            mcs: (mcs_inst, mcs_wit),
+            lut_instances: vec![],
+            mem_instances: vec![(mem_inst, mem_wit)],
+            _phantom: PhantomData,
+        }];
+
+        let ccs = neo_fold::memory_sidecar::cpu_link::make_steps_cpu_linked(&params, &l, ccs, &mut steps)
+            .expect("cpu-link helper should succeed");
+
+        Self {
+            params,
+            ccs,
+            l,
+            mixers,
+            steps,
+        }
+    }
+
+    fn prove_steps(&self, steps: &[StepWitnessBundle<Cmt, F, K>]) -> Result<ShardProof, PiCcsError> {
+        let mut tr = Poseidon2Transcript::new(b"cpu-linked-twist");
+        fold_shard_prove(
+            FoldingMode::PaperExact,
+            &mut tr,
+            &self.params,
+            &self.ccs,
+            steps,
+            &[],
+            &[],
+            &self.l,
+            self.mixers,
+        )
+    }
+
+    fn verify_steps(
+        &self,
+        steps: &[StepWitnessBundle<Cmt, F, K>],
+        proof: &ShardProof,
+    ) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError> {
+        let mut tr = Poseidon2Transcript::new(b"cpu-linked-twist");
+        let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
+        fold_shard_verify(
+            FoldingMode::PaperExact,
+            &mut tr,
+            &self.params,
+            &self.ccs,
+            &steps_public,
+            &[],
+            proof,
+            self.mixers,
+        )
+    }
+}
+
+#[cfg(feature = "paper-exact")]
 struct TwistRolloverHarness {
     params: NeoParams,
     ccs: CcsStructure<F>,
@@ -342,6 +472,68 @@ fn test_twist_only_route_a_prove_verify() {
     let ctx = TwistOnlyHarness::new();
     let proof = ctx.prove().expect("prove should succeed");
     let _outputs = ctx.verify(&proof).expect("verify should succeed");
+}
+
+#[test]
+#[cfg(feature = "paper-exact")]
+fn test_cpu_linked_route_a_tampered_cpu_bus_opening_fails() {
+    let ctx = CpuLinkedTwistHarness::new();
+
+    let proof = ctx.prove_steps(&ctx.steps).expect("prove should succeed");
+    assert!(ctx.verify_steps(&ctx.steps, &proof).is_ok(), "sanity: should verify");
+
+    // CPU-linked mode: Twist/Shout terminal checks consume openings from Π_CCS outputs.
+    // Tampering with a bus opening in `ccs_out[0].y_scalars` must be rejected.
+    let mut proof_forked = proof;
+    let mem_inst = &ctx.steps[0].mem_instances[0].0;
+    let base = mem_inst.cpu_opening_base.expect("expected CPU-linked mode");
+    let rv_idx = mem_inst.twist_layout().rv;
+    proof_forked.steps[0].fold.ccs_out[0].y_scalars[base + rv_idx] += K::ONE;
+
+    assert!(
+        ctx.verify_steps(&ctx.steps, &proof_forked).is_err(),
+        "verification must fail for tampered CPU bus opening under CPU-linked mode"
+    );
+}
+
+#[test]
+#[cfg(feature = "paper-exact")]
+fn test_cpu_linked_route_a_rejects_nonempty_memory_witness_mats() {
+    let ctx = CpuLinkedTwistHarness::new();
+
+    // In CPU-linked mode, the independent Twist witness namespace must be absent.
+    // Any non-empty `MemWitness.mats` is treated as a bug and must be rejected by the prover.
+    let mut steps_bad = ctx.steps.clone();
+    steps_bad[0].mem_instances[0].1.mats.push(Mat::zero(D, ctx.ccs.m, F::ZERO));
+
+    let err = ctx
+        .prove_steps(&steps_bad)
+        .expect_err("prove must fail when CPU-linked memory witness mats are present");
+    let err_str = format!("{err}");
+    assert!(
+        err_str.contains("Twist witness mats must be empty"),
+        "unexpected error: {err_str}"
+    );
+}
+
+#[test]
+#[cfg(feature = "paper-exact")]
+fn test_route_a_mem_cpu_linkage_corrupt_ccs_time_round_poly_fails() {
+    let ctx = TwistOnlyHarness::new();
+    let mut proof = ctx.prove().expect("prove should succeed");
+
+    // Corrupt the *CPU* time-round polynomial without touching the batched time proof.
+    // The verifier must reject because CCS time rounds must exactly match batched_time claim #0.
+    proof.steps[0].fold.ccs_proof.sumcheck_rounds[0][0] += K::ONE;
+
+    let err = ctx
+        .verify(&proof)
+        .expect_err("verification should fail when CCS time-round poly is corrupted");
+    let err_str = format!("{err}");
+    assert!(
+        err_str.contains("CCS time round poly mismatch"),
+        "unexpected error: {err_str}"
+    );
 }
 
 #[test]
@@ -541,6 +733,7 @@ fn test_twist_route_a_time_claimed_sum_must_match_addr_pre_final() {
         &ctx.params,
         &step,
         None,
+        &step_proof.fold.ccs_out[0],
         r_time,
         &r_cycle,
         &dummy_final_values,

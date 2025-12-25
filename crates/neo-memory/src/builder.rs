@@ -159,10 +159,15 @@ where
     // Maintain a running sparse memory state per instance so each chunk can start from
     // the correct initial state (rollover across chunks).
     let mut mem_states: HashMap<u32, HashMap<u64, Goldilocks>> = HashMap::new();
-    for (mem_id, layout) in mem_layouts {
+    let mut mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
+    mem_ids.sort_unstable();
+    for mem_id in mem_ids.iter().copied() {
+        let layout = mem_layouts.get(&mem_id).ok_or_else(|| {
+            ShardBuildError::MissingLayout(format!("missing PlainMemLayout for twist_id {}", mem_id))
+        })?;
         let mut state = HashMap::<u64, Goldilocks>::new();
         for ((init_mem_id, addr), &val) in initial_mem.iter() {
-            if init_mem_id != mem_id || val == Goldilocks::ZERO {
+            if *init_mem_id != mem_id || val == Goldilocks::ZERO {
                 continue;
             }
             if (*addr as usize) >= layout.k {
@@ -178,8 +183,11 @@ where
                 )));
             }
         }
-        mem_states.insert(*mem_id, state);
+        mem_states.insert(mem_id, state);
     }
+
+    let mut table_ids: Vec<u32> = lut_tables.keys().copied().collect();
+    table_ids.sort_unstable();
 
     let mut step_bundles = Vec::with_capacity(chunks_len);
 
@@ -204,15 +212,18 @@ where
 
         // Build per-chunk memory witnesses
         let mut mem_instances = Vec::new();
-        for (mem_id, plain) in &plain_mem {
-            let layout = mem_layouts.get(mem_id).ok_or_else(|| {
+        for mem_id in mem_ids.iter().copied() {
+            let layout = mem_layouts.get(&mem_id).ok_or_else(|| {
                 ShardBuildError::MissingLayout(format!("missing PlainMemLayout for twist_id {}", mem_id))
+            })?;
+            let plain = plain_mem.get(&mem_id).ok_or_else(|| {
+                ShardBuildError::MissingLayout(format!("missing PlainMemTrace for twist_id {}", mem_id))
             })?;
 
             let state = mem_states
-                .get_mut(mem_id)
+                .get_mut(&mem_id)
                 .ok_or_else(|| ShardBuildError::MissingLayout(format!("missing state for twist_id {}", mem_id)))?;
-            let init = mem_init_from_state(*mem_id, layout.k, state)?;
+            let init = mem_init_from_state(mem_id, layout.k, state)?;
             let chunk_plain = PlainMemTrace {
                 steps: chunk_len,
                 has_read: plain.has_read[chunk_start..chunk_end].to_vec(),
@@ -247,10 +258,13 @@ where
 
         // Build per-chunk lookup witnesses
         let mut lut_instances = Vec::new();
-        for (table_id, plain) in &plain_lut {
+        for table_id in table_ids.iter().copied() {
             let table = lut_tables
-                .get(table_id)
+                .get(&table_id)
                 .ok_or_else(|| ShardBuildError::MissingTable(format!("missing LutTable for shout_id {}", table_id)))?;
+            let plain = plain_lut.get(&table_id).ok_or_else(|| {
+                ShardBuildError::MissingTable(format!("missing PlainLutTrace for shout_id {}", table_id))
+            })?;
 
             let chunk_plain = PlainLutTrace {
                 has_lookup: plain.has_lookup[chunk_start..chunk_end].to_vec(),

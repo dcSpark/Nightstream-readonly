@@ -1,4 +1,6 @@
 pub mod claim_plan;
+pub mod cpu_bus;
+pub mod cpu_link;
 pub(crate) mod helpers;
 pub mod memory;
 pub(crate) mod route_a_time;

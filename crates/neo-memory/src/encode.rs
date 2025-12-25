@@ -259,6 +259,7 @@ where
     (
         MemInstance {
             comms,
+            cpu_opening_base: None,
             k: layout.k,
             d: layout.d,
             n_side: layout.n_side,
@@ -360,6 +361,7 @@ where
 
     let inst = LutInstance {
         comms,
+        cpu_opening_base: None,
         k: table.k,
         d: table.d,
         n_side: table.n_side,
@@ -377,6 +379,7 @@ where
         // since commitments require Clone and we're just checking the witness structure
         let check_inst = LutInstance::<(), Goldilocks> {
             comms: vec![(); inst.comms.len()],
+            cpu_opening_base: None,
             k: inst.k,
             d: inst.d,
             n_side: inst.n_side,
