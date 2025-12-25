@@ -130,7 +130,7 @@ pub struct StepProof {
 pub struct ShardProof {
     pub steps: Vec<StepProof>,
     /// Optional output binding proof (proves final memory matches claimed outputs).
-    /// This includes authenticated Twist opening, not just the output sumcheck.
+    /// Twist linkage is proven as an extra Route-A batched-time claim on the final step.
     pub output_proof: Option<OutputBindingProof>,
 }
 

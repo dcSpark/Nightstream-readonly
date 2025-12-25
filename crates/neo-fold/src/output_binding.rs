@@ -6,26 +6,16 @@
 //!
 //! ## Usage
 //!
-//! After generating a shard proof with Twist memory traces, use these helpers
-//! to add output binding:
+//! Prefer the shard/session wrappers which wire Route-A `r_time` into output binding automatically:
 //!
 //! ```ignore
-//! // 1. Generate shard proof normally
-//! let mut proof = fold_shard_prove(...)?;
-//!
-//! // 2. Add output binding
-//! add_output_binding(&mut proof, &mut tr, &output_config)?;
-//!
-//! // 3. Verification includes output binding check
-//! verify_with_output_binding(&proof, &mut tr, &output_config)?;
+//! let proof = neo_fold::shard::fold_shard_prove_with_output_binding(..., &ob_cfg, &twist_data)?;
+//! neo_fold::shard::fold_shard_verify_with_output_binding(..., &proof, ..., &ob_cfg)?;
 //! ```
 
-use crate::PiCcsError;
 use neo_math::{F, K};
-use neo_memory::output_check::{
-    verify_output_binding_proof, OutputBindingWitness, ProgramIO,
-};
-use neo_transcript::{Poseidon2Transcript, Transcript};
+use neo_memory::output_check::{OutputBindingWitness, OutputCheckError, ProgramIO};
+use p3_field::PrimeCharacteristicRing;
 
 /// Configuration for output binding.
 #[derive(Clone, Debug)]
@@ -34,34 +24,21 @@ pub struct OutputBindingConfig {
     pub num_bits: usize,
     /// The claimed program I/O (inputs and outputs with their addresses).
     pub program_io: ProgramIO<F>,
-    /// Initial memory values at the challenge point (for verification).
-    /// This should be derived from the public MemInit polynomial.
-    pub val_init_at_r_prime: Option<K>,
-    /// Terminal check value from finalized ME claims (for verification).
-    /// This comes from the Twist inc_total sumcheck terminal.
-    pub inc_terminal_value: Option<K>,
+    /// Which mem instance to bind outputs against (default: 0).
+    pub mem_idx: usize,
 }
+
+/// Label for the optional Route-A batched time claim that binds output sumcheck to Twist increments.
+pub const OB_INC_TOTAL_LABEL: &'static [u8] = b"output_binding/inc_total";
 
 impl OutputBindingConfig {
     /// Create a new output binding config with just the I/O claims.
     pub fn new(num_bits: usize, program_io: ProgramIO<F>) -> Self {
-        Self {
-            num_bits,
-            program_io,
-            val_init_at_r_prime: None,
-            inc_terminal_value: None,
-        }
+        Self { num_bits, program_io, mem_idx: 0 }
     }
 
-    /// Set the initial value at the challenge point.
-    pub fn with_val_init(mut self, val: K) -> Self {
-        self.val_init_at_r_prime = Some(val);
-        self
-    }
-
-    /// Set the terminal check value.
-    pub fn with_inc_terminal(mut self, val: K) -> Self {
-        self.inc_terminal_value = Some(val);
+    pub fn with_mem_idx(mut self, mem_idx: usize) -> Self {
+        self.mem_idx = mem_idx;
         self
     }
 }
@@ -75,80 +52,36 @@ pub struct TwistOutputData {
     pub witness: OutputBindingWitness,
 }
 
-/// Generate an output binding proof and attach it to a shard proof.
-///
-/// This should be called after `fold_shard_prove` with the Twist witness data.
-///
-/// # Arguments
-/// * `proof` - The shard proof to augment with output binding.
-/// * `tr` - The transcript (must be in the same state as after `fold_shard_prove`).
-/// * `config` - Output binding configuration.
-/// * `twist_data` - The Twist witness data needed for proof generation.
-///
-/// # Returns
-/// The modified proof with output binding attached.
-pub fn add_output_binding(
-    proof: &mut crate::shard_proof_types::ShardProof,
-    tr: &mut Poseidon2Transcript,
-    config: &OutputBindingConfig,
-    twist_data: &TwistOutputData,
-) -> Result<(), PiCcsError> {
-    // Domain separation
-    tr.append_message(b"shard/output_binding_start", &[]);
-
-    let output_proof = neo_memory::output_check::generate_output_binding_proof(
-        tr,
-        config.num_bits,
-        config.program_io.clone(),
-        &twist_data.final_memory_state,
-        &twist_data.witness,
-    )
-    .map_err(|e| PiCcsError::ProtocolError(format!("output binding proof failed: {:?}", e)))?;
-
-    proof.output_proof = Some(output_proof);
-    Ok(())
+fn eq_bit_affine(bit: K, u: K) -> K {
+    bit * u + (K::ONE - bit) * (K::ONE - u)
 }
 
-/// Verify the output binding proof attached to a shard proof.
-///
-/// This should be called after `fold_shard_verify` with the same transcript.
-///
-/// # Arguments
-/// * `proof` - The shard proof containing the output binding.
-/// * `tr` - The transcript (must be in the same state as after `fold_shard_verify`).
-/// * `config` - Output binding configuration (must include `val_init_at_r_prime` and `inc_terminal_value`).
-///
-/// # Returns
-/// `Ok(())` if the output binding is valid, error otherwise.
-pub fn verify_output_binding(
-    proof: &crate::shard_proof_types::ShardProof,
-    tr: &mut Poseidon2Transcript,
-    config: &OutputBindingConfig,
-) -> Result<(), PiCcsError> {
-    let output_proof = proof.output_proof.as_ref().ok_or_else(|| {
-        PiCcsError::InvalidInput("no output binding proof attached".into())
-    })?;
+pub(crate) fn val_init_from_mem_init(
+    init: &neo_memory::MemInit<F>,
+    k: usize,
+    r_prime: &[K],
+) -> Result<K, OutputCheckError> {
+    neo_memory::mem_init::eval_init_at_r_addr::<F, K>(init, k, r_prime)
+        .map_err(|e| OutputCheckError::External(format!("MemInit eval failed: {e}")))
+}
 
-    let val_init = config.val_init_at_r_prime.ok_or_else(|| {
-        PiCcsError::InvalidInput("val_init_at_r_prime required for verification".into())
-    })?;
+pub(crate) fn inc_terminal_from_time_openings(
+    open: &crate::memory_sidecar::memory::TwistTimeLaneOpenings,
+    r_prime: &[K],
+) -> Result<K, OutputCheckError> {
+    if open.wa_bits.len() != r_prime.len() {
+        return Err(OutputCheckError::DimensionMismatch {
+            expected: r_prime.len(),
+            got: open.wa_bits.len(),
+        });
+    }
 
-    let inc_terminal = config.inc_terminal_value.ok_or_else(|| {
-        PiCcsError::InvalidInput("inc_terminal_value required for verification".into())
-    })?;
+    let mut eq = K::ONE;
+    for (bit, &u) in open.wa_bits.iter().zip(r_prime.iter()) {
+        eq *= eq_bit_affine(*bit, u);
+    }
 
-    // Domain separation (must match prover)
-    tr.append_message(b"shard/output_binding_start", &[]);
-
-    verify_output_binding_proof(
-        tr,
-        config.num_bits,
-        config.program_io.clone(),
-        val_init,
-        output_proof,
-        inc_terminal,
-    )
-    .map_err(|e| PiCcsError::ProtocolError(format!("output binding verification failed: {:?}", e)))
+    Ok(open.has_write * open.inc_at_write_addr * eq)
 }
 
 /// Check if a shard proof has output binding attached.

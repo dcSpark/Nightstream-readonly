@@ -65,25 +65,39 @@ fn decompose_z_to_Z(params: &NeoParams, z: &[F]) -> Mat<F> {
 fn build_add_ccs_mcs(
     params: &NeoParams,
     l: &DummyCommit,
+    n: usize,
+    chunk_size: usize,
     const_one: F,
     lhs0: F,
     lhs1: F,
     out: F,
 ) -> (CcsStructure<F>, McsInstance<Cmt, F>, McsWitness<F>) {
-    // CCS with n=m=4, constraint: const_one + x1 + x2 - x3 = 0 (in row 0).
-    // Rows 1..3 are dummy constraints (all zeros) to keep a small but square instance.
+    // Shared CPU-bus constraint: const_one + shout_val(step0) + twist_wv(step0) - out = 0 (row 0).
     //
-    // We require square CCS so `ensure_identity_first()` can insert M₀ = I_n, which is
-    // assumed by the Ajtai/NC pipeline and by Route A's witness-free terminal checks.
-    // Columns: [const_one (public input), lhs0, lhs1, out]
-    let mut m0 = Mat::zero(4, 4, F::ZERO);
-    m0[(0, 0)] = F::ONE; // picks const_one (public input)
-    let mut m1 = Mat::zero(4, 4, F::ZERO);
-    m1[(0, 1)] = F::ONE; // picks lhs0
-    let mut m2 = Mat::zero(4, 4, F::ZERO);
-    m2[(0, 2)] = F::ONE; // picks lhs1
-    let mut m3 = Mat::zero(4, 4, F::ZERO);
-    m3[(0, 3)] = F::ONE; // picks out
+    // Bus layout for this test:
+    // - 1 Shout instance with ell_addr=1 ⇒ shout cols = 3 (addr_bit, has_lookup, val), val col_id = 2.
+    // - 1 Twist instance with ell_addr=1 ⇒ twist cols = 7 (ra, wa, has_r, has_w, wv, rv, inc), wv col_id = 3+4 = 7.
+    // - Total bus cols = 10, stored in the witness tail with stride = chunk_size.
+    let bus_cols_total = 10usize;
+    let slots_total = bus_cols_total
+        .checked_mul(chunk_size)
+        .expect("bus slots_total overflow");
+    assert!(
+        slots_total <= n,
+        "test CCS must have enough slack for CPU bus: slots_total={slots_total} > n={n}"
+    );
+    let bus_base = n - slots_total;
+    let shout_val_idx = bus_base + 2 * chunk_size; // step 0
+    let twist_wv_idx = bus_base + 7 * chunk_size; // step 0
+
+    let mut m0 = Mat::zero(n, n, F::ZERO);
+    m0[(0, 0)] = F::ONE; // const_one
+    let mut m1 = Mat::zero(n, n, F::ZERO);
+    m1[(0, shout_val_idx)] = F::ONE; // shout val(step0)
+    let mut m2 = Mat::zero(n, n, F::ZERO);
+    m2[(0, twist_wv_idx)] = F::ONE; // twist wv(step0)
+    let mut m3 = Mat::zero(n, n, F::ZERO);
+    m3[(0, 3)] = F::ONE; // out
 
     let term_const = neo_ccs::poly::Term {
         coeff: F::ONE,
@@ -105,8 +119,12 @@ fn build_add_ccs_mcs(
 
     let s = CcsStructure::new(vec![m0, m1, m2, m3], f).expect("CCS");
 
-    // Public input x = [const_one]; witness w = [lhs0, lhs1, out]
-    let z = vec![const_one, lhs0, lhs1, out];
+    let mut z = vec![F::ZERO; n];
+    z[0] = const_one;
+    z[3] = out;
+    // Pre-fill the bus slots used by the CPU constraint so it is satisfiable even in legacy mode.
+    z[shout_val_idx] = lhs0;
+    z[twist_wv_idx] = lhs1;
     let Z = decompose_z_to_Z(params, &z);
     let c = l.commit(&Z);
     let w = z.clone(); // all witness, m_in=0
@@ -138,8 +156,8 @@ fn build_single_chunk_inputs() -> (
     DummyCommit,
     F,
 ) {
-    let m = 4usize; // const_one (public), lhs0, lhs1, out
-    let base_params = NeoParams::goldilocks_auto_r1cs_ccs(m).expect("params");
+    let n = 64usize;
+    let base_params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
     let params = NeoParams::new(
         base_params.q,
         base_params.eta,
@@ -162,7 +180,8 @@ fn build_single_chunk_inputs() -> (
     let out_val = const_one + write_val + lookup_val;
 
     // Build CCS (single chunk) enforcing out = write_val + lookup_val
-    let (ccs, mcs_inst, mcs_wit) = build_add_ccs_mcs(&params, &l, const_one, lookup_val, write_val, out_val);
+    let chunk_size = 1usize;
+    let (ccs, mcs_inst, mcs_wit) = build_add_ccs_mcs(&params, &l, n, chunk_size, const_one, lookup_val, write_val, out_val);
     let _dims = utils::build_dims_and_policy(&params, &ccs).expect("dims");
 
     let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
@@ -278,9 +297,17 @@ fn full_folding_integration_single_chunk() {
 
 #[test]
 fn full_folding_integration_multi_step_chunk() {
-    let (params, ccs, step_bundle_1, _acc_init, _acc_wit_init, l, _out_val) = build_single_chunk_inputs();
+    let (params, _ccs, _step_bundle_1, _acc_init, _acc_wit_init, l, _out_val) = build_single_chunk_inputs();
 
-    let (mcs_inst, mcs_wit) = step_bundle_1.mcs.clone();
+    // Build a CCS/MCS sized for a 4-step chunk (stride = 4 for CPU bus packing).
+    let n = 64usize;
+    let chunk_size = 4usize;
+    let const_one = F::ONE;
+    let lookup_val = F::ONE; // step0
+    let write_val = F::ONE; // step0
+    let out_val = const_one + lookup_val + write_val;
+    let (ccs, mcs_inst, mcs_wit) =
+        build_add_ccs_mcs(&params, &l, n, chunk_size, const_one, lookup_val, write_val, out_val);
 
     // 4-step RW memory trace (k=2) with alternating write/read.
     let mem_layout = PlainMemLayout { k: 2, d: 1, n_side: 2 };

@@ -98,36 +98,53 @@ fn build_add_ccs_mcs(
     val2: F,
     out: F,
 ) -> (CcsStructure<F>, McsInstance<Cmt, F>, McsWitness<F>) {
-    let mut m0 = Mat::zero(4, 4, F::ZERO);
+    let n = 32usize;
+    let mut m0 = Mat::zero(n, n, F::ZERO);
     m0[(0, 0)] = F::ONE;
-    let mut m1 = Mat::zero(4, 4, F::ZERO);
+    let mut m1 = Mat::zero(n, n, F::ZERO);
     m1[(0, 1)] = F::ONE;
-    let mut m2 = Mat::zero(4, 4, F::ZERO);
+    let mut m2 = Mat::zero(n, n, F::ZERO);
     m2[(0, 2)] = F::ONE;
-    let mut m3 = Mat::zero(4, 4, F::ZERO);
+    let mut m3 = Mat::zero(n, n, F::ZERO);
     m3[(0, 3)] = F::ONE;
+    // Shared-bus mode requires that the CPU constraints "touch" the bus region.
+    // For this toy CCS, add a canceling (bus - bus) term on the last column.
+    let mut m4 = Mat::zero(n, n, F::ZERO);
+    m4[(0, n - 1)] = F::ONE;
 
     let term_const = neo_ccs::poly::Term {
         coeff: F::ONE,
-        exps: vec![1, 0, 0, 0],
+        exps: vec![1, 0, 0, 0, 0],
     };
     let term_x1 = neo_ccs::poly::Term {
         coeff: F::ONE,
-        exps: vec![0, 1, 0, 0],
+        exps: vec![0, 1, 0, 0, 0],
     };
     let term_x2 = neo_ccs::poly::Term {
         coeff: F::ONE,
-        exps: vec![0, 0, 1, 0],
+        exps: vec![0, 0, 1, 0, 0],
     };
     let term_neg_out = neo_ccs::poly::Term {
         coeff: F::ZERO - F::ONE,
-        exps: vec![0, 0, 0, 1],
+        exps: vec![0, 0, 0, 1, 0],
     };
-    let f = SparsePoly::new(4, vec![term_const, term_x1, term_x2, term_neg_out]);
+    let term_bus = neo_ccs::poly::Term {
+        coeff: F::ONE,
+        exps: vec![0, 0, 0, 0, 1],
+    };
+    let term_neg_bus = neo_ccs::poly::Term {
+        coeff: F::ZERO - F::ONE,
+        exps: vec![0, 0, 0, 0, 1],
+    };
+    let f = SparsePoly::new(5, vec![term_const, term_x1, term_x2, term_neg_out, term_bus, term_neg_bus]);
 
-    let s = CcsStructure::new(vec![m0, m1, m2, m3], f).expect("CCS");
+    let s = CcsStructure::new(vec![m0, m1, m2, m3, m4], f).expect("CCS");
 
-    let z = vec![const_one, val1, val2, out];
+    let mut z = vec![F::ZERO; n];
+    z[0] = const_one;
+    z[1] = val1;
+    z[2] = val2;
+    z[3] = out;
     let Z = decompose_z_to_Z(params, &z);
     let c = l.commit(&Z);
     let w = z.clone();
@@ -196,8 +213,8 @@ fn build_step_bundle(
 
 /// Build default proof params
 fn default_params() -> NeoParams {
-    let m = 4usize;
-    let base_params = NeoParams::goldilocks_auto_r1cs_ccs(m).expect("params");
+    let n = 32usize;
+    let base_params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
     NeoParams::new(
         base_params.q,
         base_params.eta,

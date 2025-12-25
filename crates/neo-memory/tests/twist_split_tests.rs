@@ -13,6 +13,7 @@ fn split_mem_mats_orders_fields() {
     // (ra_bits, wa_bits, has_read, has_write, wv, rv, inc_at_write_addr)
     let inst: MemInstance<(), Goldilocks> = MemInstance {
         comms: vec![(); 9],
+        cpu_opening_base: None,
         k: 4,
         d: 2,
         n_side: 2,
