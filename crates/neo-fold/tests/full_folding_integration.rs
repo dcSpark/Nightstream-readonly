@@ -14,7 +14,6 @@ use neo_fold::shard::{fold_shard_prove, fold_shard_verify, fold_shard_verify_and
 use neo_fold::shard::CommitMixers;
 use neo_fold::PiCcsError;
 use neo_math::{D, K};
-use neo_memory::encode::{encode_lut_for_shout, encode_mem_for_twist};
 use neo_memory::plain::{PlainLutTrace, PlainMemLayout, PlainMemTrace};
 use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
 use neo_memory::MemInit;
@@ -26,6 +25,9 @@ use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_goldilocks::Goldilocks as F;
 
 type Mixers = CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32) -> Cmt>;
+
+const TEST_M: usize = 64;
+const M_IN: usize = 0;
 
 /// Dummy commit that produces zero commitments.
 #[derive(Clone, Copy, Default)]
@@ -61,28 +63,19 @@ fn decompose_z_to_Z(params: &NeoParams, z: &[F]) -> Mat<F> {
     Mat::from_row_major(d, m, row_major)
 }
 
-fn build_add_ccs_mcs(
-    params: &NeoParams,
-    l: &DummyCommit,
-    const_one: F,
-    lhs0: F,
-    lhs1: F,
-    out: F,
-) -> (CcsStructure<F>, McsInstance<Cmt, F>, McsWitness<F>) {
-    // CCS with n=m=4, constraint: const_one + x1 + x2 - x3 = 0 (in row 0).
-    // Rows 1..3 are dummy constraints (all zeros) to keep a small but square instance.
+fn build_add_ccs(m: usize) -> CcsStructure<F> {
+    // A tiny “CPU” relation: const_one + lhs0 + lhs1 - out = 0 enforced only on row 0.
     //
-    // We require square CCS so `ensure_identity_first()` can insert M₀ = I_n, which is
-    // assumed by the Ajtai/NC pipeline and by Route A's witness-free terminal checks.
-    // Columns: [const_one (public input), lhs0, lhs1, out]
-    let mut m0 = Mat::zero(4, 4, F::ZERO);
-    m0[(0, 0)] = F::ONE; // picks const_one (public input)
-    let mut m1 = Mat::zero(4, 4, F::ZERO);
-    m1[(0, 1)] = F::ONE; // picks lhs0
-    let mut m2 = Mat::zero(4, 4, F::ZERO);
-    m2[(0, 2)] = F::ONE; // picks lhs1
-    let mut m3 = Mat::zero(4, 4, F::ZERO);
-    m3[(0, 3)] = F::ONE; // picks out
+    // We keep `n == m` so `ensure_identity_first()` can insert M₀ = I_n, which Route A relies on.
+    // Extra witness coordinates (including the shared CPU-bus tail) are unconstrained by this CCS.
+    let mut m0 = Mat::zero(m, m, F::ZERO);
+    m0[(0, 0)] = F::ONE;
+    let mut m1 = Mat::zero(m, m, F::ZERO);
+    m1[(0, 1)] = F::ONE;
+    let mut m2 = Mat::zero(m, m, F::ZERO);
+    m2[(0, 2)] = F::ONE;
+    let mut m3 = Mat::zero(m, m, F::ZERO);
+    m3[(0, 3)] = F::ONE;
 
     let term_const = neo_ccs::poly::Term {
         coeff: F::ONE,
@@ -102,17 +95,117 @@ fn build_add_ccs_mcs(
     };
     let f = SparsePoly::new(4, vec![term_const, term_x1, term_x2, term_neg_out]);
 
-    let s = CcsStructure::new(vec![m0, m1, m2, m3], f).expect("CCS");
+    CcsStructure::new(vec![m0, m1, m2, m3], f).expect("CCS")
+}
 
-    // Public input x = [const_one]; witness w = [lhs0, lhs1, out]
-    let z = vec![const_one, lhs0, lhs1, out];
+fn build_mcs_from_z(
+    params: &NeoParams,
+    l: &DummyCommit,
+    m_in: usize,
+    z: Vec<F>,
+) -> (McsInstance<Cmt, F>, McsWitness<F>) {
     let Z = decompose_z_to_Z(params, &z);
     let c = l.commit(&Z);
-    let w = z.clone(); // all witness, m_in=0
+    let x = z[..m_in].to_vec();
+    let w = z[m_in..].to_vec();
+    (McsInstance { c, x, m_in }, McsWitness { w, Z })
+}
 
-    let inst = McsInstance { c, x: vec![], m_in: 0 };
-    let wit = McsWitness { w, Z };
-    (s, inst, wit)
+fn write_bus_for_chunk(
+    z: &mut [F],
+    bus_base: usize,
+    chunk_size: usize,
+    lut_inst: &neo_memory::witness::LutInstance<Cmt, F>,
+    lut_trace: &PlainLutTrace<F>,
+    mem_inst: &neo_memory::witness::MemInstance<Cmt, F>,
+    mem_trace: &PlainMemTrace<F>,
+) {
+    assert_eq!(lut_inst.steps, chunk_size);
+    assert_eq!(mem_inst.steps, chunk_size);
+    assert_eq!(lut_trace.has_lookup.len(), chunk_size);
+    assert_eq!(lut_trace.addr.len(), chunk_size);
+    assert_eq!(lut_trace.val.len(), chunk_size);
+    assert_eq!(mem_trace.steps, chunk_size);
+
+    // Clear bus region.
+    let bus_cols = (lut_inst.d * lut_inst.ell + 2) + (2 * mem_inst.d * mem_inst.ell + 5);
+    let bus_region_len = bus_cols * chunk_size;
+    z[bus_base..bus_base + bus_region_len].fill(F::ZERO);
+
+    // Fill each step j independently, with canonical column order:
+    // Shout(addr_bits, has_lookup, val) then Twist(ra_bits, wa_bits, flags/vals/inc).
+    for j in 0..chunk_size {
+        let mut col_id = 0usize;
+
+        // Shout addr bits (masked by has_lookup).
+        let has_lookup = lut_trace.has_lookup[j];
+        if has_lookup == F::ONE {
+            let mut tmp = lut_trace.addr[j];
+            for _dim in 0..lut_inst.d {
+                let comp = (tmp % (lut_inst.n_side as u64)) as u64;
+                tmp /= lut_inst.n_side as u64;
+                for bit in 0..lut_inst.ell {
+                    let b = if (comp >> bit) & 1 == 1 { F::ONE } else { F::ZERO };
+                    z[bus_base + col_id * chunk_size + j] = b;
+                    col_id += 1;
+                }
+            }
+        } else {
+            col_id += lut_inst.d * lut_inst.ell;
+        }
+        z[bus_base + col_id * chunk_size + j] = has_lookup;
+        col_id += 1;
+        z[bus_base + col_id * chunk_size + j] = if has_lookup == F::ONE { lut_trace.val[j] } else { F::ZERO };
+        col_id += 1;
+
+        // Twist read bits (masked by has_read).
+        let has_read = mem_trace.has_read[j];
+        if has_read == F::ONE {
+            let mut tmp = mem_trace.read_addr[j];
+            for _dim in 0..mem_inst.d {
+                let comp = (tmp % (mem_inst.n_side as u64)) as u64;
+                tmp /= mem_inst.n_side as u64;
+                for bit in 0..mem_inst.ell {
+                    let b = if (comp >> bit) & 1 == 1 { F::ONE } else { F::ZERO };
+                    z[bus_base + col_id * chunk_size + j] = b;
+                    col_id += 1;
+                }
+            }
+        } else {
+            col_id += mem_inst.d * mem_inst.ell;
+        }
+
+        // Twist write bits (masked by has_write).
+        let has_write = mem_trace.has_write[j];
+        if has_write == F::ONE {
+            let mut tmp = mem_trace.write_addr[j];
+            for _dim in 0..mem_inst.d {
+                let comp = (tmp % (mem_inst.n_side as u64)) as u64;
+                tmp /= mem_inst.n_side as u64;
+                for bit in 0..mem_inst.ell {
+                    let b = if (comp >> bit) & 1 == 1 { F::ONE } else { F::ZERO };
+                    z[bus_base + col_id * chunk_size + j] = b;
+                    col_id += 1;
+                }
+            }
+        } else {
+            col_id += mem_inst.d * mem_inst.ell;
+        }
+
+        z[bus_base + col_id * chunk_size + j] = has_read;
+        col_id += 1;
+        z[bus_base + col_id * chunk_size + j] = has_write;
+        col_id += 1;
+        z[bus_base + col_id * chunk_size + j] = if has_write == F::ONE { mem_trace.write_val[j] } else { F::ZERO };
+        col_id += 1;
+        z[bus_base + col_id * chunk_size + j] = if has_read == F::ONE { mem_trace.read_val[j] } else { F::ZERO };
+        col_id += 1;
+        z[bus_base + col_id * chunk_size + j] =
+            if has_write == F::ONE { mem_trace.inc_at_write_addr[j] } else { F::ZERO };
+        col_id += 1;
+
+        debug_assert_eq!(col_id, bus_cols);
+    }
 }
 
 fn default_mixers() -> Mixers {
@@ -138,7 +231,7 @@ fn build_single_chunk_inputs() -> (
     Mixers,
     F,
 ) {
-    let m = 4usize; // const_one (public), lhs0, lhs1, out
+    let m = TEST_M;
     let base_params = NeoParams::goldilocks_auto_r1cs_ccs(m).expect("params");
     let params = NeoParams::new(
         base_params.q,
@@ -162,8 +255,8 @@ fn build_single_chunk_inputs() -> (
     let lookup_val = F::from_u64(1);
     let out_val = const_one + write_val + lookup_val;
 
-    // Build CCS (single chunk) enforcing out = write_val + lookup_val
-    let (ccs, mcs_inst, mcs_wit) = build_add_ccs_mcs(&params, &l, const_one, lookup_val, write_val, out_val);
+    // Build CCS (single chunk) enforcing out = write_val + lookup_val (bus vars are extra).
+    let ccs = build_add_ccs(m);
     let _dims = utils::build_dims_and_policy(&params, &ccs).expect("dims");
 
     let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
@@ -199,19 +292,41 @@ fn build_single_chunk_inputs() -> (
         content: vec![F::from_u64(1), F::from_u64(2)],
     };
 
-    // Encode memory/lookup for this chunk
-    let commit_fn = |mat: &Mat<F>| l.commit(mat);
-    let (mem_inst, mem_wit) = encode_mem_for_twist(
-        &params,
-        &mem_layout,
-        &mem_init,
-        &plain_mem,
-        &commit_fn,
-        Some(ccs.m),
-        mcs_inst.m_in,
-    );
-    let (lut_inst, lut_wit) =
-        encode_lut_for_shout(&params, &lut_table, &plain_lut, &commit_fn, Some(ccs.m), mcs_inst.m_in);
+    // Shared-bus mode: instances are metadata-only; access rows live in the CPU witness.
+    let mem_inst = neo_memory::witness::MemInstance::<Cmt, F> {
+        comms: Vec::new(),
+        k: mem_layout.k,
+        d: mem_layout.d,
+        n_side: mem_layout.n_side,
+        steps: plain_mem.steps,
+        ell: mem_layout.n_side.trailing_zeros() as usize,
+        init: mem_init.clone(),
+        _phantom: PhantomData,
+    };
+    let mem_wit = neo_memory::witness::MemWitness { mats: Vec::new() };
+    let lut_inst = neo_memory::witness::LutInstance::<Cmt, F> {
+        comms: Vec::new(),
+        k: lut_table.k,
+        d: lut_table.d,
+        n_side: lut_table.n_side,
+        steps: plain_mem.steps,
+        ell: lut_table.n_side.trailing_zeros() as usize,
+        table: lut_table.content.clone(),
+        _phantom: PhantomData,
+    };
+    let lut_wit = neo_memory::witness::LutWitness { mats: Vec::new() };
+
+    // CPU witness z: core coords in [0..4), bus in the tail segment.
+    let bus_cols = (lut_inst.d * lut_inst.ell + 2) + (2 * mem_inst.d * mem_inst.ell + 5);
+    let chunk_size = plain_mem.steps;
+    let bus_base = m - bus_cols * chunk_size;
+    let mut z = vec![F::ZERO; m];
+    z[0] = const_one;
+    z[1] = lookup_val;
+    z[2] = write_val;
+    z[3] = out_val;
+    write_bus_for_chunk(&mut z, bus_base, chunk_size, &lut_inst, &plain_lut, &mem_inst, &plain_mem);
+    let (mcs_inst, mcs_wit) = build_mcs_from_z(&params, &l, M_IN, z);
 
     let step_bundle = StepWitnessBundle {
         mcs: (mcs_inst.clone(), mcs_wit.clone()),
@@ -295,7 +410,7 @@ fn full_folding_integration_single_chunk() {
 fn full_folding_integration_multi_step_chunk() {
     let (params, ccs, step_bundle_1, acc_init, acc_wit_init, l, mixers, _out_val) = build_single_chunk_inputs();
 
-    let (mcs_inst, mcs_wit) = step_bundle_1.mcs.clone();
+    let m = step_bundle_1.mcs.1.w.len();
 
     // 4-step RW memory trace (k=2) with alternating write/read.
     let mem_layout = PlainMemLayout { k: 2, d: 1, n_side: 2 };
@@ -326,18 +441,40 @@ fn full_folding_integration_multi_step_chunk() {
         val: vec![F::ONE, F::ZERO, F::from_u64(2), F::ZERO],
     };
 
-    let commit_fn = |mat: &Mat<F>| l.commit(mat);
-    let (mem_inst, mem_wit) = encode_mem_for_twist(
-        &params,
-        &mem_layout,
-        &mem_init,
-        &plain_mem,
-        &commit_fn,
-        Some(ccs.m),
-        mcs_inst.m_in,
-    );
-    let (lut_inst, lut_wit) =
-        encode_lut_for_shout(&params, &lut_table, &plain_lut, &commit_fn, Some(ccs.m), mcs_inst.m_in);
+    let mem_inst = neo_memory::witness::MemInstance::<Cmt, F> {
+        comms: Vec::new(),
+        k: mem_layout.k,
+        d: mem_layout.d,
+        n_side: mem_layout.n_side,
+        steps: plain_mem.steps,
+        ell: mem_layout.n_side.trailing_zeros() as usize,
+        init: mem_init.clone(),
+        _phantom: PhantomData,
+    };
+    let mem_wit = neo_memory::witness::MemWitness { mats: Vec::new() };
+    let lut_inst = neo_memory::witness::LutInstance::<Cmt, F> {
+        comms: Vec::new(),
+        k: lut_table.k,
+        d: lut_table.d,
+        n_side: lut_table.n_side,
+        steps: plain_mem.steps,
+        ell: lut_table.n_side.trailing_zeros() as usize,
+        table: lut_table.content.clone(),
+        _phantom: PhantomData,
+    };
+    let lut_wit = neo_memory::witness::LutWitness { mats: Vec::new() };
+
+    let bus_cols = (lut_inst.d * lut_inst.ell + 2) + (2 * mem_inst.d * mem_inst.ell + 5);
+    let chunk_size = plain_mem.steps;
+    let bus_base = m - bus_cols * chunk_size;
+    let mut z = vec![F::ZERO; m];
+    // Satisfy the add CCS constraint on row 0 with a trivial assignment.
+    z[0] = F::ZERO;
+    z[1] = F::ZERO;
+    z[2] = F::ZERO;
+    z[3] = F::ZERO;
+    write_bus_for_chunk(&mut z, bus_base, chunk_size, &lut_inst, &plain_lut, &mem_inst, &plain_mem);
+    let (mcs_inst, mcs_wit) = build_mcs_from_z(&params, &l, M_IN, z);
 
     let step_bundle = StepWitnessBundle {
         mcs: (mcs_inst, mcs_wit),
@@ -435,8 +572,12 @@ fn tamper_me_opening_fails() {
     )
     .expect("prove should succeed");
 
-    // Mutate a memory ME opening used in terminal checks.
-    proof.steps[0].mem.me_claims_time[0].y_scalars[0] += K::ONE;
+    // Mutate a CPU ME opening used by shared-bus memory checks (a bus opening at r_time).
+    let step0 = &mut proof.steps[0];
+    let ccs_out0 = &mut step0.fold.ccs_out[0];
+    let bus_cols = 10usize; // 1 Shout (3) + 1 Twist (7) in this fixture
+    let bus_y_base = ccs_out0.y_scalars.len() - bus_cols;
+    ccs_out0.y_scalars[bus_y_base] += K::ONE;
 
     let mut tr_verify = Poseidon2Transcript::new(b"full-fold-tamper-me");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
@@ -698,20 +839,27 @@ fn main_only_finalizer_is_rejected_when_val_lane_present() {
 
 #[test]
 fn wrong_shout_lookup_value_witness_fails() {
+    // In shared-bus mode, Shout consumes its access rows from the CPU witness.
+    // So a wrong Shout value must make verification fail.
     let (params, ccs, mut step_bundle, acc_init, acc_wit_init, l, mixers, _out_val) = build_single_chunk_inputs();
 
-    // Corrupt the Shout `val` column at the active lookup step.
-    let lut_inst = &step_bundle.lut_instances[0].0;
-    let ell_addr = lut_inst.d * lut_inst.ell;
-    let val_mat_idx = ell_addr + 1;
-    let t0 = 0usize; // m_in=0 in this fixture
+    // Flip the Shout `val` entry inside the CPU bus tail (step j=0, last column of the Shout slot).
+    // Layout for 1 Shout instance (d=1, ell=1, chunk_size=1):
+    //   [addr_bit0, has_lookup, val] => Shout val is column id 2.
+    // There is also 1 Twist instance after it, but we don't touch it.
+    let m = step_bundle.mcs.1.w.len();
+    let bus_cols = 10usize;
+    let bus_base = m - bus_cols;
+    let shout_val_col_id = 2usize;
+    let mut z = neo_memory::ajtai::decode_vector(&params, &step_bundle.mcs.1.Z);
+    z[bus_base + shout_val_col_id] += F::ONE;
+    let Z = decompose_z_to_Z(&params, &z);
+    let c = l.commit(&Z);
+    step_bundle.mcs.0.c = c;
+    step_bundle.mcs.1.Z = Z;
+    step_bundle.mcs.1.w = z.clone();
 
-    let val_mat = &mut step_bundle.lut_instances[0].1.mats[val_mat_idx];
-    let mut decoded = neo_memory::ajtai::decode_vector(&params, val_mat);
-    decoded[t0] += F::ONE;
-    *val_mat = neo_memory::encode::ajtai_encode_vector(&params, &decoded);
-
-    let mut tr_prove = Poseidon2Transcript::new(b"full-fold-wrong-shout-witness");
+    let mut tr_prove = Poseidon2Transcript::new(b"full-fold-wrong-shout-bus");
     let proof = fold_shard_prove(
         FoldingMode::PaperExact,
         &mut tr_prove,
@@ -723,11 +871,11 @@ fn wrong_shout_lookup_value_witness_fails() {
         &l,
         mixers,
     )
-    .expect("prove should succeed (even with invalid lookup witness)");
+    .expect("prove should succeed (even with invalid Shout bus)");
 
-    let mut tr_verify = Poseidon2Transcript::new(b"full-fold-wrong-shout-witness");
+    let mut tr_verify = Poseidon2Transcript::new(b"full-fold-wrong-shout-bus");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
-    let result = fold_shard_verify(
+    let res = fold_shard_verify(
         FoldingMode::PaperExact,
         &mut tr_verify,
         &params,
@@ -738,5 +886,5 @@ fn wrong_shout_lookup_value_witness_fails() {
         mixers,
     );
 
-    assert!(result.is_err(), "invalid Shout lookup witness must fail verification");
+    assert!(res.is_err(), "wrong Shout bus value must fail verification");
 }

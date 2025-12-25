@@ -1,4 +1,5 @@
 #![allow(non_snake_case)]
+#![allow(deprecated)]
 
 use std::marker::PhantomData;
 
@@ -11,7 +12,7 @@ use neo_ccs::{
 };
 use neo_fold::memory_sidecar::claim_plan::RouteATimeClaimPlan;
 use neo_fold::shard::CommitMixers;
-use neo_fold::shard::{fold_shard_prove, fold_shard_verify};
+use neo_fold::shard::{fold_shard_prove_legacy, fold_shard_verify_legacy};
 use neo_math::{D, K};
 use neo_memory::encode::{encode_lut_for_shout, encode_mem_for_twist};
 use neo_memory::plain::{PlainLutTrace, PlainMemLayout, PlainMemTrace};
@@ -211,7 +212,7 @@ fn tamper_batched_time_round_poly_fails() {
     let (params, ccs, step_bundle, acc_init, acc_wit_init, l, mixers) = build_single_chunk_inputs();
 
     let mut tr_prove = Poseidon2Transcript::new(b"soundness/tamper-batched-time-round");
-    let mut proof = fold_shard_prove(
+    let mut proof = fold_shard_prove_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -229,7 +230,7 @@ fn tamper_batched_time_round_poly_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"soundness/tamper-batched-time-round");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     assert!(
-        fold_shard_verify(
+        fold_shard_verify_legacy(
             FoldingMode::PaperExact,
             &mut tr_verify,
             &params,
@@ -249,7 +250,7 @@ fn tamper_ccs_header_digest_fails() {
     let (params, ccs, step_bundle, acc_init, acc_wit_init, l, mixers) = build_single_chunk_inputs();
 
     let mut tr_prove = Poseidon2Transcript::new(b"soundness/tamper-ccs-header-digest");
-    let mut proof = fold_shard_prove(
+    let mut proof = fold_shard_prove_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -267,7 +268,7 @@ fn tamper_ccs_header_digest_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"soundness/tamper-ccs-header-digest");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     assert!(
-        fold_shard_verify(
+        fold_shard_verify_legacy(
             FoldingMode::PaperExact,
             &mut tr_verify,
             &params,
@@ -287,7 +288,7 @@ fn tamper_ccs_challenges_public_fails() {
     let (params, ccs, step_bundle, acc_init, acc_wit_init, l, mixers) = build_single_chunk_inputs();
 
     let mut tr_prove = Poseidon2Transcript::new(b"soundness/tamper-ccs-challenges-public");
-    let mut proof = fold_shard_prove(
+    let mut proof = fold_shard_prove_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -305,7 +306,7 @@ fn tamper_ccs_challenges_public_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"soundness/tamper-ccs-challenges-public");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     assert!(
-        fold_shard_verify(
+        fold_shard_verify_legacy(
             FoldingMode::PaperExact,
             &mut tr_verify,
             &params,
@@ -327,7 +328,7 @@ fn tamper_rlc_inputs_changes_rho_fails() {
     let ccs_only_step: StepWitnessBundle<Cmt, F, K> = StepWitnessBundle::from(step_bundle.mcs.clone());
 
     let mut tr_prove = Poseidon2Transcript::new(b"soundness/tamper-rlc-inputs-changes-rho");
-    let mut proof = fold_shard_prove(
+    let mut proof = fold_shard_prove_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -345,7 +346,7 @@ fn tamper_rlc_inputs_changes_rho_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"soundness/tamper-rlc-inputs-changes-rho");
     let steps_public = [StepInstanceBundle::from(&ccs_only_step)];
     assert!(
-        fold_shard_verify(
+        fold_shard_verify_legacy(
             FoldingMode::PaperExact,
             &mut tr_verify,
             &params,
@@ -365,7 +366,7 @@ fn tamper_rlc_rho_fails() {
     let (params, ccs, step_bundle, acc_init, acc_wit_init, l, mixers) = build_single_chunk_inputs();
 
     let mut tr_prove = Poseidon2Transcript::new(b"soundness/tamper-rlc-rho");
-    let mut proof = fold_shard_prove(
+    let mut proof = fold_shard_prove_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -383,7 +384,7 @@ fn tamper_rlc_rho_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"soundness/tamper-rlc-rho");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     assert!(
-        fold_shard_verify(
+        fold_shard_verify_legacy(
             FoldingMode::PaperExact,
             &mut tr_verify,
             &params,
@@ -403,7 +404,7 @@ fn tamper_rlc_parent_y_scalars_fails() {
     let (params, ccs, step_bundle, acc_init, acc_wit_init, l, mixers) = build_single_chunk_inputs();
 
     let mut tr_prove = Poseidon2Transcript::new(b"soundness/tamper-rlc-parent-y-scalars");
-    let mut proof = fold_shard_prove(
+    let mut proof = fold_shard_prove_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -425,7 +426,7 @@ fn tamper_rlc_parent_y_scalars_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"soundness/tamper-rlc-parent-y-scalars");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     assert!(
-        fold_shard_verify(
+        fold_shard_verify_legacy(
             FoldingMode::PaperExact,
             &mut tr_verify,
             &params,
@@ -445,7 +446,7 @@ fn tamper_dec_child_y_fails() {
     let (params, ccs, step_bundle, acc_init, acc_wit_init, l, mixers) = build_single_chunk_inputs();
 
     let mut tr_prove = Poseidon2Transcript::new(b"soundness/tamper-dec-child-y");
-    let mut proof = fold_shard_prove(
+    let mut proof = fold_shard_prove_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -468,7 +469,7 @@ fn tamper_dec_child_y_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"soundness/tamper-dec-child-y");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     assert!(
-        fold_shard_verify(
+        fold_shard_verify_legacy(
             FoldingMode::PaperExact,
             &mut tr_verify,
             &params,
@@ -488,7 +489,7 @@ fn tamper_batched_time_label_fails() {
     let (params, ccs, step_bundle, acc_init, acc_wit_init, l, mixers) = build_single_chunk_inputs();
 
     let mut tr_prove = Poseidon2Transcript::new(b"soundness/tamper-batched-time-label");
-    let mut proof = fold_shard_prove(
+    let mut proof = fold_shard_prove_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -506,7 +507,7 @@ fn tamper_batched_time_label_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"soundness/tamper-batched-time-label");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     assert!(
-        fold_shard_verify(
+        fold_shard_verify_legacy(
             FoldingMode::PaperExact,
             &mut tr_verify,
             &params,
@@ -526,7 +527,7 @@ fn tamper_batched_time_degree_bound_fails() {
     let (params, ccs, step_bundle, acc_init, acc_wit_init, l, mixers) = build_single_chunk_inputs();
 
     let mut tr_prove = Poseidon2Transcript::new(b"soundness/tamper-batched-time-degree");
-    let mut proof = fold_shard_prove(
+    let mut proof = fold_shard_prove_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -544,7 +545,7 @@ fn tamper_batched_time_degree_bound_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"soundness/tamper-batched-time-degree");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     assert!(
-        fold_shard_verify(
+        fold_shard_verify_legacy(
             FoldingMode::PaperExact,
             &mut tr_verify,
             &params,
@@ -564,7 +565,7 @@ fn tamper_batched_time_static_claim_sum_nonzero_fails() {
     let (params, ccs, step_bundle, acc_init, acc_wit_init, l, mixers) = build_single_chunk_inputs();
 
     let mut tr_prove = Poseidon2Transcript::new(b"soundness/tamper-batched-time-static-sum");
-    let mut proof = fold_shard_prove(
+    let mut proof = fold_shard_prove_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -591,7 +592,7 @@ fn tamper_batched_time_static_claim_sum_nonzero_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"soundness/tamper-batched-time-static-sum");
     let steps_public = [step_inst];
     assert!(
-        fold_shard_verify(
+        fold_shard_verify_legacy(
             FoldingMode::PaperExact,
             &mut tr_verify,
             &params,

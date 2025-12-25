@@ -1,4 +1,5 @@
 #![allow(non_snake_case)]
+#![allow(deprecated)]
 
 #[path = "common/fixtures.rs"]
 mod fixtures;
@@ -61,7 +62,7 @@ fn mini_zkvm_lookup_table_is_semantically_required() {
     };
 
     let mut tr_bad = neo_transcript::Poseidon2Transcript::new(b"twist-shout/fixture");
-    let res = neo_fold::shard::fold_shard_prove(
+    let res = neo_fold::shard::fold_shard_prove_legacy(
         FoldingMode::Optimized,
         &mut tr_bad,
         &fx_bad.params,

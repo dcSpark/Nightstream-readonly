@@ -1,4 +1,5 @@
 #![allow(non_snake_case)]
+#![allow(deprecated)]
 
 use std::marker::PhantomData;
 
@@ -9,7 +10,7 @@ use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::Mat;
 use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::shard::{
-    fold_shard_prove, fold_shard_verify, fold_shard_verify_and_finalize, ShardFoldOutputs, ShardProof,
+    fold_shard_prove_legacy, fold_shard_verify_legacy, ShardFoldOutputs, ShardProof,
 };
 use neo_fold::shard::CommitMixers;
 use neo_fold::{finalize::ObligationFinalizer, PiCcsError};
@@ -270,7 +271,7 @@ pub fn build_twist_shout_2step_fixture_bad_lookup(seed: u64) -> ShardFixture {
 
 pub fn prove(mode: FoldingMode, fx: &ShardFixture) -> ShardProof {
     let mut tr = Poseidon2Transcript::new(b"twist-shout/fixture");
-    fold_shard_prove(
+    fold_shard_prove_legacy(
         mode,
         &mut tr,
         &fx.params,
@@ -279,7 +280,7 @@ pub fn prove(mode: FoldingMode, fx: &ShardFixture) -> ShardProof {
         &fx.acc_init,
         &fx.acc_wit_init,
         &fx.l,
-        fx.mixers,
+    fx.mixers,
     )
     .expect("prove should succeed")
 }
@@ -290,7 +291,7 @@ pub fn verify(
     proof: &ShardProof,
 ) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError> {
     let mut tr = Poseidon2Transcript::new(b"twist-shout/fixture");
-    fold_shard_verify(
+    fold_shard_verify_legacy(
         mode,
         &mut tr,
         &fx.params,
@@ -312,7 +313,7 @@ where
     Fin: ObligationFinalizer<Cmt, F, K, Error = PiCcsError>,
 {
     let mut tr = Poseidon2Transcript::new(b"twist-shout/fixture");
-    fold_shard_verify_and_finalize(
+    let outputs = fold_shard_verify_legacy(
         mode,
         &mut tr,
         &fx.params,
@@ -321,6 +322,10 @@ where
         &fx.acc_init,
         proof,
         fx.mixers,
-        finalizer,
-    )
+    )?;
+    let report = finalizer.finalize(&outputs.obligations)?;
+    outputs
+        .obligations
+        .require_all_finalized(report.did_finalize_main, report.did_finalize_val)?;
+    Ok(())
 }

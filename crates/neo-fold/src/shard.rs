@@ -404,6 +404,7 @@ where
 
 fn fold_shard_prove_impl<L, MR, MB>(
     collect_val_lane_wits: bool,
+    shared_cpu_bus: bool,
     mode: FoldingMode,
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
@@ -419,9 +420,16 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let s = s_me
+    let s0 = s_me
         .ensure_identity_first()
         .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
+    let (s, cpu_bus) = if shared_cpu_bus {
+        let bus = crate::memory_sidecar::cpu_bus::infer_cpu_bus_spec_for_witness_steps(&s0, steps)?;
+        let s = crate::memory_sidecar::cpu_bus::extend_ccs_with_cpu_bus_copyouts(&s0, &bus)?;
+        (s, Some(bus))
+    } else {
+        (s0, None)
+    };
     // Route A terminal checks interpret `ME.y_scalars[0]` as MLE(column)(r_time), which requires M₀ = I.
     s.assert_m0_is_identity_for_nc()
         .map_err(|e| PiCcsError::InvalidInput(format!("identity-first (M₀=I) required: {e:?}")))?;
@@ -443,7 +451,11 @@ where
     let mut prev_twist_decoded: Option<Vec<neo_memory::twist::TwistDecodedCols>> = None;
 
     for (idx, step) in steps.iter().enumerate() {
-        crate::memory_sidecar::memory::absorb_step_memory_commitments_witness(tr, step);
+        if shared_cpu_bus {
+            crate::memory_sidecar::memory::absorb_step_memory_metadata_only_witness(tr, step);
+        } else {
+            crate::memory_sidecar::memory::absorb_step_memory_commitments_witness(tr, step);
+        }
 
         let (mcs_inst, mcs_wit) = &step.mcs;
 
@@ -517,8 +529,22 @@ where
             }
         };
 
-        let shout_pre = crate::memory_sidecar::memory::prove_shout_addr_pre_time(tr, params, step, ell_n, &r_cycle)?;
-        let twist_pre = crate::memory_sidecar::memory::prove_twist_addr_pre_time(tr, params, step, ell_n, &r_cycle)?;
+        let shout_pre = crate::memory_sidecar::memory::prove_shout_addr_pre_time(
+            tr,
+            params,
+            step,
+            cpu_bus.as_ref(),
+            ell_n,
+            &r_cycle,
+        )?;
+        let twist_pre = crate::memory_sidecar::memory::prove_twist_addr_pre_time(
+            tr,
+            params,
+            step,
+            cpu_bus.as_ref(),
+            ell_n,
+            &r_cycle,
+        )?;
         let twist_read_claims: Vec<K> = twist_pre.iter().map(|p| p.read_check_claim_sum).collect();
         let twist_write_claims: Vec<K> = twist_pre.iter().map(|p| p.write_check_claim_sum).collect();
         let mut mem_oracles = crate::memory_sidecar::memory::build_route_a_memory_oracles(
@@ -620,6 +646,7 @@ where
 	            &twist_pre,
 	            &r_time,
 	            mcs_inst.m_in,
+	            shared_cpu_bus,
 	            idx,
 	        )?;
 	        prev_twist_decoded = Some(twist_pre.into_iter().map(|p| p.decoded).collect());
@@ -738,8 +765,49 @@ where
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
     let (proof, _final_main_wits, _val_lane_wits) =
-        fold_shard_prove_impl(false, mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)?;
+        fold_shard_prove_impl(false, true, mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)?;
     Ok(proof)
+}
+
+#[deprecated(note = "legacy (independent mem/lut commitments) mode; use fold_shard_prove (shared CPU bus) instead")]
+pub fn fold_shard_prove_legacy<L, MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepWitnessBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_wit_init: &[Mat<F>],
+    l: &L,
+    mixers: CommitMixers<MR, MB>,
+) -> Result<ShardProof, PiCcsError>
+where
+    L: SModuleHomomorphism<F, Cmt>,
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    let (proof, _final_main_wits, _val_lane_wits) =
+        fold_shard_prove_impl(false, false, mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)?;
+    Ok(proof)
+}
+
+pub fn fold_shard_prove_shared_cpu_bus<L, MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepWitnessBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_wit_init: &[Mat<F>],
+    l: &L,
+    mixers: CommitMixers<MR, MB>,
+) -> Result<ShardProof, PiCcsError>
+where
+    L: SModuleHomomorphism<F, Cmt>,
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    fold_shard_prove(mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)
 }
 
 pub fn fold_shard_prove_with_witnesses<L, MR, MB>(
@@ -759,7 +827,7 @@ where
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
     let (proof, final_main_wits, val_lane_wits) =
-        fold_shard_prove_impl(true, mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)?;
+        fold_shard_prove_impl(true, true, mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)?;
     let outputs = proof.compute_fold_outputs(acc_init);
     if outputs.obligations.main.len() != final_main_wits.len() {
         return Err(PiCcsError::ProtocolError(format!(
@@ -785,11 +853,75 @@ where
     ))
 }
 
+#[deprecated(note = "legacy (independent mem/lut commitments) mode; use fold_shard_prove_with_witnesses (shared CPU bus) instead")]
+pub fn fold_shard_prove_with_witnesses_legacy<L, MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepWitnessBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_wit_init: &[Mat<F>],
+    l: &L,
+    mixers: CommitMixers<MR, MB>,
+) -> Result<(ShardProof, ShardFoldOutputs<Cmt, F, K>, ShardFoldWitnesses<F>), PiCcsError>
+where
+    L: SModuleHomomorphism<F, Cmt>,
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    let (proof, final_main_wits, val_lane_wits) =
+        fold_shard_prove_impl(true, false, mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)?;
+    let outputs = proof.compute_fold_outputs(acc_init);
+    if outputs.obligations.main.len() != final_main_wits.len() {
+        return Err(PiCcsError::ProtocolError(format!(
+            "final main witness count mismatch (have {}, need {})",
+            final_main_wits.len(),
+            outputs.obligations.main.len()
+        )));
+    }
+    if outputs.obligations.val.len() != val_lane_wits.len() {
+        return Err(PiCcsError::ProtocolError(format!(
+            "val-lane witness count mismatch (have {}, need {})",
+            val_lane_wits.len(),
+            outputs.obligations.val.len()
+        )));
+    }
+    Ok((
+        proof,
+        outputs,
+        ShardFoldWitnesses {
+            final_main_wits,
+            val_lane_wits,
+        },
+    ))
+}
+
+pub fn fold_shard_prove_shared_cpu_bus_with_witnesses<L, MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepWitnessBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_wit_init: &[Mat<F>],
+    l: &L,
+    mixers: CommitMixers<MR, MB>,
+) -> Result<(ShardProof, ShardFoldOutputs<Cmt, F, K>, ShardFoldWitnesses<F>), PiCcsError>
+where
+    L: SModuleHomomorphism<F, Cmt>,
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    fold_shard_prove_with_witnesses(mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)
+}
+
 // ============================================================================
 // Shard Verification
 // ============================================================================
 
-pub fn fold_shard_verify<MR, MB>(
+fn fold_shard_verify_impl<MR, MB>(
+    shared_cpu_bus: bool,
     mode: FoldingMode,
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
@@ -803,9 +935,15 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let s = s_me
+    let s0 = s_me
         .ensure_identity_first()
         .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
+    let s = if shared_cpu_bus {
+        let bus = crate::memory_sidecar::cpu_bus::infer_cpu_bus_spec_for_instance_steps(&s0, steps)?;
+        crate::memory_sidecar::cpu_bus::extend_ccs_with_cpu_bus_copyouts(&s0, &bus)?
+    } else {
+        s0
+    };
     // Route A terminal checks interpret `ME.y_scalars[0]` as MLE(column)(r_time), which requires M₀ = I.
     s.assert_m0_is_identity_for_nc()
         .map_err(|e| PiCcsError::InvalidInput(format!("identity-first (M₀=I) required: {e:?}")))?;
@@ -829,7 +967,11 @@ where
     let mut val_lane_obligations: Vec<MeInstance<Cmt, F, K>> = Vec::new();
 
     for (idx, (step, step_proof)) in steps.iter().zip(proof.steps.iter()).enumerate() {
-        absorb_step_memory_commitments(tr, step);
+        if shared_cpu_bus {
+            crate::memory_sidecar::memory::absorb_step_memory_metadata_only(tr, step);
+        } else {
+            absorb_step_memory_commitments(tr, step);
+        }
 
         let mcs_inst = &step.mcs_inst;
 
@@ -1040,6 +1182,7 @@ where
 	            params,
 	            step,
 	            prev_step,
+	            &step_proof.fold.ccs_out[0],
 	            &r_time,
 	            &r_cycle,
 	            &final_values,
@@ -1048,6 +1191,7 @@ where
 	            &step_proof.mem,
 	            &shout_pre,
 	            &twist_pre,
+	            shared_cpu_bus,
 	            idx,
 	        )?;
         let crate::memory_sidecar::memory::RouteAMemoryVerifyOutput {
@@ -1148,7 +1292,83 @@ where
     })
 }
 
+pub fn fold_shard_verify<MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepInstanceBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    proof: &ShardProof,
+    mixers: CommitMixers<MR, MB>,
+) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
+where
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    fold_shard_verify_impl(true, mode, tr, params, s_me, steps, acc_init, proof, mixers)
+}
+
+#[deprecated(note = "legacy (independent mem/lut commitments) mode; use fold_shard_verify (shared CPU bus) instead")]
+pub fn fold_shard_verify_legacy<MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepInstanceBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    proof: &ShardProof,
+    mixers: CommitMixers<MR, MB>,
+) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
+where
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    fold_shard_verify_impl(false, mode, tr, params, s_me, steps, acc_init, proof, mixers)
+}
+
+pub fn fold_shard_verify_shared_cpu_bus<MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepInstanceBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    proof: &ShardProof,
+    mixers: CommitMixers<MR, MB>,
+) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
+where
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    fold_shard_verify(mode, tr, params, s_me, steps, acc_init, proof, mixers)
+}
+
 pub fn fold_shard_verify_and_finalize<MR, MB, Fin>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepInstanceBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    proof: &ShardProof,
+    mixers: CommitMixers<MR, MB>,
+    finalizer: &mut Fin,
+) -> Result<(), PiCcsError>
+where
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+    Fin: ObligationFinalizer<Cmt, F, K, Error = PiCcsError>,
+{
+    let outputs = fold_shard_verify(mode, tr, params, s_me, steps, acc_init, proof, mixers)?;
+    let report = finalizer.finalize(&outputs.obligations)?;
+    outputs
+        .obligations
+        .require_all_finalized(report.did_finalize_main, report.did_finalize_val)?;
+    Ok(())
+}
+
+pub fn fold_shard_verify_and_finalize_shared_cpu_bus<MR, MB, Fin>(
     mode: FoldingMode,
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,

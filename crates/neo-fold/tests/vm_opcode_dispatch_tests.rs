@@ -13,6 +13,7 @@
 //! - `vm_invalid_opcode_fails`: Adversarial: claim invalid opcode
 
 #![allow(non_snake_case)]
+#![allow(deprecated)]
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -24,7 +25,7 @@ use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::Mat;
 use neo_fold::shard::CommitMixers;
 use neo_fold::pi_ccs::FoldingMode;
-use neo_fold::shard::{fold_shard_prove, fold_shard_verify};
+use neo_fold::shard::{fold_shard_prove_legacy as fold_shard_prove, fold_shard_verify_legacy as fold_shard_verify};
 use neo_math::{D, F, K};
 use neo_memory::encode::{encode_lut_for_shout, encode_mem_for_twist};
 use neo_memory::plain::{LutTable, PlainLutTrace, PlainMemLayout, PlainMemTrace};

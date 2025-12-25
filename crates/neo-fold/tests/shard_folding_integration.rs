@@ -24,6 +24,7 @@
 //! 4. Route A Twist-only happy path + adversarial cases (test_twist_only_route_a_*)
 
 #![allow(non_snake_case)]
+#![allow(deprecated)]
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
@@ -38,7 +39,8 @@ use neo_fold::memory_sidecar::claim_plan::RouteATimeClaimPlan;
 use neo_fold::memory_sidecar::memory::{ShoutAddrPreVerifyData, TwistAddrPreVerifyData, verify_route_a_memory_step};
 use neo_fold::shard::CommitMixers;
 use neo_fold::shard::{
-    fold_shard_prove, fold_shard_prove_with_witnesses, fold_shard_verify, MemOrLutProof, ShardFoldOutputs, ShardProof,
+    fold_shard_prove_legacy, fold_shard_prove_with_witnesses_legacy, fold_shard_verify_legacy, MemOrLutProof,
+    ShardFoldOutputs, ShardProof,
 };
 use neo_fold::PiCcsError;
 use neo_math::{D, F, K};
@@ -159,7 +161,7 @@ impl TwistOnlyHarness {
 
     fn prove(&self) -> Result<ShardProof, PiCcsError> {
         let mut tr = Poseidon2Transcript::new(b"twist-only");
-        fold_shard_prove(
+        fold_shard_prove_legacy(
             FoldingMode::PaperExact,
             &mut tr,
             &self.params,
@@ -176,7 +178,7 @@ impl TwistOnlyHarness {
         let mut tr = Poseidon2Transcript::new(b"twist-only");
         let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> =
             self.steps.iter().map(StepInstanceBundle::from).collect();
-        fold_shard_verify(
+        fold_shard_verify_legacy(
             FoldingMode::PaperExact,
             &mut tr,
             &self.params,
@@ -304,7 +306,7 @@ impl TwistRolloverHarness {
 
     fn prove(&self) -> Result<ShardProof, PiCcsError> {
         let mut tr = Poseidon2Transcript::new(b"twist-rollover");
-        fold_shard_prove(
+        fold_shard_prove_legacy(
             FoldingMode::PaperExact,
             &mut tr,
             &self.params,
@@ -321,7 +323,7 @@ impl TwistRolloverHarness {
         let mut tr = Poseidon2Transcript::new(b"twist-rollover");
         let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> =
             self.steps.iter().map(StepInstanceBundle::from).collect();
-        fold_shard_verify(
+        fold_shard_verify_legacy(
             FoldingMode::PaperExact,
             &mut tr,
             &self.params,
@@ -452,7 +454,7 @@ fn test_twist_only_route_a_wrong_rv_witness_fails() {
     *rv_mat = neo_memory::encode::ajtai_encode_vector(&ctx.params, &decoded);
 
     let mut tr_prove = Poseidon2Transcript::new(b"twist-only-wrong-rv-witness");
-    let result = fold_shard_prove(
+    let result = fold_shard_prove_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &ctx.params,
@@ -484,7 +486,7 @@ fn test_twist_only_route_a_wrong_inc_witness_fails() {
     *inc_mat = neo_memory::encode::ajtai_encode_vector(&ctx.params, &decoded);
 
     let mut tr_prove = Poseidon2Transcript::new(b"twist-only-wrong-inc-witness");
-    let result = fold_shard_prove(
+    let result = fold_shard_prove_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &ctx.params,
@@ -541,6 +543,7 @@ fn test_twist_route_a_time_claimed_sum_must_match_addr_pre_final() {
         &ctx.params,
         &step,
         None,
+        &step_proof.fold.ccs_out[0],
         r_time,
         &r_cycle,
         &dummy_final_values,
@@ -549,6 +552,7 @@ fn test_twist_route_a_time_claimed_sum_must_match_addr_pre_final() {
         &step_proof.mem,
         &shout_pre,
         &twist_pre,
+        false,
         0,
     ) {
         Ok(_) => panic!("mismatched twist claimed sums must fail"),
@@ -641,7 +645,7 @@ fn test_twist_only_route_a_exports_val_lane_obligations() {
     let ctx = TwistOnlyHarness::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"twist-only-obligations");
-    let (proof, outputs_prove, wits) = fold_shard_prove_with_witnesses(
+    let (proof, outputs_prove, wits) = fold_shard_prove_with_witnesses_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &ctx.params,
@@ -656,7 +660,7 @@ fn test_twist_only_route_a_exports_val_lane_obligations() {
 
     let mut tr_verify = Poseidon2Transcript::new(b"twist-only-obligations");
     let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = ctx.steps.iter().map(StepInstanceBundle::from).collect();
-    let outputs_verify = fold_shard_verify(
+    let outputs_verify = fold_shard_verify_legacy(
         FoldingMode::PaperExact,
         &mut tr_verify,
         &ctx.params,
@@ -963,7 +967,7 @@ fn test_shard_cpu_only_folding() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"shard-cpu-only");
 
-    let proof = fold_shard_prove(
+    let proof = fold_shard_prove_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -981,7 +985,7 @@ fn test_shard_cpu_only_folding() {
     let _shard_mcss_public: Vec<McsInstance<Cmt, F>> = steps.iter().map(|s| s.mcs.0.clone()).collect();
     let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
 
-    let _outputs = fold_shard_verify(
+    let _outputs = fold_shard_verify_legacy(
         FoldingMode::PaperExact,
         &mut tr_verify,
         &params,
@@ -1203,7 +1207,7 @@ fn test_full_cpu_memory_integration() {
     let mut tr_prove = Poseidon2Transcript::new(b"shard-full-integration");
 
     // This may fail with norm bound error if too many ME claims
-    let result = fold_shard_prove(
+    let result = fold_shard_prove_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -1221,7 +1225,7 @@ fn test_full_cpu_memory_integration() {
             let mut tr_verify = Poseidon2Transcript::new(b"shard-full-integration");
             let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
 
-            let outputs = fold_shard_verify(
+            let outputs = fold_shard_verify_legacy(
                 FoldingMode::PaperExact,
                 &mut tr_verify,
                 &params,
