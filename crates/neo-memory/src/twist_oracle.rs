@@ -14,7 +14,7 @@
 //! - `TwistValEvalOracleSparseTime` / `TwistTotalIncOracleSparseTime`: Twist val reconstruction (time-domain)
 
 use crate::bit_ops::eq_bit_affine;
-use crate::mle::lt_eval;
+use crate::mle::{eq_single, lt_eval};
 use crate::sparse_time::SparseIdxVec;
 #[cfg(feature = "debug-logs")]
 use neo_math::KExtensions;
@@ -157,11 +157,6 @@ impl RoundOracle for ProductRoundOracle {
 // ============================================================================
 // Sparse-in-time helpers and oracles (Track A)
 // ============================================================================
-
-#[inline]
-fn eq_single(a: K, b: K) -> K {
-    (K::ONE - a) * (K::ONE - b) + a * b
-}
 
 #[inline]
 fn chi_at_bool_index(r: &[K], idx: usize) -> K {

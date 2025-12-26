@@ -4,8 +4,14 @@
 //! R1CS-based CPU, allowing integration with Neo's shared CPU bus architecture.
 
 use crate::builder::CpuArithmetization;
+use crate::cpu::constraints::{
+    extend_ccs_with_shared_cpu_bus_constraints, ShoutBusConfig, ShoutCpuBinding, TwistBusConfig,
+    TwistCpuBinding,
+};
+use crate::mem_init::MemInit;
 use crate::plain::LutTable;
 use crate::plain::PlainMemLayout;
+use crate::witness::{LutInstance, MemInstance};
 use neo_ajtai::{decomp_b, DecompStyle};
 use neo_ccs::matrix::Mat;
 use neo_ccs::relations::{CcsStructure, McsInstance, McsWitness};
@@ -24,6 +30,21 @@ pub struct SharedCpuBusConfig<F> {
     pub mem_layouts: HashMap<u32, PlainMemLayout>,
     /// Sparse initial memory values: (twist_id, addr) -> value.
     pub initial_mem: HashMap<(u32, u64), F>,
+    /// Public witness column index that must be fixed to 1 for all steps.
+    ///
+    /// Required because selector-binding constraints are represented as unconditional equalities:
+    /// `1 * (cpu_flag - bus_flag) = 0`.
+    ///
+    /// Must satisfy: `const_one_col < m_in`.
+    pub const_one_col: usize,
+    /// Per-table CPU→bus bindings (shout_id -> binding).
+    ///
+    /// The bus tail contains one Shout instance per `table_id` known to this CPU (from `tables` in `R1csCpu::new`).
+    pub shout_cpu: HashMap<u32, ShoutCpuBinding>,
+    /// Per-memory CPU→bus bindings (twist_id -> binding).
+    ///
+    /// The bus tail contains one Twist instance per `mem_id` in `mem_layouts`.
+    pub twist_cpu: HashMap<u32, TwistCpuBinding>,
 }
 
 /// Adapter that implements CpuArithmetization for a generic R1CS-based CPU.
@@ -55,7 +76,7 @@ where
     /// Optional shared CPU-bus configuration.
     /// When present, we overwrite a reserved tail segment of `z_vec` with Twist/Shout access rows
     /// (in deterministic id order) before Ajtai decomposition + commitment.
-    pub shared_cpu_bus: Option<SharedCpuBusConfig<F>>,
+    shared_cpu_bus: Option<SharedCpuBusConfig<F>>,
 
     /// Function to map a step trace to the full witness z = (x, w).
     /// The witness MUST satisfy the CCS relation.
@@ -66,7 +87,7 @@ where
 
 impl<F, Cmt, L> R1csCpu<F, Cmt, L>
 where
-    F: PrimeField + PrimeField64,
+    F: PrimeField + PrimeField64 + Copy,
     L: SModuleHomomorphism<F, Cmt>,
 {
     pub fn new(
@@ -105,9 +126,216 @@ where
         }
     }
 
-    pub fn with_shared_cpu_bus(mut self, cfg: SharedCpuBusConfig<F>) -> Self {
+    fn shared_bus_schema(
+        &self,
+        bus: &SharedCpuBusConfig<F>,
+    ) -> Result<(Vec<u32>, Vec<u32>, usize), String> {
+        let mut table_ids: Vec<u32> = self.shout_cache.keys().copied().collect();
+        table_ids.sort_unstable();
+        let mut mem_ids: Vec<u32> = bus.mem_layouts.keys().copied().collect();
+        mem_ids.sort_unstable();
+
+        let mut bus_cols_total = 0usize;
+        for table_id in &table_ids {
+            let (d, n_side) = self
+                .shout_meta
+                .get(table_id)
+                .copied()
+                .ok_or_else(|| format!("shared_cpu_bus: missing shout_meta for table_id={table_id}"))?;
+            if n_side == 0 || !n_side.is_power_of_two() {
+                return Err(format!(
+                    "shared_cpu_bus: shout n_side must be power-of-two, got {n_side}"
+                ));
+            }
+            let ell = n_side.trailing_zeros() as usize;
+            let ell_addr = d * ell;
+            let cfg = ShoutBusConfig::new(ell_addr);
+            bus_cols_total = bus_cols_total
+                .checked_add(cfg.total_cols())
+                .ok_or_else(|| "shared_cpu_bus: bus_cols overflow (shout)".to_string())?;
+        }
+
+        for mem_id in &mem_ids {
+            let layout = bus
+                .mem_layouts
+                .get(mem_id)
+                .ok_or_else(|| format!("shared_cpu_bus: missing mem_layout for mem_id={mem_id}"))?;
+            if layout.n_side == 0 || !layout.n_side.is_power_of_two() {
+                return Err(format!(
+                    "shared_cpu_bus: twist n_side must be power-of-two, got {}",
+                    layout.n_side
+                ));
+            }
+            let ell = layout.n_side.trailing_zeros() as usize;
+            let ell_addr = layout.d * ell;
+            let cfg = TwistBusConfig::new(ell_addr);
+            bus_cols_total = bus_cols_total
+                .checked_add(cfg.total_cols())
+                .ok_or_else(|| "shared_cpu_bus: bus_cols overflow (twist)".to_string())?;
+        }
+
+        Ok((table_ids, mem_ids, bus_cols_total))
+    }
+
+    pub fn with_shared_cpu_bus(mut self, cfg: SharedCpuBusConfig<F>) -> Result<Self, String> {
+        if cfg.const_one_col >= self.m_in {
+            return Err(format!(
+                "shared_cpu_bus: const_one_col={} must be < m_in={}",
+                cfg.const_one_col, self.m_in
+            ));
+        }
+
+        let (table_ids, mem_ids, bus_cols_total) = self.shared_bus_schema(&cfg)?;
+        if bus_cols_total > self.ccs.m {
+            return Err(format!(
+                "shared_cpu_bus: bus region too large: bus_cols({bus_cols_total}) > ccs.m({})",
+                self.ccs.m
+            ));
+        }
+        let bus_base = self.ccs.m - bus_cols_total;
+        if bus_base < self.m_in {
+            return Err(format!(
+                "shared_cpu_bus: bus_base({bus_base}) overlaps public input region m_in({})",
+                self.m_in
+            ));
+        }
+
+        // Validate initial memory keys.
+        for ((mem_id, addr), _val) in cfg.initial_mem.iter() {
+            let layout = cfg.mem_layouts.get(mem_id).ok_or_else(|| {
+                format!("shared_cpu_bus: initial_mem refers to unknown mem_id={mem_id}")
+            })?;
+            if (*addr as usize) >= layout.k {
+                return Err(format!(
+                    "shared_cpu_bus: initial_mem out of range for mem_id={mem_id}: addr={addr} >= k={}",
+                    layout.k
+                ));
+            }
+        }
+
+        fn validate_cpu_binding_cols(
+            kind: &str,
+            id: u32,
+            bus_base: usize,
+            cols: &[(&str, usize)],
+        ) -> Result<(), String> {
+            for (label, col) in cols {
+                if *col >= bus_base {
+                    return Err(format!(
+                        "shared_cpu_bus: {kind} binding for id={id} uses {label}={col}, but bus_base={bus_base} (CPU bindings must be < bus_base to avoid overlapping the bus tail)"
+                    ));
+                }
+            }
+            Ok(())
+        }
+
+        // Build per-instance binding vectors in canonical order (id-sorted).
+        let mut shout_cpu: Vec<ShoutCpuBinding> = Vec::with_capacity(table_ids.len());
+        for table_id in &table_ids {
+            let b = cfg.shout_cpu.get(table_id).ok_or_else(|| {
+                format!("shared_cpu_bus: missing shout_cpu binding for table_id={table_id}")
+            })?;
+            validate_cpu_binding_cols(
+                "shout_cpu",
+                *table_id,
+                bus_base,
+                &[("has_lookup", b.has_lookup), ("addr", b.addr), ("val", b.val)],
+            )?;
+            shout_cpu.push(b.clone());
+        }
+        let mut twist_cpu: Vec<TwistCpuBinding> = Vec::with_capacity(mem_ids.len());
+        for mem_id in &mem_ids {
+            let b = cfg.twist_cpu.get(mem_id).ok_or_else(|| {
+                format!("shared_cpu_bus: missing twist_cpu binding for mem_id={mem_id}")
+            })?;
+            let mut cols = vec![
+                ("has_read", b.has_read),
+                ("has_write", b.has_write),
+                ("read_addr", b.read_addr),
+                ("write_addr", b.write_addr),
+                ("rv", b.rv),
+                ("wv", b.wv),
+            ];
+            if let Some(inc) = b.inc {
+                cols.push(("inc", inc));
+            }
+            validate_cpu_binding_cols("twist_cpu", *mem_id, bus_base, &cols)?;
+            twist_cpu.push(b.clone());
+        }
+
+        // Catch typos: refuse extra bindings for unknown ids.
+        for table_id in cfg.shout_cpu.keys() {
+            if !table_ids.contains(table_id) {
+                return Err(format!(
+                    "shared_cpu_bus: shout_cpu has binding for unknown table_id={table_id}"
+                ));
+            }
+        }
+        for mem_id in cfg.twist_cpu.keys() {
+            if !mem_ids.contains(mem_id) {
+                return Err(format!(
+                    "shared_cpu_bus: twist_cpu has binding for unknown mem_id={mem_id}"
+                ));
+            }
+        }
+
+        // Build metadata-only instances for constraint injection (steps=1, comms empty).
+        let mut lut_insts: Vec<LutInstance<Cmt, F>> = Vec::with_capacity(table_ids.len());
+        for table_id in &table_ids {
+            let (d, n_side) = self
+                .shout_meta
+                .get(table_id)
+                .copied()
+                .ok_or_else(|| format!("shared_cpu_bus: missing shout_meta for table_id={table_id}"))?;
+            let ell = n_side.trailing_zeros() as usize;
+            let k = self
+                .shout_cache
+                .get(table_id)
+                .map(|m| m.len())
+                .unwrap_or(0);
+            lut_insts.push(LutInstance {
+                comms: Vec::new(),
+                k,
+                d,
+                n_side,
+                steps: 1,
+                ell,
+                table: Vec::new(),
+                _phantom: PhantomData,
+            });
+        }
+
+        let mut mem_insts: Vec<MemInstance<Cmt, F>> = Vec::with_capacity(mem_ids.len());
+        for mem_id in &mem_ids {
+            let layout = cfg
+                .mem_layouts
+                .get(mem_id)
+                .ok_or_else(|| format!("shared_cpu_bus: missing mem_layout for mem_id={mem_id}"))?;
+            let ell = layout.n_side.trailing_zeros() as usize;
+            mem_insts.push(MemInstance {
+                comms: Vec::new(),
+                k: layout.k,
+                d: layout.d,
+                n_side: layout.n_side,
+                steps: 1,
+                ell,
+                init: MemInit::Zero,
+                _phantom: PhantomData,
+            });
+        }
+
+        self.ccs = extend_ccs_with_shared_cpu_bus_constraints(
+            &self.ccs,
+            cfg.const_one_col,
+            &shout_cpu,
+            &twist_cpu,
+            &lut_insts,
+            &mem_insts,
+        )
+        .map_err(|e| format!("shared_cpu_bus: failed to inject constraints: {e}"))?;
+
         self.shared_cpu_bus = Some(cfg);
-        self
+        Ok(self)
     }
 }
 
@@ -143,10 +371,14 @@ where
         // Shared CPU-bus bookkeeping (optional).
         let (table_ids, mem_ids, mut mem_state, bus_base) = if let Some(bus) = &self.shared_cpu_bus
         {
-            let mut table_ids: Vec<u32> = self.shout_cache.keys().copied().collect();
-            table_ids.sort_unstable();
-            let mut mem_ids: Vec<u32> = bus.mem_layouts.keys().copied().collect();
-            mem_ids.sort_unstable();
+            if bus.const_one_col >= self.m_in {
+                return Err(format!(
+                    "shared_cpu_bus: const_one_col={} must be < m_in={}",
+                    bus.const_one_col, self.m_in
+                ));
+            }
+
+            let (table_ids, mem_ids, bus_cols_total) = self.shared_bus_schema(bus)?;
 
             // Seed per-memory sparse state with initial values.
             let mut mem_state: HashMap<u32, HashMap<u64, Goldilocks>> = HashMap::new();
@@ -168,41 +400,6 @@ where
                     }
                 }
                 mem_state.insert(mem_id, st);
-            }
-
-            // Compute total bus column count in canonical order: Shout then Twist.
-            let mut bus_cols_total = 0usize;
-            for table_id in &table_ids {
-                let (d, n_side) = self
-                    .shout_meta
-                    .get(table_id)
-                    .copied()
-                    .ok_or_else(|| format!("missing shout_meta for table_id={table_id}"))?;
-                if n_side == 0 || !n_side.is_power_of_two() {
-                    return Err(format!(
-                        "shared_cpu_bus: shout n_side must be power-of-two, got {n_side}"
-                    ));
-                }
-                let ell = n_side.trailing_zeros() as usize;
-                bus_cols_total = bus_cols_total
-                    .checked_add(d * ell + 2)
-                    .ok_or_else(|| "shared_cpu_bus: bus_cols overflow".to_string())?;
-            }
-            for mem_id in &mem_ids {
-                let layout = bus
-                    .mem_layouts
-                    .get(mem_id)
-                    .ok_or_else(|| format!("missing mem_layout for mem_id={mem_id}"))?;
-                if layout.n_side == 0 || !layout.n_side.is_power_of_two() {
-                    return Err(format!(
-                        "shared_cpu_bus: twist n_side must be power-of-two, got {}",
-                        layout.n_side
-                    ));
-                }
-                let ell = layout.n_side.trailing_zeros() as usize;
-                bus_cols_total = bus_cols_total
-                    .checked_add(2 * layout.d * ell + 5)
-                    .ok_or_else(|| "shared_cpu_bus: bus_cols overflow".to_string())?;
             }
 
             if bus_cols_total > self.ccs.m {
@@ -275,6 +472,17 @@ where
             }
             if z_vec.len() != self.ccs.m {
                 z_vec.resize(self.ccs.m, Goldilocks::ZERO);
+            }
+
+            // Enforce the constant-one public input (required by shared-bus constraints and guardrails).
+            if let Some(bus) = &self.shared_cpu_bus {
+                if bus.const_one_col >= self.m_in {
+                    return Err(format!(
+                        "shared_cpu_bus: const_one_col={} must be < m_in={}",
+                        bus.const_one_col, self.m_in
+                    ));
+                }
+                z_vec[bus.const_one_col] = Goldilocks::ONE;
             }
 
             // 2.1 Overwrite the shared CPU-bus tail (if enabled).
@@ -511,4 +719,3 @@ where
     }
     type Error = String;
 }
-

@@ -68,7 +68,7 @@ pub fn mle_eval<F: Field, Kf: Field + From<F>>(v: &[F], r: &[Kf]) -> Kf {
 }
 
 #[inline]
-fn eq_single<Kf: Field>(a: Kf, b: Kf) -> Kf {
+pub(crate) fn eq_single<Kf: Field>(a: Kf, b: Kf) -> Kf {
     (Kf::ONE - a) * (Kf::ONE - b) + a * b
 }
 
