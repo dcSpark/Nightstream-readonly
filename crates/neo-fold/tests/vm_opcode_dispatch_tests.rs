@@ -25,7 +25,7 @@ use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::Mat;
 use neo_fold::shard::CommitMixers;
 use neo_fold::pi_ccs::FoldingMode;
-use neo_fold::shard::{fold_shard_prove_legacy as fold_shard_prove, fold_shard_verify_legacy as fold_shard_verify};
+use neo_fold::shard::{fold_shard_prove, fold_shard_verify};
 use neo_math::{D, F, K};
 use neo_memory::encode::{encode_lut_for_shout, encode_mem_for_twist};
 use neo_memory::plain::{LutTable, PlainLutTrace, PlainMemLayout, PlainMemTrace};
@@ -91,24 +91,141 @@ fn decompose_z_to_Z(params: &NeoParams, z: &[F]) -> Mat<F> {
     Mat::from_row_major(d, m, row_major)
 }
 
-fn create_mcs(
+fn write_bits_le(out: &mut [F], mut x: u64, ell: usize) {
+    for i in 0..ell {
+        out[i] = if (x & 1) == 1 { F::ONE } else { F::ZERO };
+        x >>= 1;
+    }
+}
+
+fn bus_cols_shout(inst: &neo_memory::witness::LutInstance<Cmt, F>) -> usize {
+    inst.d * inst.ell + 2
+}
+
+fn bus_cols_twist(inst: &neo_memory::witness::MemInstance<Cmt, F>) -> usize {
+    2 * inst.d * inst.ell + 5
+}
+
+fn fill_shout_bus(
+    z: &mut [F],
+    bus_base: usize,
+    col_id: &mut usize,
+    inst: &neo_memory::witness::LutInstance<Cmt, F>,
+    trace: &PlainLutTrace<F>,
+) {
+    let ell_addr = inst.d * inst.ell;
+    let mut bits = vec![F::ZERO; ell_addr];
+    let addr = trace.addr[0];
+    let mut tmp = addr;
+    for dim in 0..inst.d {
+        let comp = (tmp % (inst.n_side as u64)) as u64;
+        tmp /= inst.n_side as u64;
+        let offset = dim * inst.ell;
+        write_bits_le(&mut bits[offset..offset + inst.ell], comp, inst.ell);
+    }
+    for bit in bits {
+        z[bus_base + *col_id] = bit;
+        *col_id += 1;
+    }
+    z[bus_base + *col_id] = trace.has_lookup[0];
+    *col_id += 1;
+    z[bus_base + *col_id] = trace.val[0];
+    *col_id += 1;
+}
+
+fn fill_twist_bus(
+    z: &mut [F],
+    bus_base: usize,
+    col_id: &mut usize,
+    inst: &neo_memory::witness::MemInstance<Cmt, F>,
+    trace: &PlainMemTrace<F>,
+) {
+    let ell_addr = inst.d * inst.ell;
+    let mut ra_bits = vec![F::ZERO; ell_addr];
+    let mut wa_bits = vec![F::ZERO; ell_addr];
+
+    let ra = trace.read_addr[0];
+    let wa = trace.write_addr[0];
+
+    let mut tmp = ra;
+    for dim in 0..inst.d {
+        let comp = (tmp % (inst.n_side as u64)) as u64;
+        tmp /= inst.n_side as u64;
+        let offset = dim * inst.ell;
+        write_bits_le(&mut ra_bits[offset..offset + inst.ell], comp, inst.ell);
+    }
+    let mut tmp = wa;
+    for dim in 0..inst.d {
+        let comp = (tmp % (inst.n_side as u64)) as u64;
+        tmp /= inst.n_side as u64;
+        let offset = dim * inst.ell;
+        write_bits_le(&mut wa_bits[offset..offset + inst.ell], comp, inst.ell);
+    }
+
+    for bit in ra_bits {
+        z[bus_base + *col_id] = bit;
+        *col_id += 1;
+    }
+    for bit in wa_bits {
+        z[bus_base + *col_id] = bit;
+        *col_id += 1;
+    }
+
+    z[bus_base + *col_id] = trace.has_read[0];
+    *col_id += 1;
+    z[bus_base + *col_id] = trace.has_write[0];
+    *col_id += 1;
+    z[bus_base + *col_id] = trace.write_val[0];
+    *col_id += 1;
+    z[bus_base + *col_id] = trace.read_val[0];
+    *col_id += 1;
+    z[bus_base + *col_id] = trace.inc_at_write_addr[0];
+    *col_id += 1;
+}
+
+fn create_mcs_with_bus(
     params: &NeoParams,
     ccs: &CcsStructure<F>,
     l: &AjtaiSModule,
     tag: u64,
+    lut_insts: &[(&neo_memory::witness::LutInstance<Cmt, F>, &PlainLutTrace<F>)],
+    mem_insts: &[(&neo_memory::witness::MemInstance<Cmt, F>, &PlainMemTrace<F>)],
 ) -> (McsInstance<Cmt, F>, McsWitness<F>) {
-    let m = ccs.m;
-    let mut z: Vec<F> = vec![F::ZERO; m];
+    let m_in = 0usize;
+    let mut z: Vec<F> = vec![F::ZERO; ccs.m];
     if !z.is_empty() {
         z[0] = F::from_u64(tag);
+    }
+
+    let bus_cols_total: usize =
+        lut_insts.iter().map(|(inst, _)| bus_cols_shout(inst)).sum::<usize>()
+            + mem_insts.iter().map(|(inst, _)| bus_cols_twist(inst)).sum::<usize>();
+    if bus_cols_total > 0 {
+        assert!(
+            bus_cols_total <= z.len(),
+            "bus region too large: bus_cols_total({bus_cols_total}) > m({})",
+            z.len()
+        );
+        let bus_base = z.len() - bus_cols_total;
+        let mut col_id = 0usize;
+        for (inst, trace) in lut_insts {
+            fill_shout_bus(&mut z, bus_base, &mut col_id, inst, trace);
+        }
+        for (inst, trace) in mem_insts {
+            fill_twist_bus(&mut z, bus_base, &mut col_id, inst, trace);
+        }
+        debug_assert_eq!(col_id, bus_cols_total, "bus col count mismatch");
     }
 
     let Z = decompose_z_to_Z(params, &z);
     let c = l.commit(&Z);
 
+    let x = z[..m_in].to_vec();
+    let w = z[m_in..].to_vec();
+
     (
-        McsInstance { c, x: vec![], m_in: 0 },
-        McsWitness { w: z, Z },
+        McsInstance { c, x, m_in },
+        McsWitness { w, Z },
     )
 }
 
@@ -167,7 +284,7 @@ fn empty_mem_trace() -> PlainMemTrace<F> {
 /// This test validates instruction fetch via lookup tables without complex memory operations.
 #[test]
 fn vm_simple_add_program() {
-    let n = 4usize;
+    let n = 16usize;
     let ccs = create_identity_ccs(n);
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
     params.k_rho = 16;
@@ -184,6 +301,7 @@ fn vm_simple_add_program() {
     // Simulate 4 CPU cycles - focus on bytecode fetch via lookups
     let mut register: u64 = 0;
 
+    let m_in = 0usize;
     for pc in 0u64..4 {
         let opcode = bytecode_table.content[pc as usize].as_canonical_u64();
         let imm = imm_table.content[pc as usize].as_canonical_u64();
@@ -211,37 +329,47 @@ fn vm_simple_add_program() {
             _ => {}
         }
 
-        let (mcs, mcs_wit) = create_mcs(&params, &ccs, &l, pc);
-
         // Minimal memory (no actual memory operations in this simplified test)
         let mem_layout = PlainMemLayout { k: 2, d: 1, n_side: 2 };
         let mem_init = MemInit::Zero;
-        let (mem_inst, mem_wit) = encode_mem_for_twist(
+        let mem_trace = empty_mem_trace();
+        let (mut mem_inst, mut mem_wit) = encode_mem_for_twist(
             &params,
             &mem_layout,
             &mem_init,
-            &empty_mem_trace(),
+            &mem_trace,
             &commit_fn,
             Some(ccs.m),
-            mcs.m_in,
+            m_in,
         );
+        mem_inst.comms.clear();
+        mem_wit.mats.clear();
 
-        let (opcode_inst, opcode_wit) = encode_lut_for_shout(
+        let (mut opcode_inst, mut opcode_wit) = encode_lut_for_shout(
             &params,
             &bytecode_table,
             &opcode_trace,
             &commit_fn,
             Some(ccs.m),
-            mcs.m_in,
+            m_in,
         );
-        let (imm_inst, imm_wit) = encode_lut_for_shout(
+        opcode_inst.comms.clear();
+        opcode_wit.mats.clear();
+
+        let (mut imm_inst, mut imm_wit) = encode_lut_for_shout(
             &params,
             &imm_table,
             &imm_trace,
             &commit_fn,
             Some(ccs.m),
-            mcs.m_in,
+            m_in,
         );
+        imm_inst.comms.clear();
+        imm_wit.mats.clear();
+
+        let lut_bus = [(&opcode_inst, &opcode_trace), (&imm_inst, &imm_trace)];
+        let mem_bus = [(&mem_inst, &mem_trace)];
+        let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, pc, &lut_bus, &mem_bus);
 
         steps.push(StepWitnessBundle {
             mcs: (mcs, mcs_wit),
@@ -293,7 +421,7 @@ fn vm_simple_add_program() {
 /// Program: R0 = 10, R1 = 20, R2 = R0 + R1
 #[test]
 fn vm_register_file_operations() {
-    let n = 4usize;
+    let n = 16usize;
     let ccs = create_identity_ccs(n);
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
     params.k_rho = 16;
@@ -306,6 +434,7 @@ fn vm_register_file_operations() {
     let reg_layout = PlainMemLayout { k: 4, d: 1, n_side: 4 };
 
     let mut steps: Vec<StepWitnessBundle<Cmt, F, K>> = Vec::new();
+    let m_in = 0usize;
 
     // Step 0: Write 10 to R0
     {
@@ -321,16 +450,19 @@ fn vm_register_file_operations() {
         };
         let reg_init = MemInit::Zero;
 
-        let (mcs, mcs_wit) = create_mcs(&params, &ccs, &l, 0);
-        let (reg_inst, reg_wit) = encode_mem_for_twist(
+        let (mut reg_inst, mut reg_wit) = encode_mem_for_twist(
             &params,
             &reg_layout,
             &reg_init,
             &reg_trace,
             &commit_fn,
             Some(ccs.m),
-            mcs.m_in,
+            m_in,
         );
+        reg_inst.comms.clear();
+        reg_wit.mats.clear();
+        let mem_bus = [(&reg_inst, &reg_trace)];
+        let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, 0, &[], &mem_bus);
 
         steps.push(StepWitnessBundle {
             mcs: (mcs, mcs_wit),
@@ -355,16 +487,19 @@ fn vm_register_file_operations() {
         // State after step 0: R0=10
         let reg_init = MemInit::Sparse(vec![(0, F::from_u64(10))]);
 
-        let (mcs, mcs_wit) = create_mcs(&params, &ccs, &l, 1);
-        let (reg_inst, reg_wit) = encode_mem_for_twist(
+        let (mut reg_inst, mut reg_wit) = encode_mem_for_twist(
             &params,
             &reg_layout,
             &reg_init,
             &reg_trace,
             &commit_fn,
             Some(ccs.m),
-            mcs.m_in,
+            m_in,
         );
+        reg_inst.comms.clear();
+        reg_wit.mats.clear();
+        let mem_bus = [(&reg_inst, &reg_trace)];
+        let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, 1, &[], &mem_bus);
 
         steps.push(StepWitnessBundle {
             mcs: (mcs, mcs_wit),
@@ -390,16 +525,19 @@ fn vm_register_file_operations() {
         // State after step 1: R0=10, R1=20
         let reg_init = MemInit::Sparse(vec![(0, F::from_u64(10)), (1, F::from_u64(20))]);
 
-        let (mcs, mcs_wit) = create_mcs(&params, &ccs, &l, 2);
-        let (reg_inst, reg_wit) = encode_mem_for_twist(
+        let (mut reg_inst, mut reg_wit) = encode_mem_for_twist(
             &params,
             &reg_layout,
             &reg_init,
             &reg_trace,
             &commit_fn,
             Some(ccs.m),
-            mcs.m_in,
+            m_in,
         );
+        reg_inst.comms.clear();
+        reg_wit.mats.clear();
+        let mem_bus = [(&reg_inst, &reg_trace)];
+        let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, 2, &[], &mem_bus);
 
         steps.push(StepWitnessBundle {
             mcs: (mcs, mcs_wit),
@@ -449,7 +587,7 @@ fn vm_register_file_operations() {
 /// and data memory (RAM).
 #[test]
 fn vm_combined_bytecode_and_data_memory() {
-    let n = 4usize;
+    let n = 16usize;
     let ccs = create_identity_ccs(n);
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
     params.k_rho = 16;
@@ -494,25 +632,33 @@ fn vm_combined_bytecode_and_data_memory() {
     };
     let ram_init = MemInit::Zero;
 
-    let (mcs, mcs_wit) = create_mcs(&params, &ccs, &l, 0);
-
-    let (bytecode_inst, bytecode_wit) = encode_lut_for_shout(
+    let m_in = 0usize;
+    let (mut bytecode_inst, mut bytecode_wit) = encode_lut_for_shout(
         &params,
         &bytecode,
         &bytecode_trace,
         &commit_fn,
         Some(ccs.m),
-        mcs.m_in,
+        m_in,
     );
-    let (ram_inst, ram_wit) = encode_mem_for_twist(
+    bytecode_inst.comms.clear();
+    bytecode_wit.mats.clear();
+
+    let (mut ram_inst, mut ram_wit) = encode_mem_for_twist(
         &params,
         &ram_layout,
         &ram_init,
         &ram_trace,
         &commit_fn,
         Some(ccs.m),
-        mcs.m_in,
+        m_in,
     );
+    ram_inst.comms.clear();
+    ram_wit.mats.clear();
+
+    let lut_bus = [(&bytecode_inst, &bytecode_trace)];
+    let mem_bus = [(&ram_inst, &ram_trace)];
+    let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, 0, &lut_bus, &mem_bus);
 
     let step_bundle = StepWitnessBundle {
         mcs: (mcs, mcs_wit),
@@ -558,7 +704,7 @@ fn vm_combined_bytecode_and_data_memory() {
 /// Adversarial: Claim wrong opcode from bytecode table.
 #[test]
 fn vm_invalid_opcode_claim_fails() {
-    let n = 4usize;
+    let n = 16usize;
     let ccs = create_identity_ccs(n);
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
     params.k_rho = 16;
@@ -576,21 +722,24 @@ fn vm_invalid_opcode_claim_fails() {
         val: vec![F::from_u64(OP_HALT)], // WRONG: should be LOAD_IMM
     };
 
-    let (mcs, _mcs_wit) = create_mcs(&params, &ccs, &l, 0);
+    let m_in = 0usize;
 
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        encode_lut_for_shout(&params, &bytecode, &bad_trace, &commit_fn, Some(ccs.m), mcs.m_in)
+        encode_lut_for_shout(&params, &bytecode, &bad_trace, &commit_fn, Some(ccs.m), m_in)
     }));
-    let (bytecode_inst, bytecode_wit) = match result {
+    let (mut bytecode_inst, mut bytecode_wit) = match result {
         Ok(x) => x,
         Err(_) => {
             println!("✓ vm_invalid_opcode_claim_fails: Encoding rejected invalid witness");
             return;
         }
     };
+    bytecode_inst.comms.clear();
+    bytecode_wit.mats.clear();
 
     // If encoding doesn't panic (e.g. release builds), proving or verification must fail.
-    let (mcs, mcs_wit) = create_mcs(&params, &ccs, &l, 0);
+    let lut_bus = [(&bytecode_inst, &bad_trace)];
+    let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, 0, &lut_bus, &[]);
 
     let step_bundle = StepWitnessBundle {
         mcs: (mcs, mcs_wit),
@@ -640,7 +789,7 @@ fn vm_invalid_opcode_claim_fails() {
 /// Test: Multiple instruction types in sequence with proper state transitions.
 #[test]
 fn vm_multi_instruction_sequence() {
-    let n = 4usize;
+    let n = 16usize;
     let ccs = create_identity_ccs(n);
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
     params.k_rho = 16;
@@ -665,6 +814,7 @@ fn vm_multi_instruction_sequence() {
 
     let mut steps: Vec<StepWitnessBundle<Cmt, F, K>> = Vec::new();
 
+    let m_in = 0usize;
     for pc in 0u64..4 {
         let bytecode_trace = PlainLutTrace {
             has_lookup: vec![F::ONE],
@@ -672,28 +822,35 @@ fn vm_multi_instruction_sequence() {
             val: vec![bytecode.content[pc as usize]],
         };
 
-        let (mcs, mcs_wit) = create_mcs(&params, &ccs, &l, pc);
-
         let mem_layout = PlainMemLayout { k: 2, d: 1, n_side: 2 };
         let mem_init = MemInit::Zero;
 
-        let (mem_inst, mem_wit) = encode_mem_for_twist(
+        let mem_trace = empty_mem_trace();
+        let (mut mem_inst, mut mem_wit) = encode_mem_for_twist(
             &params,
             &mem_layout,
             &mem_init,
-            &empty_mem_trace(),
+            &mem_trace,
             &commit_fn,
             Some(ccs.m),
-            mcs.m_in,
+            m_in,
         );
-        let (bytecode_inst, bytecode_wit) = encode_lut_for_shout(
+        mem_inst.comms.clear();
+        mem_wit.mats.clear();
+        let (mut bytecode_inst, mut bytecode_wit) = encode_lut_for_shout(
             &params,
             &bytecode,
             &bytecode_trace,
             &commit_fn,
             Some(ccs.m),
-            mcs.m_in,
+            m_in,
         );
+        bytecode_inst.comms.clear();
+        bytecode_wit.mats.clear();
+
+        let lut_bus = [(&bytecode_inst, &bytecode_trace)];
+        let mem_bus = [(&mem_inst, &mem_trace)];
+        let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, pc, &lut_bus, &mem_bus);
 
         steps.push(StepWitnessBundle {
             mcs: (mcs, mcs_wit),

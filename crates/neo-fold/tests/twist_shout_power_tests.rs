@@ -13,7 +13,9 @@ use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::shard::ShardObligations;
 use neo_fold::PiCcsError;
 use neo_math::{F, K};
+use neo_memory::MemInit;
 use neo_transcript::Transcript;
+use p3_field::PrimeCharacteristicRing;
 
 struct RequireValLane;
 
@@ -62,7 +64,7 @@ fn mini_zkvm_lookup_table_is_semantically_required() {
     };
 
     let mut tr_bad = neo_transcript::Poseidon2Transcript::new(b"twist-shout/fixture");
-    let res = neo_fold::shard::fold_shard_prove_legacy(
+    let res = neo_fold::shard::fold_shard_prove(
         FoldingMode::Optimized,
         &mut tr_bad,
         &fx_bad.params,
@@ -115,18 +117,17 @@ fn redteam_drop_val_fold_must_fail() {
 }
 
 #[test]
-fn redteam_swap_twist_commitments_in_public_input_must_fail() {
+fn redteam_tamper_twist_init_in_public_input_must_fail() {
     let fx = build_twist_shout_2step_fixture(4);
     let proof = prove(FoldingMode::Optimized, &fx);
     let _ = verify(FoldingMode::Optimized, &fx, &proof).expect("baseline should verify");
 
     let mut fx_bad = fx.clone();
     let inst = &mut fx_bad.steps_instance[0].mem_insts[0];
-    let layout = inst.twist_layout();
-    inst.comms.swap(layout.wa_bits.start, layout.has_write);
+    inst.init = MemInit::Sparse(vec![(0, F::ONE)]);
 
     assert!(
         verify(FoldingMode::Optimized, &fx_bad, &proof).is_err(),
-        "swapping Twist commitments in public input must fail verification"
+        "tampering Twist init in public input must fail verification"
     );
 }

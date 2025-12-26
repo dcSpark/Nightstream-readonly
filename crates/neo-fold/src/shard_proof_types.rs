@@ -82,10 +82,11 @@ pub enum MemOrLutProof {
 
 #[derive(Clone, Debug)]
 pub struct MemSidecarProof<C, FF, KK> {
-    /// Memory/LUT ME claims evaluated at the shared `r_time` point.
-    pub me_claims_time: Vec<MeInstance<C, FF, KK>>,
-    /// Additional ME claims evaluated at `r_val` (Twist val-eval terminal point).
-    pub me_claims_val: Vec<MeInstance<C, FF, KK>>,
+    /// CPU ME claims evaluated at `r_val` (Twist val-eval terminal point).
+    ///
+    /// In shared-CPU-bus-only mode, Twist reads val-lane openings from these claims
+    /// (current step + optional previous step for rollover).
+    pub cpu_me_claims_val: Vec<MeInstance<C, FF, KK>>,
     pub proofs: Vec<MemOrLutProof>,
 }
 

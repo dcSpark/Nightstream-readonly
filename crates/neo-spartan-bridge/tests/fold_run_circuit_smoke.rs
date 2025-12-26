@@ -110,8 +110,7 @@ fn build_trivial_fold_run_and_instance() -> (FoldRunInstance, FoldRunWitness) {
         steps: vec![StepProof {
             fold: step,
             mem: MemSidecarProof {
-                me_claims_time: Vec::new(),
-                me_claims_val: Vec::new(),
+                cpu_me_claims_val: Vec::new(),
                 proofs: Vec::new(),
             },
             batched_time: BatchedTimeProof {

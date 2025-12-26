@@ -39,14 +39,17 @@ use neo_fold::memory_sidecar::claim_plan::RouteATimeClaimPlan;
 use neo_fold::memory_sidecar::memory::{ShoutAddrPreVerifyData, TwistAddrPreVerifyData, verify_route_a_memory_step};
 use neo_fold::shard::CommitMixers;
 use neo_fold::shard::{
-    fold_shard_prove_legacy, fold_shard_prove_with_witnesses_legacy, fold_shard_verify_legacy, MemOrLutProof,
+    fold_shard_prove as fold_shard_prove_legacy,
+    fold_shard_prove_with_witnesses as fold_shard_prove_with_witnesses_legacy,
+    fold_shard_verify as fold_shard_verify_legacy,
+    MemOrLutProof,
     ShardFoldOutputs, ShardProof,
 };
 use neo_fold::PiCcsError;
 use neo_math::{D, F, K};
 use neo_memory::encode::{encode_lut_for_shout, encode_mem_for_twist};
 use neo_memory::plain::{
-    build_plain_lut_traces, build_plain_mem_traces, LutTable, PlainLutTrace, PlainMemLayout, PlainMemTrace,
+    build_plain_lut_traces, build_plain_mem_traces, LutTable, PlainMemLayout, PlainMemTrace,
 };
 use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
 use neo_memory::{shout, twist, MemInit};
@@ -98,7 +101,8 @@ struct TwistOnlyHarness {
 #[cfg(feature = "paper-exact")]
 impl TwistOnlyHarness {
     fn new() -> Self {
-        let n = 4usize;
+        // Shared-bus-only mode reserves a tail "bus" segment in the CPU witness, so m must fit it.
+        let n = 32usize;
         let ccs = create_identity_ccs(n);
         let mut params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
         // Small twist-only test: bump k_rho to clear the norm bound when folding memory ME claims.
@@ -106,21 +110,10 @@ impl TwistOnlyHarness {
         let l = DummyCommit::default();
         let mixers = default_mixers();
 
-        let dims = utils::build_dims_and_policy(&params, &ccs).expect("dims");
-        let ell_n = dims.ell_n;
         let m_in = 2;
 
-        let r: Vec<K> = vec![K::from(F::from_u64(7)); ell_n];
-
-        let mut acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
-        let mut acc_wit_init: Vec<Mat<F>> = Vec::new();
-        for _ in 0..params.k_rho {
-            let (me, Z) = create_seed_me(&params, &ccs, &l, &r, m_in);
-            acc_init.push(me);
-            acc_wit_init.push(Z);
-        }
-
-        let (mcs, mcs_wit) = create_trivial_mcs(&params, &ccs, &l, m_in);
+        let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+        let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
         // Build a 1-step Twist trace: read addr 0 (init[0]), write addr 1 (new value 12).
         let layout = PlainMemLayout { k: 2, d: 1, n_side: 2 };
@@ -137,9 +130,30 @@ impl TwistOnlyHarness {
             write_val: vec![write_val],
             inc_at_write_addr: vec![write_val - init_vals[1]],
         };
-        let commit_fn = |mat: &Mat<F>| l.commit(mat);
-        let (mem_inst, mem_wit) =
-            encode_mem_for_twist(&params, &layout, &mem_init, &mem_trace, &commit_fn, Some(ccs.m), m_in);
+        let mem_inst = neo_memory::witness::MemInstance::<Cmt, F> {
+            comms: Vec::new(),
+            k: layout.k,
+            d: layout.d,
+            n_side: layout.n_side,
+            steps: mem_trace.steps,
+            ell: layout.n_side.trailing_zeros() as usize,
+            init: mem_init.clone(),
+            _phantom: PhantomData,
+        };
+        let mem_wit = neo_memory::witness::MemWitness { mats: Vec::new() };
+
+        // Build a CPU witness whose tail bus segment matches the Twist trace.
+        let bus_cols_total = 2 * mem_inst.d * mem_inst.ell + 5;
+        let bus_base = ccs.m - bus_cols_total;
+        let mut z = vec![F::ZERO; ccs.m];
+        // Provide a public constant-one for potential padding validation (even if CCS is trivial).
+        if m_in > 0 {
+            z[0] = F::ONE;
+        }
+        let mut col_id = 0usize;
+        write_twist_bus_step(&mut z, bus_base, 1, 0, &mem_inst, &mem_trace, &mut col_id);
+        debug_assert_eq!(col_id, bus_cols_total, "bus col count mismatch");
+        let (mcs, mcs_wit) = create_mcs_from_z(&params, &l, m_in, z);
 
         let steps = vec![StepWitnessBundle {
             mcs: (mcs, mcs_wit),
@@ -216,28 +230,18 @@ struct TwistRolloverHarness {
 #[cfg(feature = "paper-exact")]
 impl TwistRolloverHarness {
     fn new(teleport_init_step1: bool) -> Self {
-        let n = 4usize;
+        // Shared-bus-only mode reserves a tail "bus" segment in the CPU witness, so m must fit it.
+        let n = 32usize;
         let ccs = create_identity_ccs(n);
         let mut params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
         params.k_rho = 16;
         let l = DummyCommit::default();
         let mixers = default_mixers();
 
-        let dims = utils::build_dims_and_policy(&params, &ccs).expect("dims");
-        let ell_n = dims.ell_n;
         let m_in = 2;
 
-        let r: Vec<K> = vec![K::from(F::from_u64(7)); ell_n];
-
-        let mut acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
-        let mut acc_wit_init: Vec<Mat<F>> = Vec::new();
-        for _ in 0..params.k_rho {
-            let (me, Z) = create_seed_me(&params, &ccs, &l, &r, m_in);
-            acc_init.push(me);
-            acc_wit_init.push(Z);
-        }
-
-        let (mcs, mcs_wit) = create_trivial_mcs(&params, &ccs, &l, m_in);
+        let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+        let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
         let layout = PlainMemLayout { k: 2, d: 1, n_side: 2 };
         let init0 = F::from_u64(5);
@@ -260,34 +264,53 @@ impl TwistRolloverHarness {
             write_val: vec![F::ZERO],
             inc_at_write_addr: vec![F::ZERO],
         };
-        let commit_fn = |mat: &Mat<F>| l.commit(mat);
-        let (mem_inst0, mem_wit0) = encode_mem_for_twist(
-            &params,
-            &layout,
-            &mem_init_step0,
-            &mem_trace,
-            &commit_fn,
-            Some(ccs.m),
-            m_in,
-        );
-        let (mem_inst1, mem_wit1) = encode_mem_for_twist(
-            &params,
-            &layout,
-            &mem_init_step1,
-            &mem_trace,
-            &commit_fn,
-            Some(ccs.m),
-            m_in,
-        );
+        let mem_inst0 = neo_memory::witness::MemInstance::<Cmt, F> {
+            comms: Vec::new(),
+            k: layout.k,
+            d: layout.d,
+            n_side: layout.n_side,
+            steps: mem_trace.steps,
+            ell: layout.n_side.trailing_zeros() as usize,
+            init: mem_init_step0.clone(),
+            _phantom: PhantomData,
+        };
+        let mem_inst1 = neo_memory::witness::MemInstance::<Cmt, F> {
+            init: mem_init_step1.clone(),
+            ..mem_inst0.clone()
+        };
+        let mem_wit0 = neo_memory::witness::MemWitness { mats: Vec::new() };
+        let mem_wit1 = neo_memory::witness::MemWitness { mats: Vec::new() };
+
+        let bus_cols_total = 2 * mem_inst0.d * mem_inst0.ell + 5;
+        let bus_base = ccs.m - bus_cols_total;
+
+        let mut z0 = vec![F::ZERO; ccs.m];
+        if m_in > 0 {
+            z0[0] = F::ONE;
+        }
+        let mut col_id0 = 0usize;
+        write_twist_bus_step(&mut z0, bus_base, 1, 0, &mem_inst0, &mem_trace, &mut col_id0);
+        debug_assert_eq!(col_id0, bus_cols_total, "bus col count mismatch");
+        let (mcs0, mcs_wit0) = create_mcs_from_z(&params, &l, m_in, z0);
+
+        let mut z1 = vec![F::ZERO; ccs.m];
+        if m_in > 0 {
+            z1[0] = F::ONE;
+        }
+        z1[1] = F::from_u64(1);
+        let mut col_id1 = 0usize;
+        write_twist_bus_step(&mut z1, bus_base, 1, 0, &mem_inst1, &mem_trace, &mut col_id1);
+        debug_assert_eq!(col_id1, bus_cols_total, "bus col count mismatch");
+        let (mcs1, mcs_wit1) = create_mcs_from_z(&params, &l, m_in, z1);
 
         let step0 = StepWitnessBundle {
-            mcs: (mcs.clone(), mcs_wit.clone()),
+            mcs: (mcs0, mcs_wit0),
             lut_instances: vec![],
             mem_instances: vec![(mem_inst0, mem_wit0)],
             _phantom: PhantomData,
         };
         let step1 = StepWitnessBundle {
-            mcs: (mcs, mcs_wit),
+            mcs: (mcs1, mcs_wit1),
             lut_instances: vec![],
             mem_instances: vec![(mem_inst1, mem_wit1)],
             _phantom: PhantomData,
@@ -368,7 +391,12 @@ fn test_twist_only_route_a_mutated_rv_fails() {
     let ctx = TwistOnlyHarness::new();
     let mut proof = ctx.prove().expect("prove should succeed");
     let (_, _, rv_idx, _) = ctx.twist_claim_indices();
-    proof.steps[0].mem.me_claims_time[rv_idx].y_scalars[0] += K::ONE;
+    let inst = &ctx.steps[0].mem_instances[0].0;
+    let ell_addr = inst.d * inst.ell;
+    let bus_cols_total = 2 * ell_addr + 5;
+    let ccs_out0 = &mut proof.steps[0].fold.ccs_out[0];
+    let bus_y_base = ccs_out0.y_scalars.len() - bus_cols_total;
+    ccs_out0.y_scalars[bus_y_base + rv_idx] += K::ONE;
     assert!(
         ctx.verify(&proof).is_err(),
         "verification should fail when rv opening is corrupted"
@@ -384,7 +412,10 @@ fn test_twist_only_route_a_mutated_wv_fails() {
     let inst = &ctx.steps[0].mem_instances[0].0;
     let ell_addr = inst.d * inst.ell;
     let wv_idx = 2 * ell_addr + 2;
-    proof.steps[0].mem.me_claims_time[wv_idx].y_scalars[0] += K::ONE;
+    let bus_cols_total = 2 * ell_addr + 5;
+    let ccs_out0 = &mut proof.steps[0].fold.ccs_out[0];
+    let bus_y_base = ccs_out0.y_scalars.len() - bus_cols_total;
+    ccs_out0.y_scalars[bus_y_base + wv_idx] += K::ONE;
 
     assert!(
         ctx.verify(&proof).is_err(),
@@ -398,7 +429,12 @@ fn test_twist_only_route_a_mutated_addr_bit_fails() {
     let ctx = TwistOnlyHarness::new();
     let mut proof = ctx.prove().expect("prove should succeed");
     let (ra_idx, _, _, _) = ctx.twist_claim_indices();
-    let bit = &mut proof.steps[0].mem.me_claims_time[ra_idx].y_scalars[0];
+    let inst = &ctx.steps[0].mem_instances[0].0;
+    let ell_addr = inst.d * inst.ell;
+    let bus_cols_total = 2 * ell_addr + 5;
+    let ccs_out0 = &mut proof.steps[0].fold.ccs_out[0];
+    let bus_y_base = ccs_out0.y_scalars.len() - bus_cols_total;
+    let bit = &mut ccs_out0.y_scalars[bus_y_base + ra_idx];
     *bit = K::ONE - *bit; // flip bitness
     assert!(
         ctx.verify(&proof).is_err(),
@@ -415,7 +451,10 @@ fn test_twist_only_route_a_mutated_write_addr_bit_fails() {
     let inst = &ctx.steps[0].mem_instances[0].0;
     let ell_addr = inst.d * inst.ell;
     let wa_idx = ell_addr; // first write-address bit column
-    let bit = &mut proof.steps[0].mem.me_claims_time[wa_idx].y_scalars[0];
+    let bus_cols_total = 2 * ell_addr + 5;
+    let ccs_out0 = &mut proof.steps[0].fold.ccs_out[0];
+    let bus_y_base = ccs_out0.y_scalars.len() - bus_cols_total;
+    let bit = &mut ccs_out0.y_scalars[bus_y_base + wa_idx];
     *bit = K::ONE - *bit; // flip bitness
 
     assert!(
@@ -430,7 +469,12 @@ fn test_twist_only_route_a_mutated_inc_fails() {
     let ctx = TwistOnlyHarness::new();
     let mut proof = ctx.prove().expect("prove should succeed");
     let (_, _, _, inc_idx) = ctx.twist_claim_indices();
-    proof.steps[0].mem.me_claims_time[inc_idx].y_scalars[0] += K::ONE;
+    let inst = &ctx.steps[0].mem_instances[0].0;
+    let ell_addr = inst.d * inst.ell;
+    let bus_cols_total = 2 * ell_addr + 5;
+    let ccs_out0 = &mut proof.steps[0].fold.ccs_out[0];
+    let bus_y_base = ccs_out0.y_scalars.len() - bus_cols_total;
+    ccs_out0.y_scalars[bus_y_base + inc_idx] += K::ONE;
     assert!(
         ctx.verify(&proof).is_err(),
         "verification should fail when inc_at_write_addr opening is corrupted"
@@ -443,15 +487,19 @@ fn test_twist_only_route_a_wrong_rv_witness_fails() {
     let ctx = TwistOnlyHarness::new();
     let mut steps = ctx.steps.clone();
 
-    let t0 = steps[0].mcs.0.m_in; // per-step traces are embedded starting at m_in
-    let (mem_inst, mem_wit) = &mut steps[0].mem_instances[0];
+    let m_in = steps[0].mcs.0.m_in;
+    let mem_inst = &steps[0].mem_instances[0].0;
     let ell_addr = mem_inst.d * mem_inst.ell;
-    let rv_mat_idx = 2 * ell_addr + 3;
+    let rv_idx = 2 * ell_addr + 3;
 
-    let rv_mat = &mut mem_wit.mats[rv_mat_idx];
-    let mut decoded = neo_memory::ajtai::decode_vector(&ctx.params, rv_mat);
-    decoded[t0] += F::ONE;
-    *rv_mat = neo_memory::encode::ajtai_encode_vector(&ctx.params, &decoded);
+    // Corrupt the CPU witness bus cell for rv(0) (shared-bus-only mode ignores mem_wit mats).
+    let mut z = steps[0].mcs.0.x.clone();
+    z.extend_from_slice(&steps[0].mcs.1.w);
+    let bus_cols_total = 2 * ell_addr + 5;
+    let bus_base = ctx.ccs.m - bus_cols_total;
+    z[bus_base + rv_idx] += F::ONE;
+    let (mcs, mcs_wit) = create_mcs_from_z(&ctx.params, &ctx.l, m_in, z);
+    steps[0].mcs = (mcs, mcs_wit);
 
     let mut tr_prove = Poseidon2Transcript::new(b"twist-only-wrong-rv-witness");
     let result = fold_shard_prove_legacy(
@@ -475,15 +523,19 @@ fn test_twist_only_route_a_wrong_inc_witness_fails() {
     let ctx = TwistOnlyHarness::new();
     let mut steps = ctx.steps.clone();
 
-    let t0 = steps[0].mcs.0.m_in; // per-step traces are embedded starting at m_in
-    let (mem_inst, mem_wit) = &mut steps[0].mem_instances[0];
+    let m_in = steps[0].mcs.0.m_in;
+    let mem_inst = &steps[0].mem_instances[0].0;
     let ell_addr = mem_inst.d * mem_inst.ell;
-    let inc_mat_idx = 2 * ell_addr + 4;
+    let inc_idx = 2 * ell_addr + 4;
 
-    let inc_mat = &mut mem_wit.mats[inc_mat_idx];
-    let mut decoded = neo_memory::ajtai::decode_vector(&ctx.params, inc_mat);
-    decoded[t0] += F::ONE;
-    *inc_mat = neo_memory::encode::ajtai_encode_vector(&ctx.params, &decoded);
+    // Corrupt the CPU witness bus cell for inc(0) (shared-bus-only mode ignores mem_wit mats).
+    let mut z = steps[0].mcs.0.x.clone();
+    z.extend_from_slice(&steps[0].mcs.1.w);
+    let bus_cols_total = 2 * ell_addr + 5;
+    let bus_base = ctx.ccs.m - bus_cols_total;
+    z[bus_base + inc_idx] += F::ONE;
+    let (mcs, mcs_wit) = create_mcs_from_z(&ctx.params, &ctx.l, m_in, z);
+    steps[0].mcs = (mcs, mcs_wit);
 
     let mut tr_prove = Poseidon2Transcript::new(b"twist-only-wrong-inc-witness");
     let result = fold_shard_prove_legacy(
@@ -540,7 +592,6 @@ fn test_twist_route_a_time_claimed_sum_must_match_addr_pre_final() {
 
     let err = match verify_route_a_memory_step(
         &mut tr,
-        &ctx.params,
         &step,
         None,
         &step_proof.fold.ccs_out[0],
@@ -552,7 +603,6 @@ fn test_twist_route_a_time_claimed_sum_must_match_addr_pre_final() {
         &step_proof.mem,
         &shout_pre,
         &twist_pre,
-        false,
         0,
     ) {
         Ok(_) => panic!("mismatched twist claimed sums must fail"),
@@ -574,7 +624,12 @@ fn test_twist_only_route_a_nonbinary_flag_fails() {
     let ctx = TwistOnlyHarness::new();
     let mut proof = ctx.prove().expect("prove should succeed");
     let (_, has_read_idx, _, _) = ctx.twist_claim_indices();
-    proof.steps[0].mem.me_claims_time[has_read_idx].y_scalars[0] = K::from(F::from_u64(2));
+    let inst = &ctx.steps[0].mem_instances[0].0;
+    let ell_addr = inst.d * inst.ell;
+    let bus_cols_total = 2 * ell_addr + 5;
+    let ccs_out0 = &mut proof.steps[0].fold.ccs_out[0];
+    let bus_y_base = ccs_out0.y_scalars.len() - bus_cols_total;
+    ccs_out0.y_scalars[bus_y_base + has_read_idx] = K::from(F::from_u64(2));
     assert!(
         ctx.verify(&proof).is_err(),
         "verification should fail when has_read flag is non-binary"
@@ -613,7 +668,7 @@ fn test_twist_only_route_a_mutated_val_eval_claim_fails() {
 fn test_twist_only_route_a_mutated_val_lane_opening_fails() {
     let ctx = TwistOnlyHarness::new();
     let mut proof = ctx.prove().expect("prove should succeed");
-    proof.steps[0].mem.me_claims_val[0].y_scalars[0] += K::ONE;
+    proof.steps[0].mem.cpu_me_claims_val[0].y_scalars[0] += K::ONE;
     assert!(
         ctx.verify(&proof).is_err(),
         "verification should fail when r_val ME opening is corrupted"
@@ -625,7 +680,7 @@ fn test_twist_only_route_a_mutated_val_lane_opening_fails() {
 fn test_twist_only_route_a_mutated_val_lane_commitment_fails() {
     let ctx = TwistOnlyHarness::new();
     let mut proof = ctx.prove().expect("prove should succeed");
-    proof.steps[0].mem.me_claims_val[0].c.data[0] += F::ONE;
+    proof.steps[0].mem.cpu_me_claims_val[0].c.data[0] += F::ONE;
     assert!(
         ctx.verify(&proof).is_err(),
         "verification should fail when r_val ME commitment is corrupted"
@@ -643,6 +698,21 @@ fn test_twist_only_route_a_exports_val_lane_obligations() {
     }
 
     let ctx = TwistOnlyHarness::new();
+    let m_in = ctx.steps[0].mcs.0.m_in;
+    let mem_inst = &ctx.steps[0].mem_instances[0].0;
+    let bus_cols_total = 2 * mem_inst.d * mem_inst.ell + 5;
+    let bus_base = ctx.ccs.m - bus_cols_total;
+
+    // The shard prover extends the CPU CCS with bus copy-out matrices. For ME consistency checks,
+    // we must use that extended CCS structure.
+    let mut matrices = ctx.ccs.matrices.clone();
+    let f = ctx.ccs.f.append_zero_vars(bus_cols_total);
+    for col_id in 0..bus_cols_total {
+        let mut mat = Mat::zero(ctx.ccs.n, ctx.ccs.m, F::ZERO);
+        mat.set(m_in, bus_base + col_id, F::ONE);
+        matrices.push(mat);
+    }
+    let ccs_ext = CcsStructure::new(matrices, f).expect("extended CCS");
 
     let mut tr_prove = Poseidon2Transcript::new(b"twist-only-obligations");
     let (proof, outputs_prove, wits) = fold_shard_prove_with_witnesses_legacy(
@@ -703,7 +773,7 @@ fn test_twist_only_route_a_exports_val_lane_obligations() {
         .map(trim_y_to_d)
         .zip(wits.final_main_wits.iter().cloned())
     {
-        check_me_consistency(&ctx.ccs, &ctx.l, &inst, &MeWitness { Z }).expect("main ME consistency");
+        check_me_consistency(&ccs_ext, &ctx.l, &inst, &MeWitness { Z }).expect("main ME consistency");
     }
 
     for (inst, Z) in outputs_verify
@@ -714,14 +784,14 @@ fn test_twist_only_route_a_exports_val_lane_obligations() {
         .map(trim_y_to_d)
         .zip(wits.val_lane_wits.iter().cloned())
     {
-        check_me_consistency(&ctx.ccs, &ctx.l, &inst, &MeWitness { Z }).expect("val-lane ME consistency");
+        check_me_consistency(&ccs_ext, &ctx.l, &inst, &MeWitness { Z }).expect("val-lane ME consistency");
     }
 
     let mut inst_bad = trim_y_to_d(outputs_verify.obligations.val[0].clone());
     inst_bad.y[0][0] += K::ONE;
     assert!(
         check_me_consistency(
-            &ctx.ccs,
+            &ccs_ext,
             &ctx.l,
             &inst_bad,
             &MeWitness {
@@ -750,6 +820,90 @@ fn create_identity_ccs(n: usize) -> CcsStructure<F> {
     let mat = Mat::identity(n);
     let f = SparsePoly::new(1, vec![]);
     CcsStructure::new(vec![mat], f).expect("CCS")
+}
+
+fn write_bits_le(out: &mut [F], mut x: u64, ell: usize) {
+    for i in 0..ell {
+        out[i] = if (x & 1) == 1 { F::ONE } else { F::ZERO };
+        x >>= 1;
+    }
+}
+
+fn write_twist_bus_step<C>(
+    z: &mut [F],
+    bus_base: usize,
+    chunk_size: usize,
+    step_in_chunk: usize,
+    mem_inst: &neo_memory::witness::MemInstance<C, F>,
+    mem_trace: &PlainMemTrace<F>,
+    col_id: &mut usize,
+) {
+    let ell_addr = mem_inst.d * mem_inst.ell;
+    let mut ra_bits = vec![F::ZERO; ell_addr];
+    let mut wa_bits = vec![F::ZERO; ell_addr];
+
+    let ra = mem_trace.read_addr[step_in_chunk];
+    let wa = mem_trace.write_addr[step_in_chunk];
+
+    let mut tmp = ra;
+    for dim in 0..mem_inst.d {
+        let comp = (tmp % (mem_inst.n_side as u64)) as u64;
+        tmp /= mem_inst.n_side as u64;
+        let offset = dim * mem_inst.ell;
+        write_bits_le(&mut ra_bits[offset..offset + mem_inst.ell], comp, mem_inst.ell);
+    }
+    let mut tmp = wa;
+    for dim in 0..mem_inst.d {
+        let comp = (tmp % (mem_inst.n_side as u64)) as u64;
+        tmp /= mem_inst.n_side as u64;
+        let offset = dim * mem_inst.ell;
+        write_bits_le(&mut wa_bits[offset..offset + mem_inst.ell], comp, mem_inst.ell);
+    }
+
+    for j in 0..ell_addr {
+        z[bus_base + *col_id * chunk_size + step_in_chunk] = ra_bits[j];
+        *col_id += 1;
+    }
+    for j in 0..ell_addr {
+        z[bus_base + *col_id * chunk_size + step_in_chunk] = wa_bits[j];
+        *col_id += 1;
+    }
+
+    z[bus_base + *col_id * chunk_size + step_in_chunk] = mem_trace.has_read[step_in_chunk];
+    *col_id += 1;
+    z[bus_base + *col_id * chunk_size + step_in_chunk] = mem_trace.has_write[step_in_chunk];
+    *col_id += 1;
+    z[bus_base + *col_id * chunk_size + step_in_chunk] = mem_trace.write_val[step_in_chunk];
+    *col_id += 1;
+    z[bus_base + *col_id * chunk_size + step_in_chunk] = mem_trace.read_val[step_in_chunk];
+    *col_id += 1;
+    z[bus_base + *col_id * chunk_size + step_in_chunk] = mem_trace.inc_at_write_addr[step_in_chunk];
+    *col_id += 1;
+}
+
+fn create_mcs_from_z(
+    params: &NeoParams,
+    l: &DummyCommit,
+    m_in: usize,
+    z: Vec<F>,
+) -> (McsInstance<Cmt, F>, McsWitness<F>) {
+    use neo_ajtai::{decomp_b, DecompStyle};
+
+    let m = z.len();
+    let x: Vec<F> = z[..m_in].to_vec();
+    let w: Vec<F> = z[m_in..].to_vec();
+
+    let digits = decomp_b(&z, params.b, D, DecompStyle::Balanced);
+    let mut row_major = vec![F::ZERO; D * m];
+    for c in 0..m {
+        for r in 0..D {
+            row_major[r * m + c] = digits[c * D + r];
+        }
+    }
+    let Z = Mat::from_row_major(D, m, row_major);
+    let c = l.commit(&Z);
+
+    (McsInstance { c, x, m_in }, McsWitness { w, Z })
 }
 
 fn create_trivial_mcs(
@@ -1003,10 +1157,7 @@ fn test_shard_cpu_only_folding() {
         "No memory sidecar proofs"
     );
     assert!(
-        proof
-            .steps
-            .iter()
-            .all(|s| s.mem.me_claims_time.is_empty() && s.mem.me_claims_val.is_empty()),
+        proof.steps.iter().all(|s| s.mem.cpu_me_claims_val.is_empty()),
         "No memory ME claims"
     );
 
@@ -1112,178 +1263,66 @@ fn test_twist_shout_sidecar_proving() {
 #[test]
 #[cfg(feature = "paper-exact")]
 fn test_full_cpu_memory_integration() {
+    // Shared-bus-only mode reserves a tail "bus" segment in the CPU witness. If the CPU CCS is too
+    // small to fit the required bus columns, proving must reject.
     let n = 4usize;
     let ccs = create_identity_ccs(n);
     let params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
     let l = DummyCommit::default();
     let mixers = default_mixers();
 
-    let dims = utils::build_dims_and_policy(&params, &ccs).expect("dims");
-    let ell_n = dims.ell_n;
     let m_in = 2;
+    let (mcs, mcs_wit) = create_trivial_mcs(&params, &ccs, &l, m_in);
 
-    println!("Test params: k_rho={}, ell_n={}", params.k_rho, ell_n);
-
-    let r: Vec<K> = vec![K::from(F::from_u64(7)); ell_n];
-
-    // Create initial accumulator
-    let mut acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
-    let mut acc_wit_init: Vec<Mat<F>> = Vec::new();
-
-    for _ in 0..params.k_rho {
-        let (me, Z) = create_seed_me(&params, &ccs, &l, &r, m_in);
-        acc_init.push(me);
-        acc_wit_init.push(Z);
-    }
-
-    // Create MCS instances
-    let mut mcss: Vec<(McsInstance<Cmt, F>, McsWitness<F>)> = Vec::new();
-    for _ in 0..2 {
-        let (mcs, wit) = create_trivial_mcs(&params, &ccs, &l, m_in);
-        mcss.push((mcs, wit));
-    }
-
-    // Create memory sidecar
-    let vm_trace = build_test_vm_trace();
-    let mem_layout = PlainMemLayout { k: 4, d: 1, n_side: 4 };
-    let mut mem_layouts = HashMap::new();
-    mem_layouts.insert(0u32, mem_layout.clone());
-
-    let lut_table = LutTable {
-        table_id: 0,
-        k: 4,
+    // One Shout (3 cols) + one Twist (7 cols) => 10 bus cols > m=4.
+    let lut_inst = neo_memory::witness::LutInstance::<Cmt, F> {
+        comms: Vec::new(),
+        k: 2,
         d: 1,
-        n_side: 4,
-        content: vec![F::from_u64(10), F::from_u64(20), F::from_u64(30), F::from_u64(40)],
+        n_side: 2,
+        steps: 1,
+        ell: 1,
+        table: vec![F::ONE, F::from_u64(2)],
+        _phantom: PhantomData,
+    };
+    let lut_wit = neo_memory::witness::LutWitness { mats: Vec::new() };
+    let mem_inst = neo_memory::witness::MemInstance::<Cmt, F> {
+        comms: Vec::new(),
+        k: 2,
+        d: 1,
+        n_side: 2,
+        steps: 1,
+        ell: 1,
+        init: MemInit::Zero,
+        _phantom: PhantomData,
+    };
+    let mem_wit = neo_memory::witness::MemWitness { mats: Vec::new() };
+
+    let step = StepWitnessBundle {
+        mcs: (mcs, mcs_wit),
+        lut_instances: vec![(lut_inst, lut_wit)],
+        mem_instances: vec![(mem_inst, mem_wit)],
+        _phantom: PhantomData,
     };
 
-    let initial_mem: HashMap<(u32, u64), F> = HashMap::new();
-    let plain_mem_traces = build_plain_mem_traces::<F>(&vm_trace, &mem_layouts, &initial_mem);
-    let plain_mem = &plain_mem_traces[&0u32];
-
-    let mut table_sizes = HashMap::new();
-    table_sizes.insert(0u32, (4usize, 1usize));
-    let plain_lut_traces = build_plain_lut_traces::<F>(&vm_trace, &table_sizes);
-    let plain_lut = &plain_lut_traces[&0u32];
-
-    let commit_fn = |mat: &Mat<F>| l.commit(mat);
-
-    // Build per-step bundles
-    let mut steps: Vec<StepWitnessBundle<Cmt, F, K>> = Vec::new();
-    let mem_init = MemInit::Zero;
-    for (idx, mcs) in mcss.into_iter().enumerate() {
-        let single_plain_mem = PlainMemTrace {
-            steps: 1,
-            has_read: vec![plain_mem.has_read[idx]],
-            has_write: vec![plain_mem.has_write[idx]],
-            read_addr: vec![plain_mem.read_addr[idx]],
-            write_addr: vec![plain_mem.write_addr[idx]],
-            read_val: vec![plain_mem.read_val[idx]],
-            write_val: vec![plain_mem.write_val[idx]],
-            inc_at_write_addr: vec![plain_mem.inc_at_write_addr[idx]],
-        };
-        let (mem_inst_step, mem_wit_step) =
-            encode_mem_for_twist(&params, &mem_layout, &mem_init, &single_plain_mem, &commit_fn, None, 0);
-
-        let single_plain_lut = PlainLutTrace {
-            has_lookup: vec![plain_lut.has_lookup[idx]],
-            addr: vec![plain_lut.addr[idx]],
-            val: vec![plain_lut.val[idx]],
-        };
-        let (lut_inst_step, lut_wit_step) =
-            encode_lut_for_shout(&params, &lut_table, &single_plain_lut, &commit_fn, None, 0);
-
-        steps.push(StepWitnessBundle {
-            mcs,
-            lut_instances: vec![(lut_inst_step.clone(), lut_wit_step)],
-            mem_instances: vec![(mem_inst_step.clone(), mem_wit_step)],
-            _phantom: PhantomData,
-        });
-    }
-
-    let _lut_inst = steps[0].lut_instances[0].0.clone();
-    let _mem_inst = steps[0].mem_instances[0].0.clone();
-
     let mut tr_prove = Poseidon2Transcript::new(b"shard-full-integration");
-
-    // This may fail with norm bound error if too many ME claims
-    let result = fold_shard_prove_legacy(
+    let err = fold_shard_prove_legacy(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
         &ccs,
-        &steps,
-        &acc_init,
-        &acc_wit_init,
+        &[step],
+        &[],
+        &[],
         &l,
         mixers,
-    );
-
-    match result {
-        Ok(proof) => {
-            // Verify proof
-            let mut tr_verify = Poseidon2Transcript::new(b"shard-full-integration");
-            let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
-
-            let outputs = fold_shard_verify_legacy(
-                FoldingMode::PaperExact,
-                &mut tr_verify,
-                &params,
-                &ccs,
-                &steps_public,
-                &acc_init,
-                &proof,
-                mixers,
-            )
-            .expect("fold_shard_verify should succeed");
-
-            assert_eq!(proof.steps.len(), 2, "Should have 2 fold steps");
-            assert!(
-                proof.steps.iter().any(|s| !s.mem.proofs.is_empty()),
-                "Should have memory sidecar proofs"
-            );
-            assert!(
-                !outputs.obligations.val.is_empty(),
-                "expected Twist to produce val-lane obligations"
-            );
-
-            let final_children = proof.compute_final_main_children(&acc_init);
-            assert_eq!(final_children.len(), params.k_rho as usize);
-
-            println!("✓ test_full_cpu_memory_integration passed!");
-            println!("  - Fold steps: {}", proof.steps.len());
-            println!(
-                "  - Memory proofs: {}",
-                proof
-                    .steps
-                    .iter()
-                    .map(|s| s.mem.proofs.len())
-                    .sum::<usize>()
-            );
-            println!(
-                "  - Memory ME claims: {}",
-                proof
-                    .steps
-                    .iter()
-                    .map(|s| s.mem.me_claims_time.len() + s.mem.me_claims_val.len())
-                    .sum::<usize>()
-            );
-            println!("  - Final children: {}", final_children.len());
-        }
-        Err(e) => {
-            // Expected failure due to norm bound
-            let err_str = format!("{:?}", e);
-            if err_str.contains("ΠRLC bound violated") || err_str.contains("norm bound") {
-                println!("✓ test_full_cpu_memory_integration: norm bound violated (expected)");
-                println!("  Error: {}", err_str);
-                println!("");
-                println!("  This is expected with current parameters.");
-                println!("  Solutions:");
-                println!("  1. Increase k_rho to allow more claims in final merge");
-                println!("  2. Implement per-step integration (see architecture-gap.md)");
-            } else {
-                panic!("Unexpected error: {:?}", e);
-            }
-        }
+    )
+    .expect_err("CCS width too small for shared bus must be rejected");
+    match err {
+        PiCcsError::InvalidInput(msg) => assert!(
+            msg.contains("bus region too large"),
+            "unexpected InvalidInput: {msg}"
+        ),
+        other => panic!("expected InvalidInput, got {other:?}"),
     }
 }

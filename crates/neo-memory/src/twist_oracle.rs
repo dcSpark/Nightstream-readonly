@@ -15,6 +15,7 @@
 
 use crate::bit_ops::{eq_bit_affine, eq_bits_prod_table};
 use crate::mle::{eq_points, lt_eval};
+use crate::sparse_time::SparseIdxVec;
 #[cfg(feature = "debug-logs")]
 use neo_math::KExtensions;
 use neo_math::K;
@@ -150,6 +151,162 @@ impl RoundOracle for ProductRoundOracle {
         }
         self.rounds_remaining -= 1;
         self.challenges.push(r);
+    }
+}
+
+// ============================================================================
+// Sparse-in-time helpers and oracles (Track A)
+// ============================================================================
+
+#[inline]
+fn eq_single(a: K, b: K) -> K {
+    (K::ONE - a) * (K::ONE - b) + a * b
+}
+
+#[inline]
+fn chi_at_bool_index(r: &[K], idx: usize) -> K {
+    crate::mle::chi_at_index(r, idx)
+}
+
+/// Compute χ_{r_cycle}(t) children for the current time sumcheck round.
+///
+/// Variable order is little-endian (bit 0 first), matching `ProductRoundOracle`.
+#[inline]
+fn chi_cycle_children(r_cycle: &[K], bit_idx: usize, prefix_eq: K, pair_idx: usize) -> (K, K) {
+    debug_assert!(bit_idx < r_cycle.len());
+
+    // Higher bits (bit_idx+1..ell) come from pair_idx, little-endian.
+    let mut suffix = K::ONE;
+    let mut shift = 0usize;
+    for b in (bit_idx + 1)..r_cycle.len() {
+        let bit = (pair_idx >> shift) & 1;
+        suffix *= if bit == 1 { r_cycle[b] } else { K::ONE - r_cycle[b] };
+        shift += 1;
+    }
+
+    let r = r_cycle[bit_idx];
+    let child0 = prefix_eq * (K::ONE - r) * suffix;
+    let child1 = prefix_eq * r * suffix;
+    (child0, child1)
+}
+
+fn gather_pairs_from_sparse(entries: &[(usize, K)]) -> Vec<usize> {
+    let mut out: Vec<usize> = Vec::with_capacity(entries.len());
+    let mut prev: Option<usize> = None;
+    for &(idx, _v) in entries {
+        let p = idx >> 1;
+        if prev != Some(p) {
+            out.push(p);
+            prev = Some(p);
+        }
+    }
+    out
+}
+
+/// Sparse Route A oracle for Shout value:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · val(t)
+pub struct ShoutValueOracleSparse {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    val: SparseIdxVec<K>,
+    degree_bound: usize,
+    challenges: Vec<K>,
+}
+
+impl ShoutValueOracleSparse {
+    pub fn new(r_cycle: &[K], has_lookup: SparseIdxVec<K>, val: SparseIdxVec<K>) -> (Self, K) {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(val.len(), 1usize << ell_n);
+
+        let mut claim = K::ZERO;
+        for &(t, gate) in has_lookup.entries() {
+            let v = val.get(t);
+            if v == K::ZERO {
+                continue;
+            }
+            claim += chi_at_bool_index(r_cycle, t) * gate * v;
+        }
+
+        (
+            Self {
+                bit_idx: 0,
+                r_cycle: r_cycle.to_vec(),
+                prefix_eq: K::ONE,
+                has_lookup,
+                val,
+                degree_bound: 3,
+                challenges: Vec::with_capacity(ell_n),
+            },
+            claim,
+        )
+    }
+}
+
+impl RoundOracle for ShoutValueOracleSparse {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.has_lookup.len() == 1 {
+            let v = self.prefix_eq * self.has_lookup.singleton_value() * self.val.singleton_value();
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let (chi0_base, chi1_base) = if self.bit_idx < self.r_cycle.len() {
+            // Per-pair child weights depend on higher-bit assignment (pair index).
+            (K::ZERO, K::ZERO)
+        } else {
+            (K::ZERO, K::ZERO)
+        };
+        let _ = (chi0_base, chi1_base);
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let val0 = self.val.get(child0);
+            let val1 = self.val.get(child1);
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = chi0 + (chi1 - chi0) * x;
+                let gate_x = gate0 + (gate1 - gate0) * x;
+                let val_x = val0 + (val1 - val0) * x;
+                ys[i] += chi_x * gate_x * val_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.val.fold_round_in_place(r);
+        self.challenges.push(r);
+        self.bit_idx += 1;
     }
 }
 

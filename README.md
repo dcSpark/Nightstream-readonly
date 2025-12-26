@@ -501,6 +501,16 @@ cargo test -p neo-fold twist_shout_soundness --release -- --nocapture
 
 ---
 
+## Acknowledgements
+
+### Jolt zkVM
+
+The CPU-to-bus constraint binding system in the `cpu/constraints` module is adapted from the **Jolt** zkVM project.
+
+We are grateful to the Jolt team for their open-source contribution to the zkVM ecosystem.
+
+---
+
 ## Contributing
 
 * **Add tests** for behavioral changes

@@ -17,7 +17,11 @@ use neo_ccs::relations::{CcsStructure, McsInstance, McsWitness};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::{r1cs_to_ccs, Mat};
 use neo_fold::pi_ccs::FoldingMode;
-use neo_fold::shard::{fold_shard_prove_shared_cpu_bus, fold_shard_verify_shared_cpu_bus, CommitMixers};
+use neo_fold::shard::{
+    fold_shard_prove as fold_shard_prove_shared_cpu_bus,
+    fold_shard_verify as fold_shard_verify_shared_cpu_bus,
+    CommitMixers,
+};
 use neo_math::{D, F, K};
 use neo_memory::encode::encode_mem_for_twist;
 use neo_memory::plain::{PlainMemLayout, PlainMemTrace};

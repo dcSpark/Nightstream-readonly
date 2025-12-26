@@ -6,6 +6,7 @@ use neo_memory::ajtai::decode_vector as ajtai_decode_vector;
 use neo_memory::witness::{LutInstance, MemInstance, StepInstanceBundle, StepWitnessBundle};
 use neo_params::NeoParams;
 use p3_field::PrimeCharacteristicRing;
+use std::collections::HashSet;
 
 #[derive(Clone, Debug)]
 pub(crate) struct CpuBusSpec {
@@ -25,46 +26,94 @@ impl CpuBusSpec {
     }
 }
 
-pub(crate) fn shout_bus_cols<Cmt: Clone>(inst: &LutInstance<Cmt, F>) -> usize {
+pub(crate) fn shout_bus_cols<Cmt>(inst: &LutInstance<Cmt, F>) -> usize {
     (inst.d * inst.ell) + 2
 }
 
-pub(crate) fn twist_bus_cols<Cmt: Clone>(inst: &MemInstance<Cmt, F>) -> usize {
+pub(crate) fn twist_bus_cols<Cmt>(inst: &MemInstance<Cmt, F>) -> usize {
     (2 * inst.d * inst.ell) + 5
 }
 
-pub(crate) fn bus_cols_for_step_instance<Cmt: Clone, KK: Clone>(step: &StepInstanceBundle<Cmt, F, KK>) -> usize {
-    let mut total = 0usize;
-    for inst in &step.lut_insts {
-        total += shout_bus_cols(inst);
+pub(crate) trait BusStepView<Cmt> {
+    fn m_in(&self) -> usize;
+    fn public_x(&self) -> &[F];
+    fn lut_insts_len(&self) -> usize;
+    fn mem_insts_len(&self) -> usize;
+    fn lut_inst(&self, idx: usize) -> &LutInstance<Cmt, F>;
+    fn mem_inst(&self, idx: usize) -> &MemInstance<Cmt, F>;
+}
+
+impl<Cmt, KK> BusStepView<Cmt> for StepWitnessBundle<Cmt, F, KK> {
+    fn m_in(&self) -> usize {
+        self.mcs.0.m_in
     }
-    for inst in &step.mem_insts {
-        total += twist_bus_cols(inst);
+
+    fn public_x(&self) -> &[F] {
+        &self.mcs.0.x
+    }
+
+    fn lut_insts_len(&self) -> usize {
+        self.lut_instances.len()
+    }
+
+    fn mem_insts_len(&self) -> usize {
+        self.mem_instances.len()
+    }
+
+    fn lut_inst(&self, idx: usize) -> &LutInstance<Cmt, F> {
+        &self.lut_instances[idx].0
+    }
+
+    fn mem_inst(&self, idx: usize) -> &MemInstance<Cmt, F> {
+        &self.mem_instances[idx].0
+    }
+}
+
+impl<Cmt, KK> BusStepView<Cmt> for StepInstanceBundle<Cmt, F, KK> {
+    fn m_in(&self) -> usize {
+        self.mcs_inst.m_in
+    }
+
+    fn public_x(&self) -> &[F] {
+        &self.mcs_inst.x
+    }
+
+    fn lut_insts_len(&self) -> usize {
+        self.lut_insts.len()
+    }
+
+    fn mem_insts_len(&self) -> usize {
+        self.mem_insts.len()
+    }
+
+    fn lut_inst(&self, idx: usize) -> &LutInstance<Cmt, F> {
+        &self.lut_insts[idx]
+    }
+
+    fn mem_inst(&self, idx: usize) -> &MemInstance<Cmt, F> {
+        &self.mem_insts[idx]
+    }
+}
+
+fn bus_cols_for_step<Cmt, S: BusStepView<Cmt>>(step: &S) -> usize {
+    let mut total = 0usize;
+    for i in 0..step.lut_insts_len() {
+        total += shout_bus_cols(step.lut_inst(i));
+    }
+    for i in 0..step.mem_insts_len() {
+        total += twist_bus_cols(step.mem_inst(i));
     }
     total
 }
 
-pub(crate) fn bus_cols_for_step_witness<Cmt: Clone, KK: Clone>(step: &StepWitnessBundle<Cmt, F, KK>) -> usize {
-    let mut total = 0usize;
-    for (inst, _) in &step.lut_instances {
-        total += shout_bus_cols(inst);
-    }
-    for (inst, _) in &step.mem_instances {
-        total += twist_bus_cols(inst);
-    }
-    total
-}
-
-pub(crate) fn infer_chunk_size_from_witness_steps<Cmt: Clone, KK: Clone>(
-    steps: &[StepWitnessBundle<Cmt, F, KK>],
-) -> Result<usize, PiCcsError> {
+fn infer_chunk_size_from_steps<Cmt, S: BusStepView<Cmt>>(steps: &[S]) -> Result<usize, PiCcsError> {
     let mut max_steps = 0usize;
     for step in steps {
-        for (inst, _) in &step.lut_instances {
-            max_steps = max_steps.max(inst.steps);
+        for i in 0..step.lut_insts_len() {
+            max_steps = max_steps.max(step.lut_inst(i).steps);
         }
-        for (inst, _) in &step.mem_instances {
-            max_steps = max_steps.max(inst.steps);
+        for i in 0..step.mem_insts_len() {
+            max_steps = max_steps.max(step.mem_inst(i).steps);
         }
     }
     if max_steps == 0 {
@@ -75,46 +124,26 @@ pub(crate) fn infer_chunk_size_from_witness_steps<Cmt: Clone, KK: Clone>(
     Ok(max_steps)
 }
 
-pub(crate) fn infer_chunk_size_from_instance_steps<Cmt: Clone, KK: Clone>(
-    steps: &[StepInstanceBundle<Cmt, F, KK>],
-) -> Result<usize, PiCcsError> {
-    let mut max_steps = 0usize;
-    for step in steps {
-        for inst in &step.lut_insts {
-            max_steps = max_steps.max(inst.steps);
-        }
-        for inst in &step.mem_insts {
-            max_steps = max_steps.max(inst.steps);
-        }
-    }
-    if max_steps == 0 {
-        return Err(PiCcsError::InvalidInput(
-            "cannot infer chunk_size (no mem/lut instances present)".into(),
-        ));
-    }
-    Ok(max_steps)
-}
-
-pub(crate) fn infer_cpu_bus_spec_for_witness_steps<Cmt: Clone, KK: Clone>(
+fn infer_cpu_bus_spec_for_steps<Cmt, S: BusStepView<Cmt>>(
     s: &CcsStructure<F>,
-    steps: &[StepWitnessBundle<Cmt, F, KK>],
+    steps: &[S],
 ) -> Result<CpuBusSpec, PiCcsError> {
     if steps.is_empty() {
         return Err(PiCcsError::InvalidInput("no steps".into()));
     }
-    let m_in = steps[0].mcs.0.m_in;
+    let m_in = steps[0].m_in();
     for (i, step) in steps.iter().enumerate() {
-        if step.mcs.0.m_in != m_in {
+        let cur_m_in = step.m_in();
+        if cur_m_in != m_in {
             return Err(PiCcsError::InvalidInput(format!(
-                "m_in mismatch across steps (step 0 has {m_in}, step {i} has {})",
-                step.mcs.0.m_in
+                "m_in mismatch across steps (step 0 has {m_in}, step {i} has {cur_m_in})"
             )));
         }
     }
 
-    let bus_cols = bus_cols_for_step_witness(&steps[0]);
+    let bus_cols = bus_cols_for_step(&steps[0]);
     for (i, step) in steps.iter().enumerate().skip(1) {
-        let cur = bus_cols_for_step_witness(step);
+        let cur = bus_cols_for_step(step);
         if cur != bus_cols {
             return Err(PiCcsError::InvalidInput(format!(
                 "bus column count mismatch across steps (step 0 has {bus_cols}, step {i} has {cur})"
@@ -131,7 +160,12 @@ pub(crate) fn infer_cpu_bus_spec_for_witness_steps<Cmt: Clone, KK: Clone>(
         });
     }
 
-    let chunk_size = infer_chunk_size_from_witness_steps(steps)?;
+    let chunk_size = infer_chunk_size_from_steps(steps)?;
+    if chunk_size != 1 {
+        return Err(PiCcsError::InvalidInput(format!(
+            "shared CPU bus currently supports chunk_size==1, got {chunk_size}"
+        )));
+    }
     let bus_region_len = bus_cols
         .checked_mul(chunk_size)
         .ok_or_else(|| PiCcsError::InvalidInput("bus region length overflow".into()))?;
@@ -160,69 +194,15 @@ pub(crate) fn infer_cpu_bus_spec_for_witness_steps<Cmt: Clone, KK: Clone>(
     })
 }
 
-pub(crate) fn infer_cpu_bus_spec_for_instance_steps<Cmt: Clone, KK: Clone>(
-    s: &CcsStructure<F>,
-    steps: &[StepInstanceBundle<Cmt, F, KK>],
-) -> Result<CpuBusSpec, PiCcsError> {
-    if steps.is_empty() {
-        return Err(PiCcsError::InvalidInput("no steps".into()));
-    }
-    let m_in = steps[0].mcs_inst.m_in;
-    for (i, step) in steps.iter().enumerate() {
-        if step.mcs_inst.m_in != m_in {
-            return Err(PiCcsError::InvalidInput(format!(
-                "m_in mismatch across steps (step 0 has {m_in}, step {i} has {})",
-                step.mcs_inst.m_in
-            )));
-        }
-    }
-
-    let bus_cols = bus_cols_for_step_instance(&steps[0]);
-    for (i, step) in steps.iter().enumerate().skip(1) {
-        let cur = bus_cols_for_step_instance(step);
-        if cur != bus_cols {
-            return Err(PiCcsError::InvalidInput(format!(
-                "bus column count mismatch across steps (step 0 has {bus_cols}, step {i} has {cur})"
-            )));
-        }
-    }
-
-    if bus_cols == 0 {
-        return Ok(CpuBusSpec {
-            chunk_size: 0,
-            m_in,
-            bus_cols,
-            bus_base: s.m,
-        });
-    }
-
-    let chunk_size = infer_chunk_size_from_instance_steps(steps)?;
-    let bus_region_len = bus_cols
-        .checked_mul(chunk_size)
-        .ok_or_else(|| PiCcsError::InvalidInput("bus region length overflow".into()))?;
-    if bus_region_len > s.m {
-        return Err(PiCcsError::InvalidInput(format!(
-            "bus region too large: bus_cols({bus_cols}) * chunk_size({chunk_size}) = {bus_region_len} > m({})",
-            s.m
-        )));
-    }
-    if m_in
-        .checked_add(chunk_size)
-        .ok_or_else(|| PiCcsError::InvalidInput("m_in + chunk_size overflow".into()))?
-        > s.n
-    {
-        return Err(PiCcsError::InvalidInput(format!(
-            "bus time rows out of range: m_in({m_in}) + chunk_size({chunk_size}) > n({})",
-            s.n
-        )));
-    }
-
-    Ok(CpuBusSpec {
-        chunk_size,
-        m_in,
-        bus_cols,
-        bus_base: s.m - bus_region_len,
-    })
+pub(crate) fn prepare_ccs_for_shared_cpu_bus_steps<Cmt, S: BusStepView<Cmt>>(
+    s0: &CcsStructure<F>,
+    steps: &[S],
+) -> Result<(CcsStructure<F>, CpuBusSpec), PiCcsError> {
+    let bus = infer_cpu_bus_spec_for_steps(s0, steps)?;
+    ensure_ccs_binds_shared_bus_for_steps(s0, &bus, steps)?;
+    ensure_ccs_has_shared_bus_padding_for_steps(s0, &bus, steps)?;
+    let s = extend_ccs_with_cpu_bus_copyouts(s0, &bus)?;
+    Ok((s, bus))
 }
 
 pub(crate) fn extend_ccs_with_cpu_bus_copyouts(s: &CcsStructure<F>, bus: &CpuBusSpec) -> Result<CcsStructure<F>, PiCcsError> {
@@ -280,11 +260,12 @@ struct BusColLabel {
     label: String,
 }
 
-fn required_bus_cols_for_step_witness<Cmt: Clone, KK: Clone>(step: &StepWitnessBundle<Cmt, F, KK>) -> Vec<BusColLabel> {
+fn required_bus_cols_for_step<Cmt, S: BusStepView<Cmt>>(step: &S) -> Vec<BusColLabel> {
     let mut out = Vec::<BusColLabel>::new();
     let mut col_id = 0usize;
 
-    for (lut_idx, (inst, _)) in step.lut_instances.iter().enumerate() {
+    for lut_idx in 0..step.lut_insts_len() {
+        let inst = step.lut_inst(lut_idx);
         let ell_addr = inst.d * inst.ell;
         for b in 0..ell_addr {
             out.push(BusColLabel {
@@ -303,7 +284,8 @@ fn required_bus_cols_for_step_witness<Cmt: Clone, KK: Clone>(step: &StepWitnessB
         col_id += ell_addr + 2;
     }
 
-    for (mem_idx, (inst, _)) in step.mem_instances.iter().enumerate() {
+    for mem_idx in 0..step.mem_insts_len() {
+        let inst = step.mem_inst(mem_idx);
         let ell_addr = inst.d * inst.ell;
         for b in 0..ell_addr {
             out.push(BusColLabel {
@@ -335,67 +317,6 @@ fn required_bus_cols_for_step_witness<Cmt: Clone, KK: Clone>(step: &StepWitnessB
         });
         // NOTE: inc_at_write_addr is intentionally NOT required here:
         // it is semantically checked by Twist itself, and many CPU circuits will not constrain it.
-
-        col_id += 2 * ell_addr + 5;
-    }
-
-    out
-}
-
-fn required_bus_cols_for_step_instance<Cmt: Clone, KK: Clone>(step: &StepInstanceBundle<Cmt, F, KK>) -> Vec<BusColLabel> {
-    let mut out = Vec::<BusColLabel>::new();
-    let mut col_id = 0usize;
-
-    for (lut_idx, inst) in step.lut_insts.iter().enumerate() {
-        let ell_addr = inst.d * inst.ell;
-        for b in 0..ell_addr {
-            out.push(BusColLabel {
-                col_id: col_id + b,
-                label: format!("shout[{lut_idx}].addr_bits[{b}]"),
-            });
-        }
-        out.push(BusColLabel {
-            col_id: col_id + ell_addr,
-            label: format!("shout[{lut_idx}].has_lookup"),
-        });
-        out.push(BusColLabel {
-            col_id: col_id + ell_addr + 1,
-            label: format!("shout[{lut_idx}].val"),
-        });
-        col_id += ell_addr + 2;
-    }
-
-    for (mem_idx, inst) in step.mem_insts.iter().enumerate() {
-        let ell_addr = inst.d * inst.ell;
-        for b in 0..ell_addr {
-            out.push(BusColLabel {
-                col_id: col_id + b,
-                label: format!("twist[{mem_idx}].ra_bits[{b}]"),
-            });
-        }
-        for b in 0..ell_addr {
-            out.push(BusColLabel {
-                col_id: col_id + ell_addr + b,
-                label: format!("twist[{mem_idx}].wa_bits[{b}]"),
-            });
-        }
-        out.push(BusColLabel {
-            col_id: col_id + 2 * ell_addr + 0,
-            label: format!("twist[{mem_idx}].has_read"),
-        });
-        out.push(BusColLabel {
-            col_id: col_id + 2 * ell_addr + 1,
-            label: format!("twist[{mem_idx}].has_write"),
-        });
-        out.push(BusColLabel {
-            col_id: col_id + 2 * ell_addr + 2,
-            label: format!("twist[{mem_idx}].wv"),
-        });
-        out.push(BusColLabel {
-            col_id: col_id + 2 * ell_addr + 3,
-            label: format!("twist[{mem_idx}].rv"),
-        });
-        // NOTE: inc_at_write_addr intentionally not required (see witness-step version).
 
         col_id += 2 * ell_addr + 5;
     }
@@ -472,28 +393,297 @@ fn ensure_ccs_references_bus_cols(
     )))
 }
 
-pub(crate) fn ensure_ccs_binds_shared_bus_for_witness_steps<Cmt: Clone, KK: Clone>(
+#[derive(Clone, Debug)]
+struct BusPaddingLabel {
+    flag_z_idx: usize,
+    field_z_idx: usize,
+    label: String,
+}
+
+fn required_bus_padding_for_step<Cmt, S: BusStepView<Cmt>>(step: &S, bus: &CpuBusSpec) -> Vec<BusPaddingLabel> {
+    let mut out = Vec::<BusPaddingLabel>::new();
+    let mut col_id = 0usize;
+
+    for lut_idx in 0..step.lut_insts_len() {
+        let inst = step.lut_inst(lut_idx);
+        let ell_addr = inst.d * inst.ell;
+        let has_lookup_z = bus.bus_cell_index(col_id + ell_addr, 0);
+        let val_z = bus.bus_cell_index(col_id + ell_addr + 1, 0);
+
+        // (1 - has_lookup) * val = 0
+        out.push(BusPaddingLabel {
+            flag_z_idx: has_lookup_z,
+            field_z_idx: val_z,
+            label: format!("shout[{lut_idx}]: (1-has_lookup)*val"),
+        });
+
+        // (1 - has_lookup) * addr_bits[b] = 0
+        for b in 0..ell_addr {
+            let bit_z = bus.bus_cell_index(col_id + b, 0);
+            out.push(BusPaddingLabel {
+                flag_z_idx: has_lookup_z,
+                field_z_idx: bit_z,
+                label: format!("shout[{lut_idx}]: (1-has_lookup)*addr_bits[{b}]"),
+            });
+        }
+
+        col_id += ell_addr + 2;
+    }
+
+    for mem_idx in 0..step.mem_insts_len() {
+        let inst = step.mem_inst(mem_idx);
+        let ell_addr = inst.d * inst.ell;
+
+        let has_read_z = bus.bus_cell_index(col_id + 2 * ell_addr + 0, 0);
+        let has_write_z = bus.bus_cell_index(col_id + 2 * ell_addr + 1, 0);
+
+        let wv_z = bus.bus_cell_index(col_id + 2 * ell_addr + 2, 0);
+        let rv_z = bus.bus_cell_index(col_id + 2 * ell_addr + 3, 0);
+        let inc_z = bus.bus_cell_index(col_id + 2 * ell_addr + 4, 0);
+
+        // (1 - has_read) * rv = 0
+        out.push(BusPaddingLabel {
+            flag_z_idx: has_read_z,
+            field_z_idx: rv_z,
+            label: format!("twist[{mem_idx}]: (1-has_read)*rv"),
+        });
+
+        // (1 - has_read) * ra_bits[b] = 0
+        for b in 0..ell_addr {
+            let bit_z = bus.bus_cell_index(col_id + b, 0);
+            out.push(BusPaddingLabel {
+                flag_z_idx: has_read_z,
+                field_z_idx: bit_z,
+                label: format!("twist[{mem_idx}]: (1-has_read)*ra_bits[{b}]"),
+            });
+        }
+
+        // (1 - has_write) * wv = 0
+        out.push(BusPaddingLabel {
+            flag_z_idx: has_write_z,
+            field_z_idx: wv_z,
+            label: format!("twist[{mem_idx}]: (1-has_write)*wv"),
+        });
+
+        // (1 - has_write) * inc_at_write_addr = 0
+        out.push(BusPaddingLabel {
+            flag_z_idx: has_write_z,
+            field_z_idx: inc_z,
+            label: format!("twist[{mem_idx}]: (1-has_write)*inc_at_write_addr"),
+        });
+
+        // (1 - has_write) * wa_bits[b] = 0
+        for b in 0..ell_addr {
+            let bit_z = bus.bus_cell_index(col_id + ell_addr + b, 0);
+            out.push(BusPaddingLabel {
+                flag_z_idx: has_write_z,
+                field_z_idx: bit_z,
+                label: format!("twist[{mem_idx}]: (1-has_write)*wa_bits[{b}]"),
+            });
+        }
+
+        col_id += 2 * ell_addr + 5;
+    }
+
+    out
+}
+
+fn infer_public_constant_one_cols_from_steps<Cmt, S: BusStepView<Cmt>>(steps: &[S]) -> Vec<usize> {
+    if steps.is_empty() {
+        return Vec::new();
+    }
+    let m_in = steps[0].m_in();
+    if m_in == 0 {
+        return Vec::new();
+    }
+
+    let mut is_const_one = vec![true; m_in];
+    for step in steps {
+        let x = step.public_x();
+        if x.len() != m_in {
+            // Treat as no const-one. Other layers validate x length.
+            return Vec::new();
+        }
+        for c in 0..m_in {
+            if x[c] != F::ONE {
+                is_const_one[c] = false;
+            }
+        }
+    }
+    is_const_one
+        .iter()
+        .enumerate()
+        .filter_map(|(c, &ok)| ok.then_some(c))
+        .collect()
+}
+
+fn row_is_all_zero(mat: &Mat<F>, row: usize) -> bool {
+    for &v in mat.row(row) {
+        if v != F::ZERO {
+            return false;
+        }
+    }
+    true
+}
+
+fn row_single_nonzero_col(mat: &Mat<F>, row: usize) -> Option<usize> {
+    let mut found: Option<usize> = None;
+    for (c, &v) in mat.row(row).iter().enumerate() {
+        if v == F::ZERO {
+            continue;
+        }
+        if found.is_some() {
+            return None;
+        }
+        found = Some(c);
+    }
+    found
+}
+
+fn row_padding_flag_col(mat: &Mat<F>, row: usize, const_one_cols: &[usize]) -> Option<usize> {
+    let mut first: Option<(usize, F)> = None;
+    let mut second: Option<(usize, F)> = None;
+
+    for (c, &v) in mat.row(row).iter().enumerate() {
+        if v == F::ZERO {
+            continue;
+        }
+        if first.is_none() {
+            first = Some((c, v));
+            continue;
+        }
+        if second.is_none() {
+            second = Some((c, v));
+            continue;
+        }
+        // More than 2 non-zero entries -> not a simple (1-flag) form.
+        return None;
+    }
+
+    let (c1, v1) = first?;
+    let (c2, v2) = second?;
+
+    // Look for the canonical form: a*(one - flag), up to scaling by nonzero a.
+    // That means the two coefficients must be equal magnitude and opposite sign.
+    if v1 != -v2 {
+        return None;
+    }
+
+    if const_one_cols.contains(&c1) {
+        return Some(c2);
+    }
+    if const_one_cols.contains(&c2) {
+        return Some(c1);
+    }
+    None
+}
+
+fn ensure_ccs_has_bus_padding_constraints(
     s: &CcsStructure<F>,
     bus: &CpuBusSpec,
-    steps: &[StepWitnessBundle<Cmt, F, KK>],
+    const_one_cols: &[usize],
+    required: &[BusPaddingLabel],
+) -> Result<(), PiCcsError> {
+    if bus.bus_cols == 0 {
+        return Ok(());
+    }
+
+    let active = active_matrix_indices(s);
+    if active.is_empty() {
+        // CCS has no active constraints (e.g., f == 0); skip guardrail to preserve plumbing tests.
+        return Ok(());
+    }
+
+    if const_one_cols.is_empty() {
+        return Err(PiCcsError::InvalidInput(
+            "shared_cpu_bus=true but no public constant-one column found to validate required padding constraints.\n\
+             Fix: include a public input column that is always 1 (e.g., x[0]=1) and build padding constraints using it \
+             (recommended: use `neo_memory::cpu::constraints::extend_ccs_with_shared_cpu_bus_constraints` or \
+              `neo_memory::cpu::constraints::CpuConstraintBuilder`)."
+                .into(),
+        ));
+    }
+
+    // This validation is intentionally strict and recognizes the canonical R1CS embedding:
+    // A(z) * B(z) - C(z) = 0, with padding rows using:
+    //   A(z) = (1 - flag), B(z) = field, C(z) = 0.
+    let (a_idx, b_idx, c_idx) = if s.matrices.len() >= 4 && s.matrices[0].is_identity() {
+        (1usize, 2usize, 3usize)
+    } else if s.matrices.len() >= 3 {
+        (0usize, 1usize, 2usize)
+    } else {
+        return Err(PiCcsError::InvalidInput(
+            "shared_cpu_bus=true but CPU CCS has fewer than 3 matrices; cannot validate padding constraints".into(),
+        ));
+    };
+
+    let mut present: HashSet<(usize, usize)> = HashSet::new();
+    for row in 0..s.n {
+        if !row_is_all_zero(&s.matrices[c_idx], row) {
+            continue;
+        }
+        let Some(field_col) = row_single_nonzero_col(&s.matrices[b_idx], row) else {
+            continue;
+        };
+        let Some(flag_col) = row_padding_flag_col(&s.matrices[a_idx], row, const_one_cols) else {
+            continue;
+        };
+        present.insert((flag_col, field_col));
+    }
+
+    let mut missing: Vec<&BusPaddingLabel> = Vec::new();
+    for req in required {
+        if !present.contains(&(req.flag_z_idx, req.field_z_idx)) {
+            missing.push(req);
+        }
+    }
+
+    if missing.is_empty() {
+        return Ok(());
+    }
+
+    let mut examples: Vec<String> = missing
+        .iter()
+        .take(8)
+        .map(|c| format!("{}", c.label))
+        .collect();
+    if missing.len() > examples.len() {
+        examples.push(format!("... ({} more)", missing.len() - examples.len()));
+    }
+
+    Err(PiCcsError::InvalidInput(format!(
+        "shared_cpu_bus=true but CPU CCS is missing required padding constraints that force inactive bus fields to zero.\n\
+         This is a common footgun: Twist/Shout gate checks by has_* flags, so unconstrained bus fields become arbitrary degrees of freedom.\n\
+         Fix: inject the canonical shared-bus constraints (binding + padding) using `neo_memory::cpu::constraints::extend_ccs_with_shared_cpu_bus_constraints`, \
+         or add constraints of the form (1 - has_*) * field = 0 for each gated bus field (recommended: use `neo_memory::cpu::constraints::CpuConstraintBuilder`).\n\
+         Missing examples: {}",
+        examples.join(", ")
+    )))
+}
+
+fn ensure_ccs_binds_shared_bus_for_steps<Cmt, S: BusStepView<Cmt>>(
+    s: &CcsStructure<F>,
+    bus: &CpuBusSpec,
+    steps: &[S],
 ) -> Result<(), PiCcsError> {
     if steps.is_empty() || bus.bus_cols == 0 {
         return Ok(());
     }
-    let required = required_bus_cols_for_step_witness(&steps[0]);
+    let required = required_bus_cols_for_step(&steps[0]);
     ensure_ccs_references_bus_cols(s, bus, &required)
 }
 
-pub(crate) fn ensure_ccs_binds_shared_bus_for_instance_steps<Cmt: Clone, KK: Clone>(
+fn ensure_ccs_has_shared_bus_padding_for_steps<Cmt, S: BusStepView<Cmt>>(
     s: &CcsStructure<F>,
     bus: &CpuBusSpec,
-    steps: &[StepInstanceBundle<Cmt, F, KK>],
+    steps: &[S],
 ) -> Result<(), PiCcsError> {
     if steps.is_empty() || bus.bus_cols == 0 {
         return Ok(());
     }
-    let required = required_bus_cols_for_step_instance(&steps[0]);
-    ensure_ccs_references_bus_cols(s, bus, &required)
+    let const_one_cols = infer_public_constant_one_cols_from_steps(steps);
+    let required = required_bus_padding_for_step(&steps[0], bus);
+    ensure_ccs_has_bus_padding_constraints(s, bus, &const_one_cols, &required)
 }
 
 pub(crate) fn decode_cpu_z_to_k(params: &NeoParams, Z: &Mat<F>) -> Vec<K> {

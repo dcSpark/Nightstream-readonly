@@ -42,7 +42,7 @@ use p3_field::PrimeCharacteristicRing;
 // Utilities
 // ============================================================================
 
-pub use crate::memory_sidecar::memory::absorb_step_memory_commitments;
+pub use crate::memory_sidecar::memory::absorb_step_memory;
 
 /// Commitment mixers so the coordinator stays scheme-agnostic.
 /// - `mix_rhos_commits(ρ, cs)` returns Σ ρ_i · c_i  (S-action).
@@ -404,7 +404,6 @@ where
 
 fn fold_shard_prove_impl<L, MR, MB>(
     collect_val_lane_wits: bool,
-    shared_cpu_bus: bool,
     mode: FoldingMode,
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
@@ -423,14 +422,7 @@ where
     let s0 = s_me
         .ensure_identity_first()
         .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
-    let (s, cpu_bus) = if shared_cpu_bus {
-        let bus = crate::memory_sidecar::cpu_bus::infer_cpu_bus_spec_for_witness_steps(&s0, steps)?;
-        crate::memory_sidecar::cpu_bus::ensure_ccs_binds_shared_bus_for_witness_steps(&s0, &bus, steps)?;
-        let s = crate::memory_sidecar::cpu_bus::extend_ccs_with_cpu_bus_copyouts(&s0, &bus)?;
-        (s, Some(bus))
-    } else {
-        (s0, None)
-    };
+    let (s, cpu_bus) = crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(&s0, steps)?;
     // Route A terminal checks interpret `ME.y_scalars[0]` as MLE(column)(r_time), which requires M₀ = I.
     s.assert_m0_is_identity_for_nc()
         .map_err(|e| PiCcsError::InvalidInput(format!("identity-first (M₀=I) required: {e:?}")))?;
@@ -452,11 +444,7 @@ where
     let mut prev_twist_decoded: Option<Vec<neo_memory::twist::TwistDecodedCols>> = None;
 
     for (idx, step) in steps.iter().enumerate() {
-        if shared_cpu_bus {
-            crate::memory_sidecar::memory::absorb_step_memory_metadata_only_witness(tr, step);
-        } else {
-            crate::memory_sidecar::memory::absorb_step_memory_commitments_witness(tr, step);
-        }
+        crate::memory_sidecar::memory::absorb_step_memory_witness(tr, step);
 
         let (mcs_inst, mcs_wit) = &step.mcs;
 
@@ -534,7 +522,7 @@ where
             tr,
             params,
             step,
-            cpu_bus.as_ref(),
+            Some(&cpu_bus),
             ell_n,
             &r_cycle,
         )?;
@@ -542,7 +530,7 @@ where
             tr,
             params,
             step,
-            cpu_bus.as_ref(),
+            Some(&cpu_bus),
             ell_n,
             &r_cycle,
         )?;
@@ -635,7 +623,7 @@ where
         // Memory sidecar: emit ME claims at the shared r_time (no fixed-challenge sumcheck).
         let prev_step = (idx > 0).then(|| &steps[idx - 1]);
         let prev_twist_decoded_ref = prev_twist_decoded.as_deref();
-	        let mut mem_out = crate::memory_sidecar::memory::finalize_route_a_memory_prover(
+	        let mut mem_proof = crate::memory_sidecar::memory::finalize_route_a_memory_prover(
 	            tr,
 	            params,
 	            &s,
@@ -647,24 +635,13 @@ where
 	            &twist_pre,
 	            &r_time,
 	            mcs_inst.m_in,
-	            shared_cpu_bus,
 	            idx,
 	        )?;
 	        prev_twist_decoded = Some(twist_pre.into_iter().map(|p| p.decoded).collect());
 
-        normalize_me_claims(&mut mem_out.mem.me_claims_time, ell_n, ell_d, s.t())?;
-        normalize_me_claims(&mut mem_out.mem.me_claims_val, ell_n, ell_d, s.t())?;
+        normalize_me_claims(&mut mem_proof.cpu_me_claims_val, ell_n, ell_d, s.t())?;
 
         validate_me_batch_invariants(&ccs_out, "prove step ccs outputs")?;
-        validate_me_batch_invariants(&mem_out.mem.me_claims_time, "prove step memory outputs")?;
-
-        // Build RLC inputs: CCS outputs + memory ME
-        let mut rlc_inputs = ccs_out.clone();
-        rlc_inputs.extend(mem_out.mem.me_claims_time.clone());
-        validate_me_batch_invariants(&rlc_inputs, "prove step RLC inputs (ccs_out + mem_time)")?;
-
-        let mut rlc_wits = outs_Z.clone();
-        rlc_wits.extend(pad_mats_to_ccs_width(&mem_out.me_wits_time, s.m)?);
 
         let (main_fold, Z_split) = prove_rlc_dec_lane(
             &mode,
@@ -676,8 +653,8 @@ where
             ell_d,
             k_dec,
             idx,
-            &rlc_inputs,
-            &rlc_wits,
+            &ccs_out,
+            &outs_Z,
             l,
             mixers,
         )?;
@@ -690,20 +667,25 @@ where
         // --------------------------------------------------------------------
         // Phase 2: Second folding lane for Twist val-eval ME claims at r_val.
         // --------------------------------------------------------------------
-        let val_fold = if mem_out.mem.me_claims_val.is_empty() {
+        let val_fold = if mem_proof.cpu_me_claims_val.is_empty() {
             None
         } else {
-            validate_me_batch_invariants(&mem_out.mem.me_claims_val, "prove step memory val outputs")?;
-            if mem_out.me_wits_val.len() != mem_out.mem.me_claims_val.len() {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "Twist(val) witness count mismatch (have {}, need {})",
-                    mem_out.me_wits_val.len(),
-                    mem_out.mem.me_claims_val.len()
-                )));
-            }
+            validate_me_batch_invariants(&mem_proof.cpu_me_claims_val, "prove step memory val outputs")?;
 
             tr.append_message(b"fold/val_lane_start", &(idx as u64).to_le_bytes());
-            let val_wits = pad_mats_to_ccs_width(&mem_out.me_wits_val, s.m)?;
+            let mut val_wits = Vec::with_capacity(mem_proof.cpu_me_claims_val.len());
+            val_wits.push(mcs_wit.Z.clone());
+            if let Some(prev) = prev_step {
+                val_wits.push(prev.mcs.1.Z.clone());
+            }
+            if val_wits.len() != mem_proof.cpu_me_claims_val.len() {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "Twist(val) witness count mismatch (have {}, need {})",
+                    val_wits.len(),
+                    mem_proof.cpu_me_claims_val.len()
+                )));
+            }
+            let val_wits = pad_mats_to_ccs_width(&val_wits, s.m)?;
             let (val_fold, mut Z_split_val) = prove_rlc_dec_lane(
                 &mode,
                 RlcLane::Val,
@@ -714,7 +696,7 @@ where
                 ell_d,
                 k_dec,
                 idx,
-                &mem_out.mem.me_claims_val,
+                &mem_proof.cpu_me_claims_val,
                 &val_wits,
                 l,
                 mixers,
@@ -738,7 +720,7 @@ where
                 rlc_parent: parent_pub,
                 dec_children: children,
             },
-            mem: mem_out.mem,
+            mem: mem_proof,
             batched_time,
             val_fold,
         });
@@ -766,49 +748,8 @@ where
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
     let (proof, _final_main_wits, _val_lane_wits) =
-        fold_shard_prove_impl(false, true, mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)?;
+        fold_shard_prove_impl(false, mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)?;
     Ok(proof)
-}
-
-#[deprecated(note = "legacy (independent mem/lut commitments) mode; use fold_shard_prove (shared CPU bus) instead")]
-pub fn fold_shard_prove_legacy<L, MR, MB>(
-    mode: FoldingMode,
-    tr: &mut Poseidon2Transcript,
-    params: &NeoParams,
-    s_me: &CcsStructure<F>,
-    steps: &[StepWitnessBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
-    acc_wit_init: &[Mat<F>],
-    l: &L,
-    mixers: CommitMixers<MR, MB>,
-) -> Result<ShardProof, PiCcsError>
-where
-    L: SModuleHomomorphism<F, Cmt>,
-    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
-    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
-{
-    let (proof, _final_main_wits, _val_lane_wits) =
-        fold_shard_prove_impl(false, false, mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)?;
-    Ok(proof)
-}
-
-pub fn fold_shard_prove_shared_cpu_bus<L, MR, MB>(
-    mode: FoldingMode,
-    tr: &mut Poseidon2Transcript,
-    params: &NeoParams,
-    s_me: &CcsStructure<F>,
-    steps: &[StepWitnessBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
-    acc_wit_init: &[Mat<F>],
-    l: &L,
-    mixers: CommitMixers<MR, MB>,
-) -> Result<ShardProof, PiCcsError>
-where
-    L: SModuleHomomorphism<F, Cmt>,
-    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
-    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
-{
-    fold_shard_prove(mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)
 }
 
 pub fn fold_shard_prove_with_witnesses<L, MR, MB>(
@@ -828,7 +769,7 @@ where
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
     let (proof, final_main_wits, val_lane_wits) =
-        fold_shard_prove_impl(true, true, mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)?;
+        fold_shard_prove_impl(true, mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)?;
     let outputs = proof.compute_fold_outputs(acc_init);
     if outputs.obligations.main.len() != final_main_wits.len() {
         return Err(PiCcsError::ProtocolError(format!(
@@ -852,69 +793,6 @@ where
             val_lane_wits,
         },
     ))
-}
-
-#[deprecated(note = "legacy (independent mem/lut commitments) mode; use fold_shard_prove_with_witnesses (shared CPU bus) instead")]
-pub fn fold_shard_prove_with_witnesses_legacy<L, MR, MB>(
-    mode: FoldingMode,
-    tr: &mut Poseidon2Transcript,
-    params: &NeoParams,
-    s_me: &CcsStructure<F>,
-    steps: &[StepWitnessBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
-    acc_wit_init: &[Mat<F>],
-    l: &L,
-    mixers: CommitMixers<MR, MB>,
-) -> Result<(ShardProof, ShardFoldOutputs<Cmt, F, K>, ShardFoldWitnesses<F>), PiCcsError>
-where
-    L: SModuleHomomorphism<F, Cmt>,
-    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
-    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
-{
-    let (proof, final_main_wits, val_lane_wits) =
-        fold_shard_prove_impl(true, false, mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)?;
-    let outputs = proof.compute_fold_outputs(acc_init);
-    if outputs.obligations.main.len() != final_main_wits.len() {
-        return Err(PiCcsError::ProtocolError(format!(
-            "final main witness count mismatch (have {}, need {})",
-            final_main_wits.len(),
-            outputs.obligations.main.len()
-        )));
-    }
-    if outputs.obligations.val.len() != val_lane_wits.len() {
-        return Err(PiCcsError::ProtocolError(format!(
-            "val-lane witness count mismatch (have {}, need {})",
-            val_lane_wits.len(),
-            outputs.obligations.val.len()
-        )));
-    }
-    Ok((
-        proof,
-        outputs,
-        ShardFoldWitnesses {
-            final_main_wits,
-            val_lane_wits,
-        },
-    ))
-}
-
-pub fn fold_shard_prove_shared_cpu_bus_with_witnesses<L, MR, MB>(
-    mode: FoldingMode,
-    tr: &mut Poseidon2Transcript,
-    params: &NeoParams,
-    s_me: &CcsStructure<F>,
-    steps: &[StepWitnessBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
-    acc_wit_init: &[Mat<F>],
-    l: &L,
-    mixers: CommitMixers<MR, MB>,
-) -> Result<(ShardProof, ShardFoldOutputs<Cmt, F, K>, ShardFoldWitnesses<F>), PiCcsError>
-where
-    L: SModuleHomomorphism<F, Cmt>,
-    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
-    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
-{
-    fold_shard_prove_with_witnesses(mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers)
 }
 
 // ============================================================================
@@ -922,7 +800,6 @@ where
 // ============================================================================
 
 fn fold_shard_verify_impl<MR, MB>(
-    shared_cpu_bus: bool,
     mode: FoldingMode,
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
@@ -939,13 +816,7 @@ where
     let s0 = s_me
         .ensure_identity_first()
         .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
-    let s = if shared_cpu_bus {
-        let bus = crate::memory_sidecar::cpu_bus::infer_cpu_bus_spec_for_instance_steps(&s0, steps)?;
-        crate::memory_sidecar::cpu_bus::ensure_ccs_binds_shared_bus_for_instance_steps(&s0, &bus, steps)?;
-        crate::memory_sidecar::cpu_bus::extend_ccs_with_cpu_bus_copyouts(&s0, &bus)?
-    } else {
-        s0
-    };
+    let (s, _cpu_bus) = crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(&s0, steps)?;
     // Route A terminal checks interpret `ME.y_scalars[0]` as MLE(column)(r_time), which requires M₀ = I.
     s.assert_m0_is_identity_for_nc()
         .map_err(|e| PiCcsError::InvalidInput(format!("identity-first (M₀=I) required: {e:?}")))?;
@@ -969,11 +840,7 @@ where
     let mut val_lane_obligations: Vec<MeInstance<Cmt, F, K>> = Vec::new();
 
     for (idx, (step, step_proof)) in steps.iter().zip(proof.steps.iter()).enumerate() {
-        if shared_cpu_bus {
-            crate::memory_sidecar::memory::absorb_step_memory_metadata_only(tr, step);
-        } else {
-            absorb_step_memory_commitments(tr, step);
-        }
+        absorb_step_memory(tr, step);
 
         let mcs_inst = &step.mcs_inst;
 
@@ -1177,11 +1044,10 @@ where
             return Err(PiCcsError::ProtocolError("Π_CCS header digest mismatch".into()));
         }
 
-        // Verify mem proofs and collect ME claims.
+        // Verify mem proofs (shared CPU bus only).
         let prev_step = (idx > 0).then(|| &steps[idx - 1]);
-	        let mem_out = crate::memory_sidecar::memory::verify_route_a_memory_step(
+	        let claim_idx = crate::memory_sidecar::memory::verify_route_a_memory_step(
 	            tr,
-	            params,
 	            step,
 	            prev_step,
 	            &step_proof.fold.ccs_out[0],
@@ -1193,15 +1059,8 @@ where
 	            &step_proof.mem,
 	            &shout_pre,
 	            &twist_pre,
-	            shared_cpu_bus,
 	            idx,
 	        )?;
-        let crate::memory_sidecar::memory::RouteAMemoryVerifyOutput {
-            collected_me_time,
-            collected_me_val,
-            claim_idx_end: claim_idx,
-            twist_total_inc_sums: _twist_total_inc_sums,
-        } = mem_out;
 
         if claim_idx != final_values.len() {
             return Err(PiCcsError::ProtocolError(format!(
@@ -1213,23 +1072,7 @@ where
         }
 
         validate_me_batch_invariants(&step_proof.fold.ccs_out, "verify step ccs outputs")?;
-        validate_me_batch_invariants(&collected_me_time, "verify step memory outputs")?;
-        validate_me_batch_invariants(&collected_me_val, "verify step memory val outputs")?;
-
-        // Enforce r-alignment between CCS outputs and memory ME claims (needed for RLC).
-        let r_ccs = &step_proof.fold.ccs_out[0].r;
-        for (i, me) in collected_me_time.iter().enumerate() {
-            if &me.r != r_ccs {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "step {}: memory ME[{}] r != CCS r (cannot fold via Π_RLC)",
-                    idx, i
-                )));
-            }
-        }
-
-        let mut rlc_inputs = step_proof.fold.ccs_out.clone();
-        rlc_inputs.extend_from_slice(&collected_me_time);
-        validate_me_batch_invariants(&rlc_inputs, "verify step RLC inputs (ccs_out + mem_time)")?;
+        validate_me_batch_invariants(&step_proof.mem.cpu_me_claims_val, "verify step memory val outputs")?;
         verify_rlc_dec_lane(
             RlcLane::Main,
             tr,
@@ -1239,7 +1082,7 @@ where
             ell_d,
             mixers,
             idx,
-            &rlc_inputs,
+            &step_proof.fold.ccs_out,
             &step_proof.fold.rlc_rhos,
             &step_proof.fold.rlc_parent,
             &step_proof.fold.dec_children,
@@ -1248,7 +1091,7 @@ where
         accumulator = step_proof.fold.dec_children.clone();
 
         // Phase 2: Verify the r_val folding lane for Twist val-eval ME claims.
-        match (collected_me_val.is_empty(), step_proof.val_fold.as_ref()) {
+        match (step_proof.mem.cpu_me_claims_val.is_empty(), step_proof.val_fold.as_ref()) {
             (true, None) => {}
             (true, Some(_)) => {
                 return Err(PiCcsError::ProtocolError(format!(
@@ -1273,7 +1116,7 @@ where
                     ell_d,
                     mixers,
                     idx,
-                    &collected_me_val,
+                    &step_proof.mem.cpu_me_claims_val,
                     &val_fold.rlc_rhos,
                     &val_fold.rlc_parent,
                     &val_fold.dec_children,
@@ -1308,69 +1151,10 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    fold_shard_verify_impl(true, mode, tr, params, s_me, steps, acc_init, proof, mixers)
-}
-
-#[deprecated(note = "legacy (independent mem/lut commitments) mode; use fold_shard_verify (shared CPU bus) instead")]
-pub fn fold_shard_verify_legacy<MR, MB>(
-    mode: FoldingMode,
-    tr: &mut Poseidon2Transcript,
-    params: &NeoParams,
-    s_me: &CcsStructure<F>,
-    steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
-    proof: &ShardProof,
-    mixers: CommitMixers<MR, MB>,
-) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
-where
-    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
-    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
-{
-    fold_shard_verify_impl(false, mode, tr, params, s_me, steps, acc_init, proof, mixers)
-}
-
-pub fn fold_shard_verify_shared_cpu_bus<MR, MB>(
-    mode: FoldingMode,
-    tr: &mut Poseidon2Transcript,
-    params: &NeoParams,
-    s_me: &CcsStructure<F>,
-    steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
-    proof: &ShardProof,
-    mixers: CommitMixers<MR, MB>,
-) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
-where
-    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
-    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
-{
-    fold_shard_verify(mode, tr, params, s_me, steps, acc_init, proof, mixers)
+    fold_shard_verify_impl(mode, tr, params, s_me, steps, acc_init, proof, mixers)
 }
 
 pub fn fold_shard_verify_and_finalize<MR, MB, Fin>(
-    mode: FoldingMode,
-    tr: &mut Poseidon2Transcript,
-    params: &NeoParams,
-    s_me: &CcsStructure<F>,
-    steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
-    proof: &ShardProof,
-    mixers: CommitMixers<MR, MB>,
-    finalizer: &mut Fin,
-) -> Result<(), PiCcsError>
-where
-    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
-    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
-    Fin: ObligationFinalizer<Cmt, F, K, Error = PiCcsError>,
-{
-    let outputs = fold_shard_verify(mode, tr, params, s_me, steps, acc_init, proof, mixers)?;
-    let report = finalizer.finalize(&outputs.obligations)?;
-    outputs
-        .obligations
-        .require_all_finalized(report.did_finalize_main, report.did_finalize_val)?;
-    Ok(())
-}
-
-pub fn fold_shard_verify_and_finalize_shared_cpu_bus<MR, MB, Fin>(
     mode: FoldingMode,
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
