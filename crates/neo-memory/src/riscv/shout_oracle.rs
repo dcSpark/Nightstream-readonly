@@ -11,6 +11,7 @@ use neo_reductions::sumcheck::RoundOracle;
 use p3_field::PrimeCharacteristicRing;
 
 use crate::mle::build_chi_table;
+use crate::sparse_time::SparseIdxVec;
 
 use super::lookups::{compute_op, evaluate_opcode_mle, uninterleave_bits, RiscvOpcode};
 
@@ -39,7 +40,7 @@ pub struct RiscvAddressLookupOracleSparse {
 }
 
 impl RiscvAddressLookupOracleSparse {
-    fn ensure_supported(opcode: RiscvOpcode, xlen: usize) -> Result<(), PiCcsError> {
+    pub fn validate_spec(opcode: RiscvOpcode, xlen: usize) -> Result<(), PiCcsError> {
         if xlen != 32 {
             return Err(PiCcsError::InvalidInput(
                 "RISC-V implicit Shout tables currently support xlen=32 only".into(),
@@ -69,7 +70,7 @@ impl RiscvAddressLookupOracleSparse {
         has_lookup: &[K],
         r_cycle: &[K],
     ) -> Result<(Self, K), PiCcsError> {
-        Self::ensure_supported(opcode, xlen)?;
+        Self::validate_spec(opcode, xlen)?;
 
         let ell_total = xlen
             .checked_mul(2)
@@ -123,6 +124,93 @@ impl RiscvAddressLookupOracleSparse {
 
             let w_t = chi_cycle_table[t] * gate;
             *weights.entry(addr_t).or_insert(K::ZERO) += w_t;
+        }
+
+        // Claimed sum = Σ_a Table(a) * weight(a), summed over sparse support.
+        let mut claimed_sum = K::ZERO;
+        for (&addr, &w) in weights.iter() {
+            let (rs1, rs2) = uninterleave_bits(addr as u128);
+            let out = compute_op(opcode, rs1, rs2, xlen);
+            claimed_sum += K::from_u64(out) * w;
+        }
+
+        Ok((
+            Self {
+                opcode,
+                xlen,
+                ell_total,
+                rounds_remaining: ell_total,
+                bound_prefix: Vec::with_capacity(ell_total),
+                weights,
+            },
+            claimed_sum,
+        ))
+    }
+
+    /// Construct the oracle and its claimed sum from sparse-in-time decoded columns.
+    ///
+    /// This avoids building dense `2^ell_cycle` vectors and iterates only over `has_lookup`'s nonzero entries.
+    pub fn new_sparse_time(
+        opcode: RiscvOpcode,
+        xlen: usize,
+        addr_bits: &[SparseIdxVec<K>],
+        has_lookup: &SparseIdxVec<K>,
+        r_cycle: &[K],
+    ) -> Result<(Self, K), PiCcsError> {
+        Self::validate_spec(opcode, xlen)?;
+
+        let ell_total = xlen
+            .checked_mul(2)
+            .ok_or_else(|| PiCcsError::InvalidInput("RISC-V implicit Shout: 2*xlen overflow".into()))?;
+        if addr_bits.len() != ell_total {
+            return Err(PiCcsError::InvalidInput(format!(
+                "RISC-V implicit Shout: addr_bits.len()={} != 2*xlen={}",
+                addr_bits.len(),
+                ell_total
+            )));
+        }
+        if ell_total > 64 {
+            return Err(PiCcsError::InvalidInput(
+                "RISC-V implicit Shout: ell_total > 64 not supported (key does not fit u64)".into(),
+            ));
+        }
+
+        let pow2_cycle = 1usize
+            .checked_shl(r_cycle.len() as u32)
+            .ok_or_else(|| PiCcsError::InvalidInput("RISC-V implicit Shout: 2^ell_cycle overflow".into()))?;
+        if has_lookup.len() != pow2_cycle {
+            return Err(PiCcsError::InvalidInput(format!(
+                "RISC-V implicit Shout: has_lookup.len()={} != 2^ell_cycle={pow2_cycle}",
+                has_lookup.len()
+            )));
+        }
+        for (i, col) in addr_bits.iter().enumerate() {
+            if col.len() != pow2_cycle {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "RISC-V implicit Shout: addr_bits[{i}].len()={} != 2^ell_cycle={pow2_cycle}",
+                    col.len()
+                )));
+            }
+        }
+
+        // Build sparse weight table: weight[a] = Σ_t χ(r_cycle,t) * has_lookup(t) for steps hitting address a.
+        let mut weights: HashMap<u64, K> = HashMap::new();
+        for &(t, gate) in has_lookup.entries() {
+            if gate == K::ZERO {
+                continue;
+            }
+
+            let mut addr_t: u64 = 0;
+            for b in 0..ell_total {
+                if addr_bits[b].get(t) == K::ONE {
+                    addr_t |= 1u64 << b;
+                }
+            }
+
+            let w_t = crate::mle::chi_at_index(r_cycle, t) * gate;
+            if w_t != K::ZERO {
+                *weights.entry(addr_t).or_insert(K::ZERO) += w_t;
+            }
         }
 
         // Claimed sum = Σ_a Table(a) * weight(a), summed over sparse support.

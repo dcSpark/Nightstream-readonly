@@ -11,15 +11,15 @@ use neo_math::{F, K};
 use neo_memory::bit_ops::eq_bits_prod;
 use neo_memory::cpu::BusLayout;
 use neo_memory::mle::{eq_points, lt_eval};
+use neo_memory::riscv::shout_oracle::RiscvAddressLookupOracleSparse;
 use neo_memory::sparse_time::SparseIdxVec;
 use neo_memory::ts_common as ts;
 use neo_memory::twist_oracle::{
-    table_mle_eval, AddressLookupOracle, IndexAdapterOracleSparseTime, LazyBitnessOracleSparseTime,
-    ShoutValueOracleSparse, TwistReadCheckAddrOracleSparseTime, TwistReadCheckOracleSparseTime,
-    TwistTotalIncOracleSparseTime, TwistValEvalOracleSparseTime, TwistWriteCheckAddrOracleSparseTime,
-    TwistWriteCheckOracleSparseTime,
+    AddressLookupOracle, IndexAdapterOracleSparseTime, LazyBitnessOracleSparseTime, ShoutValueOracleSparse,
+    TwistReadCheckAddrOracleSparseTime, TwistReadCheckOracleSparseTime, TwistTotalIncOracleSparseTime,
+    TwistValEvalOracleSparseTime, TwistWriteCheckAddrOracleSparseTime, TwistWriteCheckOracleSparseTime,
 };
-use neo_memory::witness::{LutInstance, MemInstance, StepInstanceBundle, StepWitnessBundle};
+use neo_memory::witness::{LutInstance, LutTableSpec, MemInstance, StepInstanceBundle, StepWitnessBundle};
 use neo_memory::{eval_init_at_r_addr, twist, BatchedAddrProof, MemInit};
 use neo_params::NeoParams;
 use neo_reductions::sumcheck::{BatchedClaim, RoundOracle};
@@ -29,6 +29,56 @@ use p3_field::PrimeCharacteristicRing;
 // ============================================================================
 // Transcript binding
 // ============================================================================
+
+fn bind_shout_table_spec(tr: &mut Poseidon2Transcript, spec: &Option<LutTableSpec>) {
+    let Some(spec) = spec else {
+        return;
+    };
+
+    tr.append_message(b"shout/table_spec/tag", &[1u8]);
+    match spec {
+        LutTableSpec::RiscvOpcode { opcode, xlen } => {
+            // Stable numeric encoding: align with `RiscvShoutTables::opcode_to_id`.
+            let opcode_id: u64 = match opcode {
+                neo_memory::riscv::lookups::RiscvOpcode::And => 0,
+                neo_memory::riscv::lookups::RiscvOpcode::Xor => 1,
+                neo_memory::riscv::lookups::RiscvOpcode::Or => 2,
+                neo_memory::riscv::lookups::RiscvOpcode::Add => 3,
+                neo_memory::riscv::lookups::RiscvOpcode::Sub => 4,
+                neo_memory::riscv::lookups::RiscvOpcode::Slt => 5,
+                neo_memory::riscv::lookups::RiscvOpcode::Sltu => 6,
+                neo_memory::riscv::lookups::RiscvOpcode::Sll => 7,
+                neo_memory::riscv::lookups::RiscvOpcode::Srl => 8,
+                neo_memory::riscv::lookups::RiscvOpcode::Sra => 9,
+                neo_memory::riscv::lookups::RiscvOpcode::Eq => 10,
+                neo_memory::riscv::lookups::RiscvOpcode::Neq => 11,
+                neo_memory::riscv::lookups::RiscvOpcode::Mul => 12,
+                neo_memory::riscv::lookups::RiscvOpcode::Mulh => 13,
+                neo_memory::riscv::lookups::RiscvOpcode::Mulhu => 14,
+                neo_memory::riscv::lookups::RiscvOpcode::Mulhsu => 15,
+                neo_memory::riscv::lookups::RiscvOpcode::Div => 16,
+                neo_memory::riscv::lookups::RiscvOpcode::Divu => 17,
+                neo_memory::riscv::lookups::RiscvOpcode::Rem => 18,
+                neo_memory::riscv::lookups::RiscvOpcode::Remu => 19,
+                neo_memory::riscv::lookups::RiscvOpcode::Addw => 20,
+                neo_memory::riscv::lookups::RiscvOpcode::Subw => 21,
+                neo_memory::riscv::lookups::RiscvOpcode::Sllw => 22,
+                neo_memory::riscv::lookups::RiscvOpcode::Srlw => 23,
+                neo_memory::riscv::lookups::RiscvOpcode::Sraw => 24,
+                neo_memory::riscv::lookups::RiscvOpcode::Mulw => 25,
+                neo_memory::riscv::lookups::RiscvOpcode::Divw => 26,
+                neo_memory::riscv::lookups::RiscvOpcode::Divuw => 27,
+                neo_memory::riscv::lookups::RiscvOpcode::Remw => 28,
+                neo_memory::riscv::lookups::RiscvOpcode::Remuw => 29,
+                neo_memory::riscv::lookups::RiscvOpcode::Andn => 30,
+            };
+
+            tr.append_message(b"shout/table_spec/riscv/tag", &[1u8]);
+            tr.append_message(b"shout/table_spec/riscv/opcode_id", &opcode_id.to_le_bytes());
+            tr.append_message(b"shout/table_spec/riscv/xlen", &(*xlen as u64).to_le_bytes());
+        }
+    }
+}
 
 fn absorb_step_memory_impl<'a, LI, MI>(tr: &mut Poseidon2Transcript, mut lut_insts: LI, mut mem_insts: MI)
 where
@@ -45,6 +95,7 @@ where
         tr.append_message(b"shout/n_side", &(inst.n_side as u64).to_le_bytes());
         tr.append_message(b"shout/steps", &(inst.steps as u64).to_le_bytes());
         tr.append_message(b"shout/ell", &(inst.ell as u64).to_le_bytes());
+        bind_shout_table_spec(tr, &inst.table_spec);
         let table_digest = digest_fields(b"shout/table", &inst.table);
         tr.append_message(b"shout/table_digest", &table_digest);
     }
@@ -147,7 +198,7 @@ pub struct ShoutAddrPreVerifyData {
     pub addr_claim_sum: K,
     pub addr_final: K,
     pub r_addr: Vec<K>,
-    pub table_k: Vec<K>,
+    pub table_eval_at_r_addr: K,
 }
 
 pub(crate) struct TwistAddrPreProverData {
@@ -452,9 +503,24 @@ pub(crate) fn prove_shout_addr_pre_time(
             has_lookup,
             val,
         };
-        let table_k: Vec<K> = lut_inst.table.iter().map(|&v| v.into()).collect();
-        let (mut addr_oracle, addr_claim_sum) =
-            AddressLookupOracle::new(&decoded.addr_bits, &decoded.has_lookup, &table_k, r_cycle, ell_addr);
+        let (mut addr_oracle, addr_claim_sum): (Box<dyn RoundOracle>, K) = match &lut_inst.table_spec {
+            None => {
+                let table_k: Vec<K> = lut_inst.table.iter().map(|&v| v.into()).collect();
+                let (o, sum) =
+                    AddressLookupOracle::new(&decoded.addr_bits, &decoded.has_lookup, &table_k, r_cycle, ell_addr);
+                (Box::new(o), sum)
+            }
+            Some(LutTableSpec::RiscvOpcode { opcode, xlen }) => {
+                let (o, sum) = RiscvAddressLookupOracleSparse::new_sparse_time(
+                    *opcode,
+                    *xlen,
+                    &decoded.addr_bits,
+                    &decoded.has_lookup,
+                    r_cycle,
+                )?;
+                (Box::new(o), sum)
+            }
+        };
 
         let labels: [&[u8]; 1] = [b"shout/addr_pre".as_slice()];
         let claimed_sums = vec![addr_claim_sum];
@@ -462,7 +528,7 @@ pub(crate) fn prove_shout_addr_pre_time(
         bind_batched_claim_sums(tr, b"shout/addr_pre_time/claimed_sums", &claimed_sums, &labels);
 
         let mut claims = [BatchedClaim {
-            oracle: &mut addr_oracle,
+            oracle: addr_oracle.as_mut(),
             claimed_sum: addr_claim_sum,
             label: labels[0],
         }];
@@ -497,7 +563,7 @@ pub fn verify_shout_addr_pre_time(
     let mut out = Vec::with_capacity(step.lut_insts.len());
 
     for (idx, lut_inst) in step.lut_insts.iter().enumerate() {
-        let table_k: Vec<K> = lut_inst.table.iter().map(|&v| v.into()).collect();
+        neo_memory::addr::validate_shout_bit_addressing(lut_inst)?;
         let proof = match mem_proof.proofs.get(idx) {
             Some(MemOrLutProof::Shout(p)) => p,
             _ => return Err(PiCcsError::InvalidInput("expected Shout proof".into())),
@@ -581,11 +647,28 @@ pub fn verify_shout_addr_pre_time(
         let addr_claim_sum = proof.addr_pre.claimed_sums[0];
         let addr_final = finals[0];
 
+        let table_eval_at_r_addr = match &lut_inst.table_spec {
+            None => {
+                let pow2 = 1usize
+                    .checked_shl(r_addr.len() as u32)
+                    .ok_or_else(|| PiCcsError::InvalidInput("Shout: 2^ell_addr overflow".into()))?;
+                let mut acc = K::ZERO;
+                for (idx, &v) in lut_inst.table.iter().enumerate().take(pow2) {
+                    let w = neo_memory::mle::chi_at_index(&r_addr, idx);
+                    acc += K::from(v) * w;
+                }
+                acc
+            }
+            Some(LutTableSpec::RiscvOpcode { opcode, xlen }) => {
+                neo_memory::riscv::lookups::evaluate_opcode_mle(*opcode, &r_addr, *xlen)
+            }
+        };
+
         out.push(ShoutAddrPreVerifyData {
             addr_claim_sum,
             addr_final,
             r_addr,
-            table_k,
+            table_eval_at_r_addr,
         });
     }
 
@@ -1609,8 +1692,7 @@ pub fn verify_route_a_memory_step(
             ));
         }
 
-        let table_eval = table_mle_eval(&pre.table_k, &pre.r_addr);
-        let expected_addr_final = table_eval * adapter_claim;
+        let expected_addr_final = pre.table_eval_at_r_addr * adapter_claim;
         if expected_addr_final != pre.addr_final {
             return Err(PiCcsError::ProtocolError("shout addr terminal value mismatch".into()));
         }

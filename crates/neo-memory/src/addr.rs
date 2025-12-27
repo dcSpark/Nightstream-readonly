@@ -3,6 +3,7 @@ use neo_reductions::error::PiCcsError;
 use p3_field::PrimeCharacteristicRing;
 
 use crate::cpu::BusLayout;
+use crate::riscv::shout_oracle::RiscvAddressLookupOracleSparse;
 use crate::witness::{LutInstance, LutTableSpec, MemInstance};
 
 pub fn for_each_addr_bit_dim_major_le(addr: u64, d: usize, n_side: usize, ell: usize, mut f: impl FnMut(usize, bool)) {
@@ -115,7 +116,8 @@ pub fn validate_shout_bit_addressing<Cmt, F>(inst: &LutInstance<Cmt, F>) -> Resu
         }
 
         match spec {
-            LutTableSpec::RiscvOpcode { xlen, .. } => {
+            LutTableSpec::RiscvOpcode { opcode, xlen } => {
+                RiscvAddressLookupOracleSparse::validate_spec(*opcode, *xlen)?;
                 if inst.n_side != 2 || inst.ell != 1 {
                     return Err(PiCcsError::InvalidInput(format!(
                         "Shout(RISC-V): expected n_side=2, ell=1, got n_side={}, ell={}",
