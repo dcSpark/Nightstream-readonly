@@ -2,6 +2,7 @@ use crate::PiCcsProof;
 use neo_ajtai::Commitment as Cmt;
 use neo_ccs::{matrix::Mat, MeInstance};
 use neo_math::{F, K};
+use neo_memory::BatchedAddrProof;
 use neo_memory::output_check::OutputBindingProof;
 
 pub type TwistProofK = neo_memory::twist::TwistProof<K>;
@@ -88,6 +89,8 @@ pub struct MemSidecarProof<C, FF, KK> {
     /// In shared-CPU-bus-only mode, Twist reads val-lane openings from these claims
     /// (current step + optional previous step for rollover).
     pub cpu_me_claims_val: Vec<MeInstance<C, FF, KK>>,
+    /// Route A Shout address pre-time proofs batched across all Shout instances in the step.
+    pub shout_addr_pre: BatchedAddrProof<KK>,
     pub proofs: Vec<MemOrLutProof>,
 }
 

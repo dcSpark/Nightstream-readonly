@@ -24,7 +24,7 @@ type F = Goldilocks;
 
 /// Witness column layout for our test CPU.
 ///
-/// Layout: [const_one, is_load, is_store, rd_value, rs2_value, effective_addr, is_lookup, lookup_key, lookup_out, ...bus...]
+/// Layout: [const_one, is_load, is_store, rd_value, rs2_value, effective_addr, is_lookup, lookup_key, lookup_out, ...unused..., ...bus...]
 const COL_CONST_ONE: usize = 0;
 const COL_IS_LOAD: usize = 1;
 const COL_IS_STORE: usize = 2;
@@ -34,7 +34,9 @@ const COL_EFFECTIVE_ADDR: usize = 5;
 const COL_IS_LOOKUP: usize = 6;
 const COL_LOOKUP_KEY: usize = 7;
 const COL_LOOKUP_OUT: usize = 8;
-const CPU_COLS: usize = 9;
+// Leave slack columns between CPU and bus so the identity-first CCS has enough rows
+// for all injected constraints (including bitness constraints).
+const CPU_COLS: usize = 16;
 
 fn create_cpu_layout() -> CpuColumnLayout {
     CpuColumnLayout {

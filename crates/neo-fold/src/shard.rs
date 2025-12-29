@@ -597,6 +597,7 @@ where
             Some(&cpu_bus),
             ell_n,
             &r_cycle,
+            idx,
         )?;
         let twist_pre = crate::memory_sidecar::memory::prove_twist_addr_pre_time(
             tr,
@@ -723,7 +724,7 @@ where
             prev_step,
             prev_twist_decoded_ref,
             &mut mem_oracles,
-            &shout_pre,
+            &shout_pre.addr_pre,
             &twist_pre,
             &r_time,
             mcs_inst.m_in,
@@ -1111,7 +1112,7 @@ where
         let r_cycle: Vec<K> =
             ts::sample_ext_point(tr, b"route_a/r_cycle", b"route_a/cycle/0", b"route_a/cycle/1", ell_n);
 
-        let shout_pre = crate::memory_sidecar::memory::verify_shout_addr_pre_time(tr, step, &step_proof.mem)?;
+        let shout_pre = crate::memory_sidecar::memory::verify_shout_addr_pre_time(tr, step, &step_proof.mem, idx)?;
         let twist_pre = crate::memory_sidecar::memory::verify_twist_addr_pre_time(tr, step, &step_proof.mem)?;
         let crate::memory_sidecar::route_a_time::RouteABatchedTimeVerifyOutput { r_time, final_values } =
             crate::memory_sidecar::route_a_time::verify_route_a_batched_time(

@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use neo_ccs::matrix::Mat;
 use neo_ccs::relations::{McsInstance, McsWitness};
-use neo_memory::builder::{build_shard_witness_shared_cpu_bus, CpuArithmetization, ShardBuildError};
+use neo_memory::builder::{build_shard_witness_shared_cpu_bus, CpuArithmetization};
 use neo_memory::plain::PlainMemLayout;
 use neo_memory::MemInit;
 use neo_vm_trace::{Shout, ShoutId, StepMeta, Twist, TwistId, VmCpu};
@@ -138,7 +138,7 @@ fn build_shard_witness_shared_cpu_bus_sets_init_policy_per_step() {
         MapTwist::default(),
         NoopShout::default(),
         16,
-        1, // shared_cpu_bus requires chunk_size==1
+        1, // chunk_size=1 => one bundle per step
         &mem_layouts,
         &lut_tables,
         &lut_table_specs,
@@ -173,7 +173,7 @@ fn build_shard_witness_shared_cpu_bus_sets_init_policy_per_step() {
 }
 
 #[test]
-fn build_shard_witness_shared_cpu_bus_rejects_chunk_size_not_one() {
+fn build_shard_witness_shared_cpu_bus_supports_chunk_size_gt_one() {
     let mut mem_layouts = HashMap::new();
     mem_layouts.insert(0u32, PlainMemLayout { k: 2, d: 1, n_side: 2 });
 
@@ -181,7 +181,7 @@ fn build_shard_witness_shared_cpu_bus_rejects_chunk_size_not_one() {
     let lut_table_specs: HashMap<u32, neo_memory::witness::LutTableSpec> = HashMap::new();
     let initial_mem: HashMap<(u32, u64), Goldilocks> = HashMap::new();
 
-    let err = build_shard_witness_shared_cpu_bus::<_, (), neo_math::K, _, _, _>(
+    let bundles = build_shard_witness_shared_cpu_bus::<_, (), neo_math::K, _, _, _>(
         ScriptCpu::new(),
         MapTwist::default(),
         NoopShout::default(),
@@ -193,10 +193,21 @@ fn build_shard_witness_shared_cpu_bus_rejects_chunk_size_not_one() {
         &initial_mem,
         &DummyCpuArith::default(),
     )
-    .expect_err("expected InvalidChunkSize error");
+    .expect("chunk_size>1 should be supported");
 
-    match err {
-        ShardBuildError::InvalidChunkSize(_) => {}
-        other => panic!("expected InvalidChunkSize, got {other:?}"),
+    // Script CPU halts after 4 steps, so for chunk_size=2 we expect 2 chunks.
+    assert_eq!(bundles.len(), 2);
+    for bundle in &bundles {
+        assert_eq!(bundle.mem_instances.len(), 1);
+        assert_eq!(bundle.mem_instances[0].0.steps, 2);
     }
+
+    let inst0 = &bundles[0].mem_instances[0].0;
+    let inst1 = &bundles[1].mem_instances[0].0;
+
+    assert!(matches!(inst0.init, MemInit::Zero));
+    assert_eq!(
+        inst1.init,
+        MemInit::Sparse(vec![(0u64, Goldilocks::from_u64(5)), (1u64, Goldilocks::from_u64(7))])
+    );
 }

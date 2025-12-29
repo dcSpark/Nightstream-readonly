@@ -126,6 +126,14 @@ pub enum CpuConstraintLabel {
     ReadAddressBitsZeroPadding,
     /// Padding: wa_bits == 0 (when NOT has_write)
     WriteAddressBitsZeroPadding,
+    /// Bitness: has_read is boolean (0/1).
+    TwistHasReadBoolean,
+    /// Bitness: has_write is boolean (0/1).
+    TwistHasWriteBoolean,
+    /// Bitness: each read address bit is 0 when inactive, boolean when active.
+    TwistReadAddrBitBitness,
+    /// Bitness: each write address bit is 0 when inactive, boolean when active.
+    TwistWriteAddrBitBitness,
     /// Padding: inc_at_write_addr == 0 (when NOT has_write)
     IncrementZeroPadding,
     /// Write: cpu_inc == bus_inc (when has_write)
@@ -138,6 +146,10 @@ pub enum CpuConstraintLabel {
     LookupValueZeroPadding,
     /// Padding: lookup addr_bits == 0 (when NOT has_lookup)
     LookupAddressBitsZeroPadding,
+    /// Bitness: has_lookup is boolean (0/1).
+    ShoutHasLookupBoolean,
+    /// Bitness: each lookup key bit is 0 when inactive, boolean when active.
+    ShoutAddrBitBitness,
     /// Selector binding: is_load == has_read
     LoadSelectorBinding,
     /// Selector binding: is_store == has_write
@@ -294,6 +306,24 @@ impl<F: Field> CpuConstraintBuilder<F> {
         }
     }
 
+    fn add_boolean_constraint(&mut self, label: CpuConstraintLabel, col: usize) {
+        self.constraints.push(CpuConstraint::new_terms(
+            label,
+            col,
+            false,
+            vec![(col, F::ONE), (self.const_one_col, -F::ONE)],
+        ));
+    }
+
+    fn add_gated_bit_constraint(&mut self, label: CpuConstraintLabel, bit_col: usize, enable_col: usize) {
+        self.constraints.push(CpuConstraint::new_terms(
+            label,
+            bit_col,
+            false,
+            vec![(bit_col, F::ONE), (enable_col, -F::ONE)],
+        ));
+    }
+
     /// Add constraints for a Twist (memory) instance.
     ///
     /// # Constraints Added (from Jolt)
@@ -333,99 +363,120 @@ impl<F: Field> CpuConstraintBuilder<F> {
 
     /// Add constraints for a Twist (memory) instance using an explicit per-instance CPU binding.
     pub fn add_twist_instance_bound(&mut self, layout: &BusLayout, twist: &TwistCols, cpu: &TwistCpuBinding) {
-        assert_eq!(layout.chunk_size, 1, "CpuConstraintBuilder only supports chunk_size==1");
+        for j in 0..layout.chunk_size {
+            // Bus column indices (absolute in witness)
+            let bus_has_read = layout.bus_cell(twist.has_read, j);
+            let bus_has_write = layout.bus_cell(twist.has_write, j);
+            let bus_rv = layout.bus_cell(twist.rv, j);
+            let bus_wv = layout.bus_cell(twist.wv, j);
+            let bus_inc = layout.bus_cell(twist.inc, j);
 
-        // Bus column indices (absolute in witness)
-        let bus_has_read = layout.bus_cell(twist.has_read, 0);
-        let bus_has_write = layout.bus_cell(twist.has_write, 0);
-        let bus_rv = layout.bus_cell(twist.rv, 0);
-        let bus_wv = layout.bus_cell(twist.wv, 0);
-        let bus_inc = layout.bus_cell(twist.inc, 0);
+            // CPU columns are assumed to be chunked (contiguous, per-step): col(j) = col_base + j.
+            let cpu_has_read = cpu.has_read + j;
+            let cpu_has_write = cpu.has_write + j;
+            let cpu_read_addr = cpu.read_addr + j;
+            let cpu_write_addr = cpu.write_addr + j;
+            let cpu_rv = cpu.rv + j;
+            let cpu_wv = cpu.wv + j;
+            let cpu_inc = cpu.inc.map(|col| col + j);
 
-        // Value binding constraints
-        // has_read * (rv_cpu - bus_rv) = 0
-        self.constraints.push(CpuConstraint::new_eq(
-            CpuConstraintLabel::LoadValueBinding,
-            cpu.has_read,
-            cpu.rv,
-            bus_rv,
-        ));
+            // Ensure bus selectors are boolean so gated-bit constraints imply true {0,1} bitness.
+            self.add_boolean_constraint(CpuConstraintLabel::TwistHasReadBoolean, bus_has_read);
+            self.add_boolean_constraint(CpuConstraintLabel::TwistHasWriteBoolean, bus_has_write);
 
-        // has_write * (wv_cpu - bus_wv) = 0
-        self.constraints.push(CpuConstraint::new_eq(
-            CpuConstraintLabel::StoreValueBinding,
-            cpu.has_write,
-            cpu.wv,
-            bus_wv,
-        ));
-
-        // Selector binding: cpu_has_* == bus_has_*
-        self.add_equality_constraint(CpuConstraintLabel::LoadSelectorBinding, cpu.has_read, bus_has_read);
-        self.add_equality_constraint(CpuConstraintLabel::StoreSelectorBinding, cpu.has_write, bus_has_write);
-
-        // Address binding (bit-pack):
-        // - has_read  * (read_addr - pack(ra_bits)) = 0
-        // - has_write * (write_addr - pack(wa_bits)) = 0
-        self.constraints.push(CpuConstraint::new_terms(
-            CpuConstraintLabel::LoadAddressBinding,
-            cpu.has_read,
-            false,
-            pack_addr_bits::<F>(cpu.read_addr, twist.ra_bits.clone(), layout),
-        ));
-        self.constraints.push(CpuConstraint::new_terms(
-            CpuConstraintLabel::StoreAddressBinding,
-            cpu.has_write,
-            false,
-            pack_addr_bits::<F>(cpu.write_addr, twist.wa_bits.clone(), layout),
-        ));
-
-        // Optional: bind CPU increment semantics if provided.
-        if let Some(cpu_inc) = cpu.inc {
+            // Value binding constraints
+            // has_read * (rv_cpu - bus_rv) = 0
             self.constraints.push(CpuConstraint::new_eq(
-                CpuConstraintLabel::IncrementBinding,
-                cpu.has_write,
-                cpu_inc,
+                CpuConstraintLabel::LoadValueBinding,
+                cpu_has_read,
+                cpu_rv,
+                bus_rv,
+            ));
+
+            // has_write * (wv_cpu - bus_wv) = 0
+            self.constraints.push(CpuConstraint::new_eq(
+                CpuConstraintLabel::StoreValueBinding,
+                cpu_has_write,
+                cpu_wv,
+                bus_wv,
+            ));
+
+            // Selector binding: cpu_has_* == bus_has_*
+            self.add_equality_constraint(CpuConstraintLabel::LoadSelectorBinding, cpu_has_read, bus_has_read);
+            self.add_equality_constraint(CpuConstraintLabel::StoreSelectorBinding, cpu_has_write, bus_has_write);
+
+            // Address binding (bit-pack):
+            // - has_read  * (read_addr - pack(ra_bits)) = 0
+            // - has_write * (write_addr - pack(wa_bits)) = 0
+            self.constraints.push(CpuConstraint::new_terms(
+                CpuConstraintLabel::LoadAddressBinding,
+                cpu_has_read,
+                false,
+                pack_addr_bits::<F>(cpu_read_addr, twist.ra_bits.clone(), layout, j),
+            ));
+            self.constraints.push(CpuConstraint::new_terms(
+                CpuConstraintLabel::StoreAddressBinding,
+                cpu_has_write,
+                false,
+                pack_addr_bits::<F>(cpu_write_addr, twist.wa_bits.clone(), layout, j),
+            ));
+
+            // Optional: bind CPU increment semantics if provided.
+            if let Some(cpu_inc) = cpu_inc {
+                self.constraints.push(CpuConstraint::new_eq(
+                    CpuConstraintLabel::IncrementBinding,
+                    cpu_has_write,
+                    cpu_inc,
+                    bus_inc,
+                ));
+            }
+
+            // Padding: (1 - has_read) * rv = 0
+            self.constraints.push(CpuConstraint::new_zero_negated(
+                CpuConstraintLabel::ReadValueZeroPadding,
+                bus_has_read,
+                bus_rv,
+            ));
+
+            // Padding: (1 - has_write) * wv = 0
+            self.constraints.push(CpuConstraint::new_zero_negated(
+                CpuConstraintLabel::WriteValueZeroPadding,
+                bus_has_write,
+                bus_wv,
+            ));
+
+            // Padding: (1 - has_write) * inc_at_write_addr = 0
+            self.constraints.push(CpuConstraint::new_zero_negated(
+                CpuConstraintLabel::IncrementZeroPadding,
+                bus_has_write,
                 bus_inc,
             ));
-        }
 
-        // Padding: (1 - has_read) * rv = 0
-        self.constraints.push(CpuConstraint::new_zero_negated(
-            CpuConstraintLabel::ReadValueZeroPadding,
-            bus_has_read,
-            bus_rv,
-        ));
+            // Read address bits:
+            // - Padding: (1 - has_read) * bit = 0
+            // - Bitness: bit is 0 when inactive, boolean when active
+            for col_id in twist.ra_bits.clone() {
+                let bit = layout.bus_cell(col_id, j);
+                self.constraints.push(CpuConstraint::new_zero_negated(
+                    CpuConstraintLabel::ReadAddressBitsZeroPadding,
+                    bus_has_read,
+                    bit,
+                ));
+                self.add_gated_bit_constraint(CpuConstraintLabel::TwistReadAddrBitBitness, bit, bus_has_read);
+            }
 
-        // Padding: (1 - has_write) * wv = 0
-        self.constraints.push(CpuConstraint::new_zero_negated(
-            CpuConstraintLabel::WriteValueZeroPadding,
-            bus_has_write,
-            bus_wv,
-        ));
-
-        // Padding: (1 - has_write) * inc_at_write_addr = 0
-        self.constraints.push(CpuConstraint::new_zero_negated(
-            CpuConstraintLabel::IncrementZeroPadding,
-            bus_has_write,
-            bus_inc,
-        ));
-
-        // Padding: (1 - has_read) * ra_bits[i] = 0 for all i
-        for col_id in twist.ra_bits.clone() {
-            self.constraints.push(CpuConstraint::new_zero_negated(
-                CpuConstraintLabel::ReadAddressBitsZeroPadding,
-                bus_has_read,
-                layout.bus_cell(col_id, 0),
-            ));
-        }
-
-        // Padding: (1 - has_write) * wa_bits[i] = 0 for all i
-        for col_id in twist.wa_bits.clone() {
-            self.constraints.push(CpuConstraint::new_zero_negated(
-                CpuConstraintLabel::WriteAddressBitsZeroPadding,
-                bus_has_write,
-                layout.bus_cell(col_id, 0),
-            ));
+            // Write address bits:
+            // - Padding: (1 - has_write) * bit = 0
+            // - Bitness: bit is 0 when inactive, boolean when active
+            for col_id in twist.wa_bits.clone() {
+                let bit = layout.bus_cell(col_id, j);
+                self.constraints.push(CpuConstraint::new_zero_negated(
+                    CpuConstraintLabel::WriteAddressBitsZeroPadding,
+                    bus_has_write,
+                    bit,
+                ));
+                self.add_gated_bit_constraint(CpuConstraintLabel::TwistWriteAddrBitBitness, bit, bus_has_write);
+            }
         }
     }
 
@@ -453,49 +504,61 @@ impl<F: Field> CpuConstraintBuilder<F> {
 
     /// Add constraints for a Shout (lookup) instance using an explicit per-instance CPU binding.
     pub fn add_shout_instance_bound(&mut self, layout: &BusLayout, shout: &ShoutCols, cpu: &ShoutCpuBinding) {
-        assert_eq!(layout.chunk_size, 1, "CpuConstraintBuilder only supports chunk_size==1");
+        for j in 0..layout.chunk_size {
+            // Bus column indices
+            let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
+            let bus_val = layout.bus_cell(shout.val, j);
 
-        // Bus column indices
-        let bus_has_lookup = layout.bus_cell(shout.has_lookup, 0);
-        let bus_val = layout.bus_cell(shout.val, 0);
+            // CPU columns are assumed to be chunked (contiguous, per-step): col(j) = col_base + j.
+            let cpu_has_lookup = cpu.has_lookup + j;
+            let cpu_addr = cpu.addr + j;
+            let cpu_val = cpu.val + j;
 
-        // Value binding: is_lookup * (lookup_output - bus_val) = 0
-        self.constraints.push(CpuConstraint::new_eq(
-            CpuConstraintLabel::LookupValueBinding,
-            cpu.has_lookup,
-            cpu.val,
-            bus_val,
-        ));
+            // Ensure bus selector is boolean so gated-bit constraints imply true {0,1} bitness.
+            self.add_boolean_constraint(CpuConstraintLabel::ShoutHasLookupBoolean, bus_has_lookup);
 
-        // Selector binding: cpu_has_lookup == bus_has_lookup
-        self.add_equality_constraint(
-            CpuConstraintLabel::LookupSelectorBinding,
-            cpu.has_lookup,
-            bus_has_lookup,
-        );
-
-        // Key binding (bit-pack): is_lookup * (lookup_key - pack(addr_bits)) = 0
-        self.constraints.push(CpuConstraint::new_terms(
-            CpuConstraintLabel::LookupKeyBinding,
-            cpu.has_lookup,
-            false,
-            pack_addr_bits::<F>(cpu.addr, shout.addr_bits.clone(), layout),
-        ));
-
-        // Padding: (1 - has_lookup) * val = 0
-        self.constraints.push(CpuConstraint::new_zero_negated(
-            CpuConstraintLabel::LookupValueZeroPadding,
-            bus_has_lookup,
-            bus_val,
-        ));
-
-        // Padding: (1 - has_lookup) * addr_bits[i] = 0 for all i
-        for col_id in shout.addr_bits.clone() {
-            self.constraints.push(CpuConstraint::new_zero_negated(
-                CpuConstraintLabel::LookupAddressBitsZeroPadding,
-                bus_has_lookup,
-                layout.bus_cell(col_id, 0),
+            // Value binding: is_lookup * (lookup_output - bus_val) = 0
+            self.constraints.push(CpuConstraint::new_eq(
+                CpuConstraintLabel::LookupValueBinding,
+                cpu_has_lookup,
+                cpu_val,
+                bus_val,
             ));
+
+            // Selector binding: cpu_has_lookup == bus_has_lookup
+            self.add_equality_constraint(
+                CpuConstraintLabel::LookupSelectorBinding,
+                cpu_has_lookup,
+                bus_has_lookup,
+            );
+
+            // Key binding (bit-pack): is_lookup * (lookup_key - pack(addr_bits)) = 0
+            self.constraints.push(CpuConstraint::new_terms(
+                CpuConstraintLabel::LookupKeyBinding,
+                cpu_has_lookup,
+                false,
+                pack_addr_bits::<F>(cpu_addr, shout.addr_bits.clone(), layout, j),
+            ));
+
+            // Padding: (1 - has_lookup) * val = 0
+            self.constraints.push(CpuConstraint::new_zero_negated(
+                CpuConstraintLabel::LookupValueZeroPadding,
+                bus_has_lookup,
+                bus_val,
+            ));
+
+            // Lookup key bits:
+            // - Padding: (1 - has_lookup) * bit = 0
+            // - Bitness: bit is 0 when inactive, boolean when active
+            for col_id in shout.addr_bits.clone() {
+                let bit = layout.bus_cell(col_id, j);
+                self.constraints.push(CpuConstraint::new_zero_negated(
+                    CpuConstraintLabel::LookupAddressBitsZeroPadding,
+                    bus_has_lookup,
+                    bit,
+                ));
+                self.add_gated_bit_constraint(CpuConstraintLabel::ShoutAddrBitBitness, bit, bus_has_lookup);
+            }
         }
     }
 
@@ -730,28 +793,44 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints<F: Field + Copy, Cmt>(
         ));
     }
 
-    // This helper is for the current shared-bus layout in `R1csCpu`, which is chunk_size==1.
+    let mut chunk_size: usize = 1;
+    if !lut_insts.is_empty() || !mem_insts.is_empty() {
+        chunk_size = 0;
+    }
     for (i, inst) in lut_insts.iter().enumerate() {
-        if inst.steps != 1 {
+        if inst.steps == 0 {
+            return Err(format!("lut_insts[{i}].steps must be >= 1"));
+        }
+        if chunk_size == 0 {
+            chunk_size = inst.steps;
+        } else if inst.steps != chunk_size {
             return Err(format!(
-                "extend_ccs_with_shared_cpu_bus_constraints only supports chunk_size=1 (got lut_insts[{i}].steps={})",
+                "shared-bus requires a single chunk_size across instances; got lut_insts[{i}].steps={} but expected {chunk_size}",
                 inst.steps
             ));
         }
     }
     for (i, inst) in mem_insts.iter().enumerate() {
-        if inst.steps != 1 {
+        if inst.steps == 0 {
+            return Err(format!("mem_insts[{i}].steps must be >= 1"));
+        }
+        if chunk_size == 0 {
+            chunk_size = inst.steps;
+        } else if inst.steps != chunk_size {
             return Err(format!(
-                "extend_ccs_with_shared_cpu_bus_constraints only supports chunk_size=1 (got mem_insts[{i}].steps={})",
+                "shared-bus requires a single chunk_size across instances; got mem_insts[{i}].steps={} but expected {chunk_size}",
                 inst.steps
             ));
         }
+    }
+    if chunk_size == 0 {
+        chunk_size = 1;
     }
 
     let layout = build_bus_layout_for_instances(
         base_ccs.m,
         m_in,
-        1,
+        chunk_size,
         lut_insts.iter().map(|inst| inst.d * inst.ell),
         mem_insts.iter().map(|inst| inst.d * inst.ell),
     )?;
@@ -818,55 +897,52 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints<F: Field + Copy, Cmt>(
 /// - `(1 - has_write) * wv = 0`
 /// - etc.
 pub fn create_twist_padding_constraints<F: Field>(layout: &BusLayout, twist: &TwistCols) -> Vec<CpuConstraint<F>> {
-    assert_eq!(
-        layout.chunk_size, 1,
-        "create_twist_padding_constraints only supports chunk_size==1"
-    );
-    let bus_has_read = layout.bus_cell(twist.has_read, 0);
-    let bus_has_write = layout.bus_cell(twist.has_write, 0);
-    let bus_rv = layout.bus_cell(twist.rv, 0);
-    let bus_wv = layout.bus_cell(twist.wv, 0);
-    let bus_inc = layout.bus_cell(twist.inc, 0);
-
     let mut constraints = Vec::new();
+    for j in 0..layout.chunk_size {
+        let bus_has_read = layout.bus_cell(twist.has_read, j);
+        let bus_has_write = layout.bus_cell(twist.has_write, j);
+        let bus_rv = layout.bus_cell(twist.rv, j);
+        let bus_wv = layout.bus_cell(twist.wv, j);
+        let bus_inc = layout.bus_cell(twist.inc, j);
 
-    // (1 - has_read) * rv = 0
-    constraints.push(CpuConstraint::new_zero_negated(
-        CpuConstraintLabel::ReadValueZeroPadding,
-        bus_has_read,
-        bus_rv,
-    ));
-
-    // (1 - has_write) * wv = 0
-    constraints.push(CpuConstraint::new_zero_negated(
-        CpuConstraintLabel::WriteValueZeroPadding,
-        bus_has_write,
-        bus_wv,
-    ));
-
-    // (1 - has_write) * inc_at_write_addr = 0
-    constraints.push(CpuConstraint::new_zero_negated(
-        CpuConstraintLabel::IncrementZeroPadding,
-        bus_has_write,
-        bus_inc,
-    ));
-
-    // (1 - has_read) * ra_bits[i] = 0 for all i
-    for col_id in twist.ra_bits.clone() {
+        // (1 - has_read) * rv = 0
         constraints.push(CpuConstraint::new_zero_negated(
-            CpuConstraintLabel::ReadAddressBitsZeroPadding,
+            CpuConstraintLabel::ReadValueZeroPadding,
             bus_has_read,
-            layout.bus_cell(col_id, 0),
+            bus_rv,
         ));
-    }
 
-    // (1 - has_write) * wa_bits[i] = 0 for all i
-    for col_id in twist.wa_bits.clone() {
+        // (1 - has_write) * wv = 0
         constraints.push(CpuConstraint::new_zero_negated(
-            CpuConstraintLabel::WriteAddressBitsZeroPadding,
+            CpuConstraintLabel::WriteValueZeroPadding,
             bus_has_write,
-            layout.bus_cell(col_id, 0),
+            bus_wv,
         ));
+
+        // (1 - has_write) * inc_at_write_addr = 0
+        constraints.push(CpuConstraint::new_zero_negated(
+            CpuConstraintLabel::IncrementZeroPadding,
+            bus_has_write,
+            bus_inc,
+        ));
+
+        // (1 - has_read) * ra_bits[i] = 0 for all i
+        for col_id in twist.ra_bits.clone() {
+            constraints.push(CpuConstraint::new_zero_negated(
+                CpuConstraintLabel::ReadAddressBitsZeroPadding,
+                bus_has_read,
+                layout.bus_cell(col_id, j),
+            ));
+        }
+
+        // (1 - has_write) * wa_bits[i] = 0 for all i
+        for col_id in twist.wa_bits.clone() {
+            constraints.push(CpuConstraint::new_zero_negated(
+                CpuConstraintLabel::WriteAddressBitsZeroPadding,
+                bus_has_write,
+                layout.bus_cell(col_id, j),
+            ));
+        }
     }
 
     constraints
@@ -874,42 +950,38 @@ pub fn create_twist_padding_constraints<F: Field>(layout: &BusLayout, twist: &Tw
 
 /// Create padding constraints for Shout (lookup) bus columns.
 pub fn create_shout_padding_constraints<F: Field>(layout: &BusLayout, shout: &ShoutCols) -> Vec<CpuConstraint<F>> {
-    assert_eq!(
-        layout.chunk_size, 1,
-        "create_shout_padding_constraints only supports chunk_size==1"
-    );
-    let bus_has_lookup = layout.bus_cell(shout.has_lookup, 0);
-    let bus_val = layout.bus_cell(shout.val, 0);
-
     let mut constraints = Vec::new();
+    for j in 0..layout.chunk_size {
+        let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
+        let bus_val = layout.bus_cell(shout.val, j);
 
-    // (1 - has_lookup) * val = 0
-    constraints.push(CpuConstraint::new_zero_negated(
-        CpuConstraintLabel::LookupValueZeroPadding,
-        bus_has_lookup,
-        bus_val,
-    ));
-
-    // (1 - has_lookup) * addr_bits[i] = 0 for all i
-    for col_id in shout.addr_bits.clone() {
+        // (1 - has_lookup) * val = 0
         constraints.push(CpuConstraint::new_zero_negated(
-            CpuConstraintLabel::LookupAddressBitsZeroPadding,
+            CpuConstraintLabel::LookupValueZeroPadding,
             bus_has_lookup,
-            layout.bus_cell(col_id, 0),
+            bus_val,
         ));
+
+        // (1 - has_lookup) * addr_bits[i] = 0 for all i
+        for col_id in shout.addr_bits.clone() {
+            constraints.push(CpuConstraint::new_zero_negated(
+                CpuConstraintLabel::LookupAddressBitsZeroPadding,
+                bus_has_lookup,
+                layout.bus_cell(col_id, j),
+            ));
+        }
     }
 
     constraints
 }
 
-fn pack_addr_bits<F: Field>(addr_col: usize, bit_cols: Range<usize>, layout: &BusLayout) -> Vec<(usize, F)> {
-    assert_eq!(layout.chunk_size, 1, "pack_addr_bits only supports chunk_size==1");
+fn pack_addr_bits<F: Field>(addr_col: usize, bit_cols: Range<usize>, layout: &BusLayout, j: usize) -> Vec<(usize, F)> {
     let len = bit_cols.end.saturating_sub(bit_cols.start);
     let mut terms = Vec::with_capacity(1 + len);
     terms.push((addr_col, F::ONE));
     let mut weight = F::ONE;
     for col_id in bit_cols {
-        terms.push((layout.bus_cell(col_id, 0), -weight));
+        terms.push((layout.bus_cell(col_id, j), -weight));
         weight = weight + weight; // *= 2
     }
     terms

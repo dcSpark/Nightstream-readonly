@@ -19,6 +19,7 @@ use neo_params::NeoParams;
 use neo_vm_trace::{StepTrace, VmTrace};
 use p3_field::{PrimeCharacteristicRing, PrimeField, PrimeField64};
 use p3_goldilocks::Goldilocks;
+use std::collections::hash_map::Entry;
 use std::collections::HashMap;
 use std::marker::PhantomData;
 
@@ -81,9 +82,9 @@ where
     /// (in deterministic id order) before Ajtai decomposition + commitment.
     shared_cpu_bus: Option<SharedCpuBusState<F>>,
 
-    /// Function to map a step trace to the full witness z = (x, w).
+    /// Function to map a trace chunk (up to `chunk_size` steps) to the full witness z = (x, w).
     /// The witness MUST satisfy the CCS relation.
-    pub step_to_witness: Box<dyn Fn(&StepTrace<u64, u64>) -> Vec<F> + Send + Sync>,
+    pub chunk_to_witness: Box<dyn Fn(&[StepTrace<u64, u64>]) -> Vec<F> + Send + Sync>,
 
     _phantom: PhantomData<Cmt>,
 }
@@ -100,7 +101,7 @@ where
         m_in: usize,
         tables: &HashMap<u32, LutTable<F>>,
         table_specs: &HashMap<u32, LutTableSpec>,
-        step_to_witness: Box<dyn Fn(&StepTrace<u64, u64>) -> Vec<F> + Send + Sync>,
+        chunk_to_witness: Box<dyn Fn(&[StepTrace<u64, u64>]) -> Vec<F> + Send + Sync>,
     ) -> Self {
         let mut shout_meta = HashMap::new();
         for (id, table) in tables {
@@ -108,13 +109,23 @@ where
         }
         for (id, spec) in table_specs {
             let (d, n_side) = match spec {
-                LutTableSpec::RiscvOpcode { xlen, .. } => (
-                    xlen.checked_mul(2)
-                        .expect("RISC-V table spec: 2*xlen overflow"),
-                    2usize,
-                ),
+                LutTableSpec::RiscvOpcode { xlen, .. } => (xlen.saturating_mul(2), 2usize),
             };
-            shout_meta.insert(*id, (d, n_side));
+            match shout_meta.entry(*id) {
+                Entry::Vacant(v) => {
+                    v.insert((d, n_side));
+                }
+                Entry::Occupied(existing) => {
+                    // Prefer explicit table metadata when both are present.
+                    debug_assert_eq!(
+                        *existing.get(),
+                        (d, n_side),
+                        "shout_meta mismatch for table_id={id}: explicit={:?} spec={:?}",
+                        existing.get(),
+                        (d, n_side)
+                    );
+                }
+            }
         }
 
         Self {
@@ -124,12 +135,16 @@ where
             m_in,
             shout_meta,
             shared_cpu_bus: None,
-            step_to_witness,
+            chunk_to_witness,
             _phantom: PhantomData,
         }
     }
 
-    fn shared_bus_schema(&self, bus: &SharedCpuBusConfig<F>) -> Result<(Vec<u32>, Vec<u32>, BusLayout), String> {
+    fn shared_bus_schema(
+        &self,
+        bus: &SharedCpuBusConfig<F>,
+        chunk_size: usize,
+    ) -> Result<(Vec<u32>, Vec<u32>, BusLayout), String> {
         let mut table_ids: Vec<u32> = self.shout_meta.keys().copied().collect();
         table_ids.sort_unstable();
         let mut mem_ids: Vec<u32> = bus.mem_layouts.keys().copied().collect();
@@ -169,11 +184,20 @@ where
             twist_ell_addrs.push(ell_addr);
         }
 
-        let layout = build_bus_layout_for_instances(self.ccs.m, self.m_in, 1, shout_ell_addrs, twist_ell_addrs)?;
+        let layout = build_bus_layout_for_instances(
+            self.ccs.m,
+            self.m_in,
+            chunk_size,
+            shout_ell_addrs,
+            twist_ell_addrs,
+        )?;
         Ok((table_ids, mem_ids, layout))
     }
 
-    pub fn with_shared_cpu_bus(mut self, cfg: SharedCpuBusConfig<F>) -> Result<Self, String> {
+    pub fn with_shared_cpu_bus(mut self, cfg: SharedCpuBusConfig<F>, chunk_size: usize) -> Result<Self, String> {
+        if chunk_size == 0 {
+            return Err("shared_cpu_bus: chunk_size must be >= 1".into());
+        }
         if cfg.const_one_col >= self.m_in {
             return Err(format!(
                 "shared_cpu_bus: const_one_col={} must be < m_in={}",
@@ -181,7 +205,7 @@ where
             ));
         }
 
-        let (table_ids, mem_ids, layout) = self.shared_bus_schema(&cfg)?;
+        let (table_ids, mem_ids, layout) = self.shared_bus_schema(&cfg, chunk_size)?;
         let bus_base = layout.bus_base;
 
         // Validate initial memory keys.
@@ -202,12 +226,19 @@ where
             kind: &str,
             id: u32,
             bus_base: usize,
+            chunk_size: usize,
             cols: &[(&str, usize)],
         ) -> Result<(), String> {
+            let max_step_offset = chunk_size
+                .checked_sub(1)
+                .ok_or_else(|| "shared_cpu_bus: chunk_size must be >= 1".to_string())?;
             for (label, col) in cols {
-                if *col >= bus_base {
+                let max_col = col
+                    .checked_add(max_step_offset)
+                    .ok_or_else(|| format!("shared_cpu_bus: {kind} binding for id={id} overflows usize"))?;
+                if max_col >= bus_base {
                     return Err(format!(
-                        "shared_cpu_bus: {kind} binding for id={id} uses {label}={col}, but bus_base={bus_base} (CPU bindings must be < bus_base to avoid overlapping the bus tail)"
+                        "shared_cpu_bus: {kind} binding for id={id} uses {label}={col} (max={max_col}), but bus_base={bus_base} (CPU bindings must be < bus_base to avoid overlapping the bus tail)"
                     ));
                 }
             }
@@ -225,6 +256,7 @@ where
                 "shout_cpu",
                 *table_id,
                 bus_base,
+                chunk_size,
                 &[("has_lookup", b.has_lookup), ("addr", b.addr), ("val", b.val)],
             )?;
             shout_cpu.push(b.clone());
@@ -246,7 +278,7 @@ where
             if let Some(inc) = b.inc {
                 cols.push(("inc", inc));
             }
-            validate_cpu_binding_cols("twist_cpu", *mem_id, bus_base, &cols)?;
+            validate_cpu_binding_cols("twist_cpu", *mem_id, bus_base, chunk_size, &cols)?;
             twist_cpu.push(b.clone());
         }
 
@@ -266,7 +298,7 @@ where
             }
         }
 
-        // Build metadata-only instances for constraint injection (steps=1, comms empty).
+        // Build metadata-only instances for constraint injection (steps=chunk_size, comms empty).
         let mut lut_insts: Vec<LutInstance<Cmt, F>> = Vec::with_capacity(table_ids.len());
         for table_id in &table_ids {
             let (d, n_side) = self
@@ -280,7 +312,7 @@ where
                 k: 0,
                 d,
                 n_side,
-                steps: 1,
+                steps: chunk_size,
                 ell,
                 table_spec: None,
                 table: Vec::new(),
@@ -300,7 +332,7 @@ where
                 k: layout.k,
                 d: layout.d,
                 n_side: layout.n_side,
-                steps: 1,
+                steps: chunk_size,
                 ell,
                 init: MemInit::Zero,
                 _phantom: PhantomData,
@@ -342,23 +374,24 @@ where
         trace: &VmTrace<u64, u64>,
         chunk_size: usize,
     ) -> Result<Vec<(McsInstance<Cmt, Goldilocks>, McsWitness<Goldilocks>)>, Self::Error> {
-        if chunk_size != 1 {
-            return Err(format!(
-                "R1csCpu does not support chunk_size={} (expected 1)",
-                chunk_size
-            ));
+        if chunk_size == 0 {
+            return Err("chunk_size must be >= 1".into());
         }
-        self.build_ccs_steps(trace)
-    }
-
-    fn build_ccs_steps(
-        &self,
-        trace: &VmTrace<u64, u64>,
-    ) -> Result<Vec<(McsInstance<Cmt, Goldilocks>, McsWitness<Goldilocks>)>, Self::Error> {
-        let mut mcss = Vec::with_capacity(trace.steps.len());
 
         // Shared CPU-bus bookkeeping (optional).
         let shared = self.shared_cpu_bus.as_ref();
+        if let Some(shared) = shared {
+            if shared.layout.chunk_size != chunk_size {
+                return Err(format!(
+                    "shared_cpu_bus: chunk_size mismatch (cpu configured with {}, got {})",
+                    shared.layout.chunk_size, chunk_size
+                ));
+            }
+        }
+
+        let mut mcss = Vec::with_capacity(trace.steps.len().div_ceil(chunk_size));
+
+        // Track sparse memory state across the full trace to compute inc_at_write_addr.
         let mut mem_state: HashMap<u32, HashMap<u64, Goldilocks>> = HashMap::new();
         if let Some(shared) = shared {
             for ((mem_id, addr), &val) in shared.cfg.initial_mem.iter() {
@@ -380,9 +413,13 @@ where
             }
         }
 
-        for step in &trace.steps {
-            // 1. Build witness z
-            let mut z_vec = (self.step_to_witness)(step);
+        let mut chunk_start = 0usize;
+        while chunk_start < trace.steps.len() {
+            let chunk_end = (chunk_start + chunk_size).min(trace.steps.len());
+            let chunk = &trace.steps[chunk_start..chunk_end];
+
+            // 1) Build witness z for this chunk.
+            let mut z_vec = (self.chunk_to_witness)(chunk);
 
             // Allow witness builders to omit trailing dummy variables (including the shared-bus tail).
             if z_vec.len() < self.m_in {
@@ -403,7 +440,7 @@ where
                 z_vec.resize(self.ccs.m, Goldilocks::ZERO);
             }
 
-            // Enforce the constant-one public input (required by shared-bus constraints and guardrails).
+            // Force the constant-one public input (required by shared-bus constraints and guardrails).
             if let Some(shared) = shared {
                 if shared.cfg.const_one_col >= self.m_in {
                     return Err(format!(
@@ -414,7 +451,7 @@ where
                 z_vec[shared.cfg.const_one_col] = Goldilocks::ONE;
             }
 
-            // 2.1 Overwrite the shared CPU-bus tail (if enabled).
+            // 2) Overwrite the shared bus tail from the trace events.
             if let Some(shared) = shared {
                 let bus_base = shared.layout.bus_base;
                 let bus_region_len = shared.layout.bus_region_len();
@@ -425,137 +462,145 @@ where
                     z_vec[bus_base + i] = Goldilocks::ZERO;
                 }
 
-                // Build per-step maps for fast lookup.
-                let mut shout_by_id: HashMap<u32, (u64, Goldilocks)> = HashMap::new();
-                for ev in &step.shout_events {
-                    let id = ev.shout_id.0;
-                    if shout_by_id
-                        .insert(id, (ev.key, Goldilocks::from_u64(ev.value)))
-                        .is_some()
-                    {
-                        return Err(format!("multiple shout events for shout_id={id} in one step"));
-                    }
-                }
-
-                let mut read_by_id: HashMap<u32, (u64, Goldilocks)> = HashMap::new();
-                let mut write_by_id: HashMap<u32, (u64, Goldilocks)> = HashMap::new();
-                for ev in &step.twist_events {
-                    let id = ev.twist_id.0;
-                    match ev.kind {
-                        neo_vm_trace::TwistOpKind::Read => {
-                            if read_by_id
-                                .insert(id, (ev.addr, Goldilocks::from_u64(ev.value)))
-                                .is_some()
-                            {
-                                return Err(format!("multiple twist reads for twist_id={id} in one step"));
-                            }
-                        }
-                        neo_vm_trace::TwistOpKind::Write => {
-                            if write_by_id
-                                .insert(id, (ev.addr, Goldilocks::from_u64(ev.value)))
-                                .is_some()
-                            {
-                                return Err(format!("multiple twist writes for twist_id={id} in one step"));
-                            }
+                for (j, step) in chunk.iter().enumerate() {
+                    // Build per-step maps for fast lookup.
+                    let mut shout_by_id: HashMap<u32, (u64, Goldilocks)> = HashMap::new();
+                    for ev in &step.shout_events {
+                        let id = ev.shout_id.0;
+                        if shout_by_id
+                            .insert(id, (ev.key, Goldilocks::from_u64(ev.value)))
+                            .is_some()
+                        {
+                            return Err(format!(
+                                "multiple shout events for shout_id={id} in one step (chunk_start={chunk_start}, j={j})"
+                            ));
                         }
                     }
-                }
 
-                // Shout: addr_bits, has_lookup, val.
-                for (i, table_id) in shared.table_ids.iter().enumerate() {
-                    let shout_cols = &shared.layout.shout_cols[i];
-                    let (d, n_side) = self
-                        .shout_meta
-                        .get(table_id)
-                        .copied()
-                        .ok_or_else(|| format!("missing shout_meta for table_id={table_id}"))?;
-                    let ell = n_side.trailing_zeros() as usize;
-
-                    if let Some((key, val)) = shout_by_id.get(table_id).copied() {
-                        write_addr_bits_dim_major_le_into_bus(
-                            &mut z_vec,
-                            &shared.layout,
-                            shout_cols.addr_bits.clone(),
-                            0,
-                            key,
-                            d,
-                            n_side,
-                            ell,
-                        );
-                        z_vec[shared.layout.bus_cell(shout_cols.has_lookup, 0)] = Goldilocks::ONE;
-                        z_vec[shared.layout.bus_cell(shout_cols.val, 0)] = val;
-                    }
-                }
-
-                // Twist: ra_bits, wa_bits, has_read, has_write, wv, rv, inc_at_write_addr.
-                for (i, mem_id) in shared.mem_ids.iter().enumerate() {
-                    let twist_cols = &shared.layout.twist_cols[i];
-                    let layout = shared
-                        .cfg
-                        .mem_layouts
-                        .get(mem_id)
-                        .ok_or_else(|| format!("missing mem_layout for mem_id={mem_id}"))?;
-                    let ell = layout.n_side.trailing_zeros() as usize;
-
-                    // Read port.
-                    let (has_read, ra, rv) = if let Some((addr, val)) = read_by_id.get(mem_id).copied() {
-                        (Goldilocks::ONE, addr, val)
-                    } else {
-                        (Goldilocks::ZERO, 0u64, Goldilocks::ZERO)
-                    };
-                    if has_read == Goldilocks::ONE {
-                        write_addr_bits_dim_major_le_into_bus(
-                            &mut z_vec,
-                            &shared.layout,
-                            twist_cols.ra_bits.clone(),
-                            0,
-                            ra,
-                            layout.d,
-                            layout.n_side,
-                            ell,
-                        );
-                        z_vec[shared.layout.bus_cell(twist_cols.rv, 0)] = rv;
+                    let mut read_by_id: HashMap<u32, (u64, Goldilocks)> = HashMap::new();
+                    let mut write_by_id: HashMap<u32, (u64, Goldilocks)> = HashMap::new();
+                    for ev in &step.twist_events {
+                        let id = ev.twist_id.0;
+                        match ev.kind {
+                            neo_vm_trace::TwistOpKind::Read => {
+                                if read_by_id
+                                    .insert(id, (ev.addr, Goldilocks::from_u64(ev.value)))
+                                    .is_some()
+                                {
+                                    return Err(format!(
+                                        "multiple twist reads for twist_id={id} in one step (chunk_start={chunk_start}, j={j})"
+                                    ));
+                                }
+                            }
+                            neo_vm_trace::TwistOpKind::Write => {
+                                if write_by_id
+                                    .insert(id, (ev.addr, Goldilocks::from_u64(ev.value)))
+                                    .is_some()
+                                {
+                                    return Err(format!(
+                                        "multiple twist writes for twist_id={id} in one step (chunk_start={chunk_start}, j={j})"
+                                    ));
+                                }
+                            }
+                        }
                     }
 
-                    // Write port.
-                    let (has_write, wa, wv) = if let Some((addr, val)) = write_by_id.get(mem_id).copied() {
-                        (Goldilocks::ONE, addr, val)
-                    } else {
-                        (Goldilocks::ZERO, 0u64, Goldilocks::ZERO)
-                    };
-                    if has_write == Goldilocks::ONE {
-                        write_addr_bits_dim_major_le_into_bus(
-                            &mut z_vec,
-                            &shared.layout,
-                            twist_cols.wa_bits.clone(),
-                            0,
-                            wa,
-                            layout.d,
-                            layout.n_side,
-                            ell,
-                        );
-                        z_vec[shared.layout.bus_cell(twist_cols.wv, 0)] = wv;
+                    // Shout: addr_bits, has_lookup, val.
+                    for (i, table_id) in shared.table_ids.iter().enumerate() {
+                        let shout_cols = &shared.layout.shout_cols[i];
+                        let (d, n_side) = self
+                            .shout_meta
+                            .get(table_id)
+                            .copied()
+                            .ok_or_else(|| format!("missing shout_meta for table_id={table_id}"))?;
+                        let ell = n_side.trailing_zeros() as usize;
+
+                        if let Some((key, val)) = shout_by_id.get(table_id).copied() {
+                            write_addr_bits_dim_major_le_into_bus(
+                                &mut z_vec,
+                                &shared.layout,
+                                shout_cols.addr_bits.clone(),
+                                j,
+                                key,
+                                d,
+                                n_side,
+                                ell,
+                            );
+                            z_vec[shared.layout.bus_cell(shout_cols.has_lookup, j)] = Goldilocks::ONE;
+                            z_vec[shared.layout.bus_cell(shout_cols.val, j)] = val;
+                        }
                     }
 
-                    z_vec[shared.layout.bus_cell(twist_cols.has_read, 0)] = has_read;
-                    z_vec[shared.layout.bus_cell(twist_cols.has_write, 0)] = has_write;
+                    // Twist: ra_bits, wa_bits, has_read, has_write, wv, rv, inc_at_write_addr.
+                    for (i, mem_id) in shared.mem_ids.iter().enumerate() {
+                        let twist_cols = &shared.layout.twist_cols[i];
+                        let layout = shared
+                            .cfg
+                            .mem_layouts
+                            .get(mem_id)
+                            .ok_or_else(|| format!("missing mem_layout for mem_id={mem_id}"))?;
+                        let ell = layout.n_side.trailing_zeros() as usize;
 
-                    let mut inc = Goldilocks::ZERO;
-                    if has_write == Goldilocks::ONE && (wa as usize) < layout.k {
-                        let st = mem_state.entry(*mem_id).or_default();
-                        let old = st.get(&wa).copied().unwrap_or(Goldilocks::ZERO);
-                        inc = wv - old;
-                        if wv == Goldilocks::ZERO {
-                            st.remove(&wa);
+                        // Read port.
+                        let (has_read, ra, rv) = if let Some((addr, val)) = read_by_id.get(mem_id).copied() {
+                            (Goldilocks::ONE, addr, val)
                         } else {
-                            st.insert(wa, wv);
+                            (Goldilocks::ZERO, 0u64, Goldilocks::ZERO)
+                        };
+                        if has_read == Goldilocks::ONE {
+                            write_addr_bits_dim_major_le_into_bus(
+                                &mut z_vec,
+                                &shared.layout,
+                                twist_cols.ra_bits.clone(),
+                                j,
+                                ra,
+                                layout.d,
+                                layout.n_side,
+                                ell,
+                            );
+                            z_vec[shared.layout.bus_cell(twist_cols.rv, j)] = rv;
                         }
+
+                        // Write port.
+                        let (has_write, wa, wv) = if let Some((addr, val)) = write_by_id.get(mem_id).copied() {
+                            (Goldilocks::ONE, addr, val)
+                        } else {
+                            (Goldilocks::ZERO, 0u64, Goldilocks::ZERO)
+                        };
+                        if has_write == Goldilocks::ONE {
+                            write_addr_bits_dim_major_le_into_bus(
+                                &mut z_vec,
+                                &shared.layout,
+                                twist_cols.wa_bits.clone(),
+                                j,
+                                wa,
+                                layout.d,
+                                layout.n_side,
+                                ell,
+                            );
+                            z_vec[shared.layout.bus_cell(twist_cols.wv, j)] = wv;
+                        }
+
+                        z_vec[shared.layout.bus_cell(twist_cols.has_read, j)] = has_read;
+                        z_vec[shared.layout.bus_cell(twist_cols.has_write, j)] = has_write;
+
+                        let mut inc = Goldilocks::ZERO;
+                        if has_write == Goldilocks::ONE && (wa as usize) < layout.k {
+                            let st = mem_state.entry(*mem_id).or_default();
+                            let old = st.get(&wa).copied().unwrap_or(Goldilocks::ZERO);
+                            inc = wv - old;
+                            if wv == Goldilocks::ZERO {
+                                st.remove(&wa);
+                            } else {
+                                st.insert(wa, wv);
+                            }
+                        }
+                        z_vec[shared.layout.bus_cell(twist_cols.inc, j)] = inc;
                     }
-                    z_vec[shared.layout.bus_cell(twist_cols.inc, 0)] = inc;
                 }
             }
 
-            // 3. Decompose z -> Z matrix
+            // 3) Decompose z -> Z matrix
             let d = self.params.d as usize;
             let m = z_vec.len(); // == ccs.m after padding
 
@@ -569,8 +614,6 @@ where
             let z_digits = decomp_b(&z_vec, self.params.b, d, DecompStyle::Balanced);
 
             // Convert to Mat (row-major d x m)
-            // decomp_b returns digits "per element", i.e. column-major for the (d × m) matrix:
-            // z_digits[c*d + r] = digit r (row) of value c (column).
             let mut mat_data = vec![Goldilocks::ZERO; d * m];
             for c in 0..m {
                 for r in 0..d {
@@ -579,18 +622,26 @@ where
             }
             let z_mat = Mat::from_row_major(d, m, mat_data);
 
-            // 4. Commit to Z
+            // 4) Commit to Z
             let c = self.committer.commit(&z_mat);
 
-            // 5. Build Instance/Witness
-            // Split z into public inputs x and private witness w
+            // 5) Build Instance/Witness
             let x = z_vec[..m_in].to_vec();
             let w = z_vec[m_in..].to_vec();
 
             mcss.push((McsInstance { c, x, m_in }, McsWitness { w, Z: z_mat }));
+
+            chunk_start = chunk_end;
         }
 
         Ok(mcss)
+    }
+
+    fn build_ccs_steps(
+        &self,
+        trace: &VmTrace<u64, u64>,
+    ) -> Result<Vec<(McsInstance<Cmt, Goldilocks>, McsWitness<Goldilocks>)>, Self::Error> {
+        self.build_ccs_chunks(trace, 1)
     }
     type Error = String;
 }

@@ -52,6 +52,9 @@ impl RiscvAddressLookupOracleSparse {
             | RiscvOpcode::Or
             | RiscvOpcode::Add
             | RiscvOpcode::Sub
+            | RiscvOpcode::Sll
+            | RiscvOpcode::Srl
+            | RiscvOpcode::Sra
             | RiscvOpcode::Eq
             | RiscvOpcode::Neq
             | RiscvOpcode::Slt

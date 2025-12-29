@@ -111,6 +111,7 @@ fn build_trivial_fold_run_and_instance() -> (FoldRunInstance, FoldRunWitness) {
             fold: step,
             mem: MemSidecarProof {
                 cpu_me_claims_val: Vec::new(),
+                shout_addr_pre: Default::default(),
                 proofs: Vec::new(),
             },
             batched_time: BatchedTimeProof {

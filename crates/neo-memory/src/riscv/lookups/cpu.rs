@@ -3,7 +3,7 @@ use neo_vm_trace::{Shout, Twist};
 use super::bits::interleave_bits;
 use super::decode::decode_instruction;
 use super::encode::encode_instruction;
-use super::isa::{RiscvInstruction, RiscvMemOp};
+use super::isa::{RiscvInstruction, RiscvMemOp, RiscvOpcode};
 use super::tables::RiscvShoutTables;
 
 /// A RISC-V CPU that can be traced using Neo's VmCpu trait.
@@ -106,6 +106,8 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
     {
         let ram = super::RAM_ID;
         let prog = super::PROG_ID;
+        let shout_tables = RiscvShoutTables::new(self.xlen);
+        let add_shout_id = shout_tables.opcode_to_id(RiscvOpcode::Add);
 
         let instr_word = twist.load(prog, self.pc);
         let instr_word_u32 = u32::try_from(instr_word).map_err(|_| {
@@ -114,6 +116,12 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 self.pc, instr_word
             )
         })?;
+        if (instr_word_u32 & 0b11) != 0b11 {
+            return Err(format!(
+                "Compressed instructions not supported (PC {:#x}, word {:#x})",
+                self.pc, instr_word_u32
+            ));
+        }
 
         if let Some(expected) = self.current_instruction() {
             let expected_word = encode_instruction(expected);
@@ -142,7 +150,7 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 let rs2_val = self.get_reg(rs2);
 
                 // Use Shout for the ALU operation
-                let shout_id = RiscvShoutTables::new(self.xlen).opcode_to_id(op);
+                let shout_id = shout_tables.opcode_to_id(op);
                 let index = interleave_bits(rs1_val, rs2_val) as u64;
                 let result = shout.lookup(shout_id, index);
 
@@ -154,7 +162,7 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 let imm_val = self.sign_extend_imm(imm);
 
                 // Use Shout for the ALU operation
-                let shout_id = RiscvShoutTables::new(self.xlen).opcode_to_id(op);
+                let shout_id = shout_tables.opcode_to_id(op);
                 let index = interleave_bits(rs1_val, imm_val) as u64;
                 let result = shout.lookup(shout_id, index);
 
@@ -163,7 +171,9 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
 
             RiscvInstruction::Load { op, rd, rs1, imm } => {
                 let base = self.get_reg(rs1);
-                let addr = base.wrapping_add(self.sign_extend_imm(imm));
+                let imm_val = self.sign_extend_imm(imm);
+                let index = interleave_bits(base, imm_val) as u64;
+                let addr = shout.lookup(add_shout_id, index);
 
                 // Use Twist for memory access
                 let raw_value = twist.load(ram, addr);
@@ -194,7 +204,9 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
 
             RiscvInstruction::Store { op, rs1, rs2, imm } => {
                 let base = self.get_reg(rs1);
-                let addr = base.wrapping_add(self.sign_extend_imm(imm));
+                let imm_val = self.sign_extend_imm(imm);
+                let index = interleave_bits(base, imm_val) as u64;
+                let addr = shout.lookup(add_shout_id, index);
                 let value = self.get_reg(rs2);
 
                 // Mask value to store width
@@ -215,7 +227,7 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 let rs2_val = self.get_reg(rs2);
 
                 // Use Shout for the comparison
-                let shout_id = RiscvShoutTables::new(self.xlen).opcode_to_id(cond.to_shout_opcode());
+                let shout_id = shout_tables.opcode_to_id(cond.to_shout_opcode());
                 let index = interleave_bits(rs1_val, rs2_val) as u64;
                 let _comparison_result = shout.lookup(shout_id, index);
 
@@ -237,7 +249,11 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 let return_addr = self.pc.wrapping_add(4);
 
                 // pc = (rs1 + imm) & ~1
-                next_pc = rs1_val.wrapping_add(self.sign_extend_imm(imm)) & !1;
+                // Use Shout ADD for modular RV32 semantics, then apply the JALR alignment mask in-circuit.
+                let imm_val = self.sign_extend_imm(imm);
+                let index = interleave_bits(rs1_val, imm_val) as u64;
+                let sum = shout.lookup(add_shout_id, index);
+                next_pc = sum & !1;
 
                 // rd = return address
                 self.set_reg(rd, return_addr);
@@ -250,9 +266,11 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
             }
 
             RiscvInstruction::Auipc { rd, imm } => {
-                // rd = pc + (imm << 12)
-                let value = self.pc.wrapping_add((imm as i64 as u64) << 12);
-                self.set_reg(rd, self.mask_value(value));
+                // rd = pc + (imm << 12) (via Shout ADD for modular RV32 semantics)
+                let imm_u = self.mask_value((imm as i64 as u64) << 12);
+                let index = interleave_bits(self.pc, imm_u) as u64;
+                let value = shout.lookup(add_shout_id, index);
+                self.set_reg(rd, value);
             }
 
             RiscvInstruction::Halt => {
@@ -421,7 +439,7 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
             }
         }
 
-        self.pc = next_pc;
+        self.pc = self.mask_value(next_pc);
 
         Ok(neo_vm_trace::StepMeta {
             pc_after: self.pc,

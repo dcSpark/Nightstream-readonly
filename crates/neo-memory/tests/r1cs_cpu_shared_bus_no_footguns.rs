@@ -129,7 +129,9 @@ fn with_shared_cpu_bus_injects_constraints_and_forces_const_one() {
         )]),
     };
 
-    let cpu = cpu.with_shared_cpu_bus(cfg).expect("enable shared_cpu_bus");
+    let cpu = cpu
+        .with_shared_cpu_bus(cfg, 1)
+        .expect("enable shared_cpu_bus");
 
     // Base CCS had A/B all-zero; injection should make both non-zero.
     assert!(
@@ -178,7 +180,7 @@ fn with_shared_cpu_bus_rejects_non_public_const_one() {
     };
 
     assert!(
-        cpu.with_shared_cpu_bus(cfg).is_err(),
+        cpu.with_shared_cpu_bus(cfg, 1).is_err(),
         "const_one_col >= m_in must be rejected"
     );
 }
@@ -242,7 +244,7 @@ fn with_shared_cpu_bus_rejects_bindings_in_bus_tail() {
     };
 
     assert!(
-        cpu.with_shared_cpu_bus(cfg).is_err(),
+        cpu.with_shared_cpu_bus(cfg, 1).is_err(),
         "bindings that overlap the bus tail must be rejected"
     );
 }

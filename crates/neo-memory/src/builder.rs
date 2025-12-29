@@ -76,11 +76,6 @@ where
     if chunk_size == 0 {
         return Err(ShardBuildError::InvalidChunkSize("chunk_size must be >= 1".into()));
     }
-    if chunk_size != 1 {
-        return Err(ShardBuildError::InvalidChunkSize(format!(
-            "shared_cpu_bus currently supports chunk_size=1 (got {chunk_size})"
-        )));
-    }
 
     // 1) Run VM and collect full trace for this shard.
     let trace = neo_vm_trace::trace_program(vm, twist, shout, max_steps)
@@ -223,7 +218,7 @@ where
                 k: layout.k,
                 d: layout.d,
                 n_side: layout.n_side,
-                steps: chunk_len,
+                steps: chunk_size,
                 ell,
                 init,
                 _phantom: PhantomData,
@@ -255,6 +250,11 @@ where
         // Lookup instances (metadata-only).
         let mut lut_instances = Vec::new();
         for table_id in table_ids.iter().copied() {
+            if lut_tables.contains_key(&table_id) && lut_table_specs.contains_key(&table_id) {
+                return Err(ShardBuildError::InvalidInit(format!(
+                    "shout table_id={table_id} appears in both lut_tables (explicit) and lut_table_specs (implicit); pick exactly one to avoid schema ambiguity"
+                )));
+            }
             let table_spec = lut_table_specs.get(&table_id).cloned();
 
             let (k, d, n_side, ell, table) = if let Some(spec) = &table_spec {
@@ -282,7 +282,7 @@ where
                 k,
                 d,
                 n_side,
-                steps: chunk_len,
+                steps: chunk_size,
                 ell,
                 table_spec,
                 table,

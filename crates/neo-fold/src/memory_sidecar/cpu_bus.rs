@@ -106,11 +106,6 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
     }
 
     let chunk_size = infer_chunk_size_from_steps(steps)?;
-    if chunk_size != 1 {
-        return Err(PiCcsError::InvalidInput(format!(
-            "shared CPU bus currently supports chunk_size==1, got {chunk_size}"
-        )));
-    }
 
     let base_shout_ell_addrs: Vec<usize> = (0..steps[0].lut_insts_len())
         .map(|i| {

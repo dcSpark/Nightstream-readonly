@@ -767,8 +767,9 @@ fn increment_value_tampering_attack_should_be_rejected() {
 /// Attack: Table[1] = 200, but claim lookup result = 999.
 #[test]
 fn lookup_value_tampering_attack_should_be_rejected() {
-    let n = 20usize;
-    let m = 20usize;
+    // Must be large enough to hold all injected Shout+Twist constraints (incl. bitness checks).
+    let n = 22usize;
+    let m = 22usize;
     let m_in = 1usize;
 
     // Bus layout: Shout first, then Twist

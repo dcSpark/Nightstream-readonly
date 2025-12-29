@@ -683,8 +683,9 @@ fn has_write_flag_mismatch_wa_bits_nonzero_should_be_rejected() {
 /// Constraint needed: `(1 - has_lookup) · val = 0`
 #[test]
 fn has_lookup_flag_mismatch_val_nonzero_should_be_rejected() {
-    let n = 20usize;
-    let m = 20usize;
+    // Must be large enough to hold all injected Shout+Twist constraints (incl. bitness checks).
+    let n = 22usize;
+    let m = 22usize;
     let m_in = 1usize;
 
     let shout_cols = SHOUT_BUS_COLS;
@@ -818,8 +819,9 @@ fn has_lookup_flag_mismatch_val_nonzero_should_be_rejected() {
 /// Constraint needed: `(1 - has_lookup) · addr_bit = 0` for each bit
 #[test]
 fn has_lookup_flag_mismatch_addr_bits_nonzero_should_be_rejected() {
-    let n = 20usize;
-    let m = 20usize;
+    // Must be large enough to hold all injected Shout+Twist constraints (incl. bitness checks).
+    let n = 22usize;
+    let m = 22usize;
     let m_in = 1usize;
 
     let shout_cols = SHOUT_BUS_COLS;

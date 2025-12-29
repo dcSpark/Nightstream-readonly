@@ -5,4 +5,5 @@
 pub mod ccs;
 pub mod elf_loader;
 pub mod lookups;
+pub mod rom_init;
 pub mod shout_oracle;

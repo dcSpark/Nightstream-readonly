@@ -211,59 +211,116 @@ pub fn evaluate_sub_mle<F: Field>(r: &[F]) -> F {
 }
 
 /// Evaluate the MLE of SLL (Shift Left Logical) at a random point.
-///
-/// For shift operations, Jolt uses a "virtual table" approach where the
-/// MLE is computed using products over bit positions.
 pub fn evaluate_sll_mle<F: Field>(r: &[F], xlen: usize) -> F {
     debug_assert_eq!(r.len(), 2 * xlen);
+    assert!(
+        xlen.is_power_of_two() && xlen <= 64,
+        "shift MLE only supports power-of-two xlen <= 64 (got {xlen})"
+    );
 
-    // SLL: result_i = x_{i-shamt} if i >= shamt, else 0
-    // The MLE is: Σ_i 2^i * Σ_{s=0}^{i} eq(y, s) * x_{i-s}
-    // For simplicity, use naive evaluation for now
-    evaluate_mle_naive(RiscvOpcode::Sll, r, xlen)
+    // RISC-V semantics: shamt = y & (xlen - 1).
+    // So only the low log2(xlen) bits of y affect the result.
+    let shift_bits = xlen.trailing_zeros() as usize;
+    let mut y_bits = Vec::with_capacity(shift_bits);
+    for k in 0..shift_bits {
+        y_bits.push(r[2 * k + 1]);
+    }
+
+    // eq_s = 1 iff the low bits of y equal s (on Boolean points).
+    let mut eq_s = vec![F::ZERO; xlen];
+    for s in 0..xlen {
+        let mut eq = F::ONE;
+        for (k, y_k) in y_bits.iter().enumerate() {
+            eq *= if ((s >> k) & 1) == 1 { *y_k } else { F::ONE - *y_k };
+        }
+        eq_s[s] = eq;
+    }
+
+    // result_i = x_{i - shamt} if i >= shamt else 0
+    let mut result = F::ZERO;
+    for i in 0..xlen {
+        let mut out_bit = F::ZERO;
+        for s in 0..=i {
+            let x_bit = r[2 * (i - s)];
+            out_bit += eq_s[s] * x_bit;
+        }
+        result += F::from_u64(1u64 << i) * out_bit;
+    }
+    result
 }
 
 /// Evaluate the MLE of SRL (Shift Right Logical) at a random point.
-///
-/// Following Jolt's virtual SRL table approach.
 pub fn evaluate_srl_mle<F: Field>(r: &[F], xlen: usize) -> F {
     debug_assert_eq!(r.len(), 2 * xlen);
+    assert!(
+        xlen.is_power_of_two() && xlen <= 64,
+        "shift MLE only supports power-of-two xlen <= 64 (got {xlen})"
+    );
 
-    // Jolt's SRL formula: iteratively compute result *= (1 + y_i); result += x_i * y_i
-    // This works because for each bit position, if y_i=1, we're selecting x_i,
-    // otherwise we're shifting (multiplying by 1 + y_i = 2 when y_i=1 at boolean points)
+    let shift_bits = xlen.trailing_zeros() as usize;
+    let mut y_bits = Vec::with_capacity(shift_bits);
+    for k in 0..shift_bits {
+        y_bits.push(r[2 * k + 1]);
+    }
+
+    let mut eq_s = vec![F::ZERO; xlen];
+    for s in 0..xlen {
+        let mut eq = F::ONE;
+        for (k, y_k) in y_bits.iter().enumerate() {
+            eq *= if ((s >> k) & 1) == 1 { *y_k } else { F::ONE - *y_k };
+        }
+        eq_s[s] = eq;
+    }
+
+    // result_i = x_{i + shamt} if i + shamt < xlen else 0
     let mut result = F::ZERO;
     for i in 0..xlen {
-        let x_i = r[2 * i];
-        let y_i = r[2 * i + 1];
-        result = result * (F::ONE + y_i) + x_i * y_i;
+        let mut out_bit = F::ZERO;
+        for s in 0..(xlen - i) {
+            let x_bit = r[2 * (i + s)];
+            out_bit += eq_s[s] * x_bit;
+        }
+        result += F::from_u64(1u64 << i) * out_bit;
     }
     result
 }
 
 /// Evaluate the MLE of SRA (Shift Right Arithmetic) at a random point.
-///
-/// Following Jolt's virtual SRA table approach.
 pub fn evaluate_sra_mle<F: Field>(r: &[F], xlen: usize) -> F {
     debug_assert_eq!(r.len(), 2 * xlen);
+    assert!(
+        xlen.is_power_of_two() && xlen <= 64,
+        "shift MLE only supports power-of-two xlen <= 64 (got {xlen})"
+    );
 
-    // SRA is like SRL but with sign extension
-    // Jolt's formula adds a sign_extension term based on the MSB
-    let mut result = F::ZERO;
-    let mut sign_extension = F::ZERO;
-
-    for i in 0..xlen {
-        let x_i = r[2 * i];
-        let y_i = r[2 * i + 1];
-        result = result * (F::ONE + y_i) + x_i * y_i;
-        if i != 0 {
-            sign_extension += F::from_u64(1 << i) * (F::ONE - y_i);
-        }
+    let shift_bits = xlen.trailing_zeros() as usize;
+    let mut y_bits = Vec::with_capacity(shift_bits);
+    for k in 0..shift_bits {
+        y_bits.push(r[2 * k + 1]);
     }
 
-    // Add sign extension: MSB * sign_extension_mask
-    let msb = r[0]; // x_0 is the MSB in interleaved representation
-    result + msb * sign_extension
+    let mut eq_s = vec![F::ZERO; xlen];
+    for s in 0..xlen {
+        let mut eq = F::ONE;
+        for (k, y_k) in y_bits.iter().enumerate() {
+            eq *= if ((s >> k) & 1) == 1 { *y_k } else { F::ONE - *y_k };
+        }
+        eq_s[s] = eq;
+    }
+
+    let sign = r[2 * (xlen - 1)];
+
+    // result_i = x_{i + shamt} if i + shamt < xlen else sign(x)
+    let mut result = F::ZERO;
+    for i in 0..xlen {
+        let mut out_bit = F::ZERO;
+        for s in 0..xlen {
+            let bit = if i + s < xlen { r[2 * (i + s)] } else { sign };
+            out_bit += eq_s[s] * bit;
+        }
+        result += F::from_u64(1u64 << i) * out_bit;
+    }
+    result
 }
 
 /// Evaluate the MLE of a RISC-V opcode at a random point.
@@ -291,6 +348,9 @@ pub fn evaluate_opcode_mle<F: Field>(op: RiscvOpcode, r: &[F], xlen: usize) -> F
         RiscvOpcode::Neq => evaluate_neq_mle(r),
         RiscvOpcode::Slt => evaluate_slt_mle(r),
         RiscvOpcode::Sltu => evaluate_sltu_mle(r),
+        RiscvOpcode::Sll => evaluate_sll_mle(r, xlen),
+        RiscvOpcode::Srl => evaluate_srl_mle(r, xlen),
+        RiscvOpcode::Sra => evaluate_sra_mle(r, xlen),
         // For shift and other opcodes, use the naive MLE evaluation when available.
         // Note: naive evaluation is O(2^{2*xlen}) and intentionally limited to tiny xlen.
         _ => {

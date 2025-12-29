@@ -189,9 +189,9 @@ pub trait TimeBatchedClaims {
     );
 }
 
-pub(crate) struct ShoutAddrPreProverData {
+pub(crate) struct ShoutAddrPreBatchProverData {
     pub addr_pre: BatchedAddrProof<K>,
-    pub decoded: ShoutDecodedColsSparse,
+    pub decoded: Vec<ShoutDecodedColsSparse>,
 }
 
 pub struct ShoutAddrPreVerifyData {
@@ -434,11 +434,14 @@ pub(crate) fn prove_shout_addr_pre_time(
     cpu_bus: Option<&BusLayout>,
     ell_n: usize,
     r_cycle: &[K],
-) -> Result<Vec<ShoutAddrPreProverData>, PiCcsError> {
+    step_idx: usize,
+) -> Result<ShoutAddrPreBatchProverData, PiCcsError> {
     if step.lut_instances.is_empty() {
-        return Ok(Vec::new());
+        return Ok(ShoutAddrPreBatchProverData {
+            addr_pre: BatchedAddrProof::default(),
+            decoded: Vec::new(),
+        });
     }
-    let mut out = Vec::with_capacity(step.lut_instances.len());
 
     let bus =
         cpu_bus.ok_or_else(|| PiCcsError::InvalidInput("prove_shout_addr_pre_time requires shared_cpu_bus".into()))?;
@@ -449,9 +452,14 @@ pub(crate) fn prove_shout_addr_pre_time(
         ));
     }
 
+    let pow2_cycle = 1usize << ell_n;
+    let mut decoded_cols: Vec<ShoutDecodedColsSparse> = Vec::with_capacity(step.lut_instances.len());
+    let mut addr_oracles: Vec<Box<dyn RoundOracle>> = Vec::with_capacity(step.lut_instances.len());
+    let mut claimed_sums: Vec<K> = Vec::with_capacity(step.lut_instances.len());
+
+    let mut ell_addr: Option<usize> = None;
     for (idx, (lut_inst, _lut_wit)) in step.lut_instances.iter().enumerate() {
         neo_memory::addr::validate_shout_bit_addressing(lut_inst)?;
-        let pow2_cycle = 1usize << ell_n;
         if lut_inst.steps > pow2_cycle {
             return Err(PiCcsError::InvalidInput(format!(
                 "Shout(Route A): steps={} exceeds 2^ell_cycle={pow2_cycle}",
@@ -460,19 +468,28 @@ pub(crate) fn prove_shout_addr_pre_time(
         }
 
         let z = &cpu_z_k;
-        let ell_addr = lut_inst.d * lut_inst.ell;
+        let inst_ell_addr = lut_inst.d * lut_inst.ell;
+        if let Some(prev) = ell_addr {
+            if prev != inst_ell_addr {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "Shout(Route A): batched addr-pre requires uniform ell_addr; got {prev} (lut_idx=0) vs {inst_ell_addr} (lut_idx={idx})"
+                )));
+            }
+        } else {
+            ell_addr = Some(inst_ell_addr);
+        }
         let shout_cols = bus.shout_cols.get(idx).ok_or_else(|| {
             PiCcsError::InvalidInput(format!(
                 "shared_cpu_bus layout mismatch: missing shout_cols for lut_idx={idx}"
             ))
         })?;
-        if shout_cols.addr_bits.end - shout_cols.addr_bits.start != ell_addr {
+        if shout_cols.addr_bits.end - shout_cols.addr_bits.start != inst_ell_addr {
             return Err(PiCcsError::InvalidInput(format!(
-                "shared_cpu_bus layout mismatch at lut_idx={idx}: expected ell_addr={ell_addr}"
+                "shared_cpu_bus layout mismatch at lut_idx={idx}: expected ell_addr={inst_ell_addr}"
             )));
         }
 
-        let mut addr_bits = Vec::with_capacity(ell_addr);
+        let mut addr_bits = Vec::with_capacity(inst_ell_addr);
         for col_id in shout_cols.addr_bits.clone() {
             addr_bits.push(crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
                 z,
@@ -503,11 +520,16 @@ pub(crate) fn prove_shout_addr_pre_time(
             has_lookup,
             val,
         };
-        let (mut addr_oracle, addr_claim_sum): (Box<dyn RoundOracle>, K) = match &lut_inst.table_spec {
+        let (addr_oracle, addr_claim_sum): (Box<dyn RoundOracle>, K) = match &lut_inst.table_spec {
             None => {
                 let table_k: Vec<K> = lut_inst.table.iter().map(|&v| v.into()).collect();
-                let (o, sum) =
-                    AddressLookupOracle::new(&decoded.addr_bits, &decoded.has_lookup, &table_k, r_cycle, ell_addr);
+                let (o, sum) = AddressLookupOracle::new(
+                    &decoded.addr_bits,
+                    &decoded.has_lookup,
+                    &table_k,
+                    r_cycle,
+                    inst_ell_addr,
+                );
                 (Box::new(o), sum)
             }
             Some(LutTableSpec::RiscvOpcode { opcode, xlen }) => {
@@ -522,130 +544,153 @@ pub(crate) fn prove_shout_addr_pre_time(
             }
         };
 
-        let labels: [&[u8]; 1] = [b"shout/addr_pre".as_slice()];
-        let claimed_sums = vec![addr_claim_sum];
-        tr.append_message(b"shout/addr_pre_time/claim_idx", &(idx as u64).to_le_bytes());
-        bind_batched_claim_sums(tr, b"shout/addr_pre_time/claimed_sums", &claimed_sums, &labels);
-
-        let mut claims = [BatchedClaim {
-            oracle: addr_oracle.as_mut(),
-            claimed_sum: addr_claim_sum,
-            label: labels[0],
-        }];
-
-        let (r_addr, per_claim_results) = run_batched_sumcheck_prover_ds(tr, b"shout/addr_pre_time", idx, &mut claims)?;
-
-        if per_claim_results.len() != 1 {
-            return Err(PiCcsError::ProtocolError(format!(
-                "shout addr pre-time per-claim results len()={}, expected 1",
-                per_claim_results.len()
-            )));
-        }
-
-        out.push(ShoutAddrPreProverData {
-            addr_pre: BatchedAddrProof {
-                claimed_sums,
-                round_polys: vec![per_claim_results[0].round_polys.clone()],
-                r_addr,
-            },
-            decoded,
-        });
+        claimed_sums.push(addr_claim_sum);
+        addr_oracles.push(addr_oracle);
+        decoded_cols.push(decoded);
     }
 
-    Ok(out)
+    let labels: Vec<&'static [u8]> = vec![b"shout/addr_pre".as_slice(); step.lut_instances.len()];
+    tr.append_message(b"shout/addr_pre_time/step_idx", &(step_idx as u64).to_le_bytes());
+    bind_batched_claim_sums(tr, b"shout/addr_pre_time/claimed_sums", &claimed_sums, &labels);
+
+    let mut claims: Vec<BatchedClaim<'_>> = addr_oracles
+        .iter_mut()
+        .zip(claimed_sums.iter())
+        .zip(labels.iter())
+        .map(|((oracle, sum), label)| BatchedClaim {
+            oracle: oracle.as_mut(),
+            claimed_sum: *sum,
+            label: *label,
+        })
+        .collect();
+    let (r_addr, per_claim_results) =
+        run_batched_sumcheck_prover_ds(tr, b"shout/addr_pre_time", step_idx, claims.as_mut_slice())?;
+
+    if per_claim_results.len() != step.lut_instances.len() {
+        return Err(PiCcsError::ProtocolError(format!(
+            "shout addr pre-time per-claim results len()={}, expected {}",
+            per_claim_results.len(),
+            step.lut_instances.len()
+        )));
+    }
+
+    let round_polys = per_claim_results
+        .iter()
+        .map(|r| r.round_polys.clone())
+        .collect::<Vec<_>>();
+
+    Ok(ShoutAddrPreBatchProverData {
+        addr_pre: BatchedAddrProof {
+            claimed_sums,
+            round_polys,
+            r_addr,
+        },
+        decoded: decoded_cols,
+    })
 }
 
 pub fn verify_shout_addr_pre_time(
     tr: &mut Poseidon2Transcript,
     step: &StepInstanceBundle<Cmt, F, K>,
     mem_proof: &MemSidecarProof<Cmt, F, K>,
+    step_idx: usize,
 ) -> Result<Vec<ShoutAddrPreVerifyData>, PiCcsError> {
-    let mut out = Vec::with_capacity(step.lut_insts.len());
+    if step.lut_insts.is_empty() {
+        if !mem_proof.shout_addr_pre.claimed_sums.is_empty()
+            || !mem_proof.shout_addr_pre.round_polys.is_empty()
+            || !mem_proof.shout_addr_pre.r_addr.is_empty()
+        {
+            return Err(PiCcsError::InvalidInput(
+                "shout_addr_pre must be empty when there are no Shout instances".into(),
+            ));
+        }
+        return Ok(Vec::new());
+    }
 
+    let n_lut = step.lut_insts.len();
+    let mut out = Vec::with_capacity(n_lut);
+
+    let mut ell_addr: Option<usize> = None;
     for (idx, lut_inst) in step.lut_insts.iter().enumerate() {
         neo_memory::addr::validate_shout_bit_addressing(lut_inst)?;
-        let proof = match mem_proof.proofs.get(idx) {
-            Some(MemOrLutProof::Shout(p)) => p,
-            _ => return Err(PiCcsError::InvalidInput("expected Shout proof".into())),
-        };
+        let inst_ell_addr = lut_inst.d * lut_inst.ell;
+        if let Some(prev) = ell_addr {
+            if prev != inst_ell_addr {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "Shout(Route A): batched addr-pre requires uniform ell_addr; got {prev} (lut_idx=0) vs {inst_ell_addr} (lut_idx={idx})"
+                )));
+            }
+        } else {
+            ell_addr = Some(inst_ell_addr);
+        }
+    }
+    let ell_addr = ell_addr.unwrap_or(0);
 
-        let ell_addr = lut_inst.d * lut_inst.ell;
-        if proof.addr_pre.claimed_sums.len() != 1 {
+    let proof = &mem_proof.shout_addr_pre;
+    if proof.claimed_sums.len() != n_lut {
+        return Err(PiCcsError::InvalidInput(format!(
+            "shout_addr_pre claimed_sums.len()={}, expected {}",
+            proof.claimed_sums.len(),
+            n_lut
+        )));
+    }
+    if proof.round_polys.len() != n_lut {
+        return Err(PiCcsError::InvalidInput(format!(
+            "shout_addr_pre round_polys.len()={}, expected {}",
+            proof.round_polys.len(),
+            n_lut
+        )));
+    }
+    if proof.r_addr.len() != ell_addr {
+        return Err(PiCcsError::InvalidInput(format!(
+            "shout_addr_pre r_addr.len()={}, expected ell_addr={ell_addr}",
+            proof.r_addr.len()
+        )));
+    }
+    for (idx, rounds) in proof.round_polys.iter().enumerate() {
+        if rounds.len() != ell_addr {
             return Err(PiCcsError::InvalidInput(format!(
-                "shout addr_pre claimed_sums.len()={}, expected 1",
-                proof.addr_pre.claimed_sums.len()
+                "shout_addr_pre round_polys[{idx}].len()={}, expected ell_addr={ell_addr}",
+                rounds.len()
             )));
         }
-        if proof.addr_pre.round_polys.len() != 1 {
-            return Err(PiCcsError::InvalidInput(format!(
-                "shout addr_pre round_polys.len()={}, expected 1",
-                proof.addr_pre.round_polys.len()
-            )));
-        }
-        if proof.addr_pre.r_addr.len() != ell_addr {
-            return Err(PiCcsError::InvalidInput(format!(
-                "shout addr_pre r_addr.len()={}, expected ell_addr={}",
-                proof.addr_pre.r_addr.len(),
-                ell_addr
-            )));
-        }
-        if proof
-            .addr_pre
-            .round_polys
-            .first()
-            .map(|rounds| rounds.len())
-            .unwrap_or(0)
-            != ell_addr
-        {
-            return Err(PiCcsError::InvalidInput(format!(
-                "shout addr_pre round_polys[0].len()={}, expected ell_addr={}",
-                proof
-                    .addr_pre
-                    .round_polys
-                    .first()
-                    .map(|rounds| rounds.len())
-                    .unwrap_or(0),
-                ell_addr
-            )));
-        }
+    }
 
-        let labels: [&[u8]; 1] = [b"shout/addr_pre".as_slice()];
-        tr.append_message(b"shout/addr_pre_time/claim_idx", &(idx as u64).to_le_bytes());
-        bind_batched_claim_sums(
-            tr,
-            b"shout/addr_pre_time/claimed_sums",
-            &proof.addr_pre.claimed_sums,
-            &labels,
-        );
+    let labels: Vec<&'static [u8]> = vec![b"shout/addr_pre".as_slice(); n_lut];
+    tr.append_message(b"shout/addr_pre_time/step_idx", &(step_idx as u64).to_le_bytes());
+    bind_batched_claim_sums(tr, b"shout/addr_pre_time/claimed_sums", &proof.claimed_sums, &labels);
 
-        let degree_bounds = vec![2usize];
-        let (r_addr, finals, ok) = verify_batched_sumcheck_rounds_ds(
-            tr,
-            b"shout/addr_pre_time",
-            idx,
-            &proof.addr_pre.round_polys,
-            &proof.addr_pre.claimed_sums,
-            &labels,
-            &degree_bounds,
-        );
-        if !ok {
-            return Err(PiCcsError::SumcheckError(
-                "shout addr-pre batched sumcheck invalid".into(),
-            ));
-        }
-        if r_addr != proof.addr_pre.r_addr {
-            return Err(PiCcsError::ProtocolError(
-                "shout addr_pre r_addr mismatch: transcript-derived vs proof".into(),
-            ));
-        }
-        if finals.len() != 1 {
-            return Err(PiCcsError::ProtocolError(format!(
-                "shout addr-pre finals.len()={}, expected 1",
-                finals.len()
-            )));
-        }
-        let addr_claim_sum = proof.addr_pre.claimed_sums[0];
-        let addr_final = finals[0];
+    let degree_bounds = vec![2usize; n_lut];
+    let (r_addr, finals, ok) = verify_batched_sumcheck_rounds_ds(
+        tr,
+        b"shout/addr_pre_time",
+        step_idx,
+        &proof.round_polys,
+        &proof.claimed_sums,
+        &labels,
+        &degree_bounds,
+    );
+    if !ok {
+        return Err(PiCcsError::SumcheckError(
+            "shout addr-pre batched sumcheck invalid".into(),
+        ));
+    }
+    if r_addr != proof.r_addr {
+        return Err(PiCcsError::ProtocolError(
+            "shout_addr_pre r_addr mismatch: transcript-derived vs proof".into(),
+        ));
+    }
+    if finals.len() != n_lut {
+        return Err(PiCcsError::ProtocolError(format!(
+            "shout addr-pre finals.len()={}, expected {}",
+            finals.len(),
+            n_lut
+        )));
+    }
+
+    for (idx, lut_inst) in step.lut_insts.iter().enumerate() {
+        let addr_claim_sum = proof.claimed_sums[idx];
+        let addr_final = finals[idx];
 
         let table_eval_at_r_addr = match &lut_inst.table_spec {
             None => {
@@ -653,8 +698,8 @@ pub fn verify_shout_addr_pre_time(
                     .checked_shl(r_addr.len() as u32)
                     .ok_or_else(|| PiCcsError::InvalidInput("Shout: 2^ell_addr overflow".into()))?;
                 let mut acc = K::ZERO;
-                for (idx, &v) in lut_inst.table.iter().enumerate().take(pow2) {
-                    let w = neo_memory::mle::chi_at_index(&r_addr, idx);
+                for (i, &v) in lut_inst.table.iter().enumerate().take(pow2) {
+                    let w = neo_memory::mle::chi_at_index(&r_addr, i);
                     acc += K::from(v) * w;
                 }
                 acc
@@ -667,7 +712,7 @@ pub fn verify_shout_addr_pre_time(
         out.push(ShoutAddrPreVerifyData {
             addr_claim_sum,
             addr_final,
-            r_addr,
+            r_addr: r_addr.clone(),
             table_eval_at_r_addr,
         });
     }
@@ -767,14 +812,14 @@ pub(crate) fn build_route_a_memory_oracles(
     step: &StepWitnessBundle<Cmt, F, K>,
     _ell_n: usize,
     r_cycle: &[K],
-    shout_pre: &[ShoutAddrPreProverData],
+    shout_pre: &ShoutAddrPreBatchProverData,
     twist_pre: &[TwistAddrPreProverData],
 ) -> Result<RouteAMemoryOracles, PiCcsError> {
-    if shout_pre.len() != step.lut_instances.len() {
+    if shout_pre.decoded.len() != step.lut_instances.len() {
         return Err(PiCcsError::InvalidInput(format!(
             "shout pre-time count mismatch (expected {}, got {})",
             step.lut_instances.len(),
-            shout_pre.len()
+            shout_pre.decoded.len()
         )));
     }
     if twist_pre.len() != step.mem_instances.len() {
@@ -786,32 +831,33 @@ pub(crate) fn build_route_a_memory_oracles(
     }
 
     let mut shout_oracles = Vec::with_capacity(step.lut_instances.len());
-    for ((lut_inst, _lut_wit), pre) in step.lut_instances.iter().zip(shout_pre.iter()) {
+    let r_addr = &shout_pre.addr_pre.r_addr;
+    for ((lut_inst, _lut_wit), decoded) in step.lut_instances.iter().zip(shout_pre.decoded.iter()) {
         let ell_addr = lut_inst.d * lut_inst.ell;
-        if pre.addr_pre.r_addr.len() != ell_addr {
+        if r_addr.len() != ell_addr {
             return Err(PiCcsError::InvalidInput(format!(
                 "Shout(Route A): r_addr.len()={} != ell_addr={}",
-                pre.addr_pre.r_addr.len(),
+                r_addr.len(),
                 ell_addr
             )));
         }
 
         let (value_oracle, value_claim) =
-            ShoutValueOracleSparse::new(r_cycle, pre.decoded.has_lookup.clone(), pre.decoded.val.clone());
+            ShoutValueOracleSparse::new(r_cycle, decoded.has_lookup.clone(), decoded.val.clone());
         let (adapter_oracle, adapter_claim) = IndexAdapterOracleSparseTime::new_with_gate(
             r_cycle,
-            pre.decoded.has_lookup.clone(),
-            pre.decoded.addr_bits.clone(),
-            &pre.addr_pre.r_addr,
+            decoded.has_lookup.clone(),
+            decoded.addr_bits.clone(),
+            r_addr,
         );
 
         let mut bitness: Vec<Box<dyn RoundOracle>> = Vec::with_capacity(ell_addr + 1);
-        for col in pre.decoded.addr_bits.iter().cloned() {
+        for col in decoded.addr_bits.iter().cloned() {
             bitness.push(Box::new(LazyBitnessOracleSparseTime::new_with_cycle(r_cycle, col)));
         }
         bitness.push(Box::new(LazyBitnessOracleSparseTime::new_with_cycle(
             r_cycle,
-            pre.decoded.has_lookup.clone(),
+            decoded.has_lookup.clone(),
         )));
 
         shout_oracles.push(RouteAShoutTimeOracles {
@@ -1155,7 +1201,7 @@ pub(crate) fn finalize_route_a_memory_prover(
     prev_step: Option<&StepWitnessBundle<Cmt, F, K>>,
     prev_twist_decoded: Option<&[TwistDecodedColsSparse]>,
     oracles: &mut RouteAMemoryOracles,
-    shout_pre: &[ShoutAddrPreProverData],
+    shout_addr_pre: &BatchedAddrProof<K>,
     twist_pre: &[TwistAddrPreProverData],
     r_time: &[K],
     m_in: usize,
@@ -1169,11 +1215,14 @@ pub(crate) fn finalize_route_a_memory_prover(
             prev_twist_decoded.is_some()
         )));
     }
-    if shout_pre.len() != step.lut_instances.len() {
+    if shout_addr_pre.claimed_sums.len() != step.lut_instances.len()
+        || shout_addr_pre.round_polys.len() != step.lut_instances.len()
+    {
         return Err(PiCcsError::InvalidInput(format!(
-            "shout pre-time count mismatch (expected {}, got {})",
+            "shout addr-pre proof count mismatch (expected {}, got claimed_sums={}, round_polys={})",
             step.lut_instances.len(),
-            shout_pre.len()
+            shout_addr_pre.claimed_sums.len(),
+            shout_addr_pre.round_polys.len()
         )));
     }
     if twist_pre.len() != step.mem_instances.len() {
@@ -1365,10 +1414,38 @@ pub(crate) fn finalize_route_a_memory_prover(
         tr.append_message(b"twist/val_eval/batch_done", &[]);
     }
 
-    for pre in shout_pre {
-        let mut proof = ShoutProofK::default();
-        proof.addr_pre = pre.addr_pre.clone();
-        proofs.push(MemOrLutProof::Shout(proof));
+    if step.lut_instances.is_empty() {
+        if !shout_addr_pre.claimed_sums.is_empty() || !shout_addr_pre.round_polys.is_empty() || !shout_addr_pre.r_addr.is_empty()
+        {
+            return Err(PiCcsError::ProtocolError(
+                "shout_addr_pre must be empty when there are no Shout instances".into(),
+            ));
+        }
+    } else {
+        let mut ell_addr: Option<usize> = None;
+        for (idx, (inst, _wit)) in step.lut_instances.iter().enumerate() {
+            let inst_ell_addr = inst.d * inst.ell;
+            if let Some(prev) = ell_addr {
+                if prev != inst_ell_addr {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Shout(Route A): batched addr-pre requires uniform ell_addr; got {prev} (lut_idx=0) vs {inst_ell_addr} (lut_idx={idx})"
+                    )));
+                }
+            } else {
+                ell_addr = Some(inst_ell_addr);
+            }
+        }
+        let ell_addr = ell_addr.unwrap_or(0);
+        if shout_addr_pre.r_addr.len() != ell_addr {
+            return Err(PiCcsError::InvalidInput(format!(
+                "shout_addr_pre r_addr.len()={}, expected ell_addr={ell_addr}",
+                shout_addr_pre.r_addr.len()
+            )));
+        }
+    }
+
+    for _ in 0..step.lut_instances.len() {
+        proofs.push(MemOrLutProof::Shout(ShoutProofK::default()));
     }
 
     for idx in 0..step.mem_instances.len() {
@@ -1459,6 +1536,7 @@ pub(crate) fn finalize_route_a_memory_prover(
 
     Ok(MemSidecarProof {
         cpu_me_claims_val,
+        shout_addr_pre: shout_addr_pre.clone(),
         proofs,
     })
 }

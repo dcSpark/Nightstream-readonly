@@ -93,9 +93,10 @@ fn build_add_ccs(
     );
 
     let per_step_padding_constraints = (shout_ell_addr + 1) + (2 * twist_ell_addr + 3);
-    let include_binding_constraints = chunk_size == 1;
-    let per_step_binding_constraints = if include_binding_constraints { bus_cols } else { 0 };
-    let total_constraints = 1 + chunk_size * (per_step_padding_constraints + per_step_binding_constraints);
+    // "Touch" every bus column once (at j=0) so the CPU CCS references the shared-bus columns
+    // outside the canonical padding rows. This prevents a common linkage footgun.
+    let binding_constraints = bus_cols;
+    let total_constraints = 1 + chunk_size * per_step_padding_constraints + binding_constraints;
     assert!(
         total_constraints <= n,
         "not enough rows for shared-bus guardrail constraints: need {}, have n={}",
@@ -165,22 +166,18 @@ fn build_add_ccs(
         }
     }
 
-    // Non-padding "touch" constraints for every bus column (only for chunk_size==1 fixtures).
+    // Non-padding "touch" constraints for every bus column (j=0 only).
     //
     //   bus_col * 1 = bus_col
     //
     // These are tautologies, but they prevent a common linkage footgun where the CPU CCS only
     // references bus columns inside the padding rows.
-    if include_binding_constraints {
-        for j in 0..chunk_size {
-            for col_id in 0..bus_cols {
-                let bus_cell = bus_base + col_id * chunk_size + j;
-                A[(row, bus_cell)] = F::ONE;
-                B[(row, 0)] = F::ONE;
-                C[(row, bus_cell)] = F::ONE;
-                row += 1;
-            }
-        }
+    for col_id in 0..bus_cols {
+        let bus_cell = bus_base + col_id * chunk_size;
+        A[(row, bus_cell)] = F::ONE;
+        B[(row, 0)] = F::ONE;
+        C[(row, bus_cell)] = F::ONE;
+        row += 1;
     }
 
     // Our constraints are R1CS-style: A(z)*B(z) = C(z).
@@ -612,7 +609,7 @@ fn full_folding_integration_multi_step_chunk() {
     };
 
     let mut tr_prove = Poseidon2Transcript::new(b"full-fold-multi-step-chunk");
-    let err = fold_shard_prove(
+    let proof = fold_shard_prove(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -623,14 +620,21 @@ fn full_folding_integration_multi_step_chunk() {
         &l,
         mixers,
     )
-    .expect_err("multi-step chunks are intentionally unsupported in shared-bus-only mode");
-    match err {
-        PiCcsError::InvalidInput(msg) => assert!(
-            msg.contains("chunk_size==1"),
-            "unexpected InvalidInput for chunk_size>1: {msg}"
-        ),
-        other => panic!("expected InvalidInput, got {other:?}"),
-    }
+    .expect("prove should succeed for multi-step chunks");
+
+    let mut tr_verify = Poseidon2Transcript::new(b"full-fold-multi-step-chunk");
+    let steps_public = [StepInstanceBundle::from(&step_bundle)];
+    let _ = fold_shard_verify(
+        FoldingMode::PaperExact,
+        &mut tr_verify,
+        &params,
+        &ccs,
+        &steps_public,
+        &acc_init,
+        &proof,
+        mixers,
+    )
+    .expect("verify should succeed for multi-step chunks");
 }
 
 #[test]
@@ -713,8 +717,6 @@ fn tamper_me_opening_fails() {
 
 #[test]
 fn tamper_shout_addr_pre_round_poly_fails() {
-    use neo_fold::shard::MemOrLutProof;
-
     let (params, ccs, step_bundle, acc_init, acc_wit_init, l, mixers, _out_val) = build_single_chunk_inputs();
 
     let mut tr_prove = Poseidon2Transcript::new(b"full-fold-tamper-shout-addr-pre");
@@ -732,13 +734,7 @@ fn tamper_shout_addr_pre_round_poly_fails() {
     .expect("prove should succeed");
 
     let mem0 = proof.steps.get_mut(0).expect("one step");
-    let shout0 = mem0.mem.proofs.get_mut(0).expect("one Shout proof");
-    let shout_proof = match shout0 {
-        MemOrLutProof::Shout(p) => p,
-        _ => panic!("expected Shout proof"),
-    };
-
-    shout_proof.addr_pre.round_polys[0][0][0] += K::ONE;
+    mem0.mem.shout_addr_pre.round_polys[0][0][0] += K::ONE;
 
     let mut tr_verify = Poseidon2Transcript::new(b"full-fold-tamper-shout-addr-pre");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];

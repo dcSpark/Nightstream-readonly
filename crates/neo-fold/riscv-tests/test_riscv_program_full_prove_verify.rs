@@ -18,10 +18,11 @@ use neo_fold::shard::{fold_shard_prove, fold_shard_verify, CommitMixers};
 use neo_math::{F, K};
 use neo_memory::builder::build_shard_witness_shared_cpu_bus;
 use neo_memory::plain::PlainMemLayout;
-use neo_memory::riscv::ccs::{build_rv32_b1_step_ccs, rv32_b1_shared_cpu_bus_config, rv32_b1_step_to_witness};
+use neo_memory::riscv::ccs::{build_rv32_b1_step_ccs, rv32_b1_chunk_to_witness, rv32_b1_shared_cpu_bus_config};
 use neo_memory::riscv::lookups::{
     encode_program, RiscvCpu, RiscvInstruction, RiscvMemOp, RiscvMemory, RiscvOpcode, RiscvShoutTables, PROG_ID,
 };
+use neo_memory::riscv::rom_init::prog_init_words;
 use neo_memory::witness::{LutTableSpec, StepInstanceBundle};
 use neo_memory::R1csCpu;
 use neo_params::NeoParams;
@@ -65,19 +66,6 @@ fn pow2_ceil_k(min_k: usize) -> (usize, usize) {
     let k = min_k.next_power_of_two().max(2);
     let d = k.trailing_zeros() as usize;
     (k, d)
-}
-
-fn prog_init_words(base: u64, program_bytes: &[u8]) -> HashMap<(u32, u64), F> {
-    assert_eq!(program_bytes.len() % 4, 0, "program must be 4-byte aligned");
-    let mut out = HashMap::new();
-    for (i, chunk) in program_bytes.chunks_exact(4).enumerate() {
-        let addr = base + (i as u64) * 4;
-        let w = u32::from_le_bytes([chunk[0], chunk[1], chunk[2], chunk[3]]) as u64;
-        if w != 0 {
-            out.insert((PROG_ID.0, addr), F::from_u64(w));
-        }
-    }
-    out
 }
 
 #[test]
@@ -132,10 +120,11 @@ fn test_riscv_program_full_prove_verify() {
         (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2 }),
         (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2 }),
     ]);
-    let initial_mem = prog_init_words(0, &program_bytes);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     // Build CCS + shared-bus CPU arithmetization.
-    let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts).expect("ccs");
+    let shout_table_ids: Vec<u32> = vec![3u32]; // ADD only (this program exercises address + ALU adds).
+    let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs_base.n).expect("params");
 
     let table_specs = HashMap::from([(
@@ -153,9 +142,13 @@ fn test_riscv_program_full_prove_verify() {
         layout.m_in,
         &HashMap::new(),
         &table_specs,
-        rv32_b1_step_to_witness(layout.clone()),
+        rv32_b1_chunk_to_witness(layout.clone()),
     )
-    .with_shared_cpu_bus(rv32_b1_shared_cpu_bus_config(&layout, mem_layouts.clone(), initial_mem.clone()))
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts.clone(), initial_mem.clone())
+            .expect("cfg"),
+        1,
+    )
     .expect("shared bus inject");
 
     // Build shared-bus step bundles (includes CPU MCS + metadata-only mem/lut instances).
