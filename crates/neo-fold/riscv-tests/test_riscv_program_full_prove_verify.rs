@@ -399,6 +399,203 @@ fn test_riscv_statement_mem_init_mismatch_fails() {
 }
 
 #[test]
+#[ignore = "manual benchmark sweep; run with --ignored --nocapture"]
+fn perf_rv32_b1_chunk_size_sweep() {
+    use std::time::Instant;
+
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        }, // x1 = 1
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 0,
+            imm: 2,
+        }, // x2 = 2
+        RiscvInstruction::Branch {
+            cond: neo_memory::riscv::lookups::BranchCondition::Eq,
+            rs1: 1,
+            rs2: 2,
+            imm: 8,
+        }, // not taken
+        RiscvInstruction::Store {
+            op: RiscvMemOp::Sw,
+            rs1: 0,
+            rs2: 1,
+            imm: 0,
+        }, // mem[0] = x1
+        RiscvInstruction::Jal { rd: 5, imm: 8 }, // jump over the next instruction
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 3,
+            rs1: 0,
+            imm: 123,
+        }, // skipped
+        RiscvInstruction::Load {
+            op: RiscvMemOp::Lw,
+            rd: 3,
+            rs1: 0,
+            imm: 0,
+        }, // x3 = mem[0]
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let max_steps = 64usize;
+
+    // Keep k small to reduce bus tail width and proof work.
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x40);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2 }),
+    ]);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    fn table_specs_from_ids(ids: &[u32], xlen: usize) -> HashMap<u32, LutTableSpec> {
+        ids.iter()
+            .copied()
+            .map(|id| {
+                let opcode = match id {
+                    0 => RiscvOpcode::And,
+                    1 => RiscvOpcode::Xor,
+                    2 => RiscvOpcode::Or,
+                    3 => RiscvOpcode::Add,
+                    4 => RiscvOpcode::Sub,
+                    5 => RiscvOpcode::Slt,
+                    6 => RiscvOpcode::Sltu,
+                    7 => RiscvOpcode::Sll,
+                    8 => RiscvOpcode::Srl,
+                    9 => RiscvOpcode::Sra,
+                    10 => RiscvOpcode::Eq,
+                    11 => RiscvOpcode::Neq,
+                    12 => RiscvOpcode::Mul,
+                    13 => RiscvOpcode::Mulh,
+                    14 => RiscvOpcode::Mulhu,
+                    15 => RiscvOpcode::Mulhsu,
+                    16 => RiscvOpcode::Div,
+                    17 => RiscvOpcode::Divu,
+                    18 => RiscvOpcode::Rem,
+                    19 => RiscvOpcode::Remu,
+                    _ => panic!("unsupported RV32 B1 table_id={id}"),
+                };
+                (
+                    id,
+                    LutTableSpec::RiscvOpcode {
+                        opcode,
+                        xlen,
+                    },
+                )
+            })
+            .collect()
+    }
+
+    let profiles: &[(&str, &[u32])] = &[
+        ("min3", neo_memory::riscv::ccs::RV32_B1_SHOUT_PROFILE_MIN3),
+        ("full12", neo_memory::riscv::ccs::RV32_B1_SHOUT_PROFILE_FULL12),
+    ];
+
+    let mixers = default_mixers();
+
+    for (profile_name, shout_table_ids) in profiles {
+        let table_specs = table_specs_from_ids(shout_table_ids, xlen);
+        println!("\n== profile={profile_name} shout_tables={} ==", shout_table_ids.len());
+
+        for chunk_size in [1usize, 2, 4, 8, 16] {
+            let mut vm = RiscvCpu::new(xlen);
+            vm.load_program(0, program.clone());
+            let twist = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+            let shout = RiscvShoutTables::new(xlen);
+
+            let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts, shout_table_ids, chunk_size).expect("ccs");
+            let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs_base.n).expect("params");
+
+            let cpu = R1csCpu::new(
+                ccs_base,
+                params.clone(),
+                DummyCommit::default(),
+                layout.m_in,
+                &HashMap::new(),
+                &table_specs,
+                rv32_b1_chunk_to_witness(layout.clone()),
+            )
+            .with_shared_cpu_bus(
+                rv32_b1_shared_cpu_bus_config(&layout, shout_table_ids, mem_layouts.clone(), initial_mem.clone())
+                    .expect("cfg"),
+                chunk_size,
+            )
+            .expect("shared bus inject");
+
+            let t_build = Instant::now();
+            let steps = build_shard_witness_shared_cpu_bus::<_, Cmt, K, _, _, _>(
+                vm,
+                twist,
+                shout,
+                max_steps,
+                chunk_size,
+                &mem_layouts,
+                &HashMap::new(),
+                &table_specs,
+                &initial_mem,
+                &cpu,
+            )
+            .expect("build shard witness");
+            let build_dur = t_build.elapsed();
+
+            let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> =
+                steps.iter().map(StepInstanceBundle::from).collect();
+
+            let mut tr_prove = Poseidon2Transcript::new(b"riscv-b1-chunk-sweep");
+            let t_prove = Instant::now();
+            let proof = fold_shard_prove(
+                FoldingMode::Optimized,
+                &mut tr_prove,
+                &params,
+                &cpu.ccs,
+                &steps,
+                &[],
+                &[],
+                &DummyCommit::default(),
+                mixers,
+            )
+            .expect("prove");
+            let prove_dur = t_prove.elapsed();
+
+            let mut tr_verify = Poseidon2Transcript::new(b"riscv-b1-chunk-sweep");
+            let t_verify = Instant::now();
+            let _ = fold_shard_verify_rv32_b1_with_statement_mem_init(
+                FoldingMode::Optimized,
+                &mut tr_verify,
+                &params,
+                &cpu.ccs,
+                &mem_layouts,
+                &initial_mem,
+                &steps_public,
+                &[],
+                &proof,
+                mixers,
+                &layout,
+            )
+            .expect("verify");
+            let verify_dur = t_verify.elapsed();
+
+            println!(
+                "chunk_size={chunk_size:<2} chunks={:<3} build={:?} prove={:?} verify={:?}",
+                steps_public.len(),
+                build_dur,
+                prove_dur,
+                verify_dur
+            );
+        }
+    }
+}
+
+#[test]
 fn test_riscv_program_chunk_size_equivalence() {
     let xlen = 32usize;
     let program = vec![
@@ -614,6 +811,14 @@ fn test_riscv_program_chunk_size_equivalence() {
 #[ignore = "RV32M end-to-end requires implicit Shout table MLE support for MUL/DIV (M5)."]
 fn test_riscv_program_rv32m_full_prove_verify() {
     let xlen = 32usize;
+    // This test requires implicit Shout table MLE support for RV32M (M5). When that support is
+    // missing, running `cargo test -- --ignored` without a name filter should not fail.
+    for opcode in [RiscvOpcode::Mul, RiscvOpcode::Div] {
+        if let Err(err) = neo_memory::riscv::shout_oracle::RiscvAddressLookupOracleSparse::validate_spec(opcode, xlen) {
+            eprintln!("skipping RV32M full prove+verify: {err:?}");
+            return;
+        }
+    }
     let program = vec![
         RiscvInstruction::IAlu {
             op: RiscvOpcode::Add,

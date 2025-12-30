@@ -436,6 +436,7 @@ where
                     self.ccs.m
                 ));
             }
+            let z_len_before_resize = z_vec.len();
             if z_vec.len() != self.ccs.m {
                 z_vec.resize(self.ccs.m, Goldilocks::ZERO);
             }
@@ -458,17 +459,34 @@ where
                 debug_assert_eq!(bus_base + bus_region_len, self.ccs.m);
 
                 // Zero the bus tail so that inactive instances/ports are guaranteed zero.
-                for i in 0..bus_region_len {
-                    z_vec[bus_base + i] = Goldilocks::ZERO;
+                //
+                // Common case: CPU witness builders omit the bus tail and return a vector of length `bus_base`.
+                // In that case, the `resize` above already filled the entire bus region with zeros.
+                if z_len_before_resize > bus_base {
+                    for i in 0..bus_region_len {
+                        z_vec[bus_base + i] = Goldilocks::ZERO;
+                    }
                 }
 
+                // Scratch buffers for per-step event lookup (avoid per-step HashMap allocation).
+                let mut shout_events: Vec<Option<(u64, Goldilocks)>> = vec![None; shared.table_ids.len()];
+                let mut twist_reads: Vec<Option<(u64, Goldilocks)>> = vec![None; shared.mem_ids.len()];
+                let mut twist_writes: Vec<Option<(u64, Goldilocks)>> = vec![None; shared.mem_ids.len()];
+
                 for (j, step) in chunk.iter().enumerate() {
-                    // Build per-step maps for fast lookup.
-                    let mut shout_by_id: HashMap<u32, (u64, Goldilocks)> = HashMap::new();
+                    shout_events.fill(None);
+                    twist_reads.fill(None);
+                    twist_writes.fill(None);
+
+                    // Collect Shout events keyed by (sorted) table_id list.
                     for ev in &step.shout_events {
                         let id = ev.shout_id.0;
-                        if shout_by_id
-                            .insert(id, (ev.key, Goldilocks::from_u64(ev.value)))
+                        let idx = shared
+                            .table_ids
+                            .binary_search(&id)
+                            .map_err(|_| format!("unexpected shout_id={id} in one step (chunk_start={chunk_start}, j={j})"))?;
+                        if shout_events[idx]
+                            .replace((ev.key, Goldilocks::from_u64(ev.value)))
                             .is_some()
                         {
                             return Err(format!(
@@ -477,14 +495,17 @@ where
                         }
                     }
 
-                    let mut read_by_id: HashMap<u32, (u64, Goldilocks)> = HashMap::new();
-                    let mut write_by_id: HashMap<u32, (u64, Goldilocks)> = HashMap::new();
+                    // Collect Twist events keyed by (sorted) mem_id list.
                     for ev in &step.twist_events {
                         let id = ev.twist_id.0;
+                        let idx = shared
+                            .mem_ids
+                            .binary_search(&id)
+                            .map_err(|_| format!("unexpected twist_id={id} in one step (chunk_start={chunk_start}, j={j})"))?;
                         match ev.kind {
                             neo_vm_trace::TwistOpKind::Read => {
-                                if read_by_id
-                                    .insert(id, (ev.addr, Goldilocks::from_u64(ev.value)))
+                                if twist_reads[idx]
+                                    .replace((ev.addr, Goldilocks::from_u64(ev.value)))
                                     .is_some()
                                 {
                                     return Err(format!(
@@ -493,8 +514,8 @@ where
                                 }
                             }
                             neo_vm_trace::TwistOpKind::Write => {
-                                if write_by_id
-                                    .insert(id, (ev.addr, Goldilocks::from_u64(ev.value)))
+                                if twist_writes[idx]
+                                    .replace((ev.addr, Goldilocks::from_u64(ev.value)))
                                     .is_some()
                                 {
                                     return Err(format!(
@@ -515,7 +536,7 @@ where
                             .ok_or_else(|| format!("missing shout_meta for table_id={table_id}"))?;
                         let ell = n_side.trailing_zeros() as usize;
 
-                        if let Some((key, val)) = shout_by_id.get(table_id).copied() {
+                        if let Some((key, val)) = shout_events[i] {
                             write_addr_bits_dim_major_le_into_bus(
                                 &mut z_vec,
                                 &shared.layout,
@@ -542,7 +563,7 @@ where
                         let ell = layout.n_side.trailing_zeros() as usize;
 
                         // Read port.
-                        let (has_read, ra, rv) = if let Some((addr, val)) = read_by_id.get(mem_id).copied() {
+                        let (has_read, ra, rv) = if let Some((addr, val)) = twist_reads[i] {
                             (Goldilocks::ONE, addr, val)
                         } else {
                             (Goldilocks::ZERO, 0u64, Goldilocks::ZERO)
@@ -562,7 +583,7 @@ where
                         }
 
                         // Write port.
-                        let (has_write, wa, wv) = if let Some((addr, val)) = write_by_id.get(mem_id).copied() {
+                        let (has_write, wa, wv) = if let Some((addr, val)) = twist_writes[i] {
                             (Goldilocks::ONE, addr, val)
                         } else {
                             (Goldilocks::ZERO, 0u64, Goldilocks::ZERO)

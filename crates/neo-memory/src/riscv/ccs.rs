@@ -74,6 +74,51 @@ pub fn rv32_b1_step_linking_pairs(layout: &Rv32B1Layout) -> Vec<(usize, usize)> 
     pairs
 }
 
+/// Minimal Shout table set intended for small RV32 programs that only need:
+/// - `ADD` (address/ALU wiring), and
+/// - `EQ`/`NEQ` (BEQ/BNE).
+pub const RV32_B1_SHOUT_PROFILE_MIN3: &[u32] = &[ADD_TABLE_ID, EQ_TABLE_ID, NEQ_TABLE_ID];
+
+/// Full RV32I Shout table set (ids 0..=11).
+pub const RV32_B1_SHOUT_PROFILE_FULL12: &[u32] = &[
+    AND_TABLE_ID,
+    XOR_TABLE_ID,
+    OR_TABLE_ID,
+    ADD_TABLE_ID,
+    SUB_TABLE_ID,
+    SLT_TABLE_ID,
+    SLTU_TABLE_ID,
+    SLL_TABLE_ID,
+    SRL_TABLE_ID,
+    SRA_TABLE_ID,
+    EQ_TABLE_ID,
+    NEQ_TABLE_ID,
+];
+
+/// Full RV32IM Shout table set (ids 0..=19).
+pub const RV32_B1_SHOUT_PROFILE_FULL20: &[u32] = &[
+    AND_TABLE_ID,
+    XOR_TABLE_ID,
+    OR_TABLE_ID,
+    ADD_TABLE_ID,
+    SUB_TABLE_ID,
+    SLT_TABLE_ID,
+    SLTU_TABLE_ID,
+    SLL_TABLE_ID,
+    SRL_TABLE_ID,
+    SRA_TABLE_ID,
+    EQ_TABLE_ID,
+    NEQ_TABLE_ID,
+    MUL_TABLE_ID,
+    MULH_TABLE_ID,
+    MULHU_TABLE_ID,
+    MULHSU_TABLE_ID,
+    DIV_TABLE_ID,
+    DIVU_TABLE_ID,
+    REM_TABLE_ID,
+    REMU_TABLE_ID,
+];
+
 use bus_bindings::injected_bus_constraints_len;
 use config::{derive_mem_ids_and_ell_addrs, derive_shout_ids_and_ell_addrs};
 use constraint_builder::{build_identity_first_r1cs_ccs, Constraint};
