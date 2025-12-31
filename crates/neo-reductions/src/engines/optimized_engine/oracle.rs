@@ -632,23 +632,11 @@ fn eq_points_bool_mask(mask: usize, points: &[K]) -> K {
     prod
 }
 
-/// Get sparse threshold from environment or use default.
-/// Set NEO_SPARSE_THRESH to tune (e.g., 0.02 or 0.10).
-fn sparse_thresh() -> f32 {
-    std::env::var("NEO_SPARSE_THRESH")
-        .ok()
-        .and_then(|s| s.parse::<f32>().ok())
-        .filter(|v| *v > 0.0 && *v < 1.0)
-        .unwrap_or(0.05)
-}
-
-/// Cache of sparse matrix formats to avoid rebuilding on every eval_q_ext call.
+/// Cache of CSC matrix formats used by the optimized oracle.
 #[derive(Clone)]
 pub struct SparseCache<Ff> {
     // For each j: None (identity), or Some(CSC)
     csc: Vec<Option<CscMat<Ff>>>,
-    // Density per matrix (nnz / (n*m))
-    density: Vec<f32>,
 }
 
 impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> SparseCache<Ff> {
@@ -656,28 +644,19 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> SparseCache<Ff> {
         let t = s.t();
 
         // Parallelize sparse matrix building - happens once at setup, fully independent per matrix
-        let (csc, density): (Vec<Option<CscMat<Ff>>>, Vec<f32>) = (0..t)
+        let csc: Vec<Option<CscMat<Ff>>> = (0..t)
             .into_par_iter()
             .map(|j| {
                 if j == 0 {
-                    (None, 0.0f32)
+                    None
                 } else {
                     let mat = &s.matrices[j];
-                    let mut nnz = 0usize;
-                    for r in 0..mat.rows() {
-                        for c in 0..mat.cols() {
-                            if mat[(r, c)] != Ff::ZERO {
-                                nnz += 1;
-                            }
-                        }
-                    }
-                    let d = (nnz as f32) / ((mat.rows() * mat.cols()) as f32);
-                    (Some(CscMat::from_dense_row_major(mat)), d)
+                    Some(CscMat::from_dense_row_major(mat))
                 }
             })
-            .unzip();
+            .collect();
 
-        Self { csc, density }
+        Self { csc }
     }
 }
 
@@ -777,15 +756,6 @@ where
             acc *= (K::ONE - pi) * (K::ONE - qi) + pi * qi;
         }
         acc
-    }
-
-    #[inline]
-    fn get_F(a: &Mat<F>, row: usize, col: usize) -> F {
-        if row < a.rows() && col < a.cols() {
-            a[(row, col)]
-        } else {
-            F::ZERO
-        }
     }
 
     /// Precompute all data that depends only on r' (not on α') for row phase optimization.
@@ -928,208 +898,6 @@ where
             eq_beta_r,
             eq_r_inputs,
         }
-    }
-
-    /// Optimized Q evaluation: factor Ajtai MLE and precompute v_j vectors.
-    /// Mathematically identical but ~8-16x faster due to reduced redundant computation.
-    /// Kept for potential future use or debugging.
-    #[allow(dead_code)]
-    fn eval_q_ext(&self, alpha_prime: &[K], r_prime: &[K]) -> K {
-        use core::cmp::min;
-
-        let k_total = self.mcs_witnesses.len() + self.me_witnesses.len();
-        let t = self.s.t();
-
-        // Build χ tables for α′ and r′
-        let d_sz = 1usize << alpha_prime.len();
-        let n_sz = 1usize << r_prime.len();
-
-        let mut chi_a = vec![K::ZERO; d_sz];
-        for rho in 0..d_sz {
-            let mut w = K::ONE;
-            for bit in 0..alpha_prime.len() {
-                let a = alpha_prime[bit];
-                let is_one = ((rho >> bit) & 1) == 1;
-                w *= if is_one { a } else { K::ONE - a };
-            }
-            chi_a[rho] = w;
-        }
-
-        let mut chi_r = vec![K::ZERO; n_sz];
-        for row in 0..n_sz {
-            let mut w = K::ONE;
-            for bit in 0..r_prime.len() {
-                let r = r_prime[bit];
-                let is_one = ((row >> bit) & 1) == 1;
-                w *= if is_one { r } else { K::ONE - r };
-            }
-            chi_r[row] = w;
-        }
-
-        let eq_beta = Self::eq_points(alpha_prime, &self.ch.beta_a) * Self::eq_points(r_prime, &self.ch.beta_r);
-        let eq_ar = match self.r_inputs {
-            Some(ref r_in) => Self::eq_points(alpha_prime, &self.ch.alpha) * Self::eq_points(r_prime, r_in),
-            None => K::ZERO,
-        };
-
-        // ========== OPTIMIZATION: Precompute all v_j = M_j^T · χ_r' ONCE ==========
-        // Guard against oversized chi_r table when n_sz > self.s.n
-        let n_eff = core::cmp::min(self.s.n, n_sz);
-
-        // Heuristic: use sparse (CSC) if matrix density < threshold (tunable via env)
-        let sparse_threshold = sparse_thresh();
-
-        // Parallelize v_j computation - each matrix-vector product is independent
-        let vjs: Vec<Vec<K>> = (0..t)
-            .into_par_iter()
-            .map(|j| {
-                if j == 0 {
-                    let mut v1 = vec![K::ZERO; self.s.m];
-                    let cap = core::cmp::min(self.s.m, n_eff);
-                    v1[..cap].copy_from_slice(&chi_r[..cap]);
-                    return v1;
-                }
-
-                let mut vj = vec![K::ZERO; self.s.m];
-
-                let use_sparse = self
-                    .sparse
-                    .density
-                    .get(j)
-                    .copied()
-                    .map(|d| d < sparse_threshold)
-                    .unwrap_or(false);
-
-                if use_sparse {
-                    if let Some(ref csc) = self.sparse.csc[j] {
-                        csc.add_mul_transpose_into::<K>(&chi_r, &mut vj, n_eff);
-                    }
-                } else {
-                    for row in 0..n_eff {
-                        let wr = chi_r[row];
-                        if wr == K::ZERO {
-                            continue;
-                        }
-                        for c in 0..self.s.m {
-                            vj[c] += K::from(Self::get_F(&self.s.matrices[j], row, c)) * wr;
-                        }
-                    }
-                }
-                vj
-            })
-            .collect();
-
-        // Recompose z1 once
-        let bF = F::from_u64(self.params.b as u64);
-        let mut pow_b_f = vec![F::ONE; D];
-        for i in 1..D {
-            pow_b_f[i] = pow_b_f[i - 1] * bF;
-        }
-        let pow_b_k: Vec<K> = pow_b_f.iter().copied().map(K::from).collect();
-
-        let mut z1 = vec![K::ZERO; self.s.m];
-        for c in 0..self.s.m {
-            for rho in 0..D {
-                z1[c] += K::from(self.mcs_witnesses[0].Z[(rho, c)]) * pow_b_k[rho];
-            }
-        }
-
-        // F' using precomputed vjs
-        let mut m_vals = vec![K::ZERO; t];
-        for j in 0..t {
-            let mut acc = K::ZERO;
-            for c in 0..self.s.m {
-                acc += z1[c] * vjs[j][c];
-            }
-            m_vals[j] = acc;
-        }
-        let F_prime = self.s.f.eval_in_ext::<K>(&m_vals);
-
-        // ========== OPTIMIZATION: Precompute S_i(α') = Σ_ρ χ_α[ρ] · Z_i[ρ,·] for ALL instances ==========
-        // Parallelize S_i computation - each instance is independent
-        let S_cols: Vec<Vec<K>> = self
-            .mcs_witnesses
-            .par_iter()
-            .map(|w| &w.Z)
-            .chain(self.me_witnesses.par_iter())
-            .map(|Zi| {
-                let mut sc = vec![K::ZERO; self.s.m];
-                for rho in 0..min(D, d_sz) {
-                    let w = chi_a[rho];
-                    if w == K::ZERO {
-                        continue;
-                    }
-                    for c in 0..self.s.m {
-                        sc[c] += K::from(Zi[(rho, c)]) * w;
-                    }
-                }
-                sc
-            })
-            .collect();
-
-        // NC sum using factored S_i and v1
-        let v1 = &vjs[0];
-
-        // Precompute gamma powers for deterministic parallel sum
-        let mut g_pows = vec![K::ONE; k_total];
-        for i in 1..k_total {
-            g_pows[i] = g_pows[i - 1] * self.ch.gamma;
-        }
-
-        // Parallelize NC computation - each instance is independent
-        let nc_sum: K = (0..k_total)
-            .into_par_iter()
-            .map(|i| {
-                let mut y_eval = K::ZERO;
-                for c in 0..self.s.m {
-                    y_eval += S_cols[i][c] * v1[c];
-                }
-                let Ni = range_product_symmetric::<F>(y_eval, self.params.b);
-                g_pows[i] * self.ch.gamma * Ni
-            })
-            .sum();
-
-        // Eval block using factored S_i and precomputed vjs
-        let mut eval_inner_sum = K::ZERO;
-        if k_total >= 2 && eq_ar != K::ZERO {
-            let mut gamma_to_k = K::ONE;
-            for _ in 0..k_total {
-                gamma_to_k *= self.ch.gamma;
-            }
-
-            // Precompute gamma powers
-            let mut gamma_pow_i = vec![K::ONE; k_total];
-            for i in 1..k_total {
-                gamma_pow_i[i] = gamma_pow_i[i - 1] * self.ch.gamma;
-            }
-
-            let mut gamma_k_pow_j = vec![K::ONE; t];
-            for j in 1..t {
-                gamma_k_pow_j[j] = gamma_k_pow_j[j - 1] * gamma_to_k;
-            }
-
-            // Parallelize over j - each j iteration computes independent dot products
-            eval_inner_sum = (0..t)
-                .into_par_iter()
-                .map(|j| {
-                    let vj = &vjs[j];
-                    let mut sum_j = K::ZERO;
-                    for i_abs in 1..k_total {
-                        // y_eval = <S_i(α'), vj>
-                        let mut y_eval = K::ZERO;
-                        for c in 0..self.s.m {
-                            y_eval += S_cols[i_abs][c] * vj[c];
-                        }
-                        sum_j += gamma_pow_i[i_abs] * gamma_k_pow_j[j] * y_eval;
-                    }
-                    sum_j
-                })
-                .sum();
-
-            eval_inner_sum = eq_ar * (gamma_to_k * eval_inner_sum);
-        }
-
-        eq_beta * (F_prime + nc_sum) + eval_inner_sum
     }
 
     /// Compute the univariate round polynomial values at given xs for a row-bit round

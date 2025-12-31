@@ -12,7 +12,6 @@ use p3_field::{Field, PrimeCharacteristicRing};
 /// Better for A^T·x operations with dense x (contiguous accumulation into y).
 #[derive(Clone, Debug)]
 pub struct CscMat<Ff> {
-    pub nrows: usize,
     pub ncols: usize,
     pub col_ptr: Vec<usize>,
     pub row_idx: Vec<usize>,
@@ -59,37 +58,10 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy> CscMat<Ff> {
         }
 
         CscMat {
-            nrows,
             ncols,
             col_ptr,
             row_idx,
             vals,
-        }
-    }
-
-    /// y += A^T * x (x: nrows, y: ncols)
-    /// Only processes rows < n_eff to avoid allocating padded x vector.
-    pub fn add_mul_transpose_into<Kf>(&self, x: &[Kf], y: &mut [Kf], n_eff: usize)
-    where
-        Kf: Copy + core::ops::AddAssign + core::ops::Mul<Output = Kf> + From<Ff>,
-    {
-        debug_assert!(n_eff <= self.nrows, "n_eff must be <= nrows");
-        debug_assert!(n_eff <= x.len(), "n_eff must be <= x.len()");
-        debug_assert_eq!(y.len(), self.ncols);
-
-        for c in 0..self.ncols {
-            let s = self.col_ptr[c];
-            let e = self.col_ptr[c + 1];
-
-            // Accumulate into a register: y[c] += dot(A[:,c], x)
-            let mut acc = y[c];
-            for k in s..e {
-                let r = self.row_idx[k];
-                if r < n_eff {
-                    acc += Kf::from(self.vals[k]) * x[r];
-                }
-            }
-            y[c] = acc;
         }
     }
 }
