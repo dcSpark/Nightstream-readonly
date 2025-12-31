@@ -159,30 +159,13 @@ pub fn optimized_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
                 round_idx
             )));
         }
-        // Interpolation may return coefficients in an unspecified order.
-        // We MUST store them in low→high order (c0, c1, ..., cn) so that
-        // poly_eval_k(coeffs, ·) reproduces ys at x=0,1 and the verifier's
-        // invariant p(0)+p(1) == running_sum holds.
-        let mut coeffs = crate::optimized_engine::interpolate_univariate(&xs, &ys);
+        // Sumcheck requires coefficients in low→high order (c0, c1, ..., cn) so that
+        // poly_eval_k(coeffs, ·) reproduces ys at x=0,1 and the verifier invariant
+        // p(0)+p(1) == running_sum holds.
+        let coeffs = crate::sumcheck::interpolate_from_evals(&xs, &ys);
 
-        // If evaluating at 0/1 doesn't recreate ys, flip the order.
-        // After this normalization, `coeffs` is guaranteed low→high.
-        let ok_at_01 = crate::sumcheck::poly_eval_k(&coeffs, K::ZERO) == ys[0]
-            && crate::sumcheck::poly_eval_k(&coeffs, K::ONE) == ys[1];
-        if !ok_at_01 {
-            coeffs.reverse();
-        }
-
-        debug_assert_eq!(
-            crate::sumcheck::poly_eval_k(&coeffs, K::ZERO),
-            ys[0],
-            "interpolate_univariate returned coefficients in unexpected order (x=0)"
-        );
-        debug_assert_eq!(
-            crate::sumcheck::poly_eval_k(&coeffs, K::ONE),
-            ys[1],
-            "interpolate_univariate returned coefficients in unexpected order (x=1)"
-        );
+        debug_assert_eq!(crate::sumcheck::poly_eval_k(&coeffs, K::ZERO), ys[0]);
+        debug_assert_eq!(crate::sumcheck::poly_eval_k(&coeffs, K::ONE), ys[1]);
 
         for &c in &coeffs {
             tr.append_fields(b"sumcheck/round/coeff", &c.as_coeffs());
@@ -390,7 +373,7 @@ pub fn finalize_ccs_after_batch<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>
         }
 
         // Interpolate to coefficients
-        let coeffs = super::interpolate_univariate(&xs, &ys);
+        let coeffs = crate::sumcheck::interpolate_from_evals(&xs, &ys);
 
         // Append to transcript and get challenge
         for c in coeffs.iter() {
