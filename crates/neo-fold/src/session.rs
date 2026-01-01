@@ -17,6 +17,17 @@
 //! lives in `shard::fold_shard_prove/verify` (Route A integration).
 
 #![allow(non_snake_case)]
+#![doc = include_str!("session/README.md")]
+
+mod resources;
+pub use resources::*;
+mod layout;
+pub use layout::*;
+mod ccs_builder;
+pub use ccs_builder::*;
+mod circuit;
+pub use circuit::*;
+pub use crate::witness_layout;
 
 use neo_ajtai::{s_lincomb, s_mul, Commitment as Cmt};
 use neo_ccs::traits::SModuleHomomorphism;
@@ -24,15 +35,32 @@ use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
 use neo_math::ring::Rq as RqEl;
 use neo_math::{D, F, K};
 use neo_memory::ajtai::encode_vector_balanced_to_mat;
+use neo_memory::builder::{build_shard_witness_shared_cpu_bus_with_aux, CpuArithmetization, ShardWitnessAux};
+use neo_memory::plain::{LutTable, PlainMemLayout};
 use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
+use neo_memory::witness::LutTableSpec;
 use neo_params::NeoParams;
 use neo_transcript::{Poseidon2Transcript, Transcript};
 use p3_field::PrimeCharacteristicRing;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::pi_ccs::FoldingMode;
-use crate::shard::{self, CommitMixers, ShardProof as FoldRun, StepLinkingConfig};
+use crate::shard::{self, CommitMixers, ShardProof as FoldRun, ShardProverContext, StepLinkingConfig};
 use crate::PiCcsError;
 use neo_reductions::engines::utils;
+use neo_reductions::engines::optimized_engine::oracle::SparseCache;
+
+#[inline]
+fn mode_uses_sparse_cache(mode: &FoldingMode) -> bool {
+    match mode {
+        FoldingMode::Optimized => true,
+        #[cfg(feature = "paper-exact")]
+        FoldingMode::OptimizedWithCrosscheck(_) => true,
+        #[cfg(feature = "paper-exact")]
+        FoldingMode::PaperExact => false,
+    }
+}
 
 /// Optional application-level "output claim".
 /// (Not consumed by Π-CCS core yet; kept for API parity / future use.)
@@ -508,8 +536,18 @@ where
     l: L,
     mixers: CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32) -> Cmt>,
 
+    // Cached prover preprocessing for a specific CCS pointer (best-effort reuse).
+    prover_ctx: Option<SessionProverCcsCache>,
+
     // Collected per-step bundles (CCS-only steps have empty LUT/MEM vectors)
     steps: Vec<StepWitnessBundle<Cmt, F, K>>,
+    /// Auxiliary data for the most recent shared-CPU-bus witness build (if any).
+    ///
+    /// This is used to support ergonomic APIs such as “output binding without manually providing
+    /// final_memory_state”.
+    shared_bus_aux: Option<ShardWitnessAux>,
+    /// Optional declarative resource configuration used by `execute_shard_shared_cpu_bus_configured`.
+    shared_bus_resources: Option<SharedBusResources>,
 
     /// Optional verifier-side step-to-step linking constraints.
     ///
@@ -532,6 +570,16 @@ where
     curr_state: Option<Vec<F>>,
 }
 
+#[derive(Clone)]
+struct SessionProverCcsCache {
+    /// Address of the caller-supplied `CcsStructure` used to build this cache.
+    src_ptr: usize,
+    /// Identity-first CCS (cached to avoid cloning per prove).
+    s_norm: CcsStructure<F>,
+    /// Precomputed prover-only artifacts (digest + optional sparse cache).
+    ctx: ShardProverContext,
+}
+
 impl<L> FoldingSession<L>
 where
     L: SModuleHomomorphism<F, Cmt> + Clone,
@@ -543,13 +591,72 @@ where
             params,
             l,
             mixers: default_mixers(),
+            prover_ctx: None,
             steps: vec![],
+            shared_bus_aux: None,
+            shared_bus_resources: None,
             step_linking: None,
             allow_unlinked_steps: false,
             acc0: None,
             step_claims: vec![],
             curr_state: None,
         }
+    }
+
+    /// Replace the stored shared-bus resource configuration (Twist layouts/init + Shout tables/specs).
+    pub fn set_shared_bus_resources(&mut self, resources: SharedBusResources) {
+        self.shared_bus_resources = Some(resources);
+    }
+
+    /// Mutably access (and lazily initialize) the shared-bus resource configuration.
+    pub fn shared_bus_resources_mut(&mut self) -> &mut SharedBusResources {
+        self.shared_bus_resources.get_or_insert_with(SharedBusResources::new)
+    }
+
+    /// Execute a VM shard in shared-CPU-bus mode using the resources stored on this session.
+    ///
+    /// This is equivalent to calling `execute_shard_shared_cpu_bus(...)` with the maps from
+    /// `SharedBusResources`, but avoids re-threading those arguments on every call.
+    pub fn execute_shard_shared_cpu_bus_configured<V, A, Tw, Sh>(
+        &mut self,
+        vm: V,
+        twist: Tw,
+        shout: Sh,
+        max_steps: usize,
+        chunk_size: usize,
+        cpu_arith: &A,
+    ) -> Result<(), PiCcsError>
+    where
+        V: neo_vm_trace::VmCpu<u64, u64>,
+        Tw: neo_vm_trace::Twist<u64, u64>,
+        Sh: neo_vm_trace::Shout<u64>,
+        A: CpuArithmetization<F, Cmt>,
+    {
+        let (bundles, aux) = {
+            let resources = self.shared_bus_resources.as_ref().ok_or_else(|| {
+                PiCcsError::InvalidInput(
+                    "missing shared-bus resources; call set_shared_bus_resources(...) or shared_bus_resources_mut() first".into(),
+                )
+            })?;
+
+            build_shard_witness_shared_cpu_bus_with_aux(
+                vm,
+                twist,
+                shout,
+                max_steps,
+                chunk_size,
+                &resources.mem_layouts,
+                &resources.lut_tables,
+                &resources.lut_table_specs,
+                &resources.initial_mem,
+                cpu_arith,
+            )
+            .map_err(|e| PiCcsError::InvalidInput(format!("shared-bus witness build failed: {e:?}")))?
+        };
+
+        self.add_step_bundles(bundles);
+        self.shared_bus_aux = Some(aux);
+        Ok(())
     }
 
     /// Enable verifier-side step-to-step linking for multi-step runs.
@@ -677,6 +784,7 @@ where
         let mcs_inst = McsInstance { c, x, m_in };
         let mcs_wit = McsWitness { w, Z };
 
+        self.shared_bus_aux = None;
         self.steps.push((mcs_inst, mcs_wit).into());
         self.step_claims.push(vec![]);
 
@@ -747,6 +855,7 @@ where
             Z,
         };
 
+        self.shared_bus_aux = None;
         self.steps.push((mcs_inst, mcs_wit).into());
         self.step_claims.push(input.output_claims.to_vec());
 
@@ -760,6 +869,7 @@ where
     ///
     /// Use this method when your proof requires Twist/Shout arguments in addition to CCS.
     pub fn add_step_bundle(&mut self, bundle: StepWitnessBundle<Cmt, F, K>) {
+        self.shared_bus_aux = None;
         self.steps.push(bundle);
         self.step_claims.push(vec![]);
     }
@@ -769,6 +879,49 @@ where
         for bundle in bundles {
             self.add_step_bundle(bundle);
         }
+    }
+
+    /// Execute a VM for one shard and add shared-CPU-bus step bundles to this session.
+    ///
+    /// This is an ergonomic wrapper around `neo_memory::builder::build_shard_witness_shared_cpu_bus_with_aux`.
+    /// It also stores auxiliary outputs (including the terminal Twist memory state) so the session
+    /// can later prove output binding without the caller manually providing `final_memory_state`.
+    pub fn execute_shard_shared_cpu_bus<V, A, Tw, Sh>(
+        &mut self,
+        vm: V,
+        twist: Tw,
+        shout: Sh,
+        max_steps: usize,
+        chunk_size: usize,
+        mem_layouts: &HashMap<u32, PlainMemLayout>,
+        lut_tables: &HashMap<u32, LutTable<F>>,
+        lut_table_specs: &HashMap<u32, LutTableSpec>,
+        initial_mem: &HashMap<(u32, u64), F>,
+        cpu_arith: &A,
+    ) -> Result<(), PiCcsError>
+    where
+        V: neo_vm_trace::VmCpu<u64, u64>,
+        Tw: neo_vm_trace::Twist<u64, u64>,
+        Sh: neo_vm_trace::Shout<u64>,
+        A: CpuArithmetization<F, Cmt>,
+    {
+        let (bundles, aux) = build_shard_witness_shared_cpu_bus_with_aux(
+            vm,
+            twist,
+            shout,
+            max_steps,
+            chunk_size,
+            mem_layouts,
+            lut_tables,
+            lut_table_specs,
+            initial_mem,
+            cpu_arith,
+        )
+        .map_err(|e| PiCcsError::InvalidInput(format!("shared-bus witness build failed: {e:?}")))?;
+
+        self.add_step_bundles(bundles);
+        self.shared_bus_aux = Some(aux);
+        Ok(())
     }
 
     /// Check if any steps have Twist (memory) instances.
@@ -835,6 +988,36 @@ where
         Ok(s_prepared)
     }
 
+    fn ensure_prover_ctx_for_ccs(&mut self, s: &CcsStructure<F>) -> Result<(), PiCcsError> {
+        let src_ptr = (s as *const CcsStructure<F>) as usize;
+        if let Some(cache) = &self.prover_ctx {
+            if cache.src_ptr == src_ptr {
+                return Ok(());
+            }
+        }
+
+        let s_norm = s
+            .ensure_identity_first()
+            .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
+        s_norm
+            .assert_m0_is_identity_for_nc()
+            .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
+
+        let ccs_mat_digest = utils::digest_ccs_matrices(&s_norm);
+        let ccs_sparse_cache = if mode_uses_sparse_cache(&self.mode) {
+            Some(Arc::new(SparseCache::build(&s_norm)))
+        } else {
+            None
+        };
+        let ctx = ShardProverContext {
+            ccs_mat_digest,
+            ccs_sparse_cache,
+        };
+
+        self.prover_ctx = Some(SessionProverCcsCache { src_ptr, s_norm, ctx });
+        Ok(())
+    }
+
     /// Fold and prove: run folding over all collected steps and return a `FoldRun`.
     /// This is where the actual cryptographic work happens (Π_CCS → RLC → DEC for each step).
     /// This method manages the transcript internally for ease of use.
@@ -850,18 +1033,13 @@ where
         tr: &mut Poseidon2Transcript,
         s: &CcsStructure<F>,
     ) -> Result<FoldRun, PiCcsError> {
-        // Normalize CCS
-        let s_norm = s
-            .ensure_identity_first()
-            .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
-
-        // STRICT validation: Ajtai/NC requires M₀ = I_n (fail fast instead of mysterious sumcheck errors)
-        s_norm
-            .assert_m0_is_identity_for_nc()
-            .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
+        self.ensure_prover_ctx_for_ccs(s)?;
 
         // Shared CPU bus: compute the prepared CCS shape (copy-outs) for accumulator validation.
-        let s_prepared = self.prepared_ccs_for_accumulator(&s_norm)?;
+        let s_prepared = {
+            let cache = self.prover_ctx.as_ref().expect("prover ctx must be set");
+            self.prepared_ccs_for_accumulator(&cache.s_norm)?
+        };
         s_prepared
             .assert_m0_is_identity_for_nc()
             .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
@@ -889,16 +1067,21 @@ where
             None => (&[], &[]), // k=1
         };
 
-        shard::fold_shard_prove(
+        let (s_norm, ctx) = {
+            let cache = self.prover_ctx.as_ref().expect("prover ctx must be set");
+            (&cache.s_norm, &cache.ctx)
+        };
+        shard::fold_shard_prove_with_context(
             self.mode.clone(),
             tr,
             &self.params,
-            &s_norm,
+            s_norm,
             &self.steps,
             seed_me,
             seed_me_wit,
             &self.l,
             self.mixers,
+            ctx,
         )
     }
 
@@ -909,14 +1092,12 @@ where
         ob_cfg: &crate::output_binding::OutputBindingConfig,
         final_memory_state: &[F],
     ) -> Result<FoldRun, PiCcsError> {
-        let s_norm = s
-            .ensure_identity_first()
-            .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
-        s_norm
-            .assert_m0_is_identity_for_nc()
-            .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
+        self.ensure_prover_ctx_for_ccs(s)?;
 
-        let s_prepared = self.prepared_ccs_for_accumulator(&s_norm)?;
+        let s_prepared = {
+            let cache = self.prover_ctx.as_ref().expect("prover ctx must be set");
+            self.prepared_ccs_for_accumulator(&cache.s_norm)?
+        };
         s_prepared
             .assert_m0_is_identity_for_nc()
             .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
@@ -941,11 +1122,15 @@ where
             None => (&[], &[]),
         };
 
-        shard::fold_shard_prove_with_output_binding(
+        let (s_norm, ctx) = {
+            let cache = self.prover_ctx.as_ref().expect("prover ctx must be set");
+            (&cache.s_norm, &cache.ctx)
+        };
+        shard::fold_shard_prove_with_output_binding_with_context(
             self.mode.clone(),
             tr,
             &self.params,
-            &s_norm,
+            s_norm,
             &self.steps,
             seed_me,
             seed_me_wit,
@@ -953,6 +1138,7 @@ where
             self.mixers,
             ob_cfg,
             final_memory_state,
+            ctx,
         )
     }
 
@@ -965,6 +1151,74 @@ where
     ) -> Result<FoldRun, PiCcsError> {
         let mut tr = Poseidon2Transcript::new(b"neo.fold/session");
         self.fold_and_prove_with_output_binding(&mut tr, s, ob_cfg, final_memory_state)
+    }
+
+    fn final_memory_state_for_output_binding(&self, ob_cfg: &crate::output_binding::OutputBindingConfig) -> Result<Vec<F>, PiCcsError> {
+        let aux = self.shared_bus_aux.as_ref().ok_or_else(|| {
+            PiCcsError::InvalidInput(
+                "output binding auto mode requires shared-bus aux; call execute_shard_shared_cpu_bus(...) first".into(),
+            )
+        })?;
+        let last_step = self
+            .steps
+            .last()
+            .ok_or_else(|| PiCcsError::InvalidInput("output binding requires >= 1 step".into()))?;
+
+        if ob_cfg.mem_idx >= last_step.mem_instances.len() {
+            return Err(PiCcsError::InvalidInput("output binding mem_idx out of range".into()));
+        }
+        if ob_cfg.mem_idx >= aux.mem_ids.len() {
+            return Err(PiCcsError::InvalidInput(
+                "output binding mem_idx out of range for shared-bus aux".into(),
+            ));
+        }
+
+        let expected_k = 1usize
+            .checked_shl(ob_cfg.num_bits as u32)
+            .ok_or_else(|| PiCcsError::InvalidInput("output binding: 2^num_bits overflow".into()))?;
+        let mem_inst = &last_step.mem_instances[ob_cfg.mem_idx].0;
+        if mem_inst.k != expected_k {
+            return Err(PiCcsError::InvalidInput(format!(
+                "output binding: cfg.num_bits implies k={}, but mem_inst.k={}",
+                expected_k, mem_inst.k
+            )));
+        }
+
+        let mem_id = aux.mem_ids[ob_cfg.mem_idx];
+        let mut final_memory_state = vec![F::ZERO; expected_k];
+        if let Some(st) = aux.final_mem_states.get(&mem_id) {
+            for (&addr, &val) in st {
+                let Ok(addr_usize) = usize::try_from(addr) else {
+                    continue;
+                };
+                if addr_usize < expected_k {
+                    final_memory_state[addr_usize] = val;
+                }
+            }
+        }
+        Ok(final_memory_state)
+    }
+
+    /// Fold and prove with output binding, deriving `final_memory_state` from the most recent
+    /// shared-CPU-bus witness build (see `execute_shard_shared_cpu_bus`).
+    pub fn fold_and_prove_with_output_binding_auto(
+        &mut self,
+        tr: &mut Poseidon2Transcript,
+        s: &CcsStructure<F>,
+        ob_cfg: &crate::output_binding::OutputBindingConfig,
+    ) -> Result<FoldRun, PiCcsError> {
+        let final_memory_state = self.final_memory_state_for_output_binding(ob_cfg)?;
+        self.fold_and_prove_with_output_binding(tr, s, ob_cfg, &final_memory_state)
+    }
+
+    /// Fold and prove with output binding (auto final memory state), managing the transcript internally.
+    pub fn fold_and_prove_with_output_binding_auto_simple(
+        &mut self,
+        s: &CcsStructure<F>,
+        ob_cfg: &crate::output_binding::OutputBindingConfig,
+    ) -> Result<FoldRun, PiCcsError> {
+        let mut tr = Poseidon2Transcript::new(b"neo.fold/session");
+        self.fold_and_prove_with_output_binding_auto(&mut tr, s, ob_cfg)
     }
 
     /// Verify a finished run against the public MCS list.

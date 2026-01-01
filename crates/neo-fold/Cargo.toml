@@ -16,6 +16,7 @@ neo-ajtai = { path = "../neo-ajtai" }
 neo-reductions = { path = "../neo-reductions" }
 neo-transcript = { path = "../neo-transcript" }
 neo-memory = { path = "../neo-memory" } 
+neo-vm-trace = { path = "../neo-vm-trace" }
 p3-field = { workspace = true }
 p3-matrix = { workspace = true }
 p3-goldilocks = { workspace = true }
@@ -38,7 +39,6 @@ debug-logs = ["neo-reductions/debug-logs", "neo-memory/debug-logs"]
 criterion = { workspace = true }
 rand = { workspace = true }
 rand_chacha = { workspace = true }
-neo-vm-trace = { path = "../neo-vm-trace" }
 
 [[test]]
 name = "test_riscv_program_full_prove_verify"

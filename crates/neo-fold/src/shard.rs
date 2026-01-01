@@ -30,6 +30,7 @@ use neo_math::{KExtensions, D, F, K};
 use neo_memory::ts_common as ts;
 use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
 use neo_params::NeoParams;
+use neo_reductions::engines::optimized_engine::oracle::SparseCache;
 use neo_reductions::engines::utils;
 use neo_reductions::paper_exact_engine::{build_me_outputs_paper_exact, claimed_initial_sum_from_inputs};
 use neo_reductions::sumcheck::{poly_eval_k, RoundOracle};
@@ -519,6 +520,23 @@ where
 // Shard Proving
 // ============================================================================
 
+#[derive(Clone)]
+pub(crate) struct ShardProverContext {
+    pub ccs_mat_digest: Vec<F>,
+    pub ccs_sparse_cache: Option<Arc<SparseCache<F>>>,
+}
+
+#[inline]
+fn mode_uses_sparse_cache(mode: &FoldingMode) -> bool {
+    match mode {
+        FoldingMode::Optimized => true,
+        #[cfg(feature = "paper-exact")]
+        FoldingMode::OptimizedWithCrosscheck(_) => true,
+        #[cfg(feature = "paper-exact")]
+        FoldingMode::PaperExact => false,
+    }
+}
+
 fn fold_shard_prove_impl<L, MR, MB>(
     collect_val_lane_wits: bool,
     mode: FoldingMode,
@@ -531,6 +549,7 @@ fn fold_shard_prove_impl<L, MR, MB>(
     l: &L,
     mixers: CommitMixers<MR, MB>,
     ob: Option<(&crate::output_binding::OutputBindingConfig, &[F])>,
+    prover_ctx: Option<&ShardProverContext>,
 ) -> Result<(ShardProof, Vec<Mat<F>>, Vec<Mat<F>>), PiCcsError>
 where
     L: SModuleHomomorphism<F, Cmt>,
@@ -550,10 +569,23 @@ where
         ell,
         d_sc,
     } = utils::build_dims_and_policy(params, &s)?;
-    let ccs_mat_digest = utils::digest_ccs_matrices(&s);
-    let ccs_sparse_cache = Arc::new(
-        neo_reductions::engines::optimized_engine::oracle::SparseCache::build(&s),
-    );
+    let ccs_mat_digest = prover_ctx
+        .map(|ctx| ctx.ccs_mat_digest.clone())
+        .unwrap_or_else(|| utils::digest_ccs_matrices(&s));
+    let ccs_sparse_cache: Option<Arc<SparseCache<F>>> = if mode_uses_sparse_cache(&mode) {
+        Some(
+            prover_ctx
+                .and_then(|ctx| ctx.ccs_sparse_cache.clone())
+                .unwrap_or_else(|| Arc::new(SparseCache::build(&s))),
+        )
+    } else {
+        None
+    };
+    if mode_uses_sparse_cache(&mode) && ccs_sparse_cache.is_none() {
+        return Err(PiCcsError::ProtocolError(
+            "missing SparseCache for optimized mode".into(),
+        ));
+    }
     let k_dec = params.k_rho as usize;
     let ring = ccs::RotRing::goldilocks();
 
@@ -682,7 +714,10 @@ where
                     ell_n,
                     d_sc,
                     accumulator.first().map(|mi| mi.r.as_slice()),
-                    ccs_sparse_cache.clone(),
+                    ccs_sparse_cache
+                        .as_ref()
+                        .expect("SparseCache required for optimized mode")
+                        .clone(),
                 ),
             ),
             #[cfg(feature = "paper-exact")]
@@ -711,7 +746,10 @@ where
                     ell_n,
                     d_sc,
                     accumulator.first().map(|mi| mi.r.as_slice()),
-                    ccs_sparse_cache.clone(),
+                    ccs_sparse_cache
+                        .as_ref()
+                        .expect("SparseCache required for optimized mode")
+                        .clone(),
                 ),
             ),
         };
@@ -1031,6 +1069,41 @@ where
         l,
         mixers,
         None,
+        None,
+    )?;
+    Ok(proof)
+}
+
+pub(crate) fn fold_shard_prove_with_context<L, MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepWitnessBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_wit_init: &[Mat<F>],
+    l: &L,
+    mixers: CommitMixers<MR, MB>,
+    ctx: &ShardProverContext,
+) -> Result<ShardProof, PiCcsError>
+where
+    L: SModuleHomomorphism<F, Cmt>,
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    let (proof, _final_main_wits, _val_lane_wits) = fold_shard_prove_impl(
+        false,
+        mode,
+        tr,
+        params,
+        s_me,
+        steps,
+        acc_init,
+        acc_wit_init,
+        l,
+        mixers,
+        None,
+        Some(ctx),
     )?;
     Ok(proof)
 }
@@ -1065,6 +1138,43 @@ where
         l,
         mixers,
         Some((ob_cfg, final_memory_state)),
+        None,
+    )?;
+    Ok(proof)
+}
+
+pub(crate) fn fold_shard_prove_with_output_binding_with_context<L, MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepWitnessBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_wit_init: &[Mat<F>],
+    l: &L,
+    mixers: CommitMixers<MR, MB>,
+    ob_cfg: &crate::output_binding::OutputBindingConfig,
+    final_memory_state: &[F],
+    ctx: &ShardProverContext,
+) -> Result<ShardProof, PiCcsError>
+where
+    L: SModuleHomomorphism<F, Cmt>,
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    let (proof, _final_main_wits, _val_lane_wits) = fold_shard_prove_impl(
+        false,
+        mode,
+        tr,
+        params,
+        s_me,
+        steps,
+        acc_init,
+        acc_wit_init,
+        l,
+        mixers,
+        Some((ob_cfg, final_memory_state)),
+        Some(ctx),
     )?;
     Ok(proof)
 }
@@ -1096,6 +1206,7 @@ where
         acc_wit_init,
         l,
         mixers,
+        None,
         None,
     )?;
     let outputs = proof.compute_fold_outputs(acc_init);

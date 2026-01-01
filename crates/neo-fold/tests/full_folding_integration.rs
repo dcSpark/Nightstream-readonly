@@ -25,7 +25,7 @@ use p3_goldilocks::Goldilocks as F;
 
 type Mixers = CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32) -> Cmt>;
 
-const TEST_M: usize = 64;
+const TEST_M: usize = 128;
 // Shared-bus padding validation requires a public constant-one column.
 const M_IN: usize = 1;
 
@@ -93,9 +93,9 @@ fn build_add_ccs(
     );
 
     let per_step_padding_constraints = (shout_ell_addr + 1) + (2 * twist_ell_addr + 3);
-    // "Touch" every bus column once (at j=0) so the CPU CCS references the shared-bus columns
+    // "Touch" every bus column in every lane so the CPU CCS references the shared-bus columns
     // outside the canonical padding rows. This prevents a common linkage footgun.
-    let binding_constraints = bus_cols;
+    let binding_constraints = bus_cols * chunk_size;
     let total_constraints = 1 + chunk_size * per_step_padding_constraints + binding_constraints;
     assert!(
         total_constraints <= n,
@@ -166,18 +166,20 @@ fn build_add_ccs(
         }
     }
 
-    // Non-padding "touch" constraints for every bus column (j=0 only).
+    // Non-padding "touch" constraints for every bus cell (all j).
     //
     //   bus_col * 1 = bus_col
     //
     // These are tautologies, but they prevent a common linkage footgun where the CPU CCS only
     // references bus columns inside the padding rows.
     for col_id in 0..bus_cols {
-        let bus_cell = bus_base + col_id * chunk_size;
-        A[(row, bus_cell)] = F::ONE;
-        B[(row, 0)] = F::ONE;
-        C[(row, bus_cell)] = F::ONE;
-        row += 1;
+        for j in 0..chunk_size {
+            let bus_cell = bus_base + col_id * chunk_size + j;
+            A[(row, bus_cell)] = F::ONE;
+            B[(row, 0)] = F::ONE;
+            C[(row, bus_cell)] = F::ONE;
+            row += 1;
+        }
     }
 
     // Our constraints are R1CS-style: A(z)*B(z) = C(z).
