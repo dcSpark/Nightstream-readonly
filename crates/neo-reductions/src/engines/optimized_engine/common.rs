@@ -13,6 +13,7 @@ use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
 use neo_math::{D, K};
 use neo_params::NeoParams;
 use p3_field::{Field, PrimeCharacteristicRing};
+use rayon::prelude::*;
 
 /// Challenges sampled in Step 1 of the protocol
 #[derive(Debug, Clone)]
@@ -1230,6 +1231,37 @@ where
     Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
     K: From<Ff>,
 {
+    dec_reduction_paper_exact_inner(s, params, parent, Z_split, ell_d, None)
+}
+
+/// Same as `dec_reduction_paper_exact`, but uses a prebuilt CSC cache to avoid dense n×m scans.
+pub fn dec_reduction_paper_exact_with_sparse_cache<Ff>(
+    s: &CcsStructure<Ff>,
+    params: &NeoParams,
+    parent: &MeInstance<Cmt, Ff, K>,
+    Z_split: &[Mat<Ff>],
+    ell_d: usize,
+    sparse: &super::sparse::SparseCache<Ff>,
+) -> (Vec<MeInstance<Cmt, Ff, K>>, bool, bool)
+where
+    Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<Ff>,
+{
+    dec_reduction_paper_exact_inner(s, params, parent, Z_split, ell_d, Some(sparse))
+}
+
+fn dec_reduction_paper_exact_inner<Ff>(
+    s: &CcsStructure<Ff>,
+    params: &NeoParams,
+    parent: &MeInstance<Cmt, Ff, K>,
+    Z_split: &[Mat<Ff>],
+    ell_d: usize,
+    sparse: Option<&super::sparse::SparseCache<Ff>>,
+) -> (Vec<MeInstance<Cmt, Ff, K>>, bool, bool)
+where
+    Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<Ff>,
+{
     assert!(
         !Z_split.is_empty(),
         "Π_DEC(paper-exact): need at least one digit witness"
@@ -1240,39 +1272,69 @@ where
     let k = Z_split.len();
     let m_in = parent.m_in;
 
-    // Build χ_r and v_j = M_j^T · χ_r
-    let n_sz = parent.r.len();
-    let n_sz = 1usize << n_sz; // 2^{ℓ_n}
+    // Build χ_r and v_j = M_j^T · χ_r.
+    let ell_n = parent.r.len();
+    let n_sz = 1usize << ell_n; // 2^{ℓ_n}
+    let n_eff = core::cmp::min(s.n, n_sz);
+
     let mut chi_r = vec![K::ZERO; n_sz];
     for row in 0..n_sz {
         let mut w = K::ONE;
-        for bit in 0..parent.r.len() {
-            let rb = parent.r[bit];
+        for (bit, &rb) in parent.r.iter().enumerate() {
             let is_one = ((row >> bit) & 1) == 1;
             w *= if is_one { rb } else { K::ONE - rb };
         }
         chi_r[row] = w;
     }
-    let mut vjs: Vec<Vec<K>> = Vec::with_capacity(s.t());
-    for j in 0..s.t() {
-        let mut vj = vec![K::ZERO; s.m];
-        for row in 0..n_sz {
-            let wr = if row < s.n { chi_r[row] } else { K::ZERO };
-            if wr == K::ZERO {
-                continue;
-            }
-            for c in 0..s.m {
-                vj[c] += K::from(get_F(&s.matrices[j], row, c)) * wr;
+
+    let t_mats = s.t();
+    let mut vjs: Vec<Vec<K>> = vec![vec![K::ZERO; s.m]; t_mats];
+
+    if let Some(sparse) = sparse {
+        if sparse.len() != t_mats {
+            panic!(
+                "DEC: sparse cache matrix count mismatch: got {}, expected {}",
+                sparse.len(),
+                t_mats
+            );
+        }
+
+        // M_0 is identity in our identity-first CCS normalization.
+        let cap = core::cmp::min(s.m, n_eff);
+        vjs[0][..cap].copy_from_slice(&chi_r[..cap]);
+
+        for j in 1..t_mats {
+            let csc = sparse
+                .csc(j)
+                .unwrap_or_else(|| panic!("DEC: missing CSC for matrix j={j}"));
+            csc.add_mul_transpose_into(&chi_r, &mut vjs[j], n_eff);
+        }
+    } else {
+        // Dense fallback (reference).
+        for j in 0..t_mats {
+            for row in 0..n_sz {
+                let wr = if row < s.n { chi_r[row] } else { K::ZERO };
+                if wr == K::ZERO {
+                    continue;
+                }
+                for c in 0..s.m {
+                    vjs[j][c] += K::from(get_F(&s.matrices[j], row, c)) * wr;
+                }
             }
         }
-        vjs.push(vj);
     }
 
     // base-b powers in K and F
     let bF = Ff::from_u64(params.b as u64);
     let bK = K::from(bF);
 
-    // Helper: project first m_in columns from Z
+    // Precompute b^rho in K for rho=0..D.
+    let mut pow_b_k = vec![K::ONE; D];
+    for rho in 1..D {
+        pow_b_k[rho] = pow_b_k[rho - 1] * bK;
+    }
+
+    // Helper: project first m_in columns from Z.
     let project_x = |Z: &Mat<Ff>| {
         let mut X = Mat::zero(d, m_in, Ff::ZERO);
         for r in 0..d {
@@ -1283,61 +1345,61 @@ where
         X
     };
 
-    // Build children
-    let mut children: Vec<MeInstance<Cmt, Ff, K>> = Vec::with_capacity(k);
-    for i in 0..k {
-        let Xi = project_x(&Z_split[i]);
-        let mut y_i: Vec<Vec<K>> = Vec::with_capacity(s.t());
-        for j in 0..s.t() {
-            // y_(i,j) = Z_i · v_j ∈ K^d (then pad)
-            let mut yij = vec![K::ZERO; d];
-            for rho in 0..d {
-                let mut acc = K::ZERO;
-                for c in 0..s.m {
-                    acc += K::from(get_F(&Z_split[i], rho, c)) * vjs[j][c];
+    let parent_c = &parent.c;
+    let parent_r = &parent.r;
+    let fold_digest = parent.fold_digest;
+
+    // Build children (parallel over digits).
+    let children: Vec<MeInstance<Cmt, Ff, K>> = (0..k)
+        .into_par_iter()
+        .map(|i| {
+            let Zi = &Z_split[i];
+            let Xi = project_x(Zi);
+
+            let mut y_i: Vec<Vec<K>> = Vec::with_capacity(t_mats);
+            let mut y_scalars_i: Vec<K> = Vec::with_capacity(t_mats);
+
+            for j in 0..t_mats {
+                // y_(i,j) = Z_i · v_j ∈ K^d (then pad to 2^{ℓ_d})
+                let vj = &vjs[j];
+                let mut yij_pad = vec![K::ZERO; d_pad];
+
+                for rho in 0..d {
+                    let mut acc = K::ZERO;
+                    for c in 0..s.m {
+                        acc += K::from(get_F(Zi, rho, c)) * vj[c];
+                    }
+                    yij_pad[rho] = acc;
                 }
-                yij[rho] = acc;
+
+                // y_scalars: base-b recomposition of first D digits of yij.
+                let mut sc = K::ZERO;
+                for rho in 0..D {
+                    sc += yij_pad[rho] * pow_b_k[rho];
+                }
+
+                y_i.push(yij_pad);
+                y_scalars_i.push(sc);
             }
-            // pad to 2^{ℓ_d}
-            let mut yij_pad = yij;
-            yij_pad.resize(d_pad, K::ZERO);
-            y_i.push(yij_pad);
-        }
 
-        // y_scalars for child i: base-b recomposition of first D digits of each y_j
-        let mut pow_b_f = vec![Ff::ONE; D];
-        for t in 1..D {
-            pow_b_f[t] = pow_b_f[t - 1] * bF;
-        }
-        let pow_b_k: Vec<K> = pow_b_f.iter().copied().map(K::from).collect();
-        let y_scalars_i: Vec<K> = y_i
-            .iter()
-            .map(|row| {
-                let mut acc = K::ZERO;
-                for (idx, &v) in row.iter().enumerate().take(D) {
-                    acc += v * pow_b_k[idx];
-                }
-                acc
-            })
-            .collect();
-
-        children.push(MeInstance::<Cmt, Ff, K> {
-            c_step_coords: vec![],
-            u_offset: 0,
-            u_len: 0,
-            c: parent.c.clone(), // NOTE: caller can replace with L(Z_i)
-            X: Xi,
-            r: parent.r.clone(),
-            y: y_i,
-            y_scalars: y_scalars_i,
-            m_in,
-            fold_digest: parent.fold_digest,
-        });
-    }
+            MeInstance::<Cmt, Ff, K> {
+                c_step_coords: vec![],
+                u_offset: 0,
+                u_len: 0,
+                c: parent_c.clone(), // caller patches with L(Z_i)
+                X: Xi,
+                r: parent_r.clone(),
+                y: y_i,
+                y_scalars: y_scalars_i,
+                m_in,
+                fold_digest,
+            }
+        })
+        .collect();
 
     // Verify: y_j ?= Σ b^i · y_(i,j)
     let mut ok_y = true;
-    for j in 0..s.t() {
+    for j in 0..t_mats {
         let mut lhs = vec![K::ZERO; d_pad];
         let mut pow = K::ONE;
         for i in 0..k {

@@ -53,13 +53,18 @@ fn balanced_divrem(v: i128, b: i128) -> (i128, i128) {
 /// and the analogous balanced range for odd b.
 /// Returns an error if an entry cannot be represented within k digits (i.e., if |value| ≥ b^k)
 /// — this indicates a bad RLC sample or overflow.
-pub fn split_b_matrix_k(Z: &Mat<F>, k: usize, b: u32) -> Result<Vec<Mat<F>>, PiCcsError> {
+pub fn split_b_matrix_k_with_nonzero_flags(
+    Z: &Mat<F>,
+    k: usize,
+    b: u32,
+) -> Result<(Vec<Mat<F>>, Vec<bool>), PiCcsError> {
     let Z_rows = Z.rows();
     let Z_cols = Z.cols();
 
     let mut outs = (0..k)
         .map(|_| Mat::zero(Z_rows, Z_cols, F::ZERO))
         .collect::<Vec<_>>();
+    let mut digit_nonzero = vec![false; k];
 
     let b_i = b as i128;
     let mut B: i128 = 1;
@@ -108,6 +113,9 @@ pub fn split_b_matrix_k(Z: &Mat<F>, k: usize, b: u32) -> Result<Vec<Mat<F>>, PiC
                     F::ZERO - F::from_u64(abs)
                 };
                 outs[i][(r, c)] = digit_f;
+                if digit_f != F::ZERO {
+                    digit_nonzero[i] = true;
+                }
                 v = q;
             }
             // Must consume exactly in k digits
@@ -135,7 +143,12 @@ pub fn split_b_matrix_k(Z: &Mat<F>, k: usize, b: u32) -> Result<Vec<Mat<F>>, PiC
             }
         }
     }
-    Ok(outs)
+
+    Ok((outs, digit_nonzero))
+}
+
+pub fn split_b_matrix_k(Z: &Mat<F>, k: usize, b: u32) -> Result<Vec<Mat<F>>, PiCcsError> {
+    split_b_matrix_k_with_nonzero_flags(Z, k, b).map(|(digits, _nonzero)| digits)
 }
 
 // ---------------------------------------------------------------------------

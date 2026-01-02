@@ -19,7 +19,7 @@ use std::sync::Arc;
 use crate::sumcheck::RoundOracle;
 
 use super::common::Challenges;
-use super::sparse::CscMat;
+pub use super::sparse::SparseCache;
 
 #[derive(Clone, Debug)]
 struct CompiledPolyTerm {
@@ -42,6 +42,10 @@ struct RowStreamState {
     /// Optional χ_{r_inputs}(row) table (len = cur_len) for Eval gating.
     eq_r_inputs_tbl: Option<Vec<K>>,
 
+    /// Recomposition of the first MCS witness `Z₁` into a row vector:
+    /// `z1[c] = Σ_{ρ=0..D-1} b^ρ · Z₁[ρ,c]`.
+    z1: Vec<K>,
+
     /// Tables for the variables used by the CCS polynomial `f`.
     /// Each entry is a row-domain table of `m_j(row) = (M_j · z1)[row]` at boolean row points.
     f_var_tables: Vec<Vec<K>>,
@@ -63,6 +67,8 @@ struct RowStreamState {
     gamma_to_k: K,
 
     b: u32,
+    /// Precomputed squares t^2 for the symmetric range polynomial factors (t=1..b-1).
+    range_t_sq: Vec<K>,
 }
 
 impl RowStreamState {
@@ -213,10 +219,10 @@ impl RowStreamState {
         }
 
         // f-var tables: m_j(row) = (M_j * z1)[row] for each variable used by f.
-        if sparse.csc.len() != t_mats {
+        if sparse.len() != t_mats {
             panic!(
                 "sparse cache matrix count mismatch: got {}, expected {}",
-                sparse.csc.len(),
+                sparse.len(),
                 t_mats
             );
         }
@@ -227,9 +233,7 @@ impl RowStreamState {
                 let cap = core::cmp::min(n_eff, z1.len());
                 out[..cap].copy_from_slice(&z1[..cap]);
             } else {
-                let csc = sparse.csc[j]
-                    .as_ref()
-                    .unwrap_or_else(|| panic!("missing CSC for matrix j={j}"));
+                let csc = sparse.csc(j).unwrap_or_else(|| panic!("missing CSC for matrix j={j}"));
                 if csc.ncols != z1.len() {
                     panic!(
                         "matrix-vector dim mismatch for j={j}: csc.ncols={} != z1.len()={}",
@@ -332,9 +336,7 @@ impl RowStreamState {
                         continue;
                     }
 
-                    let csc = sparse.csc[j]
-                        .as_ref()
-                        .unwrap_or_else(|| panic!("missing CSC for matrix j={j}"));
+                    let csc = sparse.csc(j).unwrap_or_else(|| panic!("missing CSC for matrix j={j}"));
                     if csc.ncols != s_alpha.len() {
                         panic!(
                             "matrix-vector dim mismatch for eval j={j}: csc.ncols={} != s_alpha.len()={}",
@@ -368,10 +370,20 @@ impl RowStreamState {
             None
         };
 
+        let mut range_t_sq = Vec::new();
+        if b > 1 {
+            range_t_sq.reserve((b - 1) as usize);
+            for t in 1..(b as i64) {
+                let tt = K::from(Ff::from_i64(t));
+                range_t_sq.push(tt * tt);
+            }
+        }
+
         Self {
             cur_len: n_pad,
             eq_beta_r_tbl,
             eq_r_inputs_tbl,
+            z1,
             f_var_tables,
             f_terms,
             nc_tables,
@@ -380,6 +392,7 @@ impl RowStreamState {
             eval_tbl,
             gamma_to_k,
             b,
+            range_t_sq,
         }
     }
 
@@ -512,7 +525,7 @@ impl RowStreamState {
                         let a = self.nc_tables[i][2 * t][rho];
                         let b = self.nc_tables[i][2 * t + 1][rho] - a;
 
-                        // For b=2, range_product_symmetric(y) = y(y^2-1) = y^3 - y.
+                        // For b=2, N(y) = y(y^2-1) = y^3 - y.
                         let a2 = a * a;
                         let a3 = a2 * a;
                         let b2 = b * b;
@@ -574,7 +587,7 @@ impl RowStreamState {
                 .collect();
         }
 
-        // Generic fallback: evaluate directly at each x (slower).
+        // Generic fallback: evaluate directly at each x (slower, but supports any b).
         let f_arity = self.f_var_tables.len();
 
         xs.par_iter()
@@ -619,7 +632,7 @@ impl RowStreamState {
                             let lo = self.nc_tables[i][2 * t][rho];
                             let hi = self.nc_tables[i][2 * t + 1][rho];
                             let y = one_minus * lo + x * hi;
-                            let ni = range_product_symmetric::<Ff>(y, self.b);
+                            let ni = range_product_cached(y, &self.range_t_sq);
                             inner += *gamma_i * ni;
                         }
                         nc_total += w * inner;
@@ -628,9 +641,7 @@ impl RowStreamState {
                     let mut out = eq_beta_r * (f_prime + nc_total);
 
                     // Eval: eq_r_inputs(r') * gamma_to_k * eval_tbl(r')
-                    if let (Some(eq_tbl), Some(eval_tbl)) =
-                        (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref())
-                    {
+                    if let (Some(eq_tbl), Some(eval_tbl)) = (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref()) {
                         let eq_r_inputs = one_minus * eq_tbl[2 * t] + x * eq_tbl[2 * t + 1];
                         if eq_r_inputs != K::ZERO {
                             let e = one_minus * eval_tbl[2 * t] + x * eval_tbl[2 * t + 1];
@@ -648,20 +659,16 @@ impl RowStreamState {
 }
 
 /// Symmetric range polynomial: ∏_{t=-(b-1)}^{b-1} (y - t) = y · ∏_{t=1}^{b-1} (y² - t²)
-/// This is mathematically identical but ~2x faster (b multiplications instead of 2b-1).
+/// using cached `t²` values for `t=1..(b-1)`.
 #[inline]
-fn range_product_symmetric<Ff>(y: K, b: u32) -> K
-where
-    Ff: Field + PrimeCharacteristicRing + Copy,
-    K: From<Ff>,
-{
-    if b <= 1 {
+fn range_product_cached(y: K, range_t_sq: &[K]) -> K {
+    if range_t_sq.is_empty() {
         return y;
     }
+    let y2 = y * y;
     let mut prod = y;
-    for t in 1..(b as i64) {
-        let tt = K::from(Ff::from_i64(t));
-        prod *= (y * y) - (tt * tt);
+    for &tt2 in range_t_sq {
+        prod *= y2 - tt2;
     }
     prod
 }
@@ -696,27 +703,49 @@ fn fold_bit_inplace(digits: &mut [K; D], bit: usize, a: K) {
     }
 }
 
-/// Given Ajtai digits y[ρ] (length D), fold prefix bits and bit j (value x),
-/// then return the "heads" for all tail assignments as a compact vector
-/// of length 2^{ell_d - (j+1)}. Out-of-range heads are treated as 0.
+/// Fold the current Ajtai bit into `digits_pref` (which already has the prefix folded),
+/// then compute the tail-weighted sum of the resulting MLE "heads".
 #[inline]
-fn mle_heads_after(digits: &[K; D], prefix: &[K], x: K, j: usize, ell_d: usize) -> Vec<K> {
-    let mut tmp = *digits;
-    for b in 0..j {
-        fold_bit_inplace(&mut tmp, b, prefix[b]);
-    }
-    fold_bit_inplace(&mut tmp, j, x);
-    let tail = ell_d - (j + 1);
-    let len_tail = 1usize << tail;
-    let head_stride = 1usize << (j + 1);
-    let mut out = vec![K::ZERO; len_tail];
-    for t in 0..len_tail {
+fn ajtai_tail_weighted_dot_prefolded(
+    digits_pref: &[K; D],
+    x: K,
+    bit: usize,
+    head_stride: usize,
+    w_tail: &[K],
+) -> K {
+    let mut tmp = *digits_pref;
+    fold_bit_inplace(&mut tmp, bit, x);
+    let mut acc = K::ZERO;
+    for (t, &w) in w_tail.iter().enumerate() {
         let idx = t * head_stride;
         if idx < D {
-            out[t] = tmp[idx];
+            acc += w * tmp[idx];
         }
     }
-    out
+    acc
+}
+
+/// Fold the current Ajtai bit into `digits_pref` (which already has the prefix folded),
+/// then compute the tail-weighted sum of the range polynomial N(·) over the MLE heads.
+#[inline]
+fn ajtai_tail_weighted_range_prefolded(
+    digits_pref: &[K; D],
+    x: K,
+    bit: usize,
+    head_stride: usize,
+    w_tail: &[K],
+    range_t_sq: &[K],
+) -> K {
+    let mut tmp = *digits_pref;
+    fold_bit_inplace(&mut tmp, bit, x);
+    let mut acc = K::ZERO;
+    for (t, &w) in w_tail.iter().enumerate() {
+        let idx = t * head_stride;
+        if idx < D {
+            acc += w * range_product_cached(tmp[idx], range_t_sq);
+        }
+    }
+    acc
 }
 
 #[inline]
@@ -734,16 +763,6 @@ fn chi_tail_weights(bits: &[K]) -> Vec<K> {
         w[mask] = prod;
     }
     w
-}
-
-#[inline]
-fn dot_weights(vals: &[K], w: &[K]) -> K {
-    debug_assert_eq!(vals.len(), w.len());
-    let mut acc = K::ZERO;
-    for i in 0..vals.len() {
-        acc += vals[i] * w[i];
-    }
-    acc
 }
 
 /// Precomputation for a fixed r' (row assignment) - eliminates redundant v_j recomputation
@@ -769,34 +788,6 @@ fn eq_points_bool_mask(mask: usize, points: &[K]) -> K {
         prod *= if is_one { p } else { K::ONE - p };
     }
     prod
-}
-
-/// Cache of CSC matrix formats used by the optimized oracle.
-#[derive(Clone)]
-pub struct SparseCache<Ff> {
-    // For each j: None (identity), or Some(CSC)
-    csc: Vec<Option<CscMat<Ff>>>,
-}
-
-impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> SparseCache<Ff> {
-    pub fn build(s: &CcsStructure<Ff>) -> Self {
-        let t = s.t();
-
-        // Parallelize sparse matrix building - happens once at setup, fully independent per matrix
-        let csc: Vec<Option<CscMat<Ff>>> = (0..t)
-            .into_par_iter()
-            .map(|j| {
-                if j == 0 {
-                    None
-                } else {
-                    let mat = &s.matrices[j];
-                    Some(CscMat::from_dense_row_major(mat))
-                }
-            })
-            .collect();
-
-        Self { csc }
-    }
 }
 
 pub struct OptimizedOracle<'a, F>
@@ -929,7 +920,7 @@ where
         // so this is intentionally sequential to avoid nested rayon parallelism.
         let n_eff = core::cmp::min(self.s.n, n_sz);
         let sparse = self.sparse.as_ref();
-        if sparse.csc.len() != t {
+        if sparse.len() != t {
             panic!("optimized oracle sparse cache: matrix count mismatch");
         }
 
@@ -948,9 +939,9 @@ where
         vjs_nz.push(v1_nz);
 
         for j in 1..t {
-            let csc = sparse.csc[j]
-                .as_ref()
-                .expect("optimized oracle: missing CSC matrix for j>0");
+            let csc = sparse
+                .csc(j)
+                .unwrap_or_else(|| panic!("optimized oracle: missing CSC matrix for j={j}"));
             let mut nz = Vec::<(usize, K)>::new();
             for c in 0..csc.ncols {
                 let s = csc.col_ptr[c];
@@ -973,19 +964,8 @@ where
         }
 
         // Compute F' = f(z_1 · v_j) - independent of α'
-        let bF = F::from_u64(self.params.b as u64);
-        let mut pow_b_f = vec![F::ONE; D];
-        for i in 1..D {
-            pow_b_f[i] = pow_b_f[i - 1] * bF;
-        }
-        let pow_b_k: Vec<K> = pow_b_f.iter().copied().map(K::from).collect();
-
-        let mut z1 = vec![K::ZERO; self.s.m];
-        for c in 0..self.s.m {
-            for rho in 0..D {
-                z1[c] += K::from(self.mcs_witnesses[0].Z[(rho, c)]) * pow_b_k[rho];
-            }
-        }
+        // (z1 is precomputed once per oracle build in `RowStreamState`).
+        let z1 = &self.row_stream.z1;
 
         let mut m_vals = vec![K::ZERO; t];
         for (j, vj) in vjs_nz.iter().enumerate() {
@@ -1078,6 +1058,7 @@ where
         let tail_len = 1usize << free_a;
         debug_assert_eq!(w_beta_tail.len(), tail_len);
         debug_assert_eq!(w_alpha_tail.len(), tail_len);
+        let head_stride = 1usize << (j + 1);
 
         // Prefix factors (independent of x)
         let mut eq_beta_pref = K::ONE;
@@ -1104,16 +1085,40 @@ where
         }
 
         let prefix = &self.ajtai_chals[..j];
+        let beta_j = self.ch.beta_a[j];
+        let alpha_j = self.ch.alpha[j];
+        let range_t_sq = &self.row_stream.range_t_sq;
+
+        // Prefold all digits by the fixed Ajtai prefix bits once per round (independent of x).
+        // This removes redundant folding work across the (usually small) set of evaluation points `xs`.
+        let mut y_nc_pref = pre.y_nc.clone();
+        for digits in y_nc_pref.iter_mut() {
+            for b in 0..j {
+                fold_bit_inplace(digits, b, prefix[b]);
+            }
+        }
+
+        // Flattened as [i_abs * t_mats + j_mat] to avoid nested Vec allocations.
+        let mut y_eval_pref = Vec::<[K; D]>::with_capacity(k_total * t_mats);
+        for i_abs in 0..k_total {
+            for j_mat in 0..t_mats {
+                let mut digits = pre.y_eval[i_abs][j_mat];
+                for b in 0..j {
+                    fold_bit_inplace(&mut digits, b, prefix[b]);
+                }
+                y_eval_pref.push(digits);
+            }
+        }
 
         xs.par_iter()
             .map(|&x| {
                 // eq((α',r'), β) factor across α' = (prefix, x, tail)
-                let eq_beta_px = eq_beta_pref * eq_lin(x, self.ch.beta_a[j]);
+                let eq_beta_px = eq_beta_pref * eq_lin(x, beta_j);
                 let eq_beta = pre.eq_beta_r * eq_beta_px;
 
                 // eq((α',r'), (α,r)) factor if inputs present
                 let eq_ar_px = if self.r_inputs.is_some() {
-                    pre.eq_r_inputs * (eq_alpha_pref * eq_lin(x, self.ch.alpha[j]))
+                    pre.eq_r_inputs * (eq_alpha_pref * eq_lin(x, alpha_j))
                 } else {
                     K::ZERO
                 };
@@ -1123,13 +1128,14 @@ where
                 {
                     let mut g = self.ch.gamma;
                     for i_abs in 0..k_total {
-                        let vals = mle_heads_after(&pre.y_nc[i_abs], prefix, x, j, self.ell_d);
-                        let mut acc = K::ZERO;
-                        for t in 0..tail_len {
-                            let yi = vals[t];
-                            let ni = range_product_symmetric::<F>(yi, self.params.b);
-                            acc += w_beta_tail[t] * ni;
-                        }
+                        let acc = ajtai_tail_weighted_range_prefolded(
+                            &y_nc_pref[i_abs],
+                            x,
+                            j,
+                            head_stride,
+                            &w_beta_tail,
+                            range_t_sq,
+                        );
                         nc_sum += g * acc;
                         g *= self.ch.gamma;
                     }
@@ -1144,8 +1150,14 @@ where
                     for j_mat in 0..t_mats {
                         let mut sum_j = K::ZERO;
                         for i_abs in 1..k_total {
-                            let vals = mle_heads_after(&pre.y_eval[i_abs][j_mat], prefix, x, j, self.ell_d);
-                            let ydot = dot_weights(&vals, &w_alpha_tail);
+                            let digits = &y_eval_pref[i_abs * t_mats + j_mat];
+                            let ydot = ajtai_tail_weighted_dot_prefolded(
+                                digits,
+                                x,
+                                j,
+                                head_stride,
+                                &w_alpha_tail,
+                            );
                             sum_j += gamma_pow_i[i_abs] * gamma_k_pow_j[j_mat] * ydot;
                         }
                         inner += sum_j;

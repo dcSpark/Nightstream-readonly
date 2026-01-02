@@ -148,6 +148,12 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
     )
     .map_err(PiCcsError::InvalidInput)?;
 
+    // If there are no bus columns (no Twist/Shout instances), Route A doesn't use the bus time rows.
+    // Allow small CCS instances (including m_in == n) in this case.
+    if layout.bus_cols == 0 {
+        return Ok(layout);
+    }
+
     if m_in
         .checked_add(layout.chunk_size)
         .ok_or_else(|| PiCcsError::InvalidInput("m_in + chunk_size overflow".into()))?
@@ -162,16 +168,16 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
     Ok(layout)
 }
 
-pub(crate) fn prepare_ccs_for_shared_cpu_bus_steps<Cmt, S: BusStepView<Cmt>>(
-    s0: &CcsStructure<F>,
+pub(crate) fn prepare_ccs_for_shared_cpu_bus_steps<'a, Cmt, S: BusStepView<Cmt>>(
+    s0: &'a CcsStructure<F>,
     steps: &[S],
-) -> Result<(CcsStructure<F>, BusLayout), PiCcsError> {
+) -> Result<(&'a CcsStructure<F>, BusLayout), PiCcsError> {
     let bus = infer_bus_layout_for_steps(s0, steps)?;
     let padding_rows = ensure_ccs_has_shared_bus_padding_for_steps(s0, &bus, steps)?;
     ensure_ccs_binds_shared_bus_for_steps(s0, &bus, &padding_rows)?;
     // Performance: do NOT materialize bus copyout matrices into the CCS. Instead, we append the
     // corresponding ME openings directly from the witness (see `append_bus_openings_to_me_*`).
-    Ok((s0.clone(), bus))
+    Ok((s0, bus))
 }
 
 #[inline]

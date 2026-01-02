@@ -36,6 +36,8 @@ use neo_reductions::paper_exact_engine::{build_me_outputs_paper_exact, claimed_i
 use neo_reductions::sumcheck::{poly_eval_k, RoundOracle};
 use neo_transcript::{Poseidon2Transcript, Transcript};
 use p3_field::PrimeCharacteristicRing;
+use rayon::prelude::*;
+use std::borrow::Cow;
 use std::sync::Arc;
 
 enum CcsOracleDispatch<'a> {
@@ -344,6 +346,7 @@ fn prove_rlc_dec_lane<L, MR, MB>(
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
     s: &CcsStructure<F>,
+    ccs_sparse_cache: Option<&SparseCache<F>>,
     cpu_bus: Option<&neo_memory::cpu::BusLayout>,
     ring: &ccs::RotRing,
     ell_d: usize,
@@ -355,7 +358,7 @@ fn prove_rlc_dec_lane<L, MR, MB>(
     mixers: CommitMixers<MR, MB>,
 ) -> Result<(RlcDecProof, Vec<Mat<F>>), PiCcsError>
 where
-    L: SModuleHomomorphism<F, Cmt>,
+    L: SModuleHomomorphism<F, Cmt> + Sync,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
@@ -372,9 +375,14 @@ where
         mixers.mix_rhos_commits,
     );
 
-    let Z_split = ccs::split_b_matrix_k(&Z_mix, k_dec, params.b)?;
-    let child_cs: Vec<Cmt> = Z_split.iter().map(|Zi| l.commit(Zi)).collect();
-    let (mut dec_children, ok_y, ok_X, ok_c) = ccs::dec_children_with_commit(
+    let (Z_split, digit_nonzero) = ccs::split_b_matrix_k_with_nonzero_flags(&Z_mix, k_dec, params.b)?;
+    let zero_c = Cmt::zeros(rlc_parent.c.d, rlc_parent.c.kappa);
+    let child_cs: Vec<Cmt> = Z_split
+        .par_iter()
+        .enumerate()
+        .map(|(idx, Zi)| if digit_nonzero[idx] { l.commit(Zi) } else { zero_c.clone() })
+        .collect();
+    let (mut dec_children, ok_y, ok_X, ok_c) = ccs::dec_children_with_commit_cached(
         mode.clone(),
         s,
         params,
@@ -383,6 +391,7 @@ where
         ell_d,
         &child_cs,
         mixers.combine_b_pows,
+        ccs_sparse_cache,
     );
     if !(ok_y && ok_X && ok_c) {
         let lane_label = match lane {
@@ -552,14 +561,27 @@ fn fold_shard_prove_impl<L, MR, MB>(
     prover_ctx: Option<&ShardProverContext>,
 ) -> Result<(ShardProof, Vec<Mat<F>>, Vec<Mat<F>>), PiCcsError>
 where
-    L: SModuleHomomorphism<F, Cmt>,
+    L: SModuleHomomorphism<F, Cmt> + Sync,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let s0 = s_me
-        .ensure_identity_first()
-        .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
-    let (s, cpu_bus) = crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(&s0, steps)?;
+    let is_id0 = s_me.n == s_me.m
+        && s_me
+            .matrices
+            .first()
+            .map(|m0| m0.is_identity())
+            .unwrap_or(false);
+    let s0: Cow<'_, CcsStructure<F>> = if is_id0 {
+        Cow::Borrowed(s_me)
+    } else {
+        Cow::Owned(
+            s_me
+                .ensure_identity_first()
+                .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?,
+        )
+    };
+    let (s, cpu_bus) =
+        crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(s0.as_ref(), steps)?;
     // Route A terminal checks interpret `ME.y_scalars[0]` as MLE(column)(r_time), which requires M₀ = I.
     s.assert_m0_is_identity_for_nc()
         .map_err(|e| PiCcsError::InvalidInput(format!("identity-first (M₀=I) required: {e:?}")))?;
@@ -568,19 +590,19 @@ where
         ell_n,
         ell,
         d_sc,
-    } = utils::build_dims_and_policy(params, &s)?;
-    let ccs_mat_digest = prover_ctx
-        .map(|ctx| ctx.ccs_mat_digest.clone())
-        .unwrap_or_else(|| utils::digest_ccs_matrices(&s));
+    } = utils::build_dims_and_policy(params, s)?;
     let ccs_sparse_cache: Option<Arc<SparseCache<F>>> = if mode_uses_sparse_cache(&mode) {
         Some(
             prover_ctx
                 .and_then(|ctx| ctx.ccs_sparse_cache.clone())
-                .unwrap_or_else(|| Arc::new(SparseCache::build(&s))),
+                .unwrap_or_else(|| Arc::new(SparseCache::build(s))),
         )
     } else {
         None
     };
+    let ccs_mat_digest = prover_ctx
+        .map(|ctx| ctx.ccs_mat_digest.clone())
+        .unwrap_or_else(|| utils::digest_ccs_matrices_with_sparse_cache(s, ccs_sparse_cache.as_deref()));
     if mode_uses_sparse_cache(&mode) && ccs_sparse_cache.is_none() {
         return Err(PiCcsError::ProtocolError(
             "missing SparseCache for optimized mode".into(),
@@ -950,6 +972,7 @@ where
             tr,
             params,
             &s,
+            ccs_sparse_cache.as_deref(),
             Some(&cpu_bus),
             &ring,
             ell_d,
@@ -994,6 +1017,7 @@ where
                 tr,
                 params,
                 &s,
+                ccs_sparse_cache.as_deref(),
                 Some(&cpu_bus),
                 &ring,
                 ell_d,
@@ -1053,7 +1077,7 @@ pub fn fold_shard_prove<L, MR, MB>(
     mixers: CommitMixers<MR, MB>,
 ) -> Result<ShardProof, PiCcsError>
 where
-    L: SModuleHomomorphism<F, Cmt>,
+    L: SModuleHomomorphism<F, Cmt> + Sync,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
@@ -1087,7 +1111,7 @@ pub(crate) fn fold_shard_prove_with_context<L, MR, MB>(
     ctx: &ShardProverContext,
 ) -> Result<ShardProof, PiCcsError>
 where
-    L: SModuleHomomorphism<F, Cmt>,
+    L: SModuleHomomorphism<F, Cmt> + Sync,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
@@ -1122,7 +1146,7 @@ pub fn fold_shard_prove_with_output_binding<L, MR, MB>(
     final_memory_state: &[F],
 ) -> Result<ShardProof, PiCcsError>
 where
-    L: SModuleHomomorphism<F, Cmt>,
+    L: SModuleHomomorphism<F, Cmt> + Sync,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
@@ -1158,7 +1182,7 @@ pub(crate) fn fold_shard_prove_with_output_binding_with_context<L, MR, MB>(
     ctx: &ShardProverContext,
 ) -> Result<ShardProof, PiCcsError>
 where
-    L: SModuleHomomorphism<F, Cmt>,
+    L: SModuleHomomorphism<F, Cmt> + Sync,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
@@ -1191,7 +1215,7 @@ pub fn fold_shard_prove_with_witnesses<L, MR, MB>(
     mixers: CommitMixers<MR, MB>,
 ) -> Result<(ShardProof, ShardFoldOutputs<Cmt, F, K>, ShardFoldWitnesses<F>), PiCcsError>
 where
-    L: SModuleHomomorphism<F, Cmt>,
+    L: SModuleHomomorphism<F, Cmt> + Sync,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
@@ -1253,10 +1277,23 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let s0 = s_me
-        .ensure_identity_first()
-        .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
-    let (s, cpu_bus) = crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(&s0, steps)?;
+    let is_id0 = s_me.n == s_me.m
+        && s_me
+            .matrices
+            .first()
+            .map(|m0| m0.is_identity())
+            .unwrap_or(false);
+    let s0: Cow<'_, CcsStructure<F>> = if is_id0 {
+        Cow::Borrowed(s_me)
+    } else {
+        Cow::Owned(
+            s_me
+                .ensure_identity_first()
+                .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?,
+        )
+    };
+    let (s, cpu_bus) =
+        crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(s0.as_ref(), steps)?;
     // Route A terminal checks interpret `ME.y_scalars[0]` as MLE(column)(r_time), which requires M₀ = I.
     s.assert_m0_is_identity_for_nc()
         .map_err(|e| PiCcsError::InvalidInput(format!("identity-first (M₀=I) required: {e:?}")))?;
@@ -1265,7 +1302,7 @@ where
         ell_n,
         ell,
         d_sc,
-    } = utils::build_dims_and_policy(params, &s)?;
+    } = utils::build_dims_and_policy(params, s)?;
     let ring = ccs::RotRing::goldilocks();
 
     if steps.len() != proof.steps.len() {

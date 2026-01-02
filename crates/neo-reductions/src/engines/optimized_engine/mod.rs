@@ -31,6 +31,7 @@ pub use common::{
     claimed_initial_sum_from_inputs,
 
     dec_reduction_paper_exact,
+    dec_reduction_paper_exact_with_sparse_cache,
     dec_reduction_paper_exact_with_commit_check,
     // Core equalities & helpers
     eq_points,

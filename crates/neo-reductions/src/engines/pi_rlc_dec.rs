@@ -45,6 +45,37 @@ pub trait RlcDecOps {
 #[derive(Clone, Debug, Default, Copy)]
 pub struct OptimizedRlcDec;
 
+impl OptimizedRlcDec {
+    /// Optimized DEC that can reuse a caller-provided CSC cache to avoid dense n×m scans.
+    pub fn dec_children_with_commit_cached<Comb>(
+        s: &CcsStructure<F>,
+        params: &NeoParams,
+        parent: &MeInstance<Cmt, F, K>,
+        Z_split: &[Mat<F>],
+        ell_d: usize,
+        child_commitments: &[Cmt],
+        combine_b_pows: Comb,
+        sparse: Option<&super::optimized_engine::oracle::SparseCache<F>>,
+    ) -> (Vec<MeInstance<Cmt, F, K>>, bool, bool, bool)
+    where
+        Comb: Fn(&[Cmt], u32) -> Cmt,
+    {
+        let (mut children, ok_y, ok_X) = match sparse {
+            Some(cache) => super::optimized_engine::dec_reduction_paper_exact_with_sparse_cache::<F>(
+                s, params, parent, Z_split, ell_d, cache,
+            ),
+            None => super::optimized_engine::dec_reduction_paper_exact::<F>(s, params, parent, Z_split, ell_d),
+        };
+
+        // Patch children commitments and check c relation.
+        for (ch, c) in children.iter_mut().zip(child_commitments.iter()) {
+            ch.c = c.clone();
+        }
+        let ok_c = combine_b_pows(child_commitments, params.b) == parent.c;
+        (children, ok_y, ok_X, ok_c)
+    }
+}
+
 impl RlcDecOps for OptimizedRlcDec {
     fn rlc_with_commit<Comb>(
         s: &CcsStructure<F>,
@@ -58,9 +89,9 @@ impl RlcDecOps for OptimizedRlcDec {
     where
         Comb: Fn(&[Mat<F>], &[Cmt]) -> Cmt,
     {
-        // For now, delegate to paper-exact implementation
-        // TODO: Add optimized implementation
-        let (mut out, Z) = super::paper_exact_engine::rlc_reduction_paper_exact(s, params, rhos, me_inputs, Zs, ell_d);
+        // For now, delegate to paper-exact algebra (implemented in optimized_engine).
+        let (mut out, Z) =
+            super::optimized_engine::rlc_reduction_paper_exact(s, params, rhos, me_inputs, Zs, ell_d);
         let inputs_c: Vec<Cmt> = me_inputs.iter().map(|m| m.c.clone()).collect();
         out.c = mix_commits(rhos, &inputs_c);
         (out, Z)
@@ -78,10 +109,9 @@ impl RlcDecOps for OptimizedRlcDec {
     where
         Comb: Fn(&[Cmt], u32) -> Cmt,
     {
-        // For now, delegate to paper-exact implementation
-        // TODO: Add optimized implementation
+        // For now, delegate to paper-exact algebra (implemented in optimized_engine).
         let (mut children, ok_y, ok_X) =
-            super::paper_exact_engine::dec_reduction_paper_exact(s, params, parent, Z_split, ell_d);
+            super::optimized_engine::dec_reduction_paper_exact(s, params, parent, Z_split, ell_d);
         // Patch children commitments and check c relation
         for (ch, c) in children.iter_mut().zip(child_commitments.iter()) {
             ch.c = c.clone();

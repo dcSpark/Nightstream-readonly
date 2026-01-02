@@ -529,7 +529,7 @@ pub fn me_from_z_balanced_select<Lm: SModuleHomomorphism<F, Cmt>>(
 /// If absent, we run the *simple* k=1 case (no ME inputs).
 pub struct FoldingSession<L>
 where
-    L: SModuleHomomorphism<F, Cmt> + Clone,
+    L: SModuleHomomorphism<F, Cmt> + Clone + Sync,
 {
     mode: FoldingMode,
     params: NeoParams,
@@ -574,15 +574,15 @@ where
 struct SessionProverCcsCache {
     /// Address of the caller-supplied `CcsStructure` used to build this cache.
     src_ptr: usize,
-    /// Identity-first CCS (cached to avoid cloning per prove).
-    s_norm: CcsStructure<F>,
+    /// Optional identity-first CCS, stored only if normalization requires insertion.
+    s_norm: Option<CcsStructure<F>>,
     /// Precomputed prover-only artifacts (digest + optional sparse cache).
     ctx: ShardProverContext,
 }
 
 impl<L> FoldingSession<L>
 where
-    L: SModuleHomomorphism<F, Cmt> + Clone,
+    L: SModuleHomomorphism<F, Cmt> + Clone + Sync,
 {
     /// Create a new session with default Ajtai mixers and no initial accumulator (k=1 simple flow).
     pub fn new(mode: FoldingMode, params: NeoParams, l: L) -> Self {
@@ -973,12 +973,12 @@ where
         Ok(())
     }
 
-    fn prepared_ccs_for_accumulator(&self, s: &CcsStructure<F>) -> Result<CcsStructure<F>, PiCcsError> {
+    fn prepared_ccs_for_accumulator<'s>(&self, s: &'s CcsStructure<F>) -> Result<&'s CcsStructure<F>, PiCcsError> {
         if !(self.has_twist_instances() || self.has_shout_instances()) {
-            return Ok(s.clone());
+            return Ok(s);
         }
         if self.steps.is_empty() {
-            return Ok(s.clone());
+            return Ok(s);
         }
 
         let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> =
@@ -996,25 +996,44 @@ where
             }
         }
 
-        let s_norm = s
-            .ensure_identity_first()
-            .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
-        s_norm
+        let mut s_norm_opt: Option<CcsStructure<F>> = None;
+        let is_id0 = s.n == s.m
+            && s
+                .matrices
+                .first()
+                .map(|m0| m0.is_identity())
+                .unwrap_or(false);
+        let s_norm_ref: &CcsStructure<F> = if is_id0 {
+            s
+        } else {
+            let s_norm = s
+                .ensure_identity_first()
+                .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
+            s_norm_opt = Some(s_norm);
+            s_norm_opt.as_ref().expect("just set")
+        };
+
+        s_norm_ref
             .assert_m0_is_identity_for_nc()
             .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
 
-        let ccs_mat_digest = utils::digest_ccs_matrices(&s_norm);
         let ccs_sparse_cache = if mode_uses_sparse_cache(&self.mode) {
-            Some(Arc::new(SparseCache::build(&s_norm)))
+            Some(Arc::new(SparseCache::build(s_norm_ref)))
         } else {
             None
         };
+        let ccs_mat_digest =
+            utils::digest_ccs_matrices_with_sparse_cache(s_norm_ref, ccs_sparse_cache.as_deref());
         let ctx = ShardProverContext {
             ccs_mat_digest,
             ccs_sparse_cache,
         };
 
-        self.prover_ctx = Some(SessionProverCcsCache { src_ptr, s_norm, ctx });
+        self.prover_ctx = Some(SessionProverCcsCache {
+            src_ptr,
+            s_norm: s_norm_opt,
+            ctx,
+        });
         Ok(())
     }
 
@@ -1035,54 +1054,58 @@ where
     ) -> Result<FoldRun, PiCcsError> {
         self.ensure_prover_ctx_for_ccs(s)?;
 
-        // Shared CPU bus: compute the prepared CCS shape (copy-outs) for accumulator validation.
-        let s_prepared = {
-            let cache = self.prover_ctx.as_ref().expect("prover ctx must be set");
-            self.prepared_ccs_for_accumulator(&cache.s_norm)?
-        };
-        s_prepared
-            .assert_m0_is_identity_for_nc()
-            .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
-        self.ensure_accumulator_matches_ccs(&s_prepared)?;
+        // Temporarily take the prover ctx to avoid borrow conflicts while we may mutate `self`.
+        let cache = self.prover_ctx.take().expect("prover ctx must be set");
+        let s_norm = cache.s_norm.as_ref().unwrap_or(s);
+        let ctx = cache.ctx.clone();
 
-        // Determine canonical m_in from steps and ensure they all match (needed for RLC).
-        let m_in_steps = self.steps.first().map(|step| step.mcs.0.m_in).unwrap_or(0);
-        if !self.steps.iter().all(|step| step.mcs.0.m_in == m_in_steps) {
-            return Err(PiCcsError::InvalidInput("all steps must share the same m_in".into()));
-        }
+        let result = (|| {
+            // Shared CPU bus: compute the prepared CCS shape (copy-outs) for accumulator validation.
+            // IMPORTANT: Use the normalized CCS so M₀=I holds even if the caller passed a non-identity-first CCS.
+            let s_prepared = self.prepared_ccs_for_accumulator(s_norm)?;
+            s_prepared
+                .assert_m0_is_identity_for_nc()
+                .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
+            self.ensure_accumulator_matches_ccs(s_prepared)?;
 
-        // Validate or default the accumulator: None → k=1 simple case (no ME inputs).
-        let (seed_me, seed_me_wit): (&[MeInstance<Cmt, F, K>], &[Mat<F>]) = match &self.acc0 {
-            Some(acc) => {
-                acc.check(&self.params, &s_prepared)?;
-                // Also ensure accumulator m_in matches steps' m_in to avoid X-mixing shape issues.
-                let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
-                if acc_m_in != m_in_steps {
-                    return Err(PiCcsError::InvalidInput(
-                        "initial Accumulator.m_in must match steps' m_in".into(),
-                    ));
-                }
-                (&acc.me, &acc.witnesses)
+            // Determine canonical m_in from steps and ensure they all match (needed for RLC).
+            let m_in_steps = self.steps.first().map(|step| step.mcs.0.m_in).unwrap_or(0);
+            if !self.steps.iter().all(|step| step.mcs.0.m_in == m_in_steps) {
+                return Err(PiCcsError::InvalidInput("all steps must share the same m_in".into()));
             }
-            None => (&[], &[]), // k=1
-        };
 
-        let (s_norm, ctx) = {
-            let cache = self.prover_ctx.as_ref().expect("prover ctx must be set");
-            (&cache.s_norm, &cache.ctx)
-        };
-        shard::fold_shard_prove_with_context(
-            self.mode.clone(),
-            tr,
-            &self.params,
-            s_norm,
-            &self.steps,
-            seed_me,
-            seed_me_wit,
-            &self.l,
-            self.mixers,
-            ctx,
-        )
+            // Validate or default the accumulator: None → k=1 simple case (no ME inputs).
+            let (seed_me, seed_me_wit): (&[MeInstance<Cmt, F, K>], &[Mat<F>]) = match &self.acc0 {
+                Some(acc) => {
+                    acc.check(&self.params, s_prepared)?;
+                    // Also ensure accumulator m_in matches steps' m_in to avoid X-mixing shape issues.
+                    let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
+                    if acc_m_in != m_in_steps {
+                        return Err(PiCcsError::InvalidInput(
+                            "initial Accumulator.m_in must match steps' m_in".into(),
+                        ));
+                    }
+                    (&acc.me, &acc.witnesses)
+                }
+                None => (&[], &[]), // k=1
+            };
+
+            shard::fold_shard_prove_with_context(
+                self.mode.clone(),
+                tr,
+                &self.params,
+                s_norm,
+                &self.steps,
+                seed_me,
+                seed_me_wit,
+                &self.l,
+                self.mixers,
+                &ctx,
+            )
+        })();
+
+        self.prover_ctx = Some(cache);
+        result
     }
 
     pub fn fold_and_prove_with_output_binding(
@@ -1094,14 +1117,11 @@ where
     ) -> Result<FoldRun, PiCcsError> {
         self.ensure_prover_ctx_for_ccs(s)?;
 
-        let s_prepared = {
-            let cache = self.prover_ctx.as_ref().expect("prover ctx must be set");
-            self.prepared_ccs_for_accumulator(&cache.s_norm)?
-        };
+        let s_prepared = self.prepared_ccs_for_accumulator(s)?;
         s_prepared
             .assert_m0_is_identity_for_nc()
             .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
-        self.ensure_accumulator_matches_ccs(&s_prepared)?;
+        self.ensure_accumulator_matches_ccs(s_prepared)?;
 
         let m_in_steps = self.steps.first().map(|step| step.mcs.0.m_in).unwrap_or(0);
         if !self.steps.iter().all(|step| step.mcs.0.m_in == m_in_steps) {
@@ -1110,7 +1130,7 @@ where
 
         let (seed_me, seed_me_wit): (&[MeInstance<Cmt, F, K>], &[Mat<F>]) = match &self.acc0 {
             Some(acc) => {
-                acc.check(&self.params, &s_prepared)?;
+                acc.check(&self.params, s_prepared)?;
                 let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
                 if acc_m_in != m_in_steps {
                     return Err(PiCcsError::InvalidInput(
@@ -1122,10 +1142,9 @@ where
             None => (&[], &[]),
         };
 
-        let (s_norm, ctx) = {
-            let cache = self.prover_ctx.as_ref().expect("prover ctx must be set");
-            (&cache.s_norm, &cache.ctx)
-        };
+        let cache = self.prover_ctx.as_ref().expect("prover ctx must be set");
+        let s_norm = cache.s_norm.as_ref().unwrap_or(s);
+        let ctx = cache.ctx.clone();
         shard::fold_shard_prove_with_output_binding_with_context(
             self.mode.clone(),
             tr,
@@ -1138,7 +1157,7 @@ where
             self.mixers,
             ob_cfg,
             final_memory_state,
-            ctx,
+            &ctx,
         )
     }
 
@@ -1266,7 +1285,7 @@ where
         // Validate (or empty) initial accumulator to mirror finalize()
         let seed_me: &[MeInstance<Cmt, F, K>] = match &self.acc0 {
             Some(acc) => {
-                acc.check(&self.params, &s_prepared)?;
+                acc.check(&self.params, s_prepared)?;
                 let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
                 if acc_m_in != m_in_steps {
                     return Err(PiCcsError::InvalidInput(
@@ -1382,7 +1401,7 @@ where
 
         let seed_me: &[MeInstance<Cmt, F, K>] = match &self.acc0 {
             Some(acc) => {
-                acc.check(&self.params, &s_prepared)?;
+                acc.check(&self.params, s_prepared)?;
                 let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
                 if acc_m_in != m_in_steps {
                     return Err(PiCcsError::InvalidInput(
