@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use neo_fold::session::{FoldingSession, NeoStep, StepArtifacts, StepSpec};
@@ -101,9 +102,9 @@ fn build_step_ccs(r1cs: &R1csData) -> CcsStructure<F> {
     let c = sparse_to_dense_mat(&r1cs.c_sparse, n, m_padded);
     let s0 = r1cs_to_ccs(a, b, c);
     
-    // ensure_identity_first will now work since n == m_padded
-    s0.ensure_identity_first()
-        .expect("ensure_identity_first should succeed")
+    // ensure_identity_first_owned will now work since n == m_padded
+    s0.ensure_identity_first_owned()
+        .expect("ensure_identity_first_owned should succeed")
 }
 
 fn extract_witness(witness_data: &WitnessData) -> Vec<F> {
@@ -221,7 +222,9 @@ impl NeoStep for StarstreamStepCircuit {
         
         // Extract witness and pad to match CCS dimensions (m might be larger due to slack variables)
         let z_raw = extract_witness(&self.steps[step_idx].witness);
-        let witness_padded = pad_witness_to_m(z_raw, ccs_this.m);
+        let m_this = ccs_this.m;
+        let witness_padded = pad_witness_to_m(z_raw, m_this);
+        let ccs_this = Arc::new(ccs_this);
         
         StepArtifacts {
             ccs: ccs_this,

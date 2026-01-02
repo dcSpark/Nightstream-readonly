@@ -4,6 +4,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use neo_fold::session::{FoldingSession, NeoStep, StepArtifacts, StepSpec};
@@ -100,9 +101,9 @@ fn build_step_ccs(r1cs: &R1csData) -> CcsStructure<F> {
     let c = sparse_to_dense_mat(&r1cs.c_sparse, n, m_padded);
     let s0 = r1cs_to_ccs(a, b, c);
     
-    // ensure_identity_first will now work since n == m_padded
-    s0.ensure_identity_first()
-        .expect("ensure_identity_first should succeed")
+    // ensure_identity_first_owned will now work since n == m_padded
+    s0.ensure_identity_first_owned()
+        .expect("ensure_identity_first_owned should succeed")
 }
 
 fn extract_witness(witness_data: &WitnessData) -> Vec<F> {
@@ -135,7 +136,7 @@ struct NoInputs;
 struct StarstreamStepCircuit {
     steps: Vec<StepData>,
     step_spec: StepSpec,
-    step_ccs: CcsStructure<F>,
+    step_ccs: Arc<CcsStructure<F>>,
 }
 
 impl NeoStep for StarstreamStepCircuit {
@@ -194,7 +195,7 @@ fn test_starstream_tx_valid_optimized() {
         m_in: export.steps[0].r1cs.num_public_inputs,
     };
     
-    let step_ccs = build_step_ccs(&export.steps[0].r1cs);
+    let step_ccs = Arc::new(build_step_ccs(&export.steps[0].r1cs));
     let mut circuit = StarstreamStepCircuit {
         steps: export.steps.clone(),
         step_spec: step_spec.clone(),
@@ -227,7 +228,8 @@ fn test_starstream_tx_valid_optimized() {
     }
     
     let start = Instant::now();
-    let run = session.fold_and_prove(&step_ccs)
+    let run = session
+        .fold_and_prove(step_ccs.as_ref())
         .expect("fold_and_prove should produce a FoldRun");
     let finalize_duration = start.elapsed();
     
@@ -238,7 +240,8 @@ fn test_starstream_tx_valid_optimized() {
     assert_eq!(run.steps.len(), export.steps.len(), "should have correct number of steps");
     
     let mcss_public = session.mcss_public();
-    let ok = session.verify(&step_ccs, &mcss_public, &run)
+    let ok = session
+        .verify(step_ccs.as_ref(), &mcss_public, &run)
         .expect("verify should run");
     assert!(ok, "optimized verification should pass");
 }

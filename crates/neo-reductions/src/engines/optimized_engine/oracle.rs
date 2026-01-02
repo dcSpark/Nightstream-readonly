@@ -586,6 +586,171 @@ impl RowStreamState {
                 .collect();
         }
 
+        // Fast path for b=3: range polynomial is N(y) = y(y^2-1)(y^2-4) = y^5 - 5y^3 + 4y.
+        // As in the b=2 case, we build the univariate coefficients once per round and then
+        // evaluate at all requested points.
+        if self.b == 3 {
+            let four = K::from(Ff::from_u64(4));
+            let five = K::from(Ff::from_u64(5));
+            let ten = K::from(Ff::from_u64(10));
+            let fifteen = K::from(Ff::from_u64(15));
+
+            let f_max_term_deg: usize = self
+                .f_terms
+                .iter()
+                .map(|term| term.vars.iter().map(|&(_, exp)| exp as usize).sum::<usize>())
+                .max()
+                .unwrap_or(0);
+            // NC contributes degree 6 after multiplying by eq_beta_r(X).
+            let deg_max = core::cmp::max(6, f_max_term_deg + 1);
+
+            let coeffs = (0..tail_len)
+                .into_par_iter()
+                .fold(
+                    || {
+                        (
+                            vec![K::ZERO; deg_max + 1],
+                            vec![K::ZERO; deg_max + 1],
+                            vec![K::ZERO; deg_max + 1],
+                        )
+                    },
+                    |(mut coeffs, mut inner, mut term_poly), t| {
+                        // eq_beta_r(X) = e0 + e1·X
+                        let e0 = self.eq_beta_r_tbl[2 * t];
+                        let e1 = self.eq_beta_r_tbl[2 * t + 1] - e0;
+
+                        // inner(X) = f_prime(X) + nc_total(X)
+                        inner.fill(K::ZERO);
+
+                        // f_prime(X): expand sparse polynomial with affine substitutions.
+                        for term in &self.f_terms {
+                            term_poly.fill(K::ZERO);
+                            term_poly[0] = term.coeff;
+                            for &(var_pos, exp) in &term.vars {
+                                if exp == 0 {
+                                    continue;
+                                }
+                                let tbl = &self.f_var_tables[var_pos];
+                                // v(X) = a + b·X
+                                let a = tbl[2 * t];
+                                let b = tbl[2 * t + 1] - a;
+                                for _ in 0..exp {
+                                    Self::poly_mul_affine_inplace(&mut term_poly, a, b);
+                                }
+                            }
+                            for (dst, src) in inner.iter_mut().zip(term_poly.iter()) {
+                                *dst += *src;
+                            }
+                        }
+
+                        // NC: degree-5 in X before multiplying by eq_beta_r(X).
+                        for rho in 0..D {
+                            let w = self.w_beta_a[rho];
+                            if w == K::ZERO {
+                                continue;
+                            }
+
+                            let mut c0 = K::ZERO;
+                            let mut c1 = K::ZERO;
+                            let mut c2 = K::ZERO;
+                            let mut c3 = K::ZERO;
+                            let mut c4 = K::ZERO;
+                            let mut c5 = K::ZERO;
+
+                            for (i, gamma_i) in self.gamma_nc.iter().enumerate() {
+                                // y(X) = a + b·X
+                                let a = self.nc_tables[i][2 * t][rho];
+                                let b = self.nc_tables[i][2 * t + 1][rho] - a;
+
+                                // Expand N(a + bX) = (a+bX)^5 - 5(a+bX)^3 + 4(a+bX).
+                                //
+                                // Coeffs:
+                                // X^0: a^5 - 5a^3 + 4a
+                                // X^1: b(5a^4 - 15a^2 + 4)
+                                // X^2: b^2(10a^3 - 15a)
+                                // X^3: b^3(10a^2 - 5)
+                                // X^4: 5ab^4
+                                // X^5: b^5
+                                let a2 = a * a;
+                                let a3 = a2 * a;
+                                let a4 = a2 * a2;
+                                let a5 = a4 * a;
+
+                                let b2 = b * b;
+                                let b3 = b2 * b;
+                                let b4 = b2 * b2;
+                                let b5 = b4 * b;
+
+                                let t0 = a5 - a3.scale_base_k(five) + a.scale_base_k(four);
+                                let p1 = a4.scale_base_k(five) - a2.scale_base_k(fifteen) + four;
+                                let t1 = b * p1;
+
+                                let p2 = a3.scale_base_k(ten) - a.scale_base_k(fifteen);
+                                let t2 = b2 * p2;
+
+                                let p3 = a2.scale_base_k(ten) - five;
+                                let t3 = b3 * p3;
+
+                                let t4 = b4 * a.scale_base_k(five);
+                                let t5 = b5;
+
+                                c0 += *gamma_i * t0;
+                                c1 += *gamma_i * t1;
+                                c2 += *gamma_i * t2;
+                                c3 += *gamma_i * t3;
+                                c4 += *gamma_i * t4;
+                                c5 += *gamma_i * t5;
+                            }
+
+                            inner[0] += w * c0;
+                            inner[1] += w * c1;
+                            inner[2] += w * c2;
+                            inner[3] += w * c3;
+                            inner[4] += w * c4;
+                            inner[5] += w * c5;
+                        }
+
+                        // coeffs += eq_beta_r(X) * inner(X)
+                        coeffs[0] += e0 * inner[0];
+                        for d in 1..=deg_max {
+                            coeffs[d] += (e0 * inner[d]) + (e1 * inner[d - 1]);
+                        }
+
+                        // Eval: eq_r_inputs(X) * gamma_to_k * eval_tbl(X) (quadratic).
+                        if let (Some(eq_tbl), Some(eval_tbl)) =
+                            (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref())
+                        {
+                            let r0 = eq_tbl[2 * t];
+                            let r1 = eq_tbl[2 * t + 1] - r0;
+                            let v0 = eval_tbl[2 * t];
+                            let v1 = eval_tbl[2 * t + 1] - v0;
+
+                            let g = self.gamma_to_k;
+                            coeffs[0] += g * (r0 * v0);
+                            coeffs[1] += g * (r0 * v1 + r1 * v0);
+                            coeffs[2] += g * (r1 * v1);
+                        }
+
+                        (coeffs, inner, term_poly)
+                    },
+                )
+                .map(|(coeffs, _, _)| coeffs)
+                .reduce(
+                    || vec![K::ZERO; deg_max + 1],
+                    |mut a, b| {
+                        for (dst, src) in a.iter_mut().zip(b.iter()) {
+                            *dst += *src;
+                        }
+                        a
+                    },
+                );
+
+            return xs
+                .iter()
+                .map(|&x| crate::sumcheck::poly_eval_k(&coeffs, x))
+                .collect();
+        }
+
         // Generic fallback: evaluate directly at each x (slower, but supports any b).
         let f_arity = self.f_var_tables.len();
 

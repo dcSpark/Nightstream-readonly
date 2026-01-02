@@ -5,6 +5,7 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use neo_fold::session::{FoldingSession, NeoStep, StepArtifacts, StepSpec};
 use neo_fold::pi_ccs::FoldingMode;
@@ -99,8 +100,8 @@ fn build_step_ccs(r1cs: &R1csData) -> CcsStructure<F> {
     let c = sparse_to_dense_mat(&r1cs.c_sparse, n, m_padded);
     let s0 = r1cs_to_ccs(a, b, c);
     
-    s0.ensure_identity_first()
-        .expect("ensure_identity_first should succeed")
+    s0.ensure_identity_first_owned()
+        .expect("ensure_identity_first_owned should succeed")
 }
 
 fn extract_witness(witness_data: &WitnessData) -> Vec<F> {
@@ -167,7 +168,9 @@ impl NeoStep for StarstreamStepCircuit {
         );
         
         let z_raw = extract_witness(&self.steps[step_idx].witness);
-        let witness_padded = pad_witness_to_m(z_raw, ccs_this.m);
+        let m_this = ccs_this.m;
+        let witness_padded = pad_witness_to_m(z_raw, m_this);
+        let ccs_this = Arc::new(ccs_this);
         
         StepArtifacts {
             ccs: ccs_this,
@@ -235,4 +238,3 @@ fn test_starstream_tx_optimized_invalid() {
         "finalize must fail on invalid witnesses (CCS/NC constraints don't hold)"
     );
 }
-

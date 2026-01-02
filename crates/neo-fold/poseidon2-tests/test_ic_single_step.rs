@@ -26,6 +26,7 @@ use rand_chacha::rand_core::SeedableRng;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Instant;
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -65,9 +66,9 @@ fn build_step_ccs(r1cs: &TestExport) -> CcsStructure<F> {
     let c = sparse_to_dense_mat(&r1cs.matrix_c, n, n);
     let s0 = r1cs_to_ccs(a, b, c);
 
-    // ensure_identity_first will now work since n == m_padded
-    s0.ensure_identity_first()
-        .expect("ensure_identity_first should succeed")
+    // ensure_identity_first_owned will now work since n == m_padded
+    s0.ensure_identity_first_owned()
+        .expect("ensure_identity_first_owned should succeed")
 }
 
 /// Pad witness to match CCS dimensions (adds slack variables if n > m_original)
@@ -97,7 +98,7 @@ struct NoInputs;
 struct StepCircuit {
     steps: Vec<Vec<F>>,
     step_spec: StepSpec,
-    step_ccs: CcsStructure<F>,
+    step_ccs: Arc<CcsStructure<F>>,
 }
 
 impl NeoStep for StepCircuit {
@@ -185,7 +186,7 @@ fn test_poseidon2_ic_batch_size(batch_size: usize) {
         m_in: 1,
     };
 
-    let step_ccs = build_step_ccs(&export);
+    let step_ccs = Arc::new(build_step_ccs(&export));
     let mut circuit = StepCircuit {
         steps: export
             .witness
@@ -211,7 +212,7 @@ fn test_poseidon2_ic_batch_size(batch_size: usize) {
 
     
     let run = session
-        .fold_and_prove(&step_ccs)
+        .fold_and_prove(step_ccs.as_ref())
         .expect("fold_and_prove should produce a FoldRun");
     let finalize_duration = start.elapsed();
 
@@ -225,7 +226,7 @@ fn test_poseidon2_ic_batch_size(batch_size: usize) {
 
     let mcss_public = session.mcss_public();
     let ok = session
-        .verify(&step_ccs, &mcss_public, &run)
+        .verify(step_ccs.as_ref(), &mcss_public, &run)
         .expect("verify should run");
     assert!(ok, "optimized verification should pass");
 }

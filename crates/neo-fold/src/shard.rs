@@ -1272,6 +1272,7 @@ fn fold_shard_verify_impl<MR, MB>(
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
     ob_cfg: Option<&crate::output_binding::OutputBindingConfig>,
+    prover_ctx: Option<&ShardProverContext>,
 ) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
 where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
@@ -1329,11 +1330,17 @@ where
     let mut accumulator = acc_init.to_vec();
     let mut val_lane_obligations: Vec<MeInstance<Cmt, F, K>> = Vec::new();
     let ccs_sparse_cache: Option<Arc<SparseCache<F>>> = if mode_uses_sparse_cache(&mode) {
-        Some(Arc::new(SparseCache::build(s)))
+        Some(
+            prover_ctx
+                .and_then(|ctx| ctx.ccs_sparse_cache.clone())
+                .unwrap_or_else(|| Arc::new(SparseCache::build(s))),
+        )
     } else {
         None
     };
-    let ccs_mat_digest = utils::digest_ccs_matrices_with_sparse_cache(s, ccs_sparse_cache.as_deref());
+    let ccs_mat_digest = prover_ctx
+        .map(|ctx| ctx.ccs_mat_digest.clone())
+        .unwrap_or_else(|| utils::digest_ccs_matrices_with_sparse_cache(s, ccs_sparse_cache.as_deref()));
 
     for (idx, (step, step_proof)) in steps.iter().zip(proof.steps.iter()).enumerate() {
         absorb_step_memory(tr, step);
@@ -1783,7 +1790,7 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    fold_shard_verify_impl(mode, tr, params, s_me, steps, acc_init, proof, mixers, None)
+    fold_shard_verify_impl(mode, tr, params, s_me, steps, acc_init, proof, mixers, None, None)
 }
 
 pub fn fold_shard_verify_with_step_linking<MR, MB>(
@@ -1820,7 +1827,120 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    fold_shard_verify_impl(mode, tr, params, s_me, steps, acc_init, proof, mixers, Some(ob_cfg))
+    fold_shard_verify_impl(
+        mode,
+        tr,
+        params,
+        s_me,
+        steps,
+        acc_init,
+        proof,
+        mixers,
+        Some(ob_cfg),
+        None,
+    )
+}
+
+pub(crate) fn fold_shard_verify_with_context<MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepInstanceBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    proof: &ShardProof,
+    mixers: CommitMixers<MR, MB>,
+    prover_ctx: &ShardProverContext,
+) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
+where
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    fold_shard_verify_impl(
+        mode,
+        tr,
+        params,
+        s_me,
+        steps,
+        acc_init,
+        proof,
+        mixers,
+        None,
+        Some(prover_ctx),
+    )
+}
+
+pub(crate) fn fold_shard_verify_with_step_linking_with_context<MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepInstanceBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    proof: &ShardProof,
+    mixers: CommitMixers<MR, MB>,
+    step_linking: &StepLinkingConfig,
+    prover_ctx: &ShardProverContext,
+) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
+where
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    check_step_linking(steps, step_linking)?;
+    fold_shard_verify_with_context(mode, tr, params, s_me, steps, acc_init, proof, mixers, prover_ctx)
+}
+
+pub(crate) fn fold_shard_verify_with_output_binding_with_context<MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepInstanceBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    proof: &ShardProof,
+    mixers: CommitMixers<MR, MB>,
+    ob_cfg: &crate::output_binding::OutputBindingConfig,
+    prover_ctx: &ShardProverContext,
+) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
+where
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    fold_shard_verify_impl(
+        mode,
+        tr,
+        params,
+        s_me,
+        steps,
+        acc_init,
+        proof,
+        mixers,
+        Some(ob_cfg),
+        Some(prover_ctx),
+    )
+}
+
+pub(crate) fn fold_shard_verify_with_output_binding_and_step_linking_with_context<MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepInstanceBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    proof: &ShardProof,
+    mixers: CommitMixers<MR, MB>,
+    ob_cfg: &crate::output_binding::OutputBindingConfig,
+    step_linking: &StepLinkingConfig,
+    prover_ctx: &ShardProverContext,
+) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
+where
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    check_step_linking(steps, step_linking)?;
+    fold_shard_verify_with_output_binding_with_context(
+        mode, tr, params, s_me, steps, acc_init, proof, mixers, ob_cfg, prover_ctx,
+    )
 }
 
 pub fn fold_shard_verify_with_output_binding_and_step_linking<MR, MB>(

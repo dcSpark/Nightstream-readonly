@@ -1,6 +1,7 @@
 #![allow(non_snake_case)]
 
 use std::time::Instant;
+use std::sync::Arc;
 use neo_fold::session::{FoldingSession, NeoStep, StepArtifacts, StepSpec};
 use neo_fold::pi_ccs::FoldingMode;
 use neo_ccs::{Mat, r1cs_to_ccs};
@@ -87,7 +88,7 @@ impl NeoStep for FibonacciStep {
         let ccs = r1cs_to_ccs(A, B, C);
 
         StepArtifacts {
-            ccs,
+            ccs: Arc::new(ccs),
             witness: z,
             public_app_inputs: vec![],
             spec: self.step_spec(),
@@ -127,7 +128,9 @@ fn test_perf_fibonacci_10k_optimized() {
     
     // Use a dummy step to get the CCS structure for fold_and_prove
     let dummy = stepper.synthesize_step(0, &[F::ZERO, F::ONE], &());
-    let run = session.fold_and_prove(&dummy.ccs).expect("fold_and_prove failed");
+    let run = session
+        .fold_and_prove(dummy.ccs.as_ref())
+        .expect("fold_and_prove failed");
     
     let fold_time = start_fold.elapsed();
     let time_per_fold = fold_time / N_STEPS as u32;
@@ -142,4 +145,3 @@ fn test_perf_fibonacci_10k_optimized() {
     assert!(ok, "Verification failed");
     println!("Verification passed!");
 }
-

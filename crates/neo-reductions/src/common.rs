@@ -48,6 +48,25 @@ fn balanced_divrem(v: i128, b: i128) -> (i128, i128) {
     (r, q)
 }
 
+#[inline]
+fn balanced_divrem_i64(v: i64, b: i64) -> (i64, i64) {
+    debug_assert!(b >= 2);
+
+    let mut r = v % b;
+    let mut q = (v - r) / b;
+
+    let half = b / 2; // floor(b/2)
+    if r > half {
+        r -= b;
+        q += 1;
+    } else if r < -half {
+        r += b;
+        q -= 1;
+    }
+
+    (r, q)
+}
+
 /// Split Z into **balanced base-b digits** Z = Σ_{i=0}^{k-1} b^i · Z_i, entrywise.
 /// Each digit lies in [-floor(b/2), +floor(b/2)] for even b (inclusive upper bound),
 /// and the analogous balanced range for odd b.
@@ -71,75 +90,176 @@ pub fn split_b_matrix_k_with_nonzero_flags(
     for _ in 0..k {
         B = B.saturating_mul(b_i);
     } // b^k
+    let neg_one = F::ZERO - F::ONE;
 
     // Helpers to interpret field element as a small signed integer in (-(B-1), B-1)
     let p: u128 = F::ORDER_U64 as u128; // Goldilocks prime fits in u64
     let B_u: u128 = B as u128;
 
-    for r in 0..Z_rows {
-        for c in 0..Z_cols {
-            let u = Z[(r, c)].as_canonical_u64() as u128;
-            // Map to a small signed integer if within the DEC budget.
-            let val_opt: Option<i128> = if u < B_u {
-                Some(u as i128)
-            } else if p.checked_sub(u).map(|w| w < B_u).unwrap_or(false) {
-                // negative representative
-                Some(-((p - u) as i128))
-            } else {
-                None
-            };
+    let z_data = Z.as_slice();
+    {
+        let mut out_slices: Vec<&mut [F]> = outs.iter_mut().map(|m| m.as_mut_slice()).collect();
+        let total = z_data.len();
+        debug_assert_eq!(total, Z_rows * Z_cols);
 
-            let mut v = match val_opt {
-                Some(v) => v,
-                None => {
-                    let B_signed = B_u as i128;
+        if B_u <= i64::MAX as u128 {
+            let b_i64 = b as i64;
+            for idx in 0..total {
+                let u = z_data[idx].as_canonical_u64() as u128;
+                // Map to a small signed integer if within the DEC budget.
+                let val_opt: Option<i64> = if u < B_u {
+                    Some(u as i64)
+                } else if p.checked_sub(u).map(|w| w < B_u).unwrap_or(false) {
+                    // negative representative
+                    Some(-((p - u) as i64))
+                } else {
+                    None
+                };
+
+                let mut v = match val_opt {
+                    Some(v) => v,
+                    None => {
+                        let r = idx / Z_cols;
+                        let c = idx % Z_cols;
+                        let B_signed = B_u as i128;
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "DEC split: Z[{},{}] = {} (0x{:X}) is out of range for k_rho={}, b={}\n\
+                             Matrix Z is {}×{}\n\
+                             Balanced range: [{}, {}), where B = b^k_rho = {}^{} = {}\n\
+                             This typically means witness values grew too large during RLC (expansion factor T=216 for rotation matrices)",
+                            r, c, u, u, k, b, Z_rows, Z_cols, -B_signed, B_signed, b, k, B_u
+                        )));
+                    }
+                };
+
+                // Balanced digit extraction: r_i ∈ [-floor(b/2), ..., ceil(b/2)-1], v ← q
+                for i in 0..k {
+                    if v == 0 {
+                        break;
+                    }
+                    let (r_i, q) = balanced_divrem_i64(v, b_i64);
+                    if r_i != 0 {
+                        let digit_f = match r_i {
+                            1 => F::ONE,
+                            -1 => neg_one,
+                            _ => {
+                                if r_i >= 0 {
+                                    F::from_u64(r_i as u64)
+                                } else {
+                                    let abs = (-r_i) as u64;
+                                    F::ZERO - F::from_u64(abs)
+                                }
+                            }
+                        };
+                        out_slices[i][idx] = digit_f;
+                        digit_nonzero[i] = true;
+                    }
+                    v = q;
+                }
+
+                if v != 0 {
+                    let r = idx / Z_cols;
+                    let c = idx % Z_cols;
                     return Err(PiCcsError::ProtocolError(format!(
-                        "DEC split: Z[{},{}] = {} (0x{:X}) is out of range for k_rho={}, b={}\n\
+                        "DEC split: Z[{},{}] needs more than k_rho={} digits in base b={}\n\
                          Matrix Z is {}×{}\n\
-                         Balanced range: [{}, {}), where B = b^k_rho = {}^{} = {}\n\
+                         After extracting {} digits, remainder v={} (should be 0)\n\
+                         Original value exceeded the range [{}, {}) for B = {}^{} = {}\n\
                          This typically means witness values grew too large during RLC (expansion factor T=216 for rotation matrices)",
-                        r, c, u, u, k, b, Z_rows, Z_cols, -B_signed, B_signed, b, k, B_u
+                        r,
+                        c,
+                        k,
+                        b,
+                        Z_rows,
+                        Z_cols,
+                        k,
+                        v,
+                        -(B_u as i128),
+                        B_u as i128,
+                        b,
+                        k,
+                        B_u
                     )));
                 }
-            };
-
-            // Balanced digit extraction: r_i ∈ [-floor(b/2), ..., ceil(b/2)-1], v ← q
-            for i in 0..k {
-                let (r_i, q) = balanced_divrem(v, b_i);
-                let digit_f = if r_i >= 0 {
-                    F::from_u64(r_i as u64)
-                } else {
-                    let abs = (-r_i) as u64;
-                    F::ZERO - F::from_u64(abs)
-                };
-                outs[i][(r, c)] = digit_f;
-                if digit_f != F::ZERO {
-                    digit_nonzero[i] = true;
-                }
-                v = q;
             }
-            // Must consume exactly in k digits
-            if v != 0 {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "DEC split: Z[{},{}] needs more than k_rho={} digits in base b={}\n\
-                     Matrix Z is {}×{}\n\
-                     After extracting {} digits, remainder v={} (should be 0)\n\
-                     Original value exceeded the range [{}, {}) for B = {}^{} = {}\n\
-                     This typically means witness values grew too large during RLC (expansion factor T=216 for rotation matrices)",
-                    r,
-                    c,
-                    k,
-                    b,
-                    Z_rows,
-                    Z_cols,
-                    k,
-                    v,
-                    -(B_u as i128),
-                    B_u as i128,
-                    b,
-                    k,
-                    B_u
-                )));
+        } else {
+            for idx in 0..total {
+                let u = z_data[idx].as_canonical_u64() as u128;
+                // Map to a small signed integer if within the DEC budget.
+                let val_opt: Option<i128> = if u < B_u {
+                    Some(u as i128)
+                } else if p.checked_sub(u).map(|w| w < B_u).unwrap_or(false) {
+                    // negative representative
+                    Some(-((p - u) as i128))
+                } else {
+                    None
+                };
+
+                let mut v = match val_opt {
+                    Some(v) => v,
+                    None => {
+                        let r = idx / Z_cols;
+                        let c = idx % Z_cols;
+                        let B_signed = B_u as i128;
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "DEC split: Z[{},{}] = {} (0x{:X}) is out of range for k_rho={}, b={}\n\
+                             Matrix Z is {}×{}\n\
+                             Balanced range: [{}, {}), where B = b^k_rho = {}^{} = {}\n\
+                             This typically means witness values grew too large during RLC (expansion factor T=216 for rotation matrices)",
+                            r, c, u, u, k, b, Z_rows, Z_cols, -B_signed, B_signed, b, k, B_u
+                        )));
+                    }
+                };
+
+                // Balanced digit extraction: r_i ∈ [-floor(b/2), ..., ceil(b/2)-1], v ← q
+                for i in 0..k {
+                    if v == 0 {
+                        break;
+                    }
+                    let (r_i, q) = balanced_divrem(v, b_i);
+                    if r_i != 0 {
+                        let digit_f = match r_i {
+                            1 => F::ONE,
+                            -1 => neg_one,
+                            _ => {
+                                if r_i >= 0 {
+                                    F::from_u64(r_i as u64)
+                                } else {
+                                    let abs = (-r_i) as u64;
+                                    F::ZERO - F::from_u64(abs)
+                                }
+                            }
+                        };
+                        out_slices[i][idx] = digit_f;
+                        digit_nonzero[i] = true;
+                    }
+                    v = q;
+                }
+
+                if v != 0 {
+                    let r = idx / Z_cols;
+                    let c = idx % Z_cols;
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "DEC split: Z[{},{}] needs more than k_rho={} digits in base b={}\n\
+                         Matrix Z is {}×{}\n\
+                         After extracting {} digits, remainder v={} (should be 0)\n\
+                         Original value exceeded the range [{}, {}) for B = {}^{} = {}\n\
+                         This typically means witness values grew too large during RLC (expansion factor T=216 for rotation matrices)",
+                        r,
+                        c,
+                        k,
+                        b,
+                        Z_rows,
+                        Z_cols,
+                        k,
+                        v,
+                        -(B_u as i128),
+                        B_u as i128,
+                        b,
+                        k,
+                        B_u
+                    )));
+                }
             }
         }
     }

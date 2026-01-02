@@ -21,6 +21,59 @@ pub struct CscMat<Ff> {
 }
 
 impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CscMat<Ff> {
+    /// Build CSC from a list of (row, col, val) triplets (skipping zeros and combining duplicates).
+    pub fn from_triplets(mut triplets: Vec<(usize, usize, Ff)>, nrows: usize, ncols: usize) -> Self {
+        triplets.retain(|&(_, _, v)| v != Ff::ZERO);
+        triplets.sort_unstable_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
+
+        let mut entries: Vec<(usize, usize, Ff)> = Vec::with_capacity(triplets.len());
+        for (r, c, v) in triplets {
+            assert!(r < nrows, "triplet row out of bounds");
+            assert!(c < ncols, "triplet col out of bounds");
+            if let Some(last) = entries.last_mut() {
+                if last.0 == r && last.1 == c {
+                    last.2 += v;
+                    if last.2 == Ff::ZERO {
+                        entries.pop();
+                    }
+                    continue;
+                }
+            }
+            entries.push((r, c, v));
+        }
+
+        let mut col_counts = vec![0usize; ncols];
+        for &(_, c, _) in &entries {
+            col_counts[c] += 1;
+        }
+
+        let mut col_ptr = Vec::with_capacity(ncols + 1);
+        col_ptr.push(0);
+        for c in 0..ncols {
+            col_ptr.push(col_ptr[c] + col_counts[c]);
+        }
+
+        let nnz = col_ptr[ncols];
+        let mut row_idx = vec![0usize; nnz];
+        let mut vals = vec![Ff::ZERO; nnz];
+
+        let mut next = col_ptr.clone();
+        for (r, c, v) in entries {
+            let k = next[c];
+            row_idx[k] = r;
+            vals[k] = v;
+            next[c] += 1;
+        }
+
+        Self {
+            nrows,
+            ncols,
+            col_ptr,
+            row_idx,
+            vals,
+        }
+    }
+
     /// Build CSC from a dense row-major Mat<Ff>, skipping exact zeros.
     ///
     /// This is intentionally parallel over rows: large CCS matrices are often extremely sparse
@@ -144,6 +197,22 @@ pub struct SparseCache<Ff> {
 }
 
 impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> SparseCache<Ff> {
+    pub fn from_csc(csc: Vec<Option<CscMat<Ff>>>) -> Self {
+        Self { csc }
+    }
+
+    pub fn from_triplets(
+        nrows: usize,
+        ncols: usize,
+        matrices: Vec<Option<Vec<(usize, usize, Ff)>>>,
+    ) -> Self {
+        let csc = matrices
+            .into_iter()
+            .map(|m| m.map(|triplets| CscMat::from_triplets(triplets, nrows, ncols)))
+            .collect();
+        Self::from_csc(csc)
+    }
+
     pub fn build(s: &CcsStructure<Ff>) -> Self {
         let t = s.t();
 

@@ -102,7 +102,7 @@ pub struct StepSpec {
 /// What a step must return for the session to run Π-CCS.
 #[derive(Clone, Debug)]
 pub struct StepArtifacts {
-    pub ccs: CcsStructure<F>,
+    pub ccs: Arc<CcsStructure<F>>,
     /// Concrete witness vector for this step (length = m).
     pub witness: Vec<F>,
     /// App inputs you want logged/exposed (optional, informational).
@@ -536,8 +536,10 @@ where
     l: L,
     mixers: CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32) -> Cmt>,
 
-    // Cached prover preprocessing for a specific CCS pointer (best-effort reuse).
-    prover_ctx: Option<SessionProverCcsCache>,
+    // Cached CCS preprocessing for proving (best-effort reuse).
+    prover_ctx: Option<SessionCcsCache>,
+    // Cached CCS preprocessing for verification (must be explicitly preloaded).
+    verifier_ctx: Option<SessionCcsCache>,
 
     // Collected per-step bundles (CCS-only steps have empty LUT/MEM vectors)
     steps: Vec<StepWitnessBundle<Cmt, F, K>>,
@@ -571,12 +573,12 @@ where
 }
 
 #[derive(Clone)]
-struct SessionProverCcsCache {
+struct SessionCcsCache {
     /// Address of the caller-supplied `CcsStructure` used to build this cache.
     src_ptr: usize,
     /// Optional identity-first CCS, stored only if normalization requires insertion.
     s_norm: Option<CcsStructure<F>>,
-    /// Precomputed prover-only artifacts (digest + optional sparse cache).
+    /// Precomputed circuit artifacts (digest + optional sparse cache).
     ctx: ShardProverContext,
 }
 
@@ -592,6 +594,7 @@ where
             l,
             mixers: default_mixers(),
             prover_ctx: None,
+            verifier_ctx: None,
             steps: vec![],
             shared_bus_aux: None,
             shared_bus_resources: None,
@@ -722,10 +725,24 @@ where
             )));
         }
 
-        // Identity-first normalization (owned; avoids cloning when already normalized).
-        let s_norm = ccs
-            .ensure_identity_first_owned()
-            .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
+        // Identity-first normalization (borrow when already normalized; clone only if insertion required).
+        let is_id0 = ccs.n == ccs.m
+            && ccs
+                .matrices
+                .first()
+                .map(|m0| m0.is_identity())
+                .unwrap_or(false);
+        let s_norm_owned = if ccs.n == ccs.m && !is_id0 {
+            Some(
+                ccs.as_ref()
+                    .clone()
+                    .ensure_identity_first_owned()
+                    .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?,
+            )
+        } else {
+            None
+        };
+        let s_norm: &CcsStructure<F> = s_norm_owned.as_ref().unwrap_or(ccs.as_ref());
 
         // STRICT validation: Ajtai/NC requires M₀ = I_n (fail fast instead of mysterious sumcheck errors)
         s_norm
@@ -1002,13 +1019,12 @@ where
         Ok(s_prepared)
     }
 
-    fn ensure_prover_ctx_for_ccs(&mut self, s: &CcsStructure<F>) -> Result<(), PiCcsError> {
+    fn build_ccs_cache(
+        &self,
+        s: &CcsStructure<F>,
+        ccs_sparse_cache: Option<Arc<SparseCache<F>>>,
+    ) -> Result<SessionCcsCache, PiCcsError> {
         let src_ptr = (s as *const CcsStructure<F>) as usize;
-        if let Some(cache) = &self.prover_ctx {
-            if cache.src_ptr == src_ptr {
-                return Ok(());
-            }
-        }
 
         let mut s_norm_opt: Option<CcsStructure<F>> = None;
         let is_id0 = s.n == s.m
@@ -1017,7 +1033,7 @@ where
                 .first()
                 .map(|m0| m0.is_identity())
                 .unwrap_or(false);
-        let s_norm_ref: &CcsStructure<F> = if is_id0 {
+        let s_norm_ref: &CcsStructure<F> = if is_id0 || s.n != s.m {
             s
         } else {
             let s_norm = s
@@ -1031,11 +1047,24 @@ where
             .assert_m0_is_identity_for_nc()
             .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
 
-        let ccs_sparse_cache = if mode_uses_sparse_cache(&self.mode) {
+        if let Some(ref cache) = ccs_sparse_cache {
+            if cache.len() != s_norm_ref.t() {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "SparseCache matrix count mismatch: cache has {}, CCS has {}",
+                    cache.len(),
+                    s_norm_ref.t()
+                )));
+            }
+        }
+
+        let ccs_sparse_cache = if let Some(cache) = ccs_sparse_cache {
+            Some(cache)
+        } else if mode_uses_sparse_cache(&self.mode) {
             Some(Arc::new(SparseCache::build(s_norm_ref)))
         } else {
             None
         };
+
         let ccs_mat_digest =
             utils::digest_ccs_matrices_with_sparse_cache(s_norm_ref, ccs_sparse_cache.as_deref());
         let ctx = ShardProverContext {
@@ -1043,11 +1072,49 @@ where
             ccs_sparse_cache,
         };
 
-        self.prover_ctx = Some(SessionProverCcsCache {
+        Ok(SessionCcsCache {
             src_ptr,
             s_norm: s_norm_opt,
             ctx,
-        });
+        })
+    }
+
+    fn ensure_prover_ctx_for_ccs(&mut self, s: &CcsStructure<F>) -> Result<(), PiCcsError> {
+        let src_ptr = (s as *const CcsStructure<F>) as usize;
+        if let Some(cache) = &self.prover_ctx {
+            if cache.src_ptr == src_ptr {
+                return Ok(());
+            }
+        }
+        self.prover_ctx = Some(self.build_ccs_cache(s, None)?);
+        Ok(())
+    }
+
+    /// Preload prover-side CCS preprocessing (sparse-cache + matrix-digest) to avoid scanning dense matrices.
+    ///
+    /// This is intended for callers who already have a `SparseCache` (e.g. built from sparse R1CS
+    /// constraints) and want to skip the expensive `SparseCache::build` pass over dense matrices.
+    ///
+    /// Note: verification uses a separate cache; call `preload_verifier_ccs_sparse_cache(...)` if desired.
+    pub fn preload_ccs_sparse_cache(
+        &mut self,
+        s: &CcsStructure<F>,
+        ccs_sparse_cache: Arc<SparseCache<F>>,
+    ) -> Result<(), PiCcsError> {
+        self.prover_ctx = Some(self.build_ccs_cache(s, Some(ccs_sparse_cache))?);
+        Ok(())
+    }
+
+    /// Preload verifier-side CCS preprocessing (sparse-cache + matrix-digest).
+    ///
+    /// This does **not** affect proving. It exists so benchmarks can model a verifier that has
+    /// preprocessed the public circuit independently of the prover.
+    pub fn preload_verifier_ccs_sparse_cache(
+        &mut self,
+        s: &CcsStructure<F>,
+        ccs_sparse_cache: Arc<SparseCache<F>>,
+    ) -> Result<(), PiCcsError> {
+        self.verifier_ctx = Some(self.build_ccs_cache(s, Some(ccs_sparse_cache))?);
         Ok(())
     }
 
@@ -1256,6 +1323,9 @@ where
 
     /// Verify a finished run against the public MCS list.
     /// This method manages the transcript internally for ease of use.
+    ///
+    /// Note: this does not reuse prover-side preprocessing caches. To model a verifier that
+    /// preprocesses the public circuit, call `preload_verifier_ccs_sparse_cache(...)` once.
     pub fn verify(
         &self,
         s: &CcsStructure<F>,
@@ -1281,22 +1351,34 @@ where
         mcss_public: &[neo_ccs::McsInstance<Cmt, F>],
         run: &FoldRun,
     ) -> Result<bool, PiCcsError> {
-        // Normalize CCS (avoid cloning when already normalized).
-        let is_id0 = s.n == s.m
-            && s
-                .matrices
-                .first()
-                .map(|m0| m0.is_identity())
-                .unwrap_or(false);
-        let s_norm_owned = if s.n == s.m && !is_id0 {
-            Some(
-                s.ensure_identity_first()
-                    .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?,
-            )
-        } else {
-            None
+        let src_ptr = (s as *const CcsStructure<F>) as usize;
+        let verifier_cache = self
+            .verifier_ctx
+            .as_ref()
+            .filter(|cache| cache.src_ptr == src_ptr);
+        let verifier_ctx = verifier_cache.map(|cache| &cache.ctx);
+
+        // Normalize CCS (avoid cloning when already normalized or preloaded).
+        let mut s_norm_owned: Option<CcsStructure<F>> = None;
+        let s_norm: &CcsStructure<F> = match verifier_cache {
+            Some(cache) => cache.s_norm.as_ref().unwrap_or(s),
+            None => {
+                let is_id0 = s.n == s.m
+                    && s
+                        .matrices
+                        .first()
+                        .map(|m0| m0.is_identity())
+                        .unwrap_or(false);
+                if s.n == s.m && !is_id0 {
+                    s_norm_owned = Some(
+                        s.ensure_identity_first().map_err(|e| {
+                            PiCcsError::InvalidInput(format!("identity-first required: {e:?}"))
+                        })?,
+                    );
+                }
+                s_norm_owned.as_ref().unwrap_or(s)
+            }
         };
-        let s_norm: &CcsStructure<F> = s_norm_owned.as_ref().unwrap_or(s);
 
         // m_in consistency across public MCS
         let m_in_steps = mcss_public.first().map(|inst| inst.m_in).unwrap_or(0);
@@ -1331,27 +1413,54 @@ where
 
         let outputs = if steps_public.len() > 1 {
             match step_linking {
-                Some(cfg) => shard::fold_shard_verify_with_step_linking(
-                    self.mode.clone(),
-                    tr,
-                    &self.params,
-                    s_norm,
-                    &steps_public,
-                    seed_me,
-                    run,
-                    self.mixers,
-                    cfg,
-                )?,
-                None if self.allow_unlinked_steps => shard::fold_shard_verify(
-                    self.mode.clone(),
-                    tr,
-                    &self.params,
-                    s_norm,
-                    &steps_public,
-                    seed_me,
-                    run,
-                    self.mixers,
-                )?,
+                Some(cfg) => match verifier_ctx {
+                    Some(ctx) => shard::fold_shard_verify_with_step_linking_with_context(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        cfg,
+                        ctx,
+                    )?,
+                    None => shard::fold_shard_verify_with_step_linking(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        cfg,
+                    )?,
+                },
+                None if self.allow_unlinked_steps => match verifier_ctx {
+                    Some(ctx) => shard::fold_shard_verify_with_context(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        ctx,
+                    )?,
+                    None => shard::fold_shard_verify(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                    )?,
+                },
                 None => {
                     return Err(PiCcsError::InvalidInput(
                         "multi-step verification requires step linking; call FoldingSession::set_step_linking(...) or FoldingSession::unsafe_allow_unlinked_steps()".into(),
@@ -1359,16 +1468,29 @@ where
                 }
             }
         } else {
-            shard::fold_shard_verify(
-                self.mode.clone(),
-                tr,
-                &self.params,
-                s_norm,
-                &steps_public,
-                seed_me,
-                run,
-                self.mixers,
-            )?
+            match verifier_ctx {
+                Some(ctx) => shard::fold_shard_verify_with_context(
+                    self.mode.clone(),
+                    tr,
+                    &self.params,
+                    s_norm,
+                    &steps_public,
+                    seed_me,
+                    run,
+                    self.mixers,
+                    ctx,
+                )?,
+                None => shard::fold_shard_verify(
+                    self.mode.clone(),
+                    tr,
+                    &self.params,
+                    s_norm,
+                    &steps_public,
+                    seed_me,
+                    run,
+                    self.mixers,
+                )?,
+            }
         };
 
         // For CCS-only sessions (no Twist/Shout), val-lane obligations should be empty
@@ -1413,22 +1535,34 @@ where
         run: &FoldRun,
         ob_cfg: &crate::output_binding::OutputBindingConfig,
     ) -> Result<bool, PiCcsError> {
-        // Normalize CCS (avoid cloning when already normalized).
-        let is_id0 = s.n == s.m
-            && s
-                .matrices
-                .first()
-                .map(|m0| m0.is_identity())
-                .unwrap_or(false);
-        let s_norm_owned = if s.n == s.m && !is_id0 {
-            Some(
-                s.ensure_identity_first()
-                    .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?,
-            )
-        } else {
-            None
+        let src_ptr = (s as *const CcsStructure<F>) as usize;
+        let verifier_cache = self
+            .verifier_ctx
+            .as_ref()
+            .filter(|cache| cache.src_ptr == src_ptr);
+        let verifier_ctx = verifier_cache.map(|cache| &cache.ctx);
+
+        // Normalize CCS (avoid cloning when already normalized or preloaded).
+        let mut s_norm_owned: Option<CcsStructure<F>> = None;
+        let s_norm: &CcsStructure<F> = match verifier_cache {
+            Some(cache) => cache.s_norm.as_ref().unwrap_or(s),
+            None => {
+                let is_id0 = s.n == s.m
+                    && s
+                        .matrices
+                        .first()
+                        .map(|m0| m0.is_identity())
+                        .unwrap_or(false);
+                if s.n == s.m && !is_id0 {
+                    s_norm_owned = Some(
+                        s.ensure_identity_first().map_err(|e| {
+                            PiCcsError::InvalidInput(format!("identity-first required: {e:?}"))
+                        })?,
+                    );
+                }
+                s_norm_owned.as_ref().unwrap_or(s)
+            }
         };
-        let s_norm: &CcsStructure<F> = s_norm_owned.as_ref().unwrap_or(s);
 
         let m_in_steps = mcss_public.first().map(|inst| inst.m_in).unwrap_or(0);
         if !mcss_public.iter().all(|inst| inst.m_in == m_in_steps) {
@@ -1459,29 +1593,58 @@ where
 
         let outputs = if steps_public.len() > 1 {
             match step_linking {
-                Some(cfg) => shard::fold_shard_verify_with_output_binding_and_step_linking(
-                    self.mode.clone(),
-                    tr,
-                    &self.params,
-                    s_norm,
-                    &steps_public,
-                    seed_me,
-                    run,
-                    self.mixers,
-                    ob_cfg,
-                    cfg,
-                )?,
-                None if self.allow_unlinked_steps => shard::fold_shard_verify_with_output_binding(
-                    self.mode.clone(),
-                    tr,
-                    &self.params,
-                    s_norm,
-                    &steps_public,
-                    seed_me,
-                    run,
-                    self.mixers,
-                    ob_cfg,
-                )?,
+                Some(cfg) => match verifier_ctx {
+                    Some(ctx) => shard::fold_shard_verify_with_output_binding_and_step_linking_with_context(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        ob_cfg,
+                        cfg,
+                        ctx,
+                    )?,
+                    None => shard::fold_shard_verify_with_output_binding_and_step_linking(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        ob_cfg,
+                        cfg,
+                    )?,
+                },
+                None if self.allow_unlinked_steps => match verifier_ctx {
+                    Some(ctx) => shard::fold_shard_verify_with_output_binding_with_context(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        ob_cfg,
+                        ctx,
+                    )?,
+                    None => shard::fold_shard_verify_with_output_binding(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        ob_cfg,
+                    )?,
+                },
                 None => {
                     return Err(PiCcsError::InvalidInput(
                         "multi-step verification requires step linking; call FoldingSession::set_step_linking(...) or FoldingSession::unsafe_allow_unlinked_steps()".into(),
@@ -1489,17 +1652,31 @@ where
                 }
             }
         } else {
-            shard::fold_shard_verify_with_output_binding(
-                self.mode.clone(),
-                tr,
-                &self.params,
-                s_norm,
-                &steps_public,
-                seed_me,
-                run,
-                self.mixers,
-                ob_cfg,
-            )?
+            match verifier_ctx {
+                Some(ctx) => shard::fold_shard_verify_with_output_binding_with_context(
+                    self.mode.clone(),
+                    tr,
+                    &self.params,
+                    s_norm,
+                    &steps_public,
+                    seed_me,
+                    run,
+                    self.mixers,
+                    ob_cfg,
+                    ctx,
+                )?,
+                None => shard::fold_shard_verify_with_output_binding(
+                    self.mode.clone(),
+                    tr,
+                    &self.params,
+                    s_norm,
+                    &steps_public,
+                    seed_me,
+                    run,
+                    self.mixers,
+                    ob_cfg,
+                )?,
+            }
         };
 
         let has_twist_or_shout = self.has_twist_instances() || self.has_shout_instances();

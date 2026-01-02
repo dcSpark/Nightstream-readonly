@@ -10,6 +10,7 @@ use neo_ccs::{r1cs_to_ccs, CcsStructure, Mat};
 use neo_fold::{pi_ccs::FoldingMode, session::{FoldingSession, ProveInput}};
 use neo_math::{D, F};
 use neo_params::NeoParams;
+use neo_reductions::engines::optimized_engine::oracle::SparseCache;
 use p3_field::PrimeCharacteristicRing;
 use rand_chacha::rand_core::SeedableRng;
 use sha2::{Digest, Sha256};
@@ -103,7 +104,7 @@ fn test_sha256_preimage_len_bytes(preimage_len_bytes: usize) {
         .map(|x| F::from_u64(fp_to_u64(x)))
         .collect();
 
-    let (step_ccs, witness) = bellpepper_sha256_circuit(preimage_len_bytes);
+    let (step_ccs, witness, sparse_cache) = bellpepper_sha256_circuit(preimage_len_bytes);
 
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(step_ccs.n)
         .expect("goldilocks_auto_r1cs_ccs should find valid params");
@@ -116,6 +117,11 @@ fn test_sha256_preimage_len_bytes(preimage_len_bytes: usize) {
     let m_in = 1 + expected_inputs.len();
 
     let mut session = FoldingSession::new(FoldingMode::Optimized, params, l.clone());
+
+    // Avoid scanning dense n×n matrices to build CSC by preloading a cache built from sparse triplets.
+    session
+        .preload_ccs_sparse_cache(&step_ccs, sparse_cache.clone())
+        .expect("preload_ccs_sparse_cache should succeed");
     let start = Instant::now();
 
     let z = pad_witness_to_m(witness, step_ccs.m);
@@ -150,12 +156,25 @@ fn test_sha256_preimage_len_bytes(preimage_len_bytes: usize) {
     assert_eq!(run.steps.len(), 1, "should have correct number of steps");
 
     let mcss_public = session.mcss_public();
+    let verifier_pre = Instant::now();
+    session
+        .preload_verifier_ccs_sparse_cache(&step_ccs, sparse_cache.clone())
+        .expect("preload_verifier_ccs_sparse_cache should succeed");
+    println!("Verifier preprocessing time: {:?}", verifier_pre.elapsed());
     let verify_start = Instant::now();
     let ok = session
         .verify(&step_ccs, &mcss_public, &run)
         .expect("verify should run");
     println!("Verification time: {:?}", verify_start.elapsed());
     assert!(ok, "optimized verification should pass");
+
+    // Sanity check: verification must reject a tampered proof (fast verification should still be sound).
+    let mut tampered = run.clone();
+    tampered.steps[0].fold.ccs_proof.sumcheck_rounds[0][0] += neo_math::K::ONE;
+    match session.verify(&step_ccs, &mcss_public, &tampered) {
+        Ok(true) => panic!("tampered proof unexpectedly verified"),
+        Ok(false) | Err(_) => {}
+    }
 }
 
 #[derive(PrimeField)]
@@ -200,7 +219,9 @@ impl Circuit<FpGoldilocks> for Sha256Circuit {
     }
 }
 
-fn bellpepper_sha256_circuit(preimage_len_bytes: usize) -> (CcsStructure<F>, Vec<F>) {
+fn bellpepper_sha256_circuit(
+    preimage_len_bytes: usize,
+) -> (CcsStructure<F>, Vec<F>, std::sync::Arc<SparseCache<F>>) {
     use bellpepper_core::test_cs::TestConstraintSystem;
 
     let mut cs = TestConstraintSystem::<FpGoldilocks>::new();
@@ -227,9 +248,14 @@ fn bellpepper_sha256_circuit(preimage_len_bytes: usize) -> (CcsStructure<F>, Vec
 
     let n = num_constraints.max(num_variables);
 
+    let mut a_trips: Vec<(usize, usize, F)> = Vec::new();
+    let mut b_trips: Vec<(usize, usize, F)> = Vec::new();
+    let mut c_trips: Vec<(usize, usize, F)> = Vec::new();
+
     let f = |row: usize,
              mat: &mut Mat<F>,
-             lc: &LinearCombination<FpGoldilocks>| {
+             lc: &LinearCombination<FpGoldilocks>,
+             trips: &mut Vec<(usize, usize, F)>| {
         for (var, coeff) in lc.iter() {
             let col = match var.0 {
                 Index::Input(i) => i,
@@ -240,7 +266,9 @@ fn bellpepper_sha256_circuit(preimage_len_bytes: usize) -> (CcsStructure<F>, Vec
             if value == 0 {
                 continue;
             }
-            mat[(row, col)] = mat[(row, col)] + F::from_u64(value);
+            let v = F::from_u64(value);
+            mat[(row, col)] = mat[(row, col)] + v;
+            trips.push((row, col, v));
         }
     };
 
@@ -250,9 +278,9 @@ fn bellpepper_sha256_circuit(preimage_len_bytes: usize) -> (CcsStructure<F>, Vec
 
     // Extract constraints and convert to matrix form
     for (row, constraint) in cs.constraints().iter().enumerate() {
-        f(row, &mut A, &constraint.0);
-        f(row, &mut B, &constraint.1);
-        f(row, &mut C, &constraint.2);
+        f(row, &mut A, &constraint.0, &mut a_trips);
+        f(row, &mut B, &constraint.1, &mut b_trips);
+        f(row, &mut C, &constraint.2, &mut c_trips);
     }
 
     let mut witness: Vec<F> = Vec::with_capacity(num_variables);
@@ -268,5 +296,10 @@ fn bellpepper_sha256_circuit(preimage_len_bytes: usize) -> (CcsStructure<F>, Vec
     debug_assert_eq!(witness.len(), num_variables);
 
     let ccs = r1cs_to_ccs(A, B, C);
-    (ccs, witness)
+    let sparse_cache = std::sync::Arc::new(SparseCache::from_triplets(
+        n,
+        n,
+        vec![None, Some(a_trips), Some(b_trips), Some(c_trips)],
+    ));
+    (ccs, witness, sparse_cache)
 }
