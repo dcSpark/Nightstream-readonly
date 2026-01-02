@@ -53,19 +53,11 @@ where
     K: From<Ff>,
 {
     let chi = build_chi_r(r);
-    let n_sz = chi.len();
+    let n_eff = core::cmp::min(s.n, chi.len());
     let mut vjs = Vec::with_capacity(s.t());
     for j in 0..s.t() {
         let mut vj = vec![K::ZERO; s.m];
-        for row in 0..n_sz {
-            let wr = if row < s.n { chi[row] } else { K::ZERO };
-            if wr == K::ZERO {
-                continue;
-            }
-            for c in 0..s.m {
-                vj[c] += K::from(s.matrices[j][(row, c)]) * wr;
-            }
-        }
+        s.matrices[j].add_mul_transpose_into(&chi, &mut vj, n_eff);
         vjs.push(vj);
     }
     vjs

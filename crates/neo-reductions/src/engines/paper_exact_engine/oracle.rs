@@ -14,7 +14,7 @@ use p3_field::{Field, PrimeCharacteristicRing};
 
 use crate::optimized_engine::Challenges;
 use crate::sumcheck::RoundOracle;
-use neo_ccs::{CcsStructure, Mat, McsWitness};
+use neo_ccs::{CcsMatrix, CcsStructure, Mat, McsWitness};
 
 #[cfg(feature = "paper-exact")]
 pub struct PaperExactOracle<'a, F>
@@ -93,11 +93,26 @@ where
     }
 
     #[inline]
-    fn get_F(a: &Mat<F>, row: usize, col: usize) -> F {
-        if row < a.rows() && col < a.cols() {
-            a[(row, col)]
-        } else {
-            F::ZERO
+    fn get_M(a: &CcsMatrix<F>, row: usize, col: usize) -> F {
+        if row >= a.rows() || col >= a.cols() {
+            return F::ZERO;
+        }
+        match a {
+            CcsMatrix::Identity { .. } => {
+                if row == col {
+                    F::ONE
+                } else {
+                    F::ZERO
+                }
+            }
+            CcsMatrix::Csc(m) => {
+                let s = m.col_ptr[col];
+                let e = m.col_ptr[col + 1];
+                match m.row_idx[s..e].binary_search(&row) {
+                    Ok(idx) => m.vals[s + idx],
+                    Err(_) => F::ZERO,
+                }
+            }
         }
     }
 
@@ -174,7 +189,7 @@ where
                 }
                 let mut y_row = K::ZERO;
                 for c in 0..self.s.m {
-                    y_row += K::from(Self::get_F(&self.s.matrices[j], row, c)) * z1[c];
+                    y_row += K::from(Self::get_M(&self.s.matrices[j], row, c)) * z1[c];
                 }
                 y_eval += wr * y_row;
             }
@@ -192,7 +207,7 @@ where
                 continue;
             }
             for c in 0..self.s.m {
-                v1[c] += K::from(Self::get_F(&self.s.matrices[0], row, c)) * wr;
+                v1[c] += K::from(Self::get_M(&self.s.matrices[0], row, c)) * wr;
             }
         }
 
@@ -273,13 +288,13 @@ where
                 let mut vj = vec![K::ZERO; self.s.m];
                 for row in 0..n_sz {
                     let wr = if row < self.s.n { chi_r[row] } else { K::ZERO };
-                    if wr == K::ZERO {
-                        continue;
+                        if wr == K::ZERO {
+                            continue;
+                        }
+                        for c in 0..self.s.m {
+                            vj[c] += K::from(Self::get_M(&self.s.matrices[j], row, c)) * wr;
+                        }
                     }
-                    for c in 0..self.s.m {
-                        vj[c] += K::from(Self::get_F(&self.s.matrices[j], row, c)) * wr;
-                    }
-                }
 
                 // i starts from the second instance (skip index 0)
                 for (i_abs, Zi) in self

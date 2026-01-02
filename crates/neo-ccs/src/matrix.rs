@@ -2,18 +2,37 @@ use core::ops::{Index, IndexMut};
 use p3_field::PrimeCharacteristicRing;
 
 /// A dense row-major matrix over a field-like type `T`.
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Mat<T> {
     rows: usize,
     cols: usize,
     data: Vec<T>,
+    /// Fast-path marker for identity matrices created via `Mat::identity`.
+    ///
+    /// This is intentionally skipped for serde and ignored for equality: it is an optimization only.
+    /// Any mutable access clears the marker to preserve correctness.
+    #[serde(skip)]
+    identity_hint: bool,
 }
+
+impl<T: PartialEq> PartialEq for Mat<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.rows == other.rows && self.cols == other.cols && self.data == other.data
+    }
+}
+
+impl<T: Eq> Eq for Mat<T> {}
 
 impl<T: Clone> Mat<T> {
     /// Create a matrix from row-major data; panics if `data.len() != rows*cols`.
     pub fn from_row_major(rows: usize, cols: usize, data: Vec<T>) -> Self {
         assert_eq!(rows * cols, data.len());
-        Self { rows, cols, data }
+        Self {
+            rows,
+            cols,
+            data,
+            identity_hint: false,
+        }
     }
 
     /// Zero-initialized matrix (caller provides zero element).
@@ -22,6 +41,7 @@ impl<T: Clone> Mat<T> {
             rows,
             cols,
             data: vec![zero; rows * cols],
+            identity_hint: false,
         }
     }
 
@@ -42,6 +62,7 @@ impl<T: Clone> Mat<T> {
 
     /// Mutable slice.
     pub fn as_mut_slice(&mut self) -> &mut [T] {
+        self.identity_hint = false;
         &mut self.data
     }
 
@@ -53,6 +74,7 @@ impl<T: Clone> Mat<T> {
 
     /// Row i as a mutable slice.
     pub fn row_mut(&mut self, i: usize) -> &mut [T] {
+        self.identity_hint = false;
         let start = i * self.cols;
         &mut self.data[start..start + self.cols]
     }
@@ -63,6 +85,7 @@ impl<T: Clone> Mat<T> {
         if k == 0 {
             return;
         }
+        self.identity_hint = false;
         let extra = k * self.cols;
         self.data.resize(self.data.len() + extra, zero);
         self.rows += k;
@@ -71,6 +94,7 @@ impl<T: Clone> Mat<T> {
     /// Set a single entry at (row, col) to the provided value.
     #[inline]
     pub fn set(&mut self, row: usize, col: usize, val: T) {
+        self.identity_hint = false;
         debug_assert!(row < self.rows, "row out of bounds");
         debug_assert!(col < self.cols, "col out of bounds");
         self.data[row * self.cols + col] = val;
@@ -87,11 +111,15 @@ where
         for i in 0..n {
             m.set(i, i, F::ONE);
         }
+        m.identity_hint = true;
         m
     }
 
     /// Check whether this matrix is exactly the identity matrix (I_n).
     pub fn is_identity(&self) -> bool {
+        if self.identity_hint {
+            return self.rows == self.cols;
+        }
         if self.rows != self.cols {
             return false;
         }
@@ -129,6 +157,13 @@ where
             }
         }
         true
+    }
+
+    /// Fast-path marker for identity matrices created via `Mat::identity`.
+    ///
+    /// This is an optimization hint only; it is not serialized and is cleared on any mutable access.
+    pub fn is_identity_hint(&self) -> bool {
+        self.identity_hint
     }
 }
 
@@ -287,6 +322,7 @@ impl<T> Index<(usize, usize)> for Mat<T> {
 }
 impl<T> IndexMut<(usize, usize)> for Mat<T> {
     fn index_mut(&mut self, idx: (usize, usize)) -> &mut Self::Output {
+        self.identity_hint = false;
         let (r, c) = idx;
         &mut self.data[r * self.cols + c]
     }
@@ -335,7 +371,12 @@ impl<T: Clone + Send + Sync> From<&P3RowMajor<T>> for Mat<T> {
             let row = m.row(r).expect("p3 row out-of-bounds");
             data.extend(row);
         }
-        Self { rows, cols, data }
+        Self {
+            rows,
+            cols,
+            data,
+            identity_hint: false,
+        }
     }
 }
 

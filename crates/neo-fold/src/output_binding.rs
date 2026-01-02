@@ -26,6 +26,11 @@ pub struct OutputBindingConfig {
     /// The claimed program I/O (inputs and outputs with their addresses).
     pub program_io: ProgramIO<F>,
     /// Which mem instance to bind outputs against (default: 0).
+    ///
+    /// This is an index into `StepWitnessBundle.mem_instances` (i.e. “which Twist instance” in the
+    /// per-step instance list). In shared-CPU-bus mode, the builder orders Twist instances by
+    /// sorted `twist_id`, and `FoldingSession` uses `ShardWitnessAux.mem_ids` to map indices back
+    /// to concrete `twist_id`s when deriving terminal memory state.
     pub mem_idx: usize,
 }
 

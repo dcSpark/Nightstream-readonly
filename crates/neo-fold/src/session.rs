@@ -17,6 +17,17 @@
 //! lives in `shard::fold_shard_prove/verify` (Route A integration).
 
 #![allow(non_snake_case)]
+#![doc = include_str!("session/README.md")]
+
+mod resources;
+pub use resources::*;
+mod layout;
+pub use layout::*;
+mod ccs_builder;
+pub use ccs_builder::*;
+mod circuit;
+pub use circuit::*;
+pub use crate::witness_layout;
 
 use neo_ajtai::{s_lincomb, s_mul, Commitment as Cmt};
 use neo_ccs::traits::SModuleHomomorphism;
@@ -24,15 +35,32 @@ use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
 use neo_math::ring::Rq as RqEl;
 use neo_math::{D, F, K};
 use neo_memory::ajtai::encode_vector_balanced_to_mat;
+use neo_memory::builder::{build_shard_witness_shared_cpu_bus_with_aux, CpuArithmetization, ShardWitnessAux};
+use neo_memory::plain::{LutTable, PlainMemLayout};
 use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
+use neo_memory::witness::LutTableSpec;
 use neo_params::NeoParams;
 use neo_transcript::{Poseidon2Transcript, Transcript};
 use p3_field::PrimeCharacteristicRing;
+use std::collections::HashMap;
+use std::sync::Arc;
 
 use crate::pi_ccs::FoldingMode;
-use crate::shard::{self, CommitMixers, ShardProof as FoldRun, StepLinkingConfig};
+use crate::shard::{self, CommitMixers, ShardProof as FoldRun, ShardProverContext, StepLinkingConfig};
 use crate::PiCcsError;
 use neo_reductions::engines::utils;
+use neo_reductions::engines::optimized_engine::oracle::SparseCache;
+
+#[inline]
+fn mode_uses_sparse_cache(mode: &FoldingMode) -> bool {
+    match mode {
+        FoldingMode::Optimized => true,
+        #[cfg(feature = "paper-exact")]
+        FoldingMode::OptimizedWithCrosscheck(_) => true,
+        #[cfg(feature = "paper-exact")]
+        FoldingMode::PaperExact => false,
+    }
+}
 
 /// Optional application-level "output claim".
 /// (Not consumed by Π-CCS core yet; kept for API parity / future use.)
@@ -74,7 +102,7 @@ pub struct StepSpec {
 /// What a step must return for the session to run Π-CCS.
 #[derive(Clone, Debug)]
 pub struct StepArtifacts {
-    pub ccs: CcsStructure<F>,
+    pub ccs: Arc<CcsStructure<F>>,
     /// Concrete witness vector for this step (length = m).
     pub witness: Vec<F>,
     /// App inputs you want logged/exposed (optional, informational).
@@ -119,6 +147,9 @@ fn rot_matrix_to_rq(mat: &Mat<F>) -> RqEl {
 /// Default Ajtai mixers (hidden internally).
 fn default_mixers() -> CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32) -> Cmt> {
     fn mix_rhos_commits(rhos: &[Mat<F>], cs: &[Cmt]) -> Cmt {
+        if cs.len() == 1 {
+            return cs[0].clone();
+        }
         let rq_els: Vec<RqEl> = rhos.iter().map(rot_matrix_to_rq).collect();
         s_lincomb(&rq_els, cs).expect("s_lincomb should succeed")
     }
@@ -300,16 +331,7 @@ pub fn me_from_z_balanced<Lm: SModuleHomomorphism<F, Cmt>>(
     let mut vjs: Vec<Vec<K>> = Vec::with_capacity(t);
     for j in 0..t {
         let mut vj = vec![K::ZERO; s.m];
-        // Only rows < s.n contribute (others are zero rows)
-        for row in 0..s.n {
-            let wr = chi_r[row];
-            if wr == K::ZERO {
-                continue;
-            }
-            for c in 0..s.m {
-                vj[c] += K::from(s.matrices[j][(row, c)]) * wr;
-            }
-        }
+        s.matrices[j].add_mul_transpose_into(&chi_r, &mut vj, s.n);
         vjs.push(vj);
     }
 
@@ -437,16 +459,7 @@ pub fn me_from_z_balanced_select<Lm: SModuleHomomorphism<F, Cmt>>(
     let mut vjs: Vec<Vec<K>> = Vec::with_capacity(t);
     for j in 0..t {
         let mut vj = vec![K::ZERO; s.m];
-        // Only rows < s.n contribute (others are zero rows)
-        for row in 0..s.n {
-            let wr = chi_r[row];
-            if wr == K::ZERO {
-                continue;
-            }
-            for c in 0..s.m {
-                vj[c] += K::from(s.matrices[j][(row, c)]) * wr;
-            }
-        }
+        s.matrices[j].add_mul_transpose_into(&chi_r, &mut vj, s.n);
         vjs.push(vj);
     }
 
@@ -501,15 +514,27 @@ pub fn me_from_z_balanced_select<Lm: SModuleHomomorphism<F, Cmt>>(
 /// If absent, we run the *simple* k=1 case (no ME inputs).
 pub struct FoldingSession<L>
 where
-    L: SModuleHomomorphism<F, Cmt> + Clone,
+    L: SModuleHomomorphism<F, Cmt> + Clone + Sync,
 {
     mode: FoldingMode,
     params: NeoParams,
     l: L,
     mixers: CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32) -> Cmt>,
 
+    // Cached CCS preprocessing for proving (best-effort reuse).
+    prover_ctx: Option<SessionCcsCache>,
+    // Cached CCS preprocessing for verification (must be explicitly preloaded).
+    verifier_ctx: Option<SessionCcsCache>,
+
     // Collected per-step bundles (CCS-only steps have empty LUT/MEM vectors)
     steps: Vec<StepWitnessBundle<Cmt, F, K>>,
+    /// Auxiliary data for the most recent shared-CPU-bus witness build (if any).
+    ///
+    /// This is used to support ergonomic APIs such as “output binding without manually providing
+    /// final_memory_state”.
+    shared_bus_aux: Option<ShardWitnessAux>,
+    /// Optional declarative resource configuration used by `execute_shard_shared_cpu_bus_configured`.
+    shared_bus_resources: Option<SharedBusResources>,
 
     /// Optional verifier-side step-to-step linking constraints.
     ///
@@ -532,9 +557,19 @@ where
     curr_state: Option<Vec<F>>,
 }
 
+#[derive(Clone)]
+struct SessionCcsCache {
+    /// Address of the caller-supplied `CcsStructure` used to build this cache.
+    src_ptr: usize,
+    /// Optional identity-first CCS, stored only if normalization requires insertion.
+    s_norm: Option<CcsStructure<F>>,
+    /// Precomputed circuit artifacts (digest + optional sparse cache).
+    ctx: ShardProverContext,
+}
+
 impl<L> FoldingSession<L>
 where
-    L: SModuleHomomorphism<F, Cmt> + Clone,
+    L: SModuleHomomorphism<F, Cmt> + Clone + Sync,
 {
     /// Create a new session with default Ajtai mixers and no initial accumulator (k=1 simple flow).
     pub fn new(mode: FoldingMode, params: NeoParams, l: L) -> Self {
@@ -543,13 +578,73 @@ where
             params,
             l,
             mixers: default_mixers(),
+            prover_ctx: None,
+            verifier_ctx: None,
             steps: vec![],
+            shared_bus_aux: None,
+            shared_bus_resources: None,
             step_linking: None,
             allow_unlinked_steps: false,
             acc0: None,
             step_claims: vec![],
             curr_state: None,
         }
+    }
+
+    /// Replace the stored shared-bus resource configuration (Twist layouts/init + Shout tables/specs).
+    pub fn set_shared_bus_resources(&mut self, resources: SharedBusResources) {
+        self.shared_bus_resources = Some(resources);
+    }
+
+    /// Mutably access (and lazily initialize) the shared-bus resource configuration.
+    pub fn shared_bus_resources_mut(&mut self) -> &mut SharedBusResources {
+        self.shared_bus_resources.get_or_insert_with(SharedBusResources::new)
+    }
+
+    /// Execute a VM shard in shared-CPU-bus mode using the resources stored on this session.
+    ///
+    /// This is equivalent to calling `execute_shard_shared_cpu_bus(...)` with the maps from
+    /// `SharedBusResources`, but avoids re-threading those arguments on every call.
+    pub fn execute_shard_shared_cpu_bus_configured<V, A, Tw, Sh>(
+        &mut self,
+        vm: V,
+        twist: Tw,
+        shout: Sh,
+        max_steps: usize,
+        chunk_size: usize,
+        cpu_arith: &A,
+    ) -> Result<(), PiCcsError>
+    where
+        V: neo_vm_trace::VmCpu<u64, u64>,
+        Tw: neo_vm_trace::Twist<u64, u64>,
+        Sh: neo_vm_trace::Shout<u64>,
+        A: CpuArithmetization<F, Cmt>,
+    {
+        let (bundles, aux) = {
+            let resources = self.shared_bus_resources.as_ref().ok_or_else(|| {
+                PiCcsError::InvalidInput(
+                    "missing shared-bus resources; call set_shared_bus_resources(...) or shared_bus_resources_mut() first".into(),
+                )
+            })?;
+
+            build_shard_witness_shared_cpu_bus_with_aux(
+                vm,
+                twist,
+                shout,
+                max_steps,
+                chunk_size,
+                &resources.mem_layouts,
+                &resources.lut_tables,
+                &resources.lut_table_specs,
+                &resources.initial_mem,
+                cpu_arith,
+            )
+            .map_err(|e| PiCcsError::InvalidInput(format!("shared-bus witness build failed: {e:?}")))?
+        };
+
+        self.add_step_bundles(bundles);
+        self.shared_bus_aux = Some(aux);
+        Ok(())
     }
 
     /// Enable verifier-side step-to-step linking for multi-step runs.
@@ -615,10 +710,24 @@ where
             )));
         }
 
-        // Identity-first normalization
-        let s_norm = ccs
-            .ensure_identity_first()
-            .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
+        // Identity-first normalization (borrow when already normalized; clone only if insertion required).
+        let is_id0 = ccs.n == ccs.m
+            && ccs
+                .matrices
+                .first()
+                .map(|m0| m0.is_identity())
+                .unwrap_or(false);
+        let s_norm_owned = if ccs.n == ccs.m && !is_id0 {
+            Some(
+                ccs.as_ref()
+                    .clone()
+                    .ensure_identity_first_owned()
+                    .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?,
+            )
+        } else {
+            None
+        };
+        let s_norm: &CcsStructure<F> = s_norm_owned.as_ref().unwrap_or(ccs.as_ref());
 
         // STRICT validation: Ajtai/NC requires M₀ = I_n (fail fast instead of mysterious sumcheck errors)
         s_norm
@@ -677,6 +786,7 @@ where
         let mcs_inst = McsInstance { c, x, m_in };
         let mcs_wit = McsWitness { w, Z };
 
+        self.shared_bus_aux = None;
         self.steps.push((mcs_inst, mcs_wit).into());
         self.step_claims.push(vec![]);
 
@@ -708,11 +818,25 @@ where
     /// We compute the commitment and split (x | w) for you.
     /// This accumulates the step instance and witness without performing any folding.
     pub fn add_step_from_io(&mut self, input: &ProveInput<'_>) -> Result<(), PiCcsError> {
-        // Normalize CCS to identity-first
-        let s_norm = input
-            .ccs
-            .ensure_identity_first()
-            .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
+        // Normalize CCS to identity-first (avoid cloning when already normalized).
+        let is_id0 = input.ccs.n == input.ccs.m
+            && input
+                .ccs
+                .matrices
+                .first()
+                .map(|m0| m0.is_identity())
+                .unwrap_or(false);
+        let s_norm_owned = if is_id0 {
+            None
+        } else {
+            Some(
+                input
+                    .ccs
+                    .ensure_identity_first()
+                    .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?,
+            )
+        };
+        let s_norm: &CcsStructure<F> = s_norm_owned.as_ref().unwrap_or(input.ccs);
 
         // STRICT validation: Ajtai/NC requires M₀ = I_n (fail fast instead of mysterious sumcheck errors)
         s_norm
@@ -747,6 +871,7 @@ where
             Z,
         };
 
+        self.shared_bus_aux = None;
         self.steps.push((mcs_inst, mcs_wit).into());
         self.step_claims.push(input.output_claims.to_vec());
 
@@ -760,6 +885,7 @@ where
     ///
     /// Use this method when your proof requires Twist/Shout arguments in addition to CCS.
     pub fn add_step_bundle(&mut self, bundle: StepWitnessBundle<Cmt, F, K>) {
+        self.shared_bus_aux = None;
         self.steps.push(bundle);
         self.step_claims.push(vec![]);
     }
@@ -769,6 +895,49 @@ where
         for bundle in bundles {
             self.add_step_bundle(bundle);
         }
+    }
+
+    /// Execute a VM for one shard and add shared-CPU-bus step bundles to this session.
+    ///
+    /// This is an ergonomic wrapper around `neo_memory::builder::build_shard_witness_shared_cpu_bus_with_aux`.
+    /// It also stores auxiliary outputs (including the terminal Twist memory state) so the session
+    /// can later prove output binding without the caller manually providing `final_memory_state`.
+    pub fn execute_shard_shared_cpu_bus<V, A, Tw, Sh>(
+        &mut self,
+        vm: V,
+        twist: Tw,
+        shout: Sh,
+        max_steps: usize,
+        chunk_size: usize,
+        mem_layouts: &HashMap<u32, PlainMemLayout>,
+        lut_tables: &HashMap<u32, LutTable<F>>,
+        lut_table_specs: &HashMap<u32, LutTableSpec>,
+        initial_mem: &HashMap<(u32, u64), F>,
+        cpu_arith: &A,
+    ) -> Result<(), PiCcsError>
+    where
+        V: neo_vm_trace::VmCpu<u64, u64>,
+        Tw: neo_vm_trace::Twist<u64, u64>,
+        Sh: neo_vm_trace::Shout<u64>,
+        A: CpuArithmetization<F, Cmt>,
+    {
+        let (bundles, aux) = build_shard_witness_shared_cpu_bus_with_aux(
+            vm,
+            twist,
+            shout,
+            max_steps,
+            chunk_size,
+            mem_layouts,
+            lut_tables,
+            lut_table_specs,
+            initial_mem,
+            cpu_arith,
+        )
+        .map_err(|e| PiCcsError::InvalidInput(format!("shared-bus witness build failed: {e:?}")))?;
+
+        self.add_step_bundles(bundles);
+        self.shared_bus_aux = Some(aux);
+        Ok(())
     }
 
     /// Check if any steps have Twist (memory) instances.
@@ -820,12 +989,12 @@ where
         Ok(())
     }
 
-    fn prepared_ccs_for_accumulator(&self, s: &CcsStructure<F>) -> Result<CcsStructure<F>, PiCcsError> {
+    fn prepared_ccs_for_accumulator<'s>(&self, s: &'s CcsStructure<F>) -> Result<&'s CcsStructure<F>, PiCcsError> {
         if !(self.has_twist_instances() || self.has_shout_instances()) {
-            return Ok(s.clone());
+            return Ok(s);
         }
         if self.steps.is_empty() {
-            return Ok(s.clone());
+            return Ok(s);
         }
 
         let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> =
@@ -833,6 +1002,105 @@ where
         let (s_prepared, _cpu_bus) =
             crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(s, &steps_public)?;
         Ok(s_prepared)
+    }
+
+    fn build_ccs_cache(
+        &self,
+        s: &CcsStructure<F>,
+        ccs_sparse_cache: Option<Arc<SparseCache<F>>>,
+    ) -> Result<SessionCcsCache, PiCcsError> {
+        let src_ptr = (s as *const CcsStructure<F>) as usize;
+
+        let mut s_norm_opt: Option<CcsStructure<F>> = None;
+        let is_id0 = s.n == s.m
+            && s
+                .matrices
+                .first()
+                .map(|m0| m0.is_identity())
+                .unwrap_or(false);
+        let s_norm_ref: &CcsStructure<F> = if is_id0 || s.n != s.m {
+            s
+        } else {
+            let s_norm = s
+                .ensure_identity_first()
+                .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
+            s_norm_opt = Some(s_norm);
+            s_norm_opt.as_ref().expect("just set")
+        };
+
+        s_norm_ref
+            .assert_m0_is_identity_for_nc()
+            .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
+
+        if let Some(ref cache) = ccs_sparse_cache {
+            if cache.len() != s_norm_ref.t() {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "SparseCache matrix count mismatch: cache has {}, CCS has {}",
+                    cache.len(),
+                    s_norm_ref.t()
+                )));
+            }
+        }
+
+        let ccs_sparse_cache = if let Some(cache) = ccs_sparse_cache {
+            Some(cache)
+        } else if mode_uses_sparse_cache(&self.mode) {
+            Some(Arc::new(SparseCache::build(s_norm_ref)))
+        } else {
+            None
+        };
+
+        let ccs_mat_digest =
+            utils::digest_ccs_matrices_with_sparse_cache(s_norm_ref, ccs_sparse_cache.as_deref());
+        let ctx = ShardProverContext {
+            ccs_mat_digest,
+            ccs_sparse_cache,
+        };
+
+        Ok(SessionCcsCache {
+            src_ptr,
+            s_norm: s_norm_opt,
+            ctx,
+        })
+    }
+
+    fn ensure_prover_ctx_for_ccs(&mut self, s: &CcsStructure<F>) -> Result<(), PiCcsError> {
+        let src_ptr = (s as *const CcsStructure<F>) as usize;
+        if let Some(cache) = &self.prover_ctx {
+            if cache.src_ptr == src_ptr {
+                return Ok(());
+            }
+        }
+        self.prover_ctx = Some(self.build_ccs_cache(s, None)?);
+        Ok(())
+    }
+
+    /// Preload prover-side CCS preprocessing (sparse-cache + matrix-digest) to avoid scanning dense matrices.
+    ///
+    /// This is intended for callers who already have a `SparseCache` (e.g. built from sparse R1CS
+    /// constraints) and want to skip the expensive `SparseCache::build` pass over dense matrices.
+    ///
+    /// Note: verification uses a separate cache; call `preload_verifier_ccs_sparse_cache(...)` if desired.
+    pub fn preload_ccs_sparse_cache(
+        &mut self,
+        s: &CcsStructure<F>,
+        ccs_sparse_cache: Arc<SparseCache<F>>,
+    ) -> Result<(), PiCcsError> {
+        self.prover_ctx = Some(self.build_ccs_cache(s, Some(ccs_sparse_cache))?);
+        Ok(())
+    }
+
+    /// Preload verifier-side CCS preprocessing (sparse-cache + matrix-digest).
+    ///
+    /// This does **not** affect proving. It exists so benchmarks can model a verifier that has
+    /// preprocessed the public circuit independently of the prover.
+    pub fn preload_verifier_ccs_sparse_cache(
+        &mut self,
+        s: &CcsStructure<F>,
+        ccs_sparse_cache: Arc<SparseCache<F>>,
+    ) -> Result<(), PiCcsError> {
+        self.verifier_ctx = Some(self.build_ccs_cache(s, Some(ccs_sparse_cache))?);
+        Ok(())
     }
 
     /// Fold and prove: run folding over all collected steps and return a `FoldRun`.
@@ -850,56 +1118,60 @@ where
         tr: &mut Poseidon2Transcript,
         s: &CcsStructure<F>,
     ) -> Result<FoldRun, PiCcsError> {
-        // Normalize CCS
-        let s_norm = s
-            .ensure_identity_first()
-            .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
+        self.ensure_prover_ctx_for_ccs(s)?;
 
-        // STRICT validation: Ajtai/NC requires M₀ = I_n (fail fast instead of mysterious sumcheck errors)
-        s_norm
-            .assert_m0_is_identity_for_nc()
-            .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
+        // Temporarily take the prover ctx to avoid borrow conflicts while we may mutate `self`.
+        let cache = self.prover_ctx.take().expect("prover ctx must be set");
+        let s_norm = cache.s_norm.as_ref().unwrap_or(s);
+        let ctx = cache.ctx.clone();
 
-        // Shared CPU bus: compute the prepared CCS shape (copy-outs) for accumulator validation.
-        let s_prepared = self.prepared_ccs_for_accumulator(&s_norm)?;
-        s_prepared
-            .assert_m0_is_identity_for_nc()
-            .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
-        self.ensure_accumulator_matches_ccs(&s_prepared)?;
+        let result = (|| {
+            // Shared CPU bus: compute the prepared CCS shape (copy-outs) for accumulator validation.
+            // IMPORTANT: Use the normalized CCS so M₀=I holds even if the caller passed a non-identity-first CCS.
+            let s_prepared = self.prepared_ccs_for_accumulator(s_norm)?;
+            s_prepared
+                .assert_m0_is_identity_for_nc()
+                .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
+            self.ensure_accumulator_matches_ccs(s_prepared)?;
 
-        // Determine canonical m_in from steps and ensure they all match (needed for RLC).
-        let m_in_steps = self.steps.first().map(|step| step.mcs.0.m_in).unwrap_or(0);
-        if !self.steps.iter().all(|step| step.mcs.0.m_in == m_in_steps) {
-            return Err(PiCcsError::InvalidInput("all steps must share the same m_in".into()));
-        }
-
-        // Validate or default the accumulator: None → k=1 simple case (no ME inputs).
-        let (seed_me, seed_me_wit): (&[MeInstance<Cmt, F, K>], &[Mat<F>]) = match &self.acc0 {
-            Some(acc) => {
-                acc.check(&self.params, &s_prepared)?;
-                // Also ensure accumulator m_in matches steps' m_in to avoid X-mixing shape issues.
-                let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
-                if acc_m_in != m_in_steps {
-                    return Err(PiCcsError::InvalidInput(
-                        "initial Accumulator.m_in must match steps' m_in".into(),
-                    ));
-                }
-                (&acc.me, &acc.witnesses)
+            // Determine canonical m_in from steps and ensure they all match (needed for RLC).
+            let m_in_steps = self.steps.first().map(|step| step.mcs.0.m_in).unwrap_or(0);
+            if !self.steps.iter().all(|step| step.mcs.0.m_in == m_in_steps) {
+                return Err(PiCcsError::InvalidInput("all steps must share the same m_in".into()));
             }
-            None => (&[], &[]), // k=1
-        };
 
-        shard::fold_shard_prove(
-            self.mode.clone(),
-            tr,
-            &self.params,
-            &s_norm,
-            &self.steps,
-            seed_me,
-            seed_me_wit,
-            &self.l,
-            self.mixers,
-        )
+            // Validate or default the accumulator: None → k=1 simple case (no ME inputs).
+            let (seed_me, seed_me_wit): (&[MeInstance<Cmt, F, K>], &[Mat<F>]) = match &self.acc0 {
+                Some(acc) => {
+                    acc.check(&self.params, s_prepared)?;
+                    // Also ensure accumulator m_in matches steps' m_in to avoid X-mixing shape issues.
+                    let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
+                    if acc_m_in != m_in_steps {
+                        return Err(PiCcsError::InvalidInput(
+                            "initial Accumulator.m_in must match steps' m_in".into(),
+                        ));
+                    }
+                    (&acc.me, &acc.witnesses)
+                }
+                None => (&[], &[]), // k=1
+            };
+
+            shard::fold_shard_prove_with_context(
+                self.mode.clone(),
+                tr,
+                &self.params,
+                s_norm,
+                &self.steps,
+                seed_me,
+                seed_me_wit,
+                &self.l,
+                self.mixers,
+                &ctx,
+            )
+        })();
+
+        self.prover_ctx = Some(cache);
+        result
     }
 
     pub fn fold_and_prove_with_output_binding(
@@ -909,18 +1181,13 @@ where
         ob_cfg: &crate::output_binding::OutputBindingConfig,
         final_memory_state: &[F],
     ) -> Result<FoldRun, PiCcsError> {
-        let s_norm = s
-            .ensure_identity_first()
-            .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
-        s_norm
-            .assert_m0_is_identity_for_nc()
-            .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
+        self.ensure_prover_ctx_for_ccs(s)?;
 
-        let s_prepared = self.prepared_ccs_for_accumulator(&s_norm)?;
+        let s_prepared = self.prepared_ccs_for_accumulator(s)?;
         s_prepared
             .assert_m0_is_identity_for_nc()
             .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
-        self.ensure_accumulator_matches_ccs(&s_prepared)?;
+        self.ensure_accumulator_matches_ccs(s_prepared)?;
 
         let m_in_steps = self.steps.first().map(|step| step.mcs.0.m_in).unwrap_or(0);
         if !self.steps.iter().all(|step| step.mcs.0.m_in == m_in_steps) {
@@ -929,7 +1196,7 @@ where
 
         let (seed_me, seed_me_wit): (&[MeInstance<Cmt, F, K>], &[Mat<F>]) = match &self.acc0 {
             Some(acc) => {
-                acc.check(&self.params, &s_prepared)?;
+                acc.check(&self.params, s_prepared)?;
                 let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
                 if acc_m_in != m_in_steps {
                     return Err(PiCcsError::InvalidInput(
@@ -941,11 +1208,14 @@ where
             None => (&[], &[]),
         };
 
-        shard::fold_shard_prove_with_output_binding(
+        let cache = self.prover_ctx.as_ref().expect("prover ctx must be set");
+        let s_norm = cache.s_norm.as_ref().unwrap_or(s);
+        let ctx = cache.ctx.clone();
+        shard::fold_shard_prove_with_output_binding_with_context(
             self.mode.clone(),
             tr,
             &self.params,
-            &s_norm,
+            s_norm,
             &self.steps,
             seed_me,
             seed_me_wit,
@@ -953,6 +1223,7 @@ where
             self.mixers,
             ob_cfg,
             final_memory_state,
+            &ctx,
         )
     }
 
@@ -967,8 +1238,79 @@ where
         self.fold_and_prove_with_output_binding(&mut tr, s, ob_cfg, final_memory_state)
     }
 
+    fn final_memory_state_for_output_binding(&self, ob_cfg: &crate::output_binding::OutputBindingConfig) -> Result<Vec<F>, PiCcsError> {
+        let aux = self.shared_bus_aux.as_ref().ok_or_else(|| {
+            PiCcsError::InvalidInput(
+                "output binding auto mode requires shared-bus aux; call execute_shard_shared_cpu_bus(...) first".into(),
+            )
+        })?;
+        let last_step = self
+            .steps
+            .last()
+            .ok_or_else(|| PiCcsError::InvalidInput("output binding requires >= 1 step".into()))?;
+
+        if ob_cfg.mem_idx >= last_step.mem_instances.len() {
+            return Err(PiCcsError::InvalidInput("output binding mem_idx out of range".into()));
+        }
+        if ob_cfg.mem_idx >= aux.mem_ids.len() {
+            return Err(PiCcsError::InvalidInput(
+                "output binding mem_idx out of range for shared-bus aux".into(),
+            ));
+        }
+
+        let expected_k = 1usize
+            .checked_shl(ob_cfg.num_bits as u32)
+            .ok_or_else(|| PiCcsError::InvalidInput("output binding: 2^num_bits overflow".into()))?;
+        let mem_inst = &last_step.mem_instances[ob_cfg.mem_idx].0;
+        if mem_inst.k != expected_k {
+            return Err(PiCcsError::InvalidInput(format!(
+                "output binding: cfg.num_bits implies k={}, but mem_inst.k={}",
+                expected_k, mem_inst.k
+            )));
+        }
+
+        let mem_id = aux.mem_ids[ob_cfg.mem_idx];
+        let mut final_memory_state = vec![F::ZERO; expected_k];
+        if let Some(st) = aux.final_mem_states.get(&mem_id) {
+            for (&addr, &val) in st {
+                let Ok(addr_usize) = usize::try_from(addr) else {
+                    continue;
+                };
+                if addr_usize < expected_k {
+                    final_memory_state[addr_usize] = val;
+                }
+            }
+        }
+        Ok(final_memory_state)
+    }
+
+    /// Fold and prove with output binding, deriving `final_memory_state` from the most recent
+    /// shared-CPU-bus witness build (see `execute_shard_shared_cpu_bus`).
+    pub fn fold_and_prove_with_output_binding_auto(
+        &mut self,
+        tr: &mut Poseidon2Transcript,
+        s: &CcsStructure<F>,
+        ob_cfg: &crate::output_binding::OutputBindingConfig,
+    ) -> Result<FoldRun, PiCcsError> {
+        let final_memory_state = self.final_memory_state_for_output_binding(ob_cfg)?;
+        self.fold_and_prove_with_output_binding(tr, s, ob_cfg, &final_memory_state)
+    }
+
+    /// Fold and prove with output binding (auto final memory state), managing the transcript internally.
+    pub fn fold_and_prove_with_output_binding_auto_simple(
+        &mut self,
+        s: &CcsStructure<F>,
+        ob_cfg: &crate::output_binding::OutputBindingConfig,
+    ) -> Result<FoldRun, PiCcsError> {
+        let mut tr = Poseidon2Transcript::new(b"neo.fold/session");
+        self.fold_and_prove_with_output_binding_auto(&mut tr, s, ob_cfg)
+    }
+
     /// Verify a finished run against the public MCS list.
     /// This method manages the transcript internally for ease of use.
+    ///
+    /// Note: this does not reuse prover-side preprocessing caches. To model a verifier that
+    /// preprocesses the public circuit, call `preload_verifier_ccs_sparse_cache(...)` once.
     pub fn verify(
         &self,
         s: &CcsStructure<F>,
@@ -994,10 +1336,34 @@ where
         mcss_public: &[neo_ccs::McsInstance<Cmt, F>],
         run: &FoldRun,
     ) -> Result<bool, PiCcsError> {
-        // Normalize CCS
-        let s_norm = s
-            .ensure_identity_first()
-            .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
+        let src_ptr = (s as *const CcsStructure<F>) as usize;
+        let verifier_cache = self
+            .verifier_ctx
+            .as_ref()
+            .filter(|cache| cache.src_ptr == src_ptr);
+        let verifier_ctx = verifier_cache.map(|cache| &cache.ctx);
+
+        // Normalize CCS (avoid cloning when already normalized or preloaded).
+        let mut s_norm_owned: Option<CcsStructure<F>> = None;
+        let s_norm: &CcsStructure<F> = match verifier_cache {
+            Some(cache) => cache.s_norm.as_ref().unwrap_or(s),
+            None => {
+                let is_id0 = s.n == s.m
+                    && s
+                        .matrices
+                        .first()
+                        .map(|m0| m0.is_identity())
+                        .unwrap_or(false);
+                if s.n == s.m && !is_id0 {
+                    s_norm_owned = Some(
+                        s.ensure_identity_first().map_err(|e| {
+                            PiCcsError::InvalidInput(format!("identity-first required: {e:?}"))
+                        })?,
+                    );
+                }
+                s_norm_owned.as_ref().unwrap_or(s)
+            }
+        };
 
         // m_in consistency across public MCS
         let m_in_steps = mcss_public.first().map(|inst| inst.m_in).unwrap_or(0);
@@ -1007,12 +1373,12 @@ where
 
         // Build steps_public from the internal bundles to include mem/lut instances.
         let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = self.steps.iter().map(|bundle| bundle.into()).collect();
-        let s_prepared = self.prepared_ccs_for_accumulator(&s_norm)?;
+        let s_prepared = self.prepared_ccs_for_accumulator(s_norm)?;
 
         // Validate (or empty) initial accumulator to mirror finalize()
         let seed_me: &[MeInstance<Cmt, F, K>] = match &self.acc0 {
             Some(acc) => {
-                acc.check(&self.params, &s_prepared)?;
+                acc.check(&self.params, s_prepared)?;
                 let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
                 if acc_m_in != m_in_steps {
                     return Err(PiCcsError::InvalidInput(
@@ -1032,27 +1398,54 @@ where
 
         let outputs = if steps_public.len() > 1 {
             match step_linking {
-                Some(cfg) => shard::fold_shard_verify_with_step_linking(
-                    self.mode.clone(),
-                    tr,
-                    &self.params,
-                    &s_norm,
-                    &steps_public,
-                    seed_me,
-                    run,
-                    self.mixers,
-                    cfg,
-                )?,
-                None if self.allow_unlinked_steps => shard::fold_shard_verify(
-                    self.mode.clone(),
-                    tr,
-                    &self.params,
-                    &s_norm,
-                    &steps_public,
-                    seed_me,
-                    run,
-                    self.mixers,
-                )?,
+                Some(cfg) => match verifier_ctx {
+                    Some(ctx) => shard::fold_shard_verify_with_step_linking_with_context(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        cfg,
+                        ctx,
+                    )?,
+                    None => shard::fold_shard_verify_with_step_linking(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        cfg,
+                    )?,
+                },
+                None if self.allow_unlinked_steps => match verifier_ctx {
+                    Some(ctx) => shard::fold_shard_verify_with_context(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        ctx,
+                    )?,
+                    None => shard::fold_shard_verify(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                    )?,
+                },
                 None => {
                     return Err(PiCcsError::InvalidInput(
                         "multi-step verification requires step linking; call FoldingSession::set_step_linking(...) or FoldingSession::unsafe_allow_unlinked_steps()".into(),
@@ -1060,16 +1453,29 @@ where
                 }
             }
         } else {
-            shard::fold_shard_verify(
-                self.mode.clone(),
-                tr,
-                &self.params,
-                &s_norm,
-                &steps_public,
-                seed_me,
-                run,
-                self.mixers,
-            )?
+            match verifier_ctx {
+                Some(ctx) => shard::fold_shard_verify_with_context(
+                    self.mode.clone(),
+                    tr,
+                    &self.params,
+                    s_norm,
+                    &steps_public,
+                    seed_me,
+                    run,
+                    self.mixers,
+                    ctx,
+                )?,
+                None => shard::fold_shard_verify(
+                    self.mode.clone(),
+                    tr,
+                    &self.params,
+                    s_norm,
+                    &steps_public,
+                    seed_me,
+                    run,
+                    self.mixers,
+                )?,
+            }
         };
 
         // For CCS-only sessions (no Twist/Shout), val-lane obligations should be empty
@@ -1114,9 +1520,34 @@ where
         run: &FoldRun,
         ob_cfg: &crate::output_binding::OutputBindingConfig,
     ) -> Result<bool, PiCcsError> {
-        let s_norm = s
-            .ensure_identity_first()
-            .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
+        let src_ptr = (s as *const CcsStructure<F>) as usize;
+        let verifier_cache = self
+            .verifier_ctx
+            .as_ref()
+            .filter(|cache| cache.src_ptr == src_ptr);
+        let verifier_ctx = verifier_cache.map(|cache| &cache.ctx);
+
+        // Normalize CCS (avoid cloning when already normalized or preloaded).
+        let mut s_norm_owned: Option<CcsStructure<F>> = None;
+        let s_norm: &CcsStructure<F> = match verifier_cache {
+            Some(cache) => cache.s_norm.as_ref().unwrap_or(s),
+            None => {
+                let is_id0 = s.n == s.m
+                    && s
+                        .matrices
+                        .first()
+                        .map(|m0| m0.is_identity())
+                        .unwrap_or(false);
+                if s.n == s.m && !is_id0 {
+                    s_norm_owned = Some(
+                        s.ensure_identity_first().map_err(|e| {
+                            PiCcsError::InvalidInput(format!("identity-first required: {e:?}"))
+                        })?,
+                    );
+                }
+                s_norm_owned.as_ref().unwrap_or(s)
+            }
+        };
 
         let m_in_steps = mcss_public.first().map(|inst| inst.m_in).unwrap_or(0);
         if !mcss_public.iter().all(|inst| inst.m_in == m_in_steps) {
@@ -1124,11 +1555,11 @@ where
         }
 
         let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = self.steps.iter().map(|bundle| bundle.into()).collect();
-        let s_prepared = self.prepared_ccs_for_accumulator(&s_norm)?;
+        let s_prepared = self.prepared_ccs_for_accumulator(s_norm)?;
 
         let seed_me: &[MeInstance<Cmt, F, K>] = match &self.acc0 {
             Some(acc) => {
-                acc.check(&self.params, &s_prepared)?;
+                acc.check(&self.params, s_prepared)?;
                 let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
                 if acc_m_in != m_in_steps {
                     return Err(PiCcsError::InvalidInput(
@@ -1147,29 +1578,58 @@ where
 
         let outputs = if steps_public.len() > 1 {
             match step_linking {
-                Some(cfg) => shard::fold_shard_verify_with_output_binding_and_step_linking(
-                    self.mode.clone(),
-                    tr,
-                    &self.params,
-                    &s_norm,
-                    &steps_public,
-                    seed_me,
-                    run,
-                    self.mixers,
-                    ob_cfg,
-                    cfg,
-                )?,
-                None if self.allow_unlinked_steps => shard::fold_shard_verify_with_output_binding(
-                    self.mode.clone(),
-                    tr,
-                    &self.params,
-                    &s_norm,
-                    &steps_public,
-                    seed_me,
-                    run,
-                    self.mixers,
-                    ob_cfg,
-                )?,
+                Some(cfg) => match verifier_ctx {
+                    Some(ctx) => shard::fold_shard_verify_with_output_binding_and_step_linking_with_context(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        ob_cfg,
+                        cfg,
+                        ctx,
+                    )?,
+                    None => shard::fold_shard_verify_with_output_binding_and_step_linking(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        ob_cfg,
+                        cfg,
+                    )?,
+                },
+                None if self.allow_unlinked_steps => match verifier_ctx {
+                    Some(ctx) => shard::fold_shard_verify_with_output_binding_with_context(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        ob_cfg,
+                        ctx,
+                    )?,
+                    None => shard::fold_shard_verify_with_output_binding(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s_norm,
+                        &steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        ob_cfg,
+                    )?,
+                },
                 None => {
                     return Err(PiCcsError::InvalidInput(
                         "multi-step verification requires step linking; call FoldingSession::set_step_linking(...) or FoldingSession::unsafe_allow_unlinked_steps()".into(),
@@ -1177,17 +1637,31 @@ where
                 }
             }
         } else {
-            shard::fold_shard_verify_with_output_binding(
-                self.mode.clone(),
-                tr,
-                &self.params,
-                &s_norm,
-                &steps_public,
-                seed_me,
-                run,
-                self.mixers,
-                ob_cfg,
-            )?
+            match verifier_ctx {
+                Some(ctx) => shard::fold_shard_verify_with_output_binding_with_context(
+                    self.mode.clone(),
+                    tr,
+                    &self.params,
+                    s_norm,
+                    &steps_public,
+                    seed_me,
+                    run,
+                    self.mixers,
+                    ob_cfg,
+                    ctx,
+                )?,
+                None => shard::fold_shard_verify_with_output_binding(
+                    self.mode.clone(),
+                    tr,
+                    &self.params,
+                    s_norm,
+                    &steps_public,
+                    seed_me,
+                    run,
+                    self.mixers,
+                    ob_cfg,
+                )?,
+            }
         };
 
         let has_twist_or_shout = self.has_twist_instances() || self.has_shout_instances();

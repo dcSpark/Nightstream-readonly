@@ -1,6 +1,5 @@
 use crate::PiCcsError;
-use neo_ccs::poly::SparsePoly;
-use neo_ccs::{CcsStructure, Mat};
+use neo_ccs::{CcsMatrix, CcsStructure, Mat, MeInstance};
 use neo_math::{F, K};
 use neo_memory::ajtai::decode_vector as ajtai_decode_vector;
 use neo_memory::cpu::{build_bus_layout_for_instances, BusLayout};
@@ -149,6 +148,12 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
     )
     .map_err(PiCcsError::InvalidInput)?;
 
+    // If there are no bus columns (no Twist/Shout instances), Route A doesn't use the bus time rows.
+    // Allow small CCS instances (including m_in == n) in this case.
+    if layout.bus_cols == 0 {
+        return Ok(layout);
+    }
+
     if m_in
         .checked_add(layout.chunk_size)
         .ok_or_else(|| PiCcsError::InvalidInput("m_in + chunk_size overflow".into()))?
@@ -163,59 +168,155 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
     Ok(layout)
 }
 
-pub(crate) fn prepare_ccs_for_shared_cpu_bus_steps<Cmt, S: BusStepView<Cmt>>(
-    s0: &CcsStructure<F>,
+pub(crate) fn prepare_ccs_for_shared_cpu_bus_steps<'a, Cmt, S: BusStepView<Cmt>>(
+    s0: &'a CcsStructure<F>,
     steps: &[S],
-) -> Result<(CcsStructure<F>, BusLayout), PiCcsError> {
+) -> Result<(&'a CcsStructure<F>, BusLayout), PiCcsError> {
     let bus = infer_bus_layout_for_steps(s0, steps)?;
     let padding_rows = ensure_ccs_has_shared_bus_padding_for_steps(s0, &bus, steps)?;
     ensure_ccs_binds_shared_bus_for_steps(s0, &bus, &padding_rows)?;
-    let s = extend_ccs_with_cpu_bus_copyouts(s0, &bus)?;
-    Ok((s, bus))
+    // Performance: do NOT materialize bus copyout matrices into the CCS. Instead, we append the
+    // corresponding ME openings directly from the witness (see `append_bus_openings_to_me_*`).
+    Ok((s0, bus))
 }
 
-pub(crate) fn extend_ccs_with_cpu_bus_copyouts(
-    s: &CcsStructure<F>,
-    bus: &BusLayout,
-) -> Result<CcsStructure<F>, PiCcsError> {
-    if bus.bus_cols == 0 {
-        return Ok(s.clone());
+#[inline]
+fn chi_for_row_index(r: &[K], idx: usize) -> K {
+    // Multilinear basis polynomial χ_r(idx) where idx is interpreted in little-endian bits:
+    // χ_r(idx) = ∏_i (idx_i ? r_i : (1 - r_i)).
+    let mut acc = K::ONE;
+    for (bit, &ri) in r.iter().enumerate() {
+        let is_one = ((idx >> bit) & 1) == 1;
+        acc *= if is_one { ri } else { K::ONE - ri };
     }
-    if s.n != s.m {
+    acc
+}
+
+pub(crate) fn append_bus_openings_to_me_instance<Cmt>(
+    params: &NeoParams,
+    bus: &BusLayout,
+    core_t: usize,
+    Z: &Mat<F>,
+    me: &mut MeInstance<Cmt, F, K>,
+) -> Result<(), PiCcsError>
+where
+    Cmt: Clone,
+{
+    if bus.bus_cols == 0 {
+        return Ok(());
+    }
+
+    let y_pad = (params.d as usize).next_power_of_two();
+    let d = neo_math::D;
+    if y_pad < d {
         return Err(PiCcsError::InvalidInput(format!(
-            "shared-bus requires square CCS (n==m) for identity-first ME semantics, got {}×{}",
-            s.n, s.m
+            "bus openings require y_pad >= D (y_pad={y_pad}, D={d})"
         )));
     }
-
-    let mut matrices = s.matrices.clone();
-    let old_len = matrices.len();
-    let f: SparsePoly<F> = s.f.append_zero_vars(bus.bus_cols);
-
-    for col_id in 0..bus.bus_cols {
-        let mut mat = Mat::zero(s.n, s.m, F::ZERO);
-        for j in 0..bus.chunk_size {
-            let row = bus.time_index(j);
-            let col = bus.bus_cell(col_id, j);
-            if row >= s.n || col >= s.m {
-                return Err(PiCcsError::InvalidInput(format!(
-                    "bus copy-out index out of range (row={row}, col={col}, n={}, m={})",
-                    s.n, s.m
-                )));
-            }
-            mat.set(row, col, F::ONE);
+    if Z.rows() != d {
+        return Err(PiCcsError::InvalidInput(format!(
+            "bus openings require Z.rows()==D (got {}, want {})",
+            Z.rows(),
+            d
+        )));
+    }
+    if Z.cols() != bus.m {
+        return Err(PiCcsError::InvalidInput(format!(
+            "bus openings require Z.cols()==bus.m (got {}, want {})",
+            Z.cols(),
+            bus.m
+        )));
+    }
+    if me.m_in != bus.m_in {
+        return Err(PiCcsError::InvalidInput(format!(
+            "bus openings require ME.m_in==bus.m_in (got {}, want {})",
+            me.m_in, bus.m_in
+        )));
+    }
+    if me.r.len() == 0 {
+        return Err(PiCcsError::InvalidInput("bus openings require non-empty ME.r".into()));
+    }
+    let n_pad = 1usize
+        .checked_shl(me.r.len() as u32)
+        .ok_or_else(|| PiCcsError::InvalidInput("2^ell_n overflow".into()))?;
+    for j in 0..bus.chunk_size {
+        let row = bus.time_index(j);
+        if row >= n_pad {
+            return Err(PiCcsError::InvalidInput(format!(
+                "bus time_index({j})={row} out of range for ell_n={} (n_pad={})",
+                me.r.len(),
+                n_pad
+            )));
         }
-        matrices.push(mat);
     }
 
-    let out = CcsStructure::new(matrices, f)
-        .map_err(|e| PiCcsError::InvalidInput(format!("invalid CCS after bus extension: {e:?}")))?;
-    assert_eq!(
-        out.matrices.len(),
-        old_len + bus.bus_cols,
-        "shared-bus copyouts: matrix count mismatch"
-    );
-    Ok(out)
+    // Idempotent append: allow callers to call this once; reject unexpected shapes.
+    let want_len = core_t
+        .checked_add(bus.bus_cols)
+        .ok_or_else(|| PiCcsError::InvalidInput("core_t + bus_cols overflow".into()))?;
+    if me.y.len() == want_len && me.y_scalars.len() == want_len {
+        return Ok(());
+    }
+    if me.y.len() != core_t || me.y_scalars.len() != core_t {
+        return Err(PiCcsError::InvalidInput(format!(
+            "bus openings expect ME y/y_scalars to start at core_t (y.len()={}, y_scalars.len()={}, core_t={})",
+            me.y.len(),
+            me.y_scalars.len(),
+            core_t
+        )));
+    }
+    for (j, row) in me.y.iter().enumerate() {
+        if row.len() != y_pad {
+            return Err(PiCcsError::InvalidInput(format!(
+                "bus openings require ME.y[{j}].len()==y_pad (got {}, want {})",
+                row.len(),
+                y_pad
+            )));
+        }
+    }
+
+    // Precompute χ_r(time_index(j)) weights for the bus time rows.
+    let mut time_weights = Vec::with_capacity(bus.chunk_size);
+    for j in 0..bus.chunk_size {
+        time_weights.push(chi_for_row_index(&me.r, bus.time_index(j)));
+    }
+
+    // Base-b powers for recomposition.
+    let bK = K::from(F::from_u64(params.b as u64));
+    let mut pow_b = Vec::with_capacity(d);
+    let mut cur = K::ONE;
+    for _ in 0..d {
+        pow_b.push(cur);
+        cur *= bK;
+    }
+
+    // Append bus openings in canonical col_id order so `bus_y_base = y_scalars.len() - bus_cols`
+    // remains valid.
+    for col_id in 0..bus.bus_cols {
+        let mut y_row = vec![K::ZERO; y_pad];
+        for rho in 0..d {
+            let mut acc = K::ZERO;
+            for j in 0..bus.chunk_size {
+                let w = time_weights[j];
+                if w == K::ZERO {
+                    continue;
+                }
+                let z_idx = bus.bus_cell(col_id, j);
+                acc += w * K::from(Z[(rho, z_idx)]);
+            }
+            y_row[rho] = acc;
+        }
+
+        let mut y_scalar = K::ZERO;
+        for rho in 0..d {
+            y_scalar += y_row[rho] * pow_b[rho];
+        }
+
+        me.y.push(y_row);
+        me.y_scalars.push(y_scalar);
+    }
+
+    Ok(())
 }
 
 fn active_matrix_indices(s: &CcsStructure<F>) -> Vec<usize> {
@@ -233,6 +334,40 @@ fn active_matrix_indices(s: &CcsStructure<F>) -> Vec<usize> {
         .enumerate()
         .filter_map(|(j, &is_active)| is_active.then_some(j))
         .collect()
+}
+
+fn ccs_col_has_any_nonzero(mat: &CcsMatrix<F>, col: usize) -> bool {
+    match mat {
+        CcsMatrix::Identity { n } => col < *n,
+        CcsMatrix::Csc(csc) => csc.col_ptr[col] < csc.col_ptr[col + 1],
+    }
+}
+
+fn ccs_col_has_nonzero_outside_padding_rows(
+    mat: &CcsMatrix<F>,
+    col: usize,
+    is_padding_row: &[bool],
+) -> bool {
+    match mat {
+        CcsMatrix::Identity { n } => {
+            if col >= *n {
+                return false;
+            }
+            let row = col;
+            row < is_padding_row.len() && !is_padding_row[row]
+        }
+        CcsMatrix::Csc(csc) => {
+            let s0 = csc.col_ptr[col];
+            let e0 = csc.col_ptr[col + 1];
+            for k in s0..e0 {
+                let row = csc.row_idx[k];
+                if row < is_padding_row.len() && !is_padding_row[row] {
+                    return true;
+                }
+            }
+            false
+        }
+    }
 }
 
 struct BusColLabel {
@@ -298,6 +433,10 @@ fn required_bus_cols_for_layout(layout: &BusLayout) -> Vec<BusColLabel> {
 }
 
 fn required_bus_binding_cols_for_layout(layout: &BusLayout) -> Vec<BusColLabel> {
+    // Note: `inc_at_write_addr` is a Twist-internal witness field derived from the sparse
+    // memory state. Many CPU CCSes do not (and should not) constrain it outside padding rows;
+    // it is constrained by the Twist Route-A checks instead. We still require the canonical
+    // padding constraint `(1 - has_write) * inc_at_write_addr = 0`.
     let inc_cols: HashSet<usize> = layout.twist_cols.iter().map(|t| t.inc).collect();
     required_bus_cols_for_layout(layout)
         .into_iter()
@@ -329,25 +468,30 @@ fn ensure_ccs_references_bus_cols(
                 col.col_id, bus.bus_cols
             )));
         }
-        let z_idx = bus.bus_cell(col.col_id, 0);
-        if z_idx >= s.m {
-            return Err(PiCcsError::InvalidInput(format!(
-                "shared_cpu_bus internal error: bus z index {} out of range (m={})",
-                z_idx, s.m
-            )));
-        }
+        let mut all_js_present = true;
+        for j in 0..bus.chunk_size {
+            let z_idx = bus.bus_cell(col.col_id, j);
+            if z_idx >= s.m {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "shared_cpu_bus internal error: bus z index {} out of range (m={})",
+                    z_idx, s.m
+                )));
+            }
 
-        let mut found = false;
-        'active_mats: for &mj in &active {
-            let mat = &s.matrices[mj];
-            for r in 0..mat.rows() {
-                if mat[(r, z_idx)] != F::ZERO {
+            let mut found = false;
+            'active_mats: for &mj in &active {
+                let mat = &s.matrices[mj];
+                if ccs_col_has_any_nonzero(mat, z_idx) {
                     found = true;
                     break 'active_mats;
                 }
             }
+            if !found {
+                all_js_present = false;
+                break;
+            }
         }
-        if !found {
+        if !all_js_present {
             missing.push(col);
         }
     }
@@ -406,28 +550,30 @@ fn ensure_ccs_references_bus_cols_outside_padding_rows(
                 col.col_id, bus.bus_cols
             )));
         }
-        let z_idx = bus.bus_cell(col.col_id, 0);
-        if z_idx >= s.m {
-            return Err(PiCcsError::InvalidInput(format!(
-                "shared_cpu_bus internal error: bus z index {} out of range (m={})",
-                z_idx, s.m
-            )));
-        }
+        let mut all_js_present = true;
+        for j in 0..bus.chunk_size {
+            let z_idx = bus.bus_cell(col.col_id, j);
+            if z_idx >= s.m {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "shared_cpu_bus internal error: bus z index {} out of range (m={})",
+                    z_idx, s.m
+                )));
+            }
 
-        let mut found = false;
-        'active_mats: for &mj in &active {
-            let mat = &s.matrices[mj];
-            for r in 0..mat.rows() {
-                if is_padding_row[r] {
-                    continue;
-                }
-                if mat[(r, z_idx)] != F::ZERO {
+            let mut found = false;
+            'active_mats: for &mj in &active {
+                let mat = &s.matrices[mj];
+                if ccs_col_has_nonzero_outside_padding_rows(mat, z_idx, &is_padding_row) {
                     found = true;
                     break 'active_mats;
                 }
             }
+            if !found {
+                all_js_present = false;
+                break;
+            }
         }
-        if !found {
+        if !all_js_present {
             missing.push(col);
         }
     }
@@ -467,74 +613,78 @@ fn required_bus_padding_for_layout(bus: &BusLayout) -> Vec<BusPaddingLabel> {
     let mut out = Vec::<BusPaddingLabel>::new();
 
     for (lut_idx, shout) in bus.shout_cols.iter().enumerate() {
-        let has_lookup_z = bus.bus_cell(shout.has_lookup, 0);
-        let val_z = bus.bus_cell(shout.val, 0);
+        for j in 0..bus.chunk_size {
+            let has_lookup_z = bus.bus_cell(shout.has_lookup, j);
+            let val_z = bus.bus_cell(shout.val, j);
 
-        // (1 - has_lookup) * val = 0
-        out.push(BusPaddingLabel {
-            flag_z_idx: has_lookup_z,
-            field_z_idx: val_z,
-            label: format!("shout[{lut_idx}]: (1-has_lookup)*val"),
-        });
-
-        // (1 - has_lookup) * addr_bits[b] = 0
-        for (b, col_id) in shout.addr_bits.clone().enumerate() {
-            let bit_z = bus.bus_cell(col_id, 0);
+            // (1 - has_lookup) * val = 0
             out.push(BusPaddingLabel {
                 flag_z_idx: has_lookup_z,
-                field_z_idx: bit_z,
-                label: format!("shout[{lut_idx}]: (1-has_lookup)*addr_bits[{b}]"),
+                field_z_idx: val_z,
+                label: format!("shout[{lut_idx}][j={j}]: (1-has_lookup)*val"),
             });
+
+            // (1 - has_lookup) * addr_bits[b] = 0
+            for (b, col_id) in shout.addr_bits.clone().enumerate() {
+                let bit_z = bus.bus_cell(col_id, j);
+                out.push(BusPaddingLabel {
+                    flag_z_idx: has_lookup_z,
+                    field_z_idx: bit_z,
+                    label: format!("shout[{lut_idx}][j={j}]: (1-has_lookup)*addr_bits[{b}]"),
+                });
+            }
         }
     }
 
     for (mem_idx, twist) in bus.twist_cols.iter().enumerate() {
-        let has_read_z = bus.bus_cell(twist.has_read, 0);
-        let has_write_z = bus.bus_cell(twist.has_write, 0);
+        for j in 0..bus.chunk_size {
+            let has_read_z = bus.bus_cell(twist.has_read, j);
+            let has_write_z = bus.bus_cell(twist.has_write, j);
 
-        let wv_z = bus.bus_cell(twist.wv, 0);
-        let rv_z = bus.bus_cell(twist.rv, 0);
-        let inc_z = bus.bus_cell(twist.inc, 0);
+            let wv_z = bus.bus_cell(twist.wv, j);
+            let rv_z = bus.bus_cell(twist.rv, j);
+            let inc_z = bus.bus_cell(twist.inc, j);
 
-        // (1 - has_read) * rv = 0
-        out.push(BusPaddingLabel {
-            flag_z_idx: has_read_z,
-            field_z_idx: rv_z,
-            label: format!("twist[{mem_idx}]: (1-has_read)*rv"),
-        });
-
-        // (1 - has_read) * ra_bits[b] = 0
-        for (b, col_id) in twist.ra_bits.clone().enumerate() {
-            let bit_z = bus.bus_cell(col_id, 0);
+            // (1 - has_read) * rv = 0
             out.push(BusPaddingLabel {
                 flag_z_idx: has_read_z,
-                field_z_idx: bit_z,
-                label: format!("twist[{mem_idx}]: (1-has_read)*ra_bits[{b}]"),
+                field_z_idx: rv_z,
+                label: format!("twist[{mem_idx}][j={j}]: (1-has_read)*rv"),
             });
-        }
 
-        // (1 - has_write) * wv = 0
-        out.push(BusPaddingLabel {
-            flag_z_idx: has_write_z,
-            field_z_idx: wv_z,
-            label: format!("twist[{mem_idx}]: (1-has_write)*wv"),
-        });
+            // (1 - has_read) * ra_bits[b] = 0
+            for (b, col_id) in twist.ra_bits.clone().enumerate() {
+                let bit_z = bus.bus_cell(col_id, j);
+                out.push(BusPaddingLabel {
+                    flag_z_idx: has_read_z,
+                    field_z_idx: bit_z,
+                    label: format!("twist[{mem_idx}][j={j}]: (1-has_read)*ra_bits[{b}]"),
+                });
+            }
 
-        // (1 - has_write) * inc_at_write_addr = 0
-        out.push(BusPaddingLabel {
-            flag_z_idx: has_write_z,
-            field_z_idx: inc_z,
-            label: format!("twist[{mem_idx}]: (1-has_write)*inc_at_write_addr"),
-        });
-
-        // (1 - has_write) * wa_bits[b] = 0
-        for (b, col_id) in twist.wa_bits.clone().enumerate() {
-            let bit_z = bus.bus_cell(col_id, 0);
+            // (1 - has_write) * wv = 0
             out.push(BusPaddingLabel {
                 flag_z_idx: has_write_z,
-                field_z_idx: bit_z,
-                label: format!("twist[{mem_idx}]: (1-has_write)*wa_bits[{b}]"),
+                field_z_idx: wv_z,
+                label: format!("twist[{mem_idx}][j={j}]: (1-has_write)*wv"),
             });
+
+            // (1 - has_write) * inc_at_write_addr = 0
+            out.push(BusPaddingLabel {
+                flag_z_idx: has_write_z,
+                field_z_idx: inc_z,
+                label: format!("twist[{mem_idx}][j={j}]: (1-has_write)*inc_at_write_addr"),
+            });
+
+            // (1 - has_write) * wa_bits[b] = 0
+            for (b, col_id) in twist.wa_bits.clone().enumerate() {
+                let bit_z = bus.bus_cell(col_id, j);
+                out.push(BusPaddingLabel {
+                    flag_z_idx: has_write_z,
+                    field_z_idx: bit_z,
+                    label: format!("twist[{mem_idx}][j={j}]: (1-has_write)*wa_bits[{b}]"),
+                });
+            }
         }
     }
 
@@ -568,67 +718,6 @@ fn infer_public_constant_one_cols_from_steps<Cmt, S: BusStepView<Cmt>>(steps: &[
         .enumerate()
         .filter_map(|(c, &ok)| ok.then_some(c))
         .collect()
-}
-
-fn row_is_all_zero(mat: &Mat<F>, row: usize) -> bool {
-    for &v in mat.row(row) {
-        if v != F::ZERO {
-            return false;
-        }
-    }
-    true
-}
-
-fn row_single_nonzero_col(mat: &Mat<F>, row: usize) -> Option<usize> {
-    let mut found: Option<usize> = None;
-    for (c, &v) in mat.row(row).iter().enumerate() {
-        if v == F::ZERO {
-            continue;
-        }
-        if found.is_some() {
-            return None;
-        }
-        found = Some(c);
-    }
-    found
-}
-
-fn row_padding_flag_col(mat: &Mat<F>, row: usize, const_one_cols: &[usize]) -> Option<usize> {
-    let mut first: Option<(usize, F)> = None;
-    let mut second: Option<(usize, F)> = None;
-
-    for (c, &v) in mat.row(row).iter().enumerate() {
-        if v == F::ZERO {
-            continue;
-        }
-        if first.is_none() {
-            first = Some((c, v));
-            continue;
-        }
-        if second.is_none() {
-            second = Some((c, v));
-            continue;
-        }
-        // More than 2 non-zero entries -> not a simple (1-flag) form.
-        return None;
-    }
-
-    let (c1, v1) = first?;
-    let (c2, v2) = second?;
-
-    // Look for the canonical form: a*(one - flag), up to scaling by nonzero a.
-    // That means the two coefficients must be equal magnitude and opposite sign.
-    if v1 != -v2 {
-        return None;
-    }
-
-    if const_one_cols.contains(&c1) {
-        return Some(c2);
-    }
-    if const_one_cols.contains(&c2) {
-        return Some(c1);
-    }
-    None
 }
 
 fn ensure_ccs_has_bus_padding_constraints(
@@ -670,18 +759,151 @@ fn ensure_ccs_has_bus_padding_constraints(
         ));
     };
 
+    let n = s.n;
+    let empty = usize::MAX;
+    let multi = usize::MAX - 1;
+
+    let mut c_has_nonzero = vec![false; n];
+    let mut b_col = vec![empty; n];
+
+    let mut a_count = vec![0u8; n];
+    let mut a_col1 = vec![0usize; n];
+    let mut a_val1 = vec![F::ZERO; n];
+    let mut a_col2 = vec![0usize; n];
+    let mut a_val2 = vec![F::ZERO; n];
+
+    let scan_c = |mat: &CcsMatrix<F>, c_has_nonzero: &mut [bool]| {
+        match mat {
+            CcsMatrix::Identity { n } => {
+                let cap = core::cmp::min(*n, c_has_nonzero.len());
+                for row in 0..cap {
+                    c_has_nonzero[row] = true;
+                }
+            }
+            CcsMatrix::Csc(csc) => {
+                for &row in &csc.row_idx {
+                    if row < c_has_nonzero.len() {
+                        c_has_nonzero[row] = true;
+                    }
+                }
+            }
+        }
+    };
+
+    let scan_b = |mat: &CcsMatrix<F>, b_col: &mut [usize]| {
+        match mat {
+            CcsMatrix::Identity { n } => {
+                let cap = core::cmp::min(*n, b_col.len());
+                for row in 0..cap {
+                    b_col[row] = row;
+                }
+            }
+            CcsMatrix::Csc(csc) => {
+                for col in 0..csc.ncols {
+                    let s0 = csc.col_ptr[col];
+                    let e0 = csc.col_ptr[col + 1];
+                    for k in s0..e0 {
+                        let row = csc.row_idx[k];
+                        if row >= b_col.len() {
+                            continue;
+                        }
+                        if b_col[row] == empty {
+                            b_col[row] = col;
+                        } else {
+                            b_col[row] = multi;
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    let scan_a = |mat: &CcsMatrix<F>,
+                  a_count: &mut [u8],
+                  a_col1: &mut [usize],
+                  a_val1: &mut [F],
+                  a_col2: &mut [usize],
+                  a_val2: &mut [F]| {
+        match mat {
+            CcsMatrix::Identity { n } => {
+                let cap = core::cmp::min(*n, a_count.len());
+                for row in 0..cap {
+                    a_count[row] = 1;
+                    a_col1[row] = row;
+                    a_val1[row] = F::ONE;
+                }
+            }
+            CcsMatrix::Csc(csc) => {
+                for col in 0..csc.ncols {
+                    let s0 = csc.col_ptr[col];
+                    let e0 = csc.col_ptr[col + 1];
+                    for k in s0..e0 {
+                        let row = csc.row_idx[k];
+                        if row >= a_count.len() {
+                            continue;
+                        }
+                        match a_count[row] {
+                            0 => {
+                                a_count[row] = 1;
+                                a_col1[row] = col;
+                                a_val1[row] = csc.vals[k];
+                            }
+                            1 => {
+                                a_count[row] = 2;
+                                a_col2[row] = col;
+                                a_val2[row] = csc.vals[k];
+                            }
+                            _ => {
+                                a_count[row] = 3;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    };
+
+    scan_c(&s.matrices[c_idx], &mut c_has_nonzero);
+    scan_b(&s.matrices[b_idx], &mut b_col);
+    scan_a(
+        &s.matrices[a_idx],
+        &mut a_count,
+        &mut a_col1,
+        &mut a_val1,
+        &mut a_col2,
+        &mut a_val2,
+    );
+
     let mut present: HashSet<(usize, usize)> = HashSet::new();
     let mut padding_rows: HashSet<usize> = HashSet::new();
-    for row in 0..s.n {
-        if !row_is_all_zero(&s.matrices[c_idx], row) {
+    for row in 0..n {
+        if c_has_nonzero[row] {
             continue;
         }
-        let Some(field_col) = row_single_nonzero_col(&s.matrices[b_idx], row) else {
+        let field_col = b_col[row];
+        if field_col == empty || field_col == multi {
+            continue;
+        }
+        if a_count[row] != 2 {
+            continue;
+        }
+        let (c1, v1) = (a_col1[row], a_val1[row]);
+        let (c2, v2) = (a_col2[row], a_val2[row]);
+        if v1 != -v2 {
+            continue;
+        }
+
+        let flag_col = if const_one_cols.contains(&c1) {
+            Some(c2)
+        } else if const_one_cols.contains(&c2) {
+            Some(c1)
+        } else {
+            None
+        };
+        let Some(flag_col) = flag_col else {
             continue;
         };
-        let Some(flag_col) = row_padding_flag_col(&s.matrices[a_idx], row, const_one_cols) else {
-            continue;
-        };
+
         present.insert((flag_col, field_col));
         padding_rows.insert(row);
     }

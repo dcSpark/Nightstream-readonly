@@ -17,6 +17,7 @@ use neo_params::NeoParams;
 use neo_transcript::Poseidon2Transcript;
 use neo_transcript::Transcript;
 use p3_field::PrimeCharacteristicRing;
+use std::sync::Arc;
 
 use crate::engines::utils;
 
@@ -107,7 +108,8 @@ pub fn optimized_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     tr.append_fields(b"sumcheck/initial_sum", &initial_sum.as_coeffs());
 
     // Optimized oracle with cached sparse formats and factored algebra
-    let mut oracle = super::oracle::OptimizedOracle::new(
+    let sparse = Arc::new(super::oracle::SparseCache::build(s));
+    let mut oracle = super::oracle::OptimizedOracle::new_with_sparse(
         s,
         params,
         mcs_witnesses,
@@ -117,6 +119,7 @@ pub fn optimized_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         dims.ell_n,
         dims.d_sc,
         me_inputs.first().map(|mi| mi.r.as_slice()),
+        sparse,
     );
 
     let mut running_sum = initial_sum;
@@ -156,30 +159,13 @@ pub fn optimized_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
                 round_idx
             )));
         }
-        // Interpolation may return coefficients in an unspecified order.
-        // We MUST store them in low→high order (c0, c1, ..., cn) so that
-        // poly_eval_k(coeffs, ·) reproduces ys at x=0,1 and the verifier's
-        // invariant p(0)+p(1) == running_sum holds.
-        let mut coeffs = crate::optimized_engine::interpolate_univariate(&xs, &ys);
+        // Sumcheck requires coefficients in low→high order (c0, c1, ..., cn) so that
+        // poly_eval_k(coeffs, ·) reproduces ys at x=0,1 and the verifier invariant
+        // p(0)+p(1) == running_sum holds.
+        let coeffs = crate::sumcheck::interpolate_from_evals(&xs, &ys);
 
-        // If evaluating at 0/1 doesn't recreate ys, flip the order.
-        // After this normalization, `coeffs` is guaranteed low→high.
-        let ok_at_01 = crate::sumcheck::poly_eval_k(&coeffs, K::ZERO) == ys[0]
-            && crate::sumcheck::poly_eval_k(&coeffs, K::ONE) == ys[1];
-        if !ok_at_01 {
-            coeffs.reverse();
-        }
-
-        debug_assert_eq!(
-            crate::sumcheck::poly_eval_k(&coeffs, K::ZERO),
-            ys[0],
-            "interpolate_univariate returned coefficients in unexpected order (x=0)"
-        );
-        debug_assert_eq!(
-            crate::sumcheck::poly_eval_k(&coeffs, K::ONE),
-            ys[1],
-            "interpolate_univariate returned coefficients in unexpected order (x=1)"
-        );
+        debug_assert_eq!(crate::sumcheck::poly_eval_k(&coeffs, K::ZERO), ys[0]);
+        debug_assert_eq!(crate::sumcheck::poly_eval_k(&coeffs, K::ONE), ys[1]);
 
         for &c in &coeffs {
             tr.append_fields(b"sumcheck/round/coeff", &c.as_coeffs());
@@ -196,21 +182,9 @@ pub fn optimized_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         sumcheck_rounds.push(coeffs);
     }
 
-    // Build outputs literally at r′ using paper-exact helper
+    // Build outputs at r′ using the oracle's r′-only precomputation (no dense scan).
     let fold_digest = tr.digest32();
-    let (r_prime, _alpha_prime) = sumcheck_chals.split_at(dims.ell_n);
-    let out_me = crate::paper_exact_engine::build_me_outputs_paper_exact(
-        s,
-        params,
-        mcs_list,
-        mcs_witnesses,
-        me_inputs,
-        me_witnesses,
-        r_prime,
-        dims.ell_d,
-        fold_digest,
-        log,
-    );
+    let out_me = oracle.build_me_outputs_from_ajtai_precomp(mcs_list, me_inputs, fold_digest, log);
 
     let mut proof = PiCcsProof::new(sumcheck_rounds, Some(initial_sum));
     proof.sumcheck_challenges = sumcheck_chals;
@@ -305,7 +279,8 @@ pub fn prepare_ccs_for_batch<'a>(
     let initial_sum = crate::paper_exact_engine::claimed_initial_sum_from_inputs(s, &ch, me_inputs);
 
     // Create the oracle
-    let oracle = super::oracle::OptimizedOracle::new(
+    let sparse = Arc::new(super::oracle::SparseCache::build(s));
+    let oracle = super::oracle::OptimizedOracle::new_with_sparse(
         s,
         params,
         mcs_witnesses,
@@ -315,6 +290,7 @@ pub fn prepare_ccs_for_batch<'a>(
         dims.ell_n,
         dims.d_sc,
         me_inputs.first().map(|mi| mi.r.as_slice()),
+        sparse,
     );
 
     Ok(CcsBatchContext {
@@ -385,7 +361,7 @@ pub fn finalize_ccs_after_batch<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>
         }
 
         // Interpolate to coefficients
-        let coeffs = super::interpolate_univariate(&xs, &ys);
+        let coeffs = crate::sumcheck::interpolate_from_evals(&xs, &ys);
 
         // Append to transcript and get challenge
         for c in coeffs.iter() {
@@ -404,19 +380,10 @@ pub fn finalize_ccs_after_batch<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>
 
     // Build ME outputs
     let fold_digest = tr.digest32();
-    let (r_prime, _alpha_prime) = sumcheck_chals.split_at(context.ell_n);
-    let out_me = crate::paper_exact_engine::build_me_outputs_paper_exact(
-        s,
-        params,
-        mcs_list,
-        mcs_witnesses,
-        me_inputs,
-        me_witnesses,
-        r_prime,
-        context.ell_d,
-        fold_digest,
-        log,
-    );
+    let _ = (params, s, mcs_witnesses, me_witnesses);
+    let out_me = context
+        .oracle
+        .build_me_outputs_from_ajtai_precomp(mcs_list, me_inputs, fold_digest, log);
 
     let mut proof = super::PiCcsProof::new(sumcheck_rounds, Some(context.initial_sum));
     proof.sumcheck_challenges = sumcheck_chals;

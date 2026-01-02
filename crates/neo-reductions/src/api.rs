@@ -29,6 +29,7 @@ pub use crate::common::{
     left_mul_acc,
     sample_rot_rhos_n, // Dynamic: samples N rhos with norm bound check
     split_b_matrix_k,
+    split_b_matrix_k_with_nonzero_flags,
     RotRing, // Ring metadata for rotation matrix sampling
 };
 
@@ -142,6 +143,49 @@ where
 {
     use crate::engines::pi_rlc_dec::{OptimizedRlcDec, RlcDecOps};
 
+    // Fast path: with a single ME claim there is nothing to mix, so Π_RLC can be the identity.
+    //
+    // We still sample/store `rhos` at the shard layer for transcript binding, but skipping the
+    // S-action here avoids an extremely expensive D×D by D×m witness multiplication.
+    if me_inputs.len() == 1 {
+        assert_eq!(rhos.len(), 1, "Π_RLC(k=1): |rhos| must equal |inputs|");
+        assert_eq!(Zs.len(), 1, "Π_RLC(k=1): |Zs| must equal |inputs|");
+
+        let inp = &me_inputs[0];
+        let t = inp.y.len();
+        assert!(t >= s.t(), "Π_RLC(k=1): ME y.len() must be >= s.t()");
+
+        let inputs_c = vec![inp.c.clone()];
+        let c = mix_commits(rhos, &inputs_c);
+
+        // Recompute y_scalars from digits (canonical).
+        let bK = K::from(F::from_u64(params.b as u64));
+        let mut y_scalars = Vec::with_capacity(t);
+        for j in 0..t {
+            let mut sc = K::ZERO;
+            let mut pow = K::ONE;
+            for rho in 0..D {
+                sc += pow * inp.y[j][rho];
+                pow *= bK;
+            }
+            y_scalars.push(sc);
+        }
+
+        let out = MeInstance::<Cmt, F, K> {
+            c_step_coords: vec![],
+            u_offset: 0,
+            u_len: 0,
+            c,
+            X: inp.X.clone(),
+            r: inp.r.clone(),
+            y: inp.y.clone(),
+            y_scalars,
+            m_in: inp.m_in,
+            fold_digest: inp.fold_digest,
+        };
+        return (out, Zs[0].clone());
+    }
+
     match mode {
         FoldingMode::Optimized => OptimizedRlcDec::rlc_with_commit(s, params, rhos, me_inputs, Zs, ell_d, mix_commits),
         #[cfg(feature = "paper-exact")]
@@ -223,6 +267,62 @@ where
     }
 }
 
+/// DEC (cached): same as `dec_children_with_commit`, but can reuse a caller-provided CSC cache.
+///
+/// This is intended for high-level coordinators (e.g. neo-fold) that already build
+/// a `SparseCache` for the optimized CCS oracle, and want to avoid re-scanning dense matrices
+/// during Π_DEC.
+pub fn dec_children_with_commit_cached<Comb>(
+    mode: FoldingMode,
+    s: &CcsStructure<F>,
+    params: &NeoParams,
+    parent: &MeInstance<Cmt, F, K>,
+    Z_split: &[Mat<F>],
+    ell_d: usize,
+    child_commitments: &[Cmt],
+    combine_b_pows: Comb,
+    sparse: Option<&crate::engines::optimized_engine::oracle::SparseCache<F>>,
+) -> (Vec<MeInstance<Cmt, F, K>>, bool, bool, bool)
+where
+    Comb: Fn(&[Cmt], u32) -> Cmt,
+{
+    use crate::engines::pi_rlc_dec::OptimizedRlcDec;
+
+    match mode {
+        FoldingMode::Optimized => OptimizedRlcDec::dec_children_with_commit_cached(
+            s,
+            params,
+            parent,
+            Z_split,
+            ell_d,
+            child_commitments,
+            combine_b_pows,
+            sparse,
+        ),
+        #[cfg(feature = "paper-exact")]
+        FoldingMode::PaperExact => crate::engines::paper_exact_engine::dec_reduction_paper_exact_with_commit_check(
+            s,
+            params,
+            parent,
+            Z_split,
+            ell_d,
+            child_commitments,
+            combine_b_pows,
+        ),
+        #[cfg(feature = "paper-exact")]
+        FoldingMode::OptimizedWithCrosscheck(_) => OptimizedRlcDec::dec_children_with_commit_cached(
+            s,
+            params,
+            parent,
+            Z_split,
+            ell_d,
+            child_commitments,
+            combine_b_pows,
+            sparse,
+        ),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // RLC/DEC Public Verification API
 // ---------------------------------------------------------------------------
@@ -245,9 +345,55 @@ where
 
     assert!(!inputs.is_empty());
     assert_eq!(rhos.len(), inputs.len());
+    if inputs.len() == 1 {
+        let inp = &inputs[0];
+        let t = inp.y.len();
+        assert!(t >= s.t(), "rlc_public(k=1): ME y.len() must be >= s.t()");
+
+        let inputs_c = vec![inp.c.clone()];
+        let c = mix_rhos_commits(rhos, &inputs_c);
+
+        // Recompute y_scalars from digits (canonical).
+        let bK = K::from(F::from_u64(params.b as u64));
+        let mut y_scalars = Vec::with_capacity(t);
+        for j in 0..t {
+            let mut sc = K::ZERO;
+            let mut pow = K::ONE;
+            for rho in 0..D {
+                sc += pow * inp.y[j][rho];
+                pow *= bK;
+            }
+            y_scalars.push(sc);
+        }
+
+        return MeInstance {
+            c_step_coords: vec![],
+            u_offset: 0,
+            u_len: 0,
+            c,
+            X: inp.X.clone(),
+            r: inp.r.clone(),
+            y: inp.y.clone(),
+            y_scalars,
+            m_in: inp.m_in,
+            fold_digest: inp.fold_digest,
+        };
+    }
     let d = D;
     let m_in = inputs[0].m_in;
     let d_pad = 1usize << ell_d;
+    let t = inputs[0].y.len();
+    assert!(
+        t >= s.t(),
+        "rlc_public: ME input y.len() must be >= s.t()"
+    );
+    for (idx, inst) in inputs.iter().enumerate() {
+        assert_eq!(
+            inst.m_in, m_in,
+            "rlc_public: m_in mismatch at input {idx}"
+        );
+        assert_eq!(inst.y.len(), t, "rlc_public: y.len mismatch at input {idx}");
+    }
 
     // X_out := Σ ρ_i · X_i
     let mut X = Mat::zero(d, m_in, F::ZERO);
@@ -262,8 +408,8 @@ where
     }
 
     // y_out[j] := Σ ρ_i · y_(i,j)  (first D digits, keep padding)
-    let mut y = Vec::with_capacity(s.t());
-    for j in 0..s.t() {
+    let mut y = Vec::with_capacity(t);
+    for j in 0..t {
         let mut acc = vec![K::ZERO; d_pad];
         for (rho, inst) in rhos.iter().zip(inputs.iter()) {
             for r in 0..D {
@@ -279,8 +425,8 @@ where
 
     // y_scalars (convenience)
     let bK = K::from(F::from_u64(params.b as u64));
-    let mut y_scalars = Vec::with_capacity(s.t());
-    for j in 0..s.t() {
+    let mut y_scalars = Vec::with_capacity(t);
+    for j in 0..t {
         let mut sc = K::ZERO;
         let mut pow = K::ONE;
         for rho in 0..D {
@@ -329,6 +475,43 @@ where
         eprintln!("verify_dec_public failed: r mismatch");
         return false;
     }
+    let t = parent.y.len();
+    if t < s.t() {
+        eprintln!(
+            "verify_dec_public failed: parent y.len()={} < s.t()={}",
+            t,
+            s.t()
+        );
+        return false;
+    }
+    for (idx, ch) in children.iter().enumerate() {
+        if ch.y.len() != t {
+            eprintln!(
+                "verify_dec_public failed: child y.len mismatch (child {} has {}, expected {})",
+                idx,
+                ch.y.len(),
+                t
+            );
+            return false;
+        }
+        if ch.y_scalars.len() != parent.y_scalars.len() {
+            eprintln!(
+                "verify_dec_public failed: child y_scalars.len mismatch (child {} has {}, expected {})",
+                idx,
+                ch.y_scalars.len(),
+                parent.y_scalars.len()
+            );
+            return false;
+        }
+    }
+    if parent.y_scalars.len() != t {
+        eprintln!(
+            "verify_dec_public failed: parent y_scalars.len()={} != y.len()={}",
+            parent.y_scalars.len(),
+            t
+        );
+        return false;
+    }
 
     // X
     let mut lhs_X = Mat::zero(D, parent.m_in, F::ZERO);
@@ -353,17 +536,42 @@ where
     // y_j
     let d_pad = 1usize << ell_d;
     let bK = K::from(F::from_u64(params.b as u64));
-    for j in 0..s.t() {
+    for j in 0..t {
         let mut lhs = vec![K::ZERO; d_pad];
         let mut p = K::ONE;
         for i in 0..k {
+            if children[i].y[j].len() != d_pad {
+                eprintln!(
+                    "verify_dec_public failed: child y[{}] len mismatch at j={}",
+                    i, j
+                );
+                return false;
+            }
             for t in 0..d_pad {
                 lhs[t] += p * children[i].y[j][t];
             }
             p *= bK;
         }
+        if parent.y[j].len() != d_pad {
+            eprintln!("verify_dec_public failed: parent y[j] len mismatch at j={j}");
+            return false;
+        }
         if lhs != parent.y[j] {
             eprintln!("verify_dec_public failed: y check mismatch at j={}", j);
+            return false;
+        }
+    }
+
+    // y_scalars_j: scalar decomposition must also hold (covers any extra appended openings).
+    for j in 0..t {
+        let mut lhs = K::ZERO;
+        let mut p = K::ONE;
+        for i in 0..k {
+            lhs += p * children[i].y_scalars[j];
+            p *= bK;
+        }
+        if lhs != parent.y_scalars[j] {
+            eprintln!("verify_dec_public failed: y_scalars check mismatch at j={j}");
             return false;
         }
     }

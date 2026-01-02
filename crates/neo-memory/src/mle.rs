@@ -159,18 +159,7 @@ pub fn compute_me_y_for_ccs(
         // v_j[c] = Σ_{row=0}^{n-1} M_j[row, c] * χ_r[row]
         let mj = &s.matrices[j];
         let mut v_j: Vec<KElem> = vec![KElem::ZERO; m];
-
-        for row in 0..n {
-            let chi_row = chi_r[row];
-            if chi_row == KElem::ZERO {
-                continue; // Skip zero contributions for efficiency
-            }
-            let mj_row = mj.row(row);
-            for c in 0..m {
-                let mj_rc: KElem = mj_row[c].into();
-                v_j[c] += mj_rc * chi_row;
-            }
-        }
+        mj.add_mul_transpose_into(&chi_r, &mut v_j, n);
 
         // Compute y_j = Z · v_j (length d)
         // y_j[row] = Σ_{c=0}^{m-1} Z[row, c] * v_j[c]

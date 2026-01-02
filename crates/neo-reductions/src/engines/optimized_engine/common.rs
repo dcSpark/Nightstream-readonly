@@ -9,10 +9,11 @@
 #![allow(non_snake_case)]
 
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
+use neo_ccs::{CcsMatrix, CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
 use neo_math::{D, K};
 use neo_params::NeoParams;
 use p3_field::{Field, PrimeCharacteristicRing};
+use rayon::prelude::*;
 
 /// Challenges sampled in Step 1 of the protocol
 #[derive(Debug, Clone)]
@@ -104,14 +105,39 @@ where
 }
 
 /// Safe access with zero-padding when indices are outside the true dimension.
-/// - For M_j ∈ F^{n×m}: if row ≥ n or col ≥ m → 0.
-/// - For Z   ∈ F^{d×m}: if rho ≥ d or col ≥ m → 0.
+/// - For Z ∈ F^{d×m}: if rho ≥ d or col ≥ m → 0.
 #[inline]
 fn get_F<Ff: Field + PrimeCharacteristicRing + Copy>(a: &Mat<Ff>, row: usize, col: usize) -> Ff {
     if row < a.rows() && col < a.cols() {
         a[(row, col)]
     } else {
         Ff::ZERO
+    }
+}
+
+/// Safe access into a CCS matrix M_j, returning 0 for out-of-range indices.
+#[inline]
+fn get_M<Ff: Field + PrimeCharacteristicRing + Copy>(a: &CcsMatrix<Ff>, row: usize, col: usize) -> Ff {
+    if row >= a.rows() || col >= a.cols() {
+        return Ff::ZERO;
+    }
+
+    match a {
+        CcsMatrix::Identity { .. } => {
+            if row == col {
+                Ff::ONE
+            } else {
+                Ff::ZERO
+            }
+        }
+        CcsMatrix::Csc(m) => {
+            let s = m.col_ptr[col];
+            let e = m.col_ptr[col + 1];
+            match m.row_idx[s..e].binary_search(&row) {
+                Ok(idx) => m.vals[s + idx],
+                Err(_) => Ff::ZERO,
+            }
+        }
     }
 }
 
@@ -134,7 +160,7 @@ where
         // (M_j z_1)[xr] = Σ_c M_j[xr, c] · z1[c]
         let mut acc = K::ZERO;
         for c in 0..s.m {
-            acc += K::from(get_F(&s.matrices[j], xr_mask, c)) * z1[c];
+            acc += K::from(get_M(&s.matrices[j], xr_mask, c)) * z1[c];
         }
         m_vals[j] = acc;
     }
@@ -156,7 +182,7 @@ where
     let mut y_val = K::ZERO;
     for c in 0..s.m {
         let z = K::from(get_F(Z_i, xa_mask, c));
-        let m = K::from(get_F(&s.matrices[0], xr_mask, c));
+        let m = K::from(get_M(&s.matrices[0], xr_mask, c));
         y_val += z * m;
     }
     range_product::<Ff>(y_val, b)
@@ -168,7 +194,7 @@ where
 fn Eval_ij_at_bool_point<Ff>(
     s: &CcsStructure<Ff>,
     Z_i: &Mat<Ff>,
-    Mj: &Mat<Ff>,
+    Mj: &CcsMatrix<Ff>,
     xa_mask: usize,
     xr_mask: usize,
     alpha: &[K],
@@ -207,7 +233,7 @@ where
     let mut y_val = K::ZERO;
     for c in 0..s.m {
         let z = K::from(get_F(Z_i, xa_mask, c));
-        let m = K::from(get_F(Mj, xr_mask, c));
+        let m = K::from(get_M(Mj, xr_mask, c));
         y_val += z * m;
     }
 
@@ -488,7 +514,7 @@ where
             }
             let mut y_row = K::ZERO;
             for c in 0..s.m {
-                y_row += K::from(get_F(&s.matrices[j], row, c)) * z1[c];
+                y_row += K::from(get_M(&s.matrices[j], row, c)) * z1[c];
             }
             y_eval += wr * y_row;
         }
@@ -510,7 +536,7 @@ where
             continue;
         }
         for c in 0..s.m {
-            v1[c] += K::from(get_F(&s.matrices[0], row, c)) * wr;
+            v1[c] += K::from(get_M(&s.matrices[0], row, c)) * wr;
         }
     }
 
@@ -587,7 +613,7 @@ where
                     continue;
                 }
                 for c in 0..s.m {
-                    vj[c] += K::from(get_F(&s.matrices[j], row, c)) * wr;
+                    vj[c] += K::from(get_M(&s.matrices[j], row, c)) * wr;
                 }
             }
 
@@ -972,7 +998,7 @@ where
                 continue;
             }
             for c in 0..s.m {
-                vj[c] += K::from(get_F(&s.matrices[j], row, c)) * wr;
+                vj[c] += K::from(get_M(&s.matrices[j], row, c)) * wr;
             }
         }
         vjs.push(vj);
@@ -1185,6 +1211,173 @@ where
     (out, Z)
 }
 
+/// --- Π_RLC (optimized) -----------------------------------------------------
+///
+/// Optimized Random Linear Combination for the prover path.
+///
+/// Semantics match `rlc_reduction_paper_exact`, but this implementation:
+/// - Fast-paths the common `k=1` case (no mixing) to avoid a D×D by D×m multiply.
+/// - Uses cache-friendly row-major loops for the large witness matrix `Z` when k>1.
+pub fn rlc_reduction_optimized<Ff>(
+    s: &CcsStructure<Ff>,
+    params: &NeoParams,
+    rhos: &[Mat<Ff>],
+    me_inputs: &[MeInstance<Cmt, Ff, K>],
+    Zs: &[Mat<Ff>],
+    ell_d: usize,
+) -> (MeInstance<Cmt, Ff, K>, Mat<Ff>)
+where
+    Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<Ff>,
+{
+    assert!(
+        !me_inputs.is_empty(),
+        "Π_RLC(optimized): need at least one input"
+    );
+    let k1 = me_inputs.len();
+    assert_eq!(rhos.len(), k1, "Π_RLC: |rhos| must equal |inputs|");
+    assert_eq!(Zs.len(), k1, "Π_RLC: |Zs| must equal |inputs|");
+
+    // IMPORTANT: The folding layer may append extra ME outputs (e.g. shared-bus openings)
+    // beyond `s.t()`. Π_RLC in this module mixes only the core CCS outputs; the sidecar
+    // outputs are recomputed later from `Z_mix` and appended once.
+    let t_core = s.t();
+
+    // k=1: no mixing needed (common for the first step and for CCS-only flows).
+    // We still return only the core CCS outputs to preserve the "append sidecar once" invariant.
+    if k1 == 1 {
+        let mut out = me_inputs[0].clone();
+        out.y.truncate(t_core);
+        out.y_scalars.truncate(t_core);
+        return (out, Zs[0].clone());
+    }
+
+    let d = D;
+    let d_pad = 1usize << ell_d;
+    let m_in = me_inputs[0].m_in;
+    let r = me_inputs[0].r.clone();
+
+    // X := Σ ρ_i X_i
+    let mut X = Mat::zero(d, m_in, Ff::ZERO);
+    {
+        let x_out = X.as_mut_slice();
+        for i in 0..k1 {
+            let rho = &rhos[i];
+            let xi = &me_inputs[i].X;
+            debug_assert_eq!(rho.rows(), d);
+            debug_assert_eq!(rho.cols(), d);
+            debug_assert_eq!(xi.rows(), d);
+            debug_assert_eq!(xi.cols(), m_in);
+
+            let rho_data = rho.as_slice();
+            let x_in = xi.as_slice();
+            for rr in 0..d {
+                let rho_row = &rho_data[rr * d..(rr + 1) * d];
+                let out_off = rr * m_in;
+                for kk in 0..d {
+                    let coeff = rho_row[kk];
+                    if coeff == Ff::ZERO {
+                        continue;
+                    }
+                    let in_off = kk * m_in;
+                    for c in 0..m_in {
+                        x_out[out_off + c] += coeff * x_in[in_off + c];
+                    }
+                }
+            }
+        }
+    }
+
+    // y_j := Σ ρ_i y_(i,j) (apply ρ to the first D digits; keep padding to 2^{ell_d})
+    let mut y: Vec<Vec<K>> = Vec::with_capacity(t_core);
+    for j in 0..t_core {
+        let mut yj_acc = vec![K::ZERO; d_pad];
+        for i in 0..k1 {
+            let yi = &me_inputs[i].y[j];
+            debug_assert!(yi.len() >= d, "ME.y[{j}] must have length >= D");
+            let rho = &rhos[i];
+            for rr in 0..d.min(d_pad) {
+                let mut acc_rr = K::ZERO;
+                for kk in 0..d {
+                    acc_rr += K::from(rho[(rr, kk)]) * yi[kk];
+                }
+                yj_acc[rr] += acc_rr;
+            }
+        }
+        y.push(yj_acc);
+    }
+
+    // y_scalars: base-b recomposition of the first D digits of each y_j
+    let bF = Ff::from_u64(params.b as u64);
+    let mut pow_b = vec![Ff::ONE; D];
+    for i in 1..D {
+        pow_b[i] = pow_b[i - 1] * bF;
+    }
+    let pow_b_k: Vec<K> = pow_b.iter().copied().map(K::from).collect();
+    let y_scalars: Vec<K> = y
+        .iter()
+        .map(|yj| {
+            let mut acc = K::ZERO;
+            for rho in 0..d {
+                acc += yj[rho] * pow_b_k[rho];
+            }
+            acc
+        })
+        .collect();
+
+    // Z := Σ ρ_i Z_i (this is the hot path: D×m is huge).
+    let mut Z = Mat::zero(d, s.m, Ff::ZERO);
+    {
+        let m = s.m;
+        let z_out = Z.as_mut_slice();
+        const BLOCK_COLS: usize = 1024;
+
+        for i in 0..k1 {
+            let rho = &rhos[i];
+            let zi = &Zs[i];
+            debug_assert_eq!(rho.rows(), d);
+            debug_assert_eq!(rho.cols(), d);
+            debug_assert_eq!(zi.rows(), d);
+            debug_assert_eq!(zi.cols(), m);
+
+            let rho_data = rho.as_slice();
+            let z_in = zi.as_slice();
+
+            for col0 in (0..m).step_by(BLOCK_COLS) {
+                let len = core::cmp::min(BLOCK_COLS, m - col0);
+                for kk in 0..d {
+                    let in_off = kk * m + col0;
+                    for rr in 0..d {
+                        let coeff = rho_data[rr * d + kk];
+                        if coeff == Ff::ZERO {
+                            continue;
+                        }
+                        let out_off = rr * m + col0;
+                        for t in 0..len {
+                            z_out[out_off + t] += coeff * z_in[in_off + t];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let out = MeInstance::<Cmt, Ff, K> {
+        c_step_coords: vec![],
+        u_offset: 0,
+        u_len: 0,
+        c: me_inputs[0].c.clone(), // NOTE: caller can replace with true Σ ρ_i·c_i
+        X,
+        r,
+        y,
+        y_scalars,
+        m_in,
+        fold_digest: me_inputs[0].fold_digest,
+    };
+
+    (out, Z)
+}
+
 /// Same as `rlc_reduction_paper_exact`, but also computes the combined commitment via a caller-supplied
 /// mixing function over commitments. This matches the paper's Π_RLC output when `combine_commit` implements
 /// the correct S-module action on commitments.
@@ -1230,6 +1423,37 @@ where
     Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
     K: From<Ff>,
 {
+    dec_reduction_paper_exact_inner(s, params, parent, Z_split, ell_d, None)
+}
+
+/// Same as `dec_reduction_paper_exact`, but uses a prebuilt CSC cache to avoid dense n×m scans.
+pub fn dec_reduction_paper_exact_with_sparse_cache<Ff>(
+    s: &CcsStructure<Ff>,
+    params: &NeoParams,
+    parent: &MeInstance<Cmt, Ff, K>,
+    Z_split: &[Mat<Ff>],
+    ell_d: usize,
+    sparse: &super::sparse::SparseCache<Ff>,
+) -> (Vec<MeInstance<Cmt, Ff, K>>, bool, bool)
+where
+    Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<Ff>,
+{
+    dec_reduction_paper_exact_inner(s, params, parent, Z_split, ell_d, Some(sparse))
+}
+
+fn dec_reduction_paper_exact_inner<Ff>(
+    s: &CcsStructure<Ff>,
+    params: &NeoParams,
+    parent: &MeInstance<Cmt, Ff, K>,
+    Z_split: &[Mat<Ff>],
+    ell_d: usize,
+    sparse: Option<&super::sparse::SparseCache<Ff>>,
+) -> (Vec<MeInstance<Cmt, Ff, K>>, bool, bool)
+where
+    Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<Ff>,
+{
     assert!(
         !Z_split.is_empty(),
         "Π_DEC(paper-exact): need at least one digit witness"
@@ -1240,39 +1464,71 @@ where
     let k = Z_split.len();
     let m_in = parent.m_in;
 
-    // Build χ_r and v_j = M_j^T · χ_r
-    let n_sz = parent.r.len();
-    let n_sz = 1usize << n_sz; // 2^{ℓ_n}
+    // Build χ_r and v_j = M_j^T · χ_r.
+    let ell_n = parent.r.len();
+    let n_sz = 1usize << ell_n; // 2^{ℓ_n}
+    let n_eff = core::cmp::min(s.n, n_sz);
+
     let mut chi_r = vec![K::ZERO; n_sz];
     for row in 0..n_sz {
         let mut w = K::ONE;
-        for bit in 0..parent.r.len() {
-            let rb = parent.r[bit];
+        for (bit, &rb) in parent.r.iter().enumerate() {
             let is_one = ((row >> bit) & 1) == 1;
             w *= if is_one { rb } else { K::ONE - rb };
         }
         chi_r[row] = w;
     }
-    let mut vjs: Vec<Vec<K>> = Vec::with_capacity(s.t());
-    for j in 0..s.t() {
-        let mut vj = vec![K::ZERO; s.m];
-        for row in 0..n_sz {
-            let wr = if row < s.n { chi_r[row] } else { K::ZERO };
-            if wr == K::ZERO {
-                continue;
-            }
-            for c in 0..s.m {
-                vj[c] += K::from(get_F(&s.matrices[j], row, c)) * wr;
+
+    let t_mats = s.t();
+    let mut vjs: Vec<Vec<K>> = vec![vec![K::ZERO; s.m]; t_mats];
+
+    if let Some(sparse) = sparse {
+        if sparse.len() != t_mats {
+            panic!(
+                "DEC: sparse cache matrix count mismatch: got {}, expected {}",
+                sparse.len(),
+                t_mats
+            );
+        }
+
+        // M_0 is identity in our identity-first CCS normalization.
+        let cap = core::cmp::min(s.m, n_eff);
+        vjs[0][..cap].copy_from_slice(&chi_r[..cap]);
+
+        for j in 1..t_mats {
+            if let Some(csc) = sparse.csc(j) {
+                csc.add_mul_transpose_into(&chi_r, &mut vjs[j], n_eff);
+            } else {
+                // Identity sentinel: (I^T · χ_r)[c] = χ_r[c]
+                vjs[j][..cap].copy_from_slice(&chi_r[..cap]);
             }
         }
-        vjs.push(vj);
+    } else {
+        // Dense fallback (reference).
+        for j in 0..t_mats {
+            for row in 0..n_sz {
+                let wr = if row < s.n { chi_r[row] } else { K::ZERO };
+                if wr == K::ZERO {
+                    continue;
+                }
+                for c in 0..s.m {
+                    vjs[j][c] += K::from(get_M(&s.matrices[j], row, c)) * wr;
+                }
+            }
+        }
     }
 
     // base-b powers in K and F
     let bF = Ff::from_u64(params.b as u64);
     let bK = K::from(bF);
 
-    // Helper: project first m_in columns from Z
+    // Precompute b^rho in K for rho=0..D.
+    let mut pow_b_k = vec![K::ONE; D];
+    for rho in 1..D {
+        pow_b_k[rho] = pow_b_k[rho - 1] * bK;
+    }
+
+    // Helper: project first m_in columns from Z.
     let project_x = |Z: &Mat<Ff>| {
         let mut X = Mat::zero(d, m_in, Ff::ZERO);
         for r in 0..d {
@@ -1283,61 +1539,61 @@ where
         X
     };
 
-    // Build children
-    let mut children: Vec<MeInstance<Cmt, Ff, K>> = Vec::with_capacity(k);
-    for i in 0..k {
-        let Xi = project_x(&Z_split[i]);
-        let mut y_i: Vec<Vec<K>> = Vec::with_capacity(s.t());
-        for j in 0..s.t() {
-            // y_(i,j) = Z_i · v_j ∈ K^d (then pad)
-            let mut yij = vec![K::ZERO; d];
-            for rho in 0..d {
-                let mut acc = K::ZERO;
-                for c in 0..s.m {
-                    acc += K::from(get_F(&Z_split[i], rho, c)) * vjs[j][c];
+    let parent_c = &parent.c;
+    let parent_r = &parent.r;
+    let fold_digest = parent.fold_digest;
+
+    // Build children (parallel over digits).
+    let children: Vec<MeInstance<Cmt, Ff, K>> = (0..k)
+        .into_par_iter()
+        .map(|i| {
+            let Zi = &Z_split[i];
+            let Xi = project_x(Zi);
+
+            let mut y_i: Vec<Vec<K>> = Vec::with_capacity(t_mats);
+            let mut y_scalars_i: Vec<K> = Vec::with_capacity(t_mats);
+
+            for j in 0..t_mats {
+                // y_(i,j) = Z_i · v_j ∈ K^d (then pad to 2^{ℓ_d})
+                let vj = &vjs[j];
+                let mut yij_pad = vec![K::ZERO; d_pad];
+
+                for rho in 0..d {
+                    let mut acc = K::ZERO;
+                    for c in 0..s.m {
+                        acc += K::from(get_F(Zi, rho, c)) * vj[c];
+                    }
+                    yij_pad[rho] = acc;
                 }
-                yij[rho] = acc;
+
+                // y_scalars: base-b recomposition of first D digits of yij.
+                let mut sc = K::ZERO;
+                for rho in 0..D {
+                    sc += yij_pad[rho] * pow_b_k[rho];
+                }
+
+                y_i.push(yij_pad);
+                y_scalars_i.push(sc);
             }
-            // pad to 2^{ℓ_d}
-            let mut yij_pad = yij;
-            yij_pad.resize(d_pad, K::ZERO);
-            y_i.push(yij_pad);
-        }
 
-        // y_scalars for child i: base-b recomposition of first D digits of each y_j
-        let mut pow_b_f = vec![Ff::ONE; D];
-        for t in 1..D {
-            pow_b_f[t] = pow_b_f[t - 1] * bF;
-        }
-        let pow_b_k: Vec<K> = pow_b_f.iter().copied().map(K::from).collect();
-        let y_scalars_i: Vec<K> = y_i
-            .iter()
-            .map(|row| {
-                let mut acc = K::ZERO;
-                for (idx, &v) in row.iter().enumerate().take(D) {
-                    acc += v * pow_b_k[idx];
-                }
-                acc
-            })
-            .collect();
-
-        children.push(MeInstance::<Cmt, Ff, K> {
-            c_step_coords: vec![],
-            u_offset: 0,
-            u_len: 0,
-            c: parent.c.clone(), // NOTE: caller can replace with L(Z_i)
-            X: Xi,
-            r: parent.r.clone(),
-            y: y_i,
-            y_scalars: y_scalars_i,
-            m_in,
-            fold_digest: parent.fold_digest,
-        });
-    }
+            MeInstance::<Cmt, Ff, K> {
+                c_step_coords: vec![],
+                u_offset: 0,
+                u_len: 0,
+                c: parent_c.clone(), // caller patches with L(Z_i)
+                X: Xi,
+                r: parent_r.clone(),
+                y: y_i,
+                y_scalars: y_scalars_i,
+                m_in,
+                fold_digest,
+            }
+        })
+        .collect();
 
     // Verify: y_j ?= Σ b^i · y_(i,j)
     let mut ok_y = true;
-    for j in 0..s.t() {
+    for j in 0..t_mats {
         let mut lhs = vec![K::ZERO; d_pad];
         let mut pow = K::ONE;
         for i in 0..k {

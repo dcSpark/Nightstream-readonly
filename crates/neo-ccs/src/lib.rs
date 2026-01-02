@@ -14,6 +14,8 @@ pub mod error;
 pub mod gadgets;
 /// Matrix types and operations.
 pub mod matrix;
+/// Sparse matrix types (CSC) and caches.
+pub mod sparse;
 /// Polynomial types and evaluation.
 pub mod poly;
 /// R1CS to CCS conversion utility (kept: used in tests).
@@ -30,6 +32,7 @@ pub mod utils;
 // Re-export core types
 pub use error::{CcsError, DimMismatch, RelationError};
 pub use matrix::{CsrMatrix, Mat, MatRef};
+pub use sparse::{CcsMatrix, CscMat, SparseCache};
 pub use poly::{SparsePoly, Term};
 pub use r1cs::r1cs_to_ccs;
 

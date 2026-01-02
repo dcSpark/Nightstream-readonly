@@ -38,6 +38,19 @@ pub enum ShardBuildError {
     MissingTable(String),
 }
 
+/// Auxiliary outputs from `build_shard_witness_shared_cpu_bus_with_aux`.
+#[derive(Clone, Debug)]
+pub struct ShardWitnessAux {
+    /// Original (unpadded) VM trace length.
+    pub original_len: usize,
+    pub max_steps: usize,
+    pub chunk_size: usize,
+    /// Deterministic ordering of Twist instances used by the builder (and by the shared CPU bus).
+    pub mem_ids: Vec<u32>,
+    /// Final sparse memory states at the end of the shard: mem_id -> (addr -> value), with zero cells omitted.
+    pub final_mem_states: HashMap<u32, HashMap<u64, Goldilocks>>,
+}
+
 fn ell_from_pow2_n_side(n_side: usize) -> Result<usize, ShardBuildError> {
     if n_side == 0 || !n_side.is_power_of_two() {
         return Err(ShardBuildError::InvalidInit(format!(
@@ -68,6 +81,41 @@ pub fn build_shard_witness_shared_cpu_bus<V, Cmt, K, A, Tw, Sh>(
     initial_mem: &HashMap<(u32, u64), Goldilocks>,
     cpu_arith: &A,
 ) -> Result<Vec<StepWitnessBundle<Cmt, Goldilocks, K>>, ShardBuildError>
+where
+    V: neo_vm_trace::VmCpu<u64, u64>,
+    Tw: neo_vm_trace::Twist<u64, u64>,
+    Sh: neo_vm_trace::Shout<u64>,
+    A: CpuArithmetization<Goldilocks, Cmt>,
+{
+    let (bundles, _aux) = build_shard_witness_shared_cpu_bus_with_aux(
+        vm,
+        twist,
+        shout,
+        max_steps,
+        chunk_size,
+        mem_layouts,
+        lut_tables,
+        lut_table_specs,
+        initial_mem,
+        cpu_arith,
+    )?;
+    Ok(bundles)
+}
+
+/// Like `build_shard_witness_shared_cpu_bus`, but also returns auxiliary outputs useful for
+/// higher-level APIs (e.g. output binding that needs the terminal Twist memory state).
+pub fn build_shard_witness_shared_cpu_bus_with_aux<V, Cmt, K, A, Tw, Sh>(
+    vm: V,
+    twist: Tw,
+    shout: Sh,
+    max_steps: usize,
+    chunk_size: usize,
+    mem_layouts: &HashMap<u32, PlainMemLayout>,
+    lut_tables: &HashMap<u32, LutTable<Goldilocks>>,
+    lut_table_specs: &HashMap<u32, LutTableSpec>,
+    initial_mem: &HashMap<(u32, u64), Goldilocks>,
+    cpu_arith: &A,
+) -> Result<(Vec<StepWitnessBundle<Cmt, Goldilocks, K>>, ShardWitnessAux), ShardBuildError>
 where
     V: neo_vm_trace::VmCpu<u64, u64>,
     Tw: neo_vm_trace::Twist<u64, u64>,
@@ -345,5 +393,12 @@ where
         chunk_start = chunk_end;
     }
 
-    Ok(step_bundles)
+    let aux = ShardWitnessAux {
+        original_len,
+        max_steps,
+        chunk_size,
+        mem_ids,
+        final_mem_states: mem_states,
+    };
+    Ok((step_bundles, aux))
 }

@@ -4,15 +4,16 @@ use crate::{
     error::{CcsError, RelationError},
     matrix::{Mat, MatRef},
     poly::SparsePoly,
+    sparse::{CcsMatrix, CscMat},
     traits::SModuleHomomorphism,
-    utils::{mat_vec_mul_ff, mat_vec_mul_fk, tensor_point},
+    utils::{mat_vec_mul_fk, tensor_point},
 };
 
 /// CCS structure: matrices {M_j} and a sparse polynomial `f` in `t` variables.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CcsStructure<F> {
     /// M_j ∈ F^{n×m}, j = 0..t-1
-    pub matrices: Vec<Mat<F>>,
+    pub matrices: Vec<CcsMatrix<F>>,
     /// Degree-`<u` polynomial in t variables.
     pub f: SparsePoly<F>,
     /// n (rows)
@@ -23,7 +24,47 @@ pub struct CcsStructure<F> {
 
 impl<F: Field> CcsStructure<F> {
     /// Create a CCS structure; validates matrix shapes & polynomial arity.
-    pub fn new(matrices: Vec<Mat<F>>, f: SparsePoly<F>) -> Result<Self, RelationError> {
+    pub fn new(matrices: Vec<Mat<F>>, f: SparsePoly<F>) -> Result<Self, RelationError>
+    where
+        F: p3_field::PrimeCharacteristicRing + Copy + Eq + Send + Sync,
+    {
+        if matrices.is_empty() {
+            return Err(RelationError::InvalidStructure);
+        }
+        let n = matrices[0].rows();
+        let m = matrices[0].cols();
+        for mj in matrices.iter() {
+            if mj.rows() != n || mj.cols() != m {
+                return Err(RelationError::InvalidStructure);
+            }
+            if mj.rows() == 0 || mj.cols() == 0 {
+                return Err(RelationError::InvalidStructure);
+            }
+        }
+        let t = matrices.len();
+        if f.arity() != t {
+            return Err(RelationError::PolyArity {
+                poly_arity: f.arity(),
+                t,
+            });
+        }
+
+        let matrices = matrices
+            .into_iter()
+            .map(|mj| {
+                if mj.is_identity_hint() {
+                    CcsMatrix::Identity { n: mj.rows() }
+                } else {
+                    CcsMatrix::Csc(CscMat::from_dense_row_major(&mj))
+                }
+            })
+            .collect();
+
+        Ok(Self { matrices, f, n, m })
+    }
+
+    /// Create a CCS structure from sparse matrices (CSC / identity).
+    pub fn new_sparse(matrices: Vec<CcsMatrix<F>>, f: SparsePoly<F>) -> Result<Self, RelationError> {
         if matrices.is_empty() {
             return Err(RelationError::InvalidStructure);
         }
@@ -77,7 +118,7 @@ impl<F: Field> CcsStructure<F> {
         }
         // Insert identity at position 0
         let mut matrices = self.matrices.clone();
-        matrices.insert(0, Mat::<F>::identity(self.n));
+        matrices.insert(0, CcsMatrix::Identity { n: self.n });
         // Shift polynomial variables by inserting a dummy variable at the front
         let f = self.f.insert_var_at_front();
         Ok(CcsStructure {
@@ -86,6 +127,31 @@ impl<F: Field> CcsStructure<F> {
             n: self.n,
             m: self.m,
         })
+    }
+
+    /// Owned variant of `ensure_identity_first` that avoids cloning when `M₀` is already identity.
+    ///
+    /// This is useful in hot paths where callers already own a `CcsStructure` and only need to
+    /// normalize it (if necessary) for Ajtai/NC semantics.
+    pub fn ensure_identity_first_owned(mut self) -> Result<Self, RelationError>
+    where
+        F: p3_field::PrimeCharacteristicRing + Copy + Eq + Clone,
+    {
+        // If not square, we cannot insert a true identity; leave structure unchanged.
+        if self.n != self.m {
+            return Ok(self);
+        }
+        let is_id0 = self
+            .matrices
+            .first()
+            .map(|m0| m0.is_identity())
+            .unwrap_or(false);
+        if is_id0 {
+            return Ok(self);
+        }
+        self.matrices.insert(0, CcsMatrix::Identity { n: self.n });
+        self.f = self.f.insert_var_at_front();
+        Ok(self)
     }
 
     /// **STRICT** validation: Assert that M₀ = I_n for Ajtai/NC pipeline.
@@ -284,20 +350,9 @@ where
     }
 
     for (j, mj) in s.matrices.iter().enumerate() {
-        // v = M_j^T r^b  →  v[c] = Σ_r M_j[r,c] * rb[r]
-        let v_k_m = {
-            // multiply transpose-by-vector without materializing M_j^T
-            let mut v = vec![K::ZERO; s.m];
-            for r in 0..s.n {
-                let rb_r = rb[r];
-                let row = mj.row(r);
-                for c in 0..s.m {
-                    let a_k: K = row[c].into();
-                    v[c] += a_k * rb_r;
-                }
-            }
-            v
-        };
+        // v = M_j^T r^b (consume only the first n rows of χ_r)
+        let mut v_k_m = vec![K::ZERO; s.m];
+        mj.add_mul_transpose_into(&rb, &mut v_k_m, s.n);
         // y*_j = Z v_k_m
         let z_ref = MatRef::from_mat(&wit.Z);
         let y_star = mat_vec_mul_fk::<F, K>(z_ref.data, z_ref.rows, z_ref.cols, &v_k_m);
@@ -326,7 +381,8 @@ pub fn check_ccs_rowwise_zero<F: Field>(s: &CcsStructure<F>, x: &[F], w: &[F]) -
     // Compute M_j z for every j
     let mut mz: Vec<Vec<F>> = Vec::with_capacity(s.t());
     for mj in &s.matrices {
-        let v = mat_vec_mul_ff::<F>(mj.as_slice(), s.n, s.m, &z);
+        let mut v = vec![F::ZERO; s.n];
+        mj.add_mul_into(&z, &mut v, s.n);
         mz.push(v);
     }
 
@@ -385,7 +441,8 @@ pub fn check_ccs_rowwise_relaxed<F: Field>(
     // M_j z for every j
     let mut mz: Vec<Vec<F>> = Vec::with_capacity(s.t());
     for mj in &s.matrices {
-        let v = mat_vec_mul_ff::<F>(mj.as_slice(), s.n, s.m, &z);
+        let mut v = vec![F::ZERO; s.n];
+        mj.add_mul_into(&z, &mut v, s.n);
         mz.push(v);
     }
 

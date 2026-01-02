@@ -30,11 +30,55 @@ use neo_math::{KExtensions, D, F, K};
 use neo_memory::ts_common as ts;
 use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
 use neo_params::NeoParams;
+use neo_reductions::engines::optimized_engine::oracle::SparseCache;
 use neo_reductions::engines::utils;
 use neo_reductions::paper_exact_engine::{build_me_outputs_paper_exact, claimed_initial_sum_from_inputs};
 use neo_reductions::sumcheck::{poly_eval_k, RoundOracle};
 use neo_transcript::{Poseidon2Transcript, Transcript};
 use p3_field::PrimeCharacteristicRing;
+use rayon::prelude::*;
+use std::borrow::Cow;
+use std::sync::Arc;
+
+enum CcsOracleDispatch<'a> {
+    Optimized(neo_reductions::engines::optimized_engine::oracle::OptimizedOracle<'a, F>),
+    #[cfg(feature = "paper-exact")]
+    PaperExact(neo_reductions::engines::paper_exact_engine::oracle::PaperExactOracle<'a, F>),
+}
+
+impl<'a> RoundOracle for CcsOracleDispatch<'a> {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        match self {
+            Self::Optimized(oracle) => oracle.evals_at(points),
+            #[cfg(feature = "paper-exact")]
+            Self::PaperExact(oracle) => oracle.evals_at(points),
+        }
+    }
+
+    fn num_rounds(&self) -> usize {
+        match self {
+            Self::Optimized(oracle) => oracle.num_rounds(),
+            #[cfg(feature = "paper-exact")]
+            Self::PaperExact(oracle) => oracle.num_rounds(),
+        }
+    }
+
+    fn degree_bound(&self) -> usize {
+        match self {
+            Self::Optimized(oracle) => oracle.degree_bound(),
+            #[cfg(feature = "paper-exact")]
+            Self::PaperExact(oracle) => oracle.degree_bound(),
+        }
+    }
+
+    fn fold(&mut self, r: K) {
+        match self {
+            Self::Optimized(oracle) => oracle.fold(r),
+            #[cfg(feature = "paper-exact")]
+            Self::PaperExact(oracle) => oracle.fold(r),
+        }
+    }
+}
 
 // ============================================================================
 // Utilities
@@ -302,6 +346,8 @@ fn prove_rlc_dec_lane<L, MR, MB>(
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
     s: &CcsStructure<F>,
+    ccs_sparse_cache: Option<&SparseCache<F>>,
+    cpu_bus: Option<&neo_memory::cpu::BusLayout>,
     ring: &ccs::RotRing,
     ell_d: usize,
     k_dec: usize,
@@ -312,13 +358,13 @@ fn prove_rlc_dec_lane<L, MR, MB>(
     mixers: CommitMixers<MR, MB>,
 ) -> Result<(RlcDecProof, Vec<Mat<F>>), PiCcsError>
 where
-    L: SModuleHomomorphism<F, Cmt>,
+    L: SModuleHomomorphism<F, Cmt> + Sync,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
     bind_rlc_inputs(tr, lane, step_idx, me_inputs)?;
     let rlc_rhos = ccs::sample_rot_rhos_n(tr, params, ring, me_inputs.len())?;
-    let (rlc_parent, Z_mix) = ccs::rlc_with_commit(
+    let (mut rlc_parent, Z_mix) = ccs::rlc_with_commit(
         mode.clone(),
         s,
         params,
@@ -329,9 +375,14 @@ where
         mixers.mix_rhos_commits,
     );
 
-    let Z_split = ccs::split_b_matrix_k(&Z_mix, k_dec, params.b)?;
-    let child_cs: Vec<Cmt> = Z_split.iter().map(|Zi| l.commit(Zi)).collect();
-    let (dec_children, ok_y, ok_X, ok_c) = ccs::dec_children_with_commit(
+    let (Z_split, digit_nonzero) = ccs::split_b_matrix_k_with_nonzero_flags(&Z_mix, k_dec, params.b)?;
+    let zero_c = Cmt::zeros(rlc_parent.c.d, rlc_parent.c.kappa);
+    let child_cs: Vec<Cmt> = Z_split
+        .par_iter()
+        .enumerate()
+        .map(|(idx, Zi)| if digit_nonzero[idx] { l.commit(Zi) } else { zero_c.clone() })
+        .collect();
+    let (mut dec_children, ok_y, ok_X, ok_c) = ccs::dec_children_with_commit_cached(
         mode.clone(),
         s,
         params,
@@ -340,6 +391,7 @@ where
         ell_d,
         &child_cs,
         mixers.combine_b_pows,
+        ccs_sparse_cache,
     );
     if !(ok_y && ok_X && ok_c) {
         let lane_label = match lane {
@@ -350,6 +402,26 @@ where
             "{} public check failed at step {} (y={}, X={}, c={})",
             lane_label, step_idx, ok_y, ok_X, ok_c
         )));
+    }
+
+    // Shared CPU bus: carry the implicit bus openings through Π_RLC/Π_DEC so they remain
+    // part of the folded instance (and are checked by public DEC verification).
+    if let Some(bus) = cpu_bus {
+        if bus.bus_cols > 0 {
+            let core_t = s.t();
+            crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
+                params,
+                bus,
+                core_t,
+                &Z_mix,
+                &mut rlc_parent,
+            )?;
+            for (child, Zi) in dec_children.iter_mut().zip(Z_split.iter()) {
+                crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
+                    params, bus, core_t, Zi, child,
+                )?;
+            }
+        }
     }
 
     Ok((
@@ -457,6 +529,23 @@ where
 // Shard Proving
 // ============================================================================
 
+#[derive(Clone)]
+pub(crate) struct ShardProverContext {
+    pub ccs_mat_digest: Vec<F>,
+    pub ccs_sparse_cache: Option<Arc<SparseCache<F>>>,
+}
+
+#[inline]
+fn mode_uses_sparse_cache(mode: &FoldingMode) -> bool {
+    match mode {
+        FoldingMode::Optimized => true,
+        #[cfg(feature = "paper-exact")]
+        FoldingMode::OptimizedWithCrosscheck(_) => true,
+        #[cfg(feature = "paper-exact")]
+        FoldingMode::PaperExact => false,
+    }
+}
+
 fn fold_shard_prove_impl<L, MR, MB>(
     collect_val_lane_wits: bool,
     mode: FoldingMode,
@@ -469,16 +558,30 @@ fn fold_shard_prove_impl<L, MR, MB>(
     l: &L,
     mixers: CommitMixers<MR, MB>,
     ob: Option<(&crate::output_binding::OutputBindingConfig, &[F])>,
+    prover_ctx: Option<&ShardProverContext>,
 ) -> Result<(ShardProof, Vec<Mat<F>>, Vec<Mat<F>>), PiCcsError>
 where
-    L: SModuleHomomorphism<F, Cmt>,
+    L: SModuleHomomorphism<F, Cmt> + Sync,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let s0 = s_me
-        .ensure_identity_first()
-        .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
-    let (s, cpu_bus) = crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(&s0, steps)?;
+    let is_id0 = s_me.n == s_me.m
+        && s_me
+            .matrices
+            .first()
+            .map(|m0| m0.is_identity())
+            .unwrap_or(false);
+    let s0: Cow<'_, CcsStructure<F>> = if is_id0 {
+        Cow::Borrowed(s_me)
+    } else {
+        Cow::Owned(
+            s_me
+                .ensure_identity_first()
+                .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?,
+        )
+    };
+    let (s, cpu_bus) =
+        crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(s0.as_ref(), steps)?;
     // Route A terminal checks interpret `ME.y_scalars[0]` as MLE(column)(r_time), which requires M₀ = I.
     s.assert_m0_is_identity_for_nc()
         .map_err(|e| PiCcsError::InvalidInput(format!("identity-first (M₀=I) required: {e:?}")))?;
@@ -487,7 +590,24 @@ where
         ell_n,
         ell,
         d_sc,
-    } = utils::build_dims_and_policy(params, &s)?;
+    } = utils::build_dims_and_policy(params, s)?;
+    let ccs_sparse_cache: Option<Arc<SparseCache<F>>> = if mode_uses_sparse_cache(&mode) {
+        Some(
+            prover_ctx
+                .and_then(|ctx| ctx.ccs_sparse_cache.clone())
+                .unwrap_or_else(|| Arc::new(SparseCache::build(s))),
+        )
+    } else {
+        None
+    };
+    let ccs_mat_digest = prover_ctx
+        .map(|ctx| ctx.ccs_mat_digest.clone())
+        .unwrap_or_else(|| utils::digest_ccs_matrices_with_sparse_cache(s, ccs_sparse_cache.as_deref()));
+    if mode_uses_sparse_cache(&mode) && ccs_sparse_cache.is_none() {
+        return Err(PiCcsError::ProtocolError(
+            "missing SparseCache for optimized mode".into(),
+        ));
+    }
     let k_dec = params.k_rho as usize;
     let ring = ccs::RotRing::goldilocks();
 
@@ -582,7 +702,15 @@ where
         // 5) Finish CCS alone for remaining ell_d Ajtai rounds
         // 6) Emit CCS + memory ME claims at the shared r_time and fold via RLC/DEC
 
-        utils::bind_header_and_instances(tr, params, &s, core::slice::from_ref(mcs_inst), ell, d_sc, 0)?;
+        utils::bind_header_and_instances_with_digest(
+            tr,
+            params,
+            &s,
+            core::slice::from_ref(mcs_inst),
+            ell,
+            d_sc,
+            &ccs_mat_digest,
+        )?;
         utils::bind_me_inputs(tr, &accumulator)?;
         let ch = utils::sample_challenges(tr, ell_d, ell)?;
         let ccs_initial_sum = claimed_initial_sum_from_inputs(&s, &ch, &accumulator);
@@ -593,10 +721,12 @@ where
         let r_cycle: Vec<K> =
             ts::sample_ext_point(tr, b"route_a/r_cycle", b"route_a/cycle/0", b"route_a/cycle/1", ell_n);
 
-        // CCS oracle (engine-selected)
-        let mut ccs_oracle: Box<dyn RoundOracle> = match mode.clone() {
-            FoldingMode::Optimized => {
-                Box::new(neo_reductions::engines::optimized_engine::oracle::OptimizedOracle::new(
+        // CCS oracle (engine-selected).
+        //
+        // Keep the optimized oracle concrete so we can build outputs from its Ajtai precompute.
+        let mut ccs_oracle: CcsOracleDispatch<'_> = match mode.clone() {
+            FoldingMode::Optimized => CcsOracleDispatch::Optimized(
+                neo_reductions::engines::optimized_engine::oracle::OptimizedOracle::new_with_sparse(
                     &s,
                     params,
                     core::slice::from_ref(mcs_wit),
@@ -606,10 +736,14 @@ where
                     ell_n,
                     d_sc,
                     accumulator.first().map(|mi| mi.r.as_slice()),
-                ))
-            }
+                    ccs_sparse_cache
+                        .as_ref()
+                        .expect("SparseCache required for optimized mode")
+                        .clone(),
+                ),
+            ),
             #[cfg(feature = "paper-exact")]
-            FoldingMode::PaperExact => Box::new(
+            FoldingMode::PaperExact => CcsOracleDispatch::PaperExact(
                 neo_reductions::engines::paper_exact_engine::oracle::PaperExactOracle::new(
                     &s,
                     params,
@@ -623,8 +757,8 @@ where
                 ),
             ),
             #[cfg(feature = "paper-exact")]
-            FoldingMode::OptimizedWithCrosscheck(_) => {
-                Box::new(neo_reductions::engines::optimized_engine::oracle::OptimizedOracle::new(
+            FoldingMode::OptimizedWithCrosscheck(_) => CcsOracleDispatch::Optimized(
+                neo_reductions::engines::optimized_engine::oracle::OptimizedOracle::new_with_sparse(
                     &s,
                     params,
                     core::slice::from_ref(mcs_wit),
@@ -634,8 +768,12 @@ where
                     ell_n,
                     d_sc,
                     accumulator.first().map(|mi| mi.r.as_slice()),
-                ))
-            }
+                    ccs_sparse_cache
+                        .as_ref()
+                        .expect("SparseCache required for optimized mode")
+                        .clone(),
+                ),
+            ),
         };
 
         let shout_pre = crate::memory_sidecar::memory::prove_shout_addr_pre_time(
@@ -695,7 +833,7 @@ where
             ell_n,
             d_sc,
             ccs_initial_sum,
-            ccs_oracle.as_mut(),
+            &mut ccs_oracle,
             &mut mem_oracles,
             step,
             twist_read_claims,
@@ -715,7 +853,7 @@ where
             .map(|r| r.final_value)
             .unwrap_or(ccs_initial_sum);
 
-        let mut ccs_ajtai = RoundOraclePrefix::new(ccs_oracle.as_mut(), ell_d);
+        let mut ccs_ajtai = RoundOraclePrefix::new(&mut ccs_oracle, ell_d);
         let (ajtai_rounds, ajtai_chals) =
             run_sumcheck_prover_ds(tr, b"ccs/ajtai", idx, &mut ccs_ajtai, ajtai_initial_sum)?;
         let mut running_sum = ajtai_initial_sum;
@@ -725,23 +863,62 @@ where
         sumcheck_rounds.extend_from_slice(&ajtai_rounds);
         sumcheck_chals.extend_from_slice(&ajtai_chals);
 
+        // Build CCS ME outputs at r_time.
+        let fold_digest = tr.digest32();
+        let mut ccs_out = match &mut ccs_oracle {
+            CcsOracleDispatch::Optimized(oracle) => oracle.build_me_outputs_from_ajtai_precomp(
+                core::slice::from_ref(mcs_inst),
+                &accumulator,
+                fold_digest,
+                l,
+            ),
+            #[cfg(feature = "paper-exact")]
+            CcsOracleDispatch::PaperExact(_) => build_me_outputs_paper_exact(
+                &s,
+                params,
+                core::slice::from_ref(mcs_inst),
+                core::slice::from_ref(mcs_wit),
+                &accumulator,
+                &accumulator_wit,
+                &r_time,
+                ell_d,
+                fold_digest,
+                l,
+            ),
+        };
+
         // CCS oracle borrows accumulator_wit; drop before updating accumulator_wit at the end.
         drop(ccs_oracle);
 
-        // Build CCS ME outputs at r_time
-        let fold_digest = tr.digest32();
-        let ccs_out = build_me_outputs_paper_exact(
-            &s,
-            params,
-            core::slice::from_ref(mcs_inst),
-            core::slice::from_ref(mcs_wit),
-            &accumulator,
-            &accumulator_wit,
-            &r_time,
-            ell_d,
-            fold_digest,
-            l,
-        );
+        // Shared CPU bus: append "implicit openings" for all bus columns without materializing
+        // bus copyout matrices into the CCS.
+        if cpu_bus.bus_cols > 0 {
+            let core_t = s.t();
+            if ccs_out.len() != 1 + accumulator_wit.len() {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "CCS output count mismatch for bus openings (ccs_out.len()={}, expected {})",
+                    ccs_out.len(),
+                    1 + accumulator_wit.len()
+                )));
+            }
+
+            crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
+                params,
+                &cpu_bus,
+                core_t,
+                &mcs_wit.Z,
+                &mut ccs_out[0],
+            )?;
+            for (out, Z) in ccs_out.iter_mut().skip(1).zip(accumulator_wit.iter()) {
+                crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
+                    params,
+                    &cpu_bus,
+                    core_t,
+                    Z,
+                    out,
+                )?;
+            }
+        }
 
         if ccs_out.len() != k {
             return Err(PiCcsError::ProtocolError(format!(
@@ -767,6 +944,7 @@ where
         let mut mem_proof = crate::memory_sidecar::memory::finalize_route_a_memory_prover(
             tr,
             params,
+            &cpu_bus,
             &s,
             step,
             prev_step,
@@ -780,7 +958,11 @@ where
         )?;
         prev_twist_decoded = Some(twist_pre.into_iter().map(|p| p.decoded).collect());
 
-        normalize_me_claims(&mut mem_proof.cpu_me_claims_val, ell_n, ell_d, s.t())?;
+        let y_len_total = s
+            .t()
+            .checked_add(cpu_bus.bus_cols)
+            .ok_or_else(|| PiCcsError::ProtocolError("t + bus_cols overflow".into()))?;
+        normalize_me_claims(&mut mem_proof.cpu_me_claims_val, ell_n, ell_d, y_len_total)?;
 
         validate_me_batch_invariants(&ccs_out, "prove step ccs outputs")?;
 
@@ -790,6 +972,8 @@ where
             tr,
             params,
             &s,
+            ccs_sparse_cache.as_deref(),
+            Some(&cpu_bus),
             &ring,
             ell_d,
             k_dec,
@@ -833,6 +1017,8 @@ where
                 tr,
                 params,
                 &s,
+                ccs_sparse_cache.as_deref(),
+                Some(&cpu_bus),
                 &ring,
                 ell_d,
                 k_dec,
@@ -891,7 +1077,7 @@ pub fn fold_shard_prove<L, MR, MB>(
     mixers: CommitMixers<MR, MB>,
 ) -> Result<ShardProof, PiCcsError>
 where
-    L: SModuleHomomorphism<F, Cmt>,
+    L: SModuleHomomorphism<F, Cmt> + Sync,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
@@ -907,6 +1093,41 @@ where
         l,
         mixers,
         None,
+        None,
+    )?;
+    Ok(proof)
+}
+
+pub(crate) fn fold_shard_prove_with_context<L, MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepWitnessBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_wit_init: &[Mat<F>],
+    l: &L,
+    mixers: CommitMixers<MR, MB>,
+    ctx: &ShardProverContext,
+) -> Result<ShardProof, PiCcsError>
+where
+    L: SModuleHomomorphism<F, Cmt> + Sync,
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    let (proof, _final_main_wits, _val_lane_wits) = fold_shard_prove_impl(
+        false,
+        mode,
+        tr,
+        params,
+        s_me,
+        steps,
+        acc_init,
+        acc_wit_init,
+        l,
+        mixers,
+        None,
+        Some(ctx),
     )?;
     Ok(proof)
 }
@@ -925,7 +1146,7 @@ pub fn fold_shard_prove_with_output_binding<L, MR, MB>(
     final_memory_state: &[F],
 ) -> Result<ShardProof, PiCcsError>
 where
-    L: SModuleHomomorphism<F, Cmt>,
+    L: SModuleHomomorphism<F, Cmt> + Sync,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
@@ -941,6 +1162,43 @@ where
         l,
         mixers,
         Some((ob_cfg, final_memory_state)),
+        None,
+    )?;
+    Ok(proof)
+}
+
+pub(crate) fn fold_shard_prove_with_output_binding_with_context<L, MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepWitnessBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_wit_init: &[Mat<F>],
+    l: &L,
+    mixers: CommitMixers<MR, MB>,
+    ob_cfg: &crate::output_binding::OutputBindingConfig,
+    final_memory_state: &[F],
+    ctx: &ShardProverContext,
+) -> Result<ShardProof, PiCcsError>
+where
+    L: SModuleHomomorphism<F, Cmt> + Sync,
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    let (proof, _final_main_wits, _val_lane_wits) = fold_shard_prove_impl(
+        false,
+        mode,
+        tr,
+        params,
+        s_me,
+        steps,
+        acc_init,
+        acc_wit_init,
+        l,
+        mixers,
+        Some((ob_cfg, final_memory_state)),
+        Some(ctx),
     )?;
     Ok(proof)
 }
@@ -957,7 +1215,7 @@ pub fn fold_shard_prove_with_witnesses<L, MR, MB>(
     mixers: CommitMixers<MR, MB>,
 ) -> Result<(ShardProof, ShardFoldOutputs<Cmt, F, K>, ShardFoldWitnesses<F>), PiCcsError>
 where
-    L: SModuleHomomorphism<F, Cmt>,
+    L: SModuleHomomorphism<F, Cmt> + Sync,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
@@ -972,6 +1230,7 @@ where
         acc_wit_init,
         l,
         mixers,
+        None,
         None,
     )?;
     let outputs = proof.compute_fold_outputs(acc_init);
@@ -1013,15 +1272,29 @@ fn fold_shard_verify_impl<MR, MB>(
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
     ob_cfg: Option<&crate::output_binding::OutputBindingConfig>,
+    prover_ctx: Option<&ShardProverContext>,
 ) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
 where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let s0 = s_me
-        .ensure_identity_first()
-        .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
-    let (s, cpu_bus) = crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(&s0, steps)?;
+    let is_id0 = s_me.n == s_me.m
+        && s_me
+            .matrices
+            .first()
+            .map(|m0| m0.is_identity())
+            .unwrap_or(false);
+    let s0: Cow<'_, CcsStructure<F>> = if is_id0 {
+        Cow::Borrowed(s_me)
+    } else {
+        Cow::Owned(
+            s_me
+                .ensure_identity_first()
+                .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?,
+        )
+    };
+    let (s, cpu_bus) =
+        crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(s0.as_ref(), steps)?;
     // Route A terminal checks interpret `ME.y_scalars[0]` as MLE(column)(r_time), which requires M₀ = I.
     s.assert_m0_is_identity_for_nc()
         .map_err(|e| PiCcsError::InvalidInput(format!("identity-first (M₀=I) required: {e:?}")))?;
@@ -1030,7 +1303,7 @@ where
         ell_n,
         ell,
         d_sc,
-    } = utils::build_dims_and_policy(params, &s)?;
+    } = utils::build_dims_and_policy(params, s)?;
     let ring = ccs::RotRing::goldilocks();
 
     if steps.len() != proof.steps.len() {
@@ -1056,6 +1329,18 @@ where
 
     let mut accumulator = acc_init.to_vec();
     let mut val_lane_obligations: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let ccs_sparse_cache: Option<Arc<SparseCache<F>>> = if mode_uses_sparse_cache(&mode) {
+        Some(
+            prover_ctx
+                .and_then(|ctx| ctx.ccs_sparse_cache.clone())
+                .unwrap_or_else(|| Arc::new(SparseCache::build(s))),
+        )
+    } else {
+        None
+    };
+    let ccs_mat_digest = prover_ctx
+        .map(|ctx| ctx.ccs_mat_digest.clone())
+        .unwrap_or_else(|| utils::digest_ccs_matrices_with_sparse_cache(s, ccs_sparse_cache.as_deref()));
 
     for (idx, (step, step_proof)) in steps.iter().zip(proof.steps.iter()).enumerate() {
         absorb_step_memory(tr, step);
@@ -1119,7 +1404,15 @@ where
         // --------------------------------------------------------------------
 
         // Bind CCS header + ME inputs and sample public challenges.
-        utils::bind_header_and_instances(tr, params, &s, core::slice::from_ref(mcs_inst), ell, d_sc, 0)?;
+        utils::bind_header_and_instances_with_digest(
+            tr,
+            params,
+            &s,
+            core::slice::from_ref(mcs_inst),
+            ell,
+            d_sc,
+            &ccs_mat_digest,
+        )?;
         utils::bind_me_inputs(tr, &accumulator)?;
         let ch = utils::sample_challenges(tr, ell_d, ell)?;
         let expected_ch = &step_proof.fold.ccs_proof.challenges_public;
@@ -1497,7 +1790,7 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    fold_shard_verify_impl(mode, tr, params, s_me, steps, acc_init, proof, mixers, None)
+    fold_shard_verify_impl(mode, tr, params, s_me, steps, acc_init, proof, mixers, None, None)
 }
 
 pub fn fold_shard_verify_with_step_linking<MR, MB>(
@@ -1534,7 +1827,120 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    fold_shard_verify_impl(mode, tr, params, s_me, steps, acc_init, proof, mixers, Some(ob_cfg))
+    fold_shard_verify_impl(
+        mode,
+        tr,
+        params,
+        s_me,
+        steps,
+        acc_init,
+        proof,
+        mixers,
+        Some(ob_cfg),
+        None,
+    )
+}
+
+pub(crate) fn fold_shard_verify_with_context<MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepInstanceBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    proof: &ShardProof,
+    mixers: CommitMixers<MR, MB>,
+    prover_ctx: &ShardProverContext,
+) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
+where
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    fold_shard_verify_impl(
+        mode,
+        tr,
+        params,
+        s_me,
+        steps,
+        acc_init,
+        proof,
+        mixers,
+        None,
+        Some(prover_ctx),
+    )
+}
+
+pub(crate) fn fold_shard_verify_with_step_linking_with_context<MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepInstanceBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    proof: &ShardProof,
+    mixers: CommitMixers<MR, MB>,
+    step_linking: &StepLinkingConfig,
+    prover_ctx: &ShardProverContext,
+) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
+where
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    check_step_linking(steps, step_linking)?;
+    fold_shard_verify_with_context(mode, tr, params, s_me, steps, acc_init, proof, mixers, prover_ctx)
+}
+
+pub(crate) fn fold_shard_verify_with_output_binding_with_context<MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepInstanceBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    proof: &ShardProof,
+    mixers: CommitMixers<MR, MB>,
+    ob_cfg: &crate::output_binding::OutputBindingConfig,
+    prover_ctx: &ShardProverContext,
+) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
+where
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    fold_shard_verify_impl(
+        mode,
+        tr,
+        params,
+        s_me,
+        steps,
+        acc_init,
+        proof,
+        mixers,
+        Some(ob_cfg),
+        Some(prover_ctx),
+    )
+}
+
+pub(crate) fn fold_shard_verify_with_output_binding_and_step_linking_with_context<MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepInstanceBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    proof: &ShardProof,
+    mixers: CommitMixers<MR, MB>,
+    ob_cfg: &crate::output_binding::OutputBindingConfig,
+    step_linking: &StepLinkingConfig,
+    prover_ctx: &ShardProverContext,
+) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
+where
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    check_step_linking(steps, step_linking)?;
+    fold_shard_verify_with_output_binding_with_context(
+        mode, tr, params, s_me, steps, acc_init, proof, mixers, ob_cfg, prover_ctx,
+    )
 }
 
 pub fn fold_shard_verify_with_output_binding_and_step_linking<MR, MB>(

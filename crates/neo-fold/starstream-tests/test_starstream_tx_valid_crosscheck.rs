@@ -5,9 +5,11 @@
 
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use neo_fold::session::{FoldingSession, NeoStep, StepArtifacts, StepSpec};
 use neo_fold::pi_ccs::FoldingMode;
+use neo_fold::shard::StepLinkingConfig;
 use neo_ccs::{Mat, r1cs_to_ccs, CcsStructure};
 use neo_ajtai::{setup as ajtai_setup, set_global_pp, AjtaiSModule};
 use rand_chacha::rand_core::SeedableRng;
@@ -100,9 +102,9 @@ fn build_step_ccs(r1cs: &R1csData) -> CcsStructure<F> {
     let c = sparse_to_dense_mat(&r1cs.c_sparse, n, m_padded);
     let s0 = r1cs_to_ccs(a, b, c);
     
-    // ensure_identity_first will now work since n == m_padded
-    s0.ensure_identity_first()
-        .expect("ensure_identity_first should succeed")
+    // ensure_identity_first_owned will now work since n == m_padded
+    s0.ensure_identity_first_owned()
+        .expect("ensure_identity_first_owned should succeed")
 }
 
 fn extract_witness(witness_data: &WitnessData) -> Vec<F> {
@@ -135,7 +137,7 @@ struct NoInputs;
 struct StarstreamStepCircuit {
     steps: Vec<StepData>,
     step_spec: StepSpec,
-    step_ccs: CcsStructure<F>,
+    step_ccs: Arc<CcsStructure<F>>,
 }
 
 impl NeoStep for StarstreamStepCircuit {
@@ -194,7 +196,7 @@ fn test_starstream_tx_valid_crosscheck() {
         m_in: export.steps[0].r1cs.num_public_inputs,
     };
     
-    let step_ccs = build_step_ccs(&export.steps[0].r1cs);
+    let step_ccs = Arc::new(build_step_ccs(&export.steps[0].r1cs));
     let mut circuit = StarstreamStepCircuit {
         steps: export.steps.clone(),
         step_spec: step_spec.clone(),
@@ -215,6 +217,23 @@ fn test_starstream_tx_valid_crosscheck() {
         params,
         l.clone()
     );
+
+    // Multi-step verification requires explicit step-to-step linking.
+    // Here `x = [const1] ++ y_step ++ y_prev`, so enforce:
+    //   prev.x[1+i] == next.x[1+|y_step|+i]  for i in 0..y_len
+    let y_len = step_spec.y_len;
+    let y_step_len = step_spec.y_step_indices.len();
+    let y_prev_len = step_spec
+        .app_input_indices
+        .as_ref()
+        .map(|v| v.len())
+        .unwrap_or(0);
+    assert!(y_len <= y_step_len, "y_step_indices must cover y_len");
+    assert!(y_len <= y_prev_len, "app_input_indices must cover y_len (y_prev)");
+    let pairs: Vec<(usize, usize)> = (0..y_len)
+        .map(|i| (1 + i, 1 + y_step_len + i))
+        .collect();
+    session.set_step_linking(StepLinkingConfig::new(pairs));
     
     // Execute all steps
     for _ in 0..export.steps.len() {
@@ -222,14 +241,15 @@ fn test_starstream_tx_valid_crosscheck() {
             .expect("add_step should succeed with crosscheck");
     }
     
-    let run = session.fold_and_prove(&step_ccs)
+    let run = session
+        .fold_and_prove(step_ccs.as_ref())
         .expect("fold_and_prove should produce a FoldRun");
     
     assert_eq!(run.steps.len(), export.steps.len(), "should have correct number of steps");
     
     let mcss_public = session.mcss_public();
-    let ok = session.verify(&step_ccs, &mcss_public, &run)
+    let ok = session
+        .verify(step_ccs.as_ref(), &mcss_public, &run)
         .expect("verify should run");
     assert!(ok, "crosscheck verification should pass");
 }
-

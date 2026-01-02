@@ -29,19 +29,11 @@ fn build_chi(p: &[K]) -> Vec<K> {
 
 fn build_vjs_ext(s: &CcsStructure<F>, r_prime: &[K]) -> Vec<Vec<K>> {
     let chi_rp = build_chi(r_prime);
-    let n_sz = chi_rp.len();
+    let n_eff = core::cmp::min(s.n, chi_rp.len());
     let mut vjs: Vec<Vec<K>> = Vec::with_capacity(s.t());
     for j in 0..s.t() {
         let mut vj = vec![K::ZERO; s.m];
-        for row in 0..n_sz {
-            let wr = if row < s.n { chi_rp[row] } else { K::ZERO };
-            if wr == K::ZERO {
-                continue;
-            }
-            for c in 0..s.m {
-                vj[c] += K::from(s.matrices[j][(row, c)]) * wr;
-            }
-        }
+        s.matrices[j].add_mul_transpose_into(&chi_rp, &mut vj, n_eff);
         vjs.push(vj);
     }
     vjs
@@ -704,12 +696,9 @@ fn paper_exact_outputs_equal_literal_definition() {
         chi_rp[row] = wgt;
     }
     let mut vjs = vec![vec![K::ZERO; m]; s.t()];
+    let n_eff = core::cmp::min(s.n, chi_rp.len());
     for j in 0..s.t() {
-        for row in 0..n_sz {
-            for c in 0..m {
-                vjs[j][c] += K::from(s.matrices[j][(row, c)]) * chi_rp[row];
-            }
-        }
+        s.matrices[j].add_mul_transpose_into(&chi_rp, &mut vjs[j], n_eff);
     }
 
     for j in 0..s.t() {
@@ -802,11 +791,8 @@ fn paper_exact_f_term_matches_mle_and_yprime_recomposition() {
     let mut m_from_mle = vec![K::ZERO; s.t()];
     for j in 0..s.t() {
         let mut vj = vec![K::ZERO; m];
-        for row in 0..n_sz {
-            for c in 0..m {
-                vj[c] += K::from(s.matrices[j][(row, c)]) * chi_rp[row];
-            }
-        }
+        let n_eff = core::cmp::min(s.n, chi_rp.len());
+        s.matrices[j].add_mul_transpose_into(&chi_rp, &mut vj, n_eff);
         for c in 0..m {
             m_from_mle[j] += z1[c] * vj[c];
         }
