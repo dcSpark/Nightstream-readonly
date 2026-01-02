@@ -6,7 +6,7 @@
 #![allow(non_snake_case)]
 
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
+use neo_ccs::{CcsMatrix, CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
 use neo_math::{D, K};
 use neo_params::NeoParams;
 use p3_field::{Field, PrimeCharacteristicRing};
@@ -91,14 +91,39 @@ where
 }
 
 /// Safe access with zero-padding when indices are outside the true dimension.
-/// - For M_j ∈ F^{n×m}: if row ≥ n or col ≥ m → 0.
-/// - For Z   ∈ F^{d×m}: if rho ≥ d or col ≥ m → 0.
+/// - For Z ∈ F^{d×m}: if rho ≥ d or col ≥ m → 0.
 #[inline]
 fn get_F<Ff: Field + PrimeCharacteristicRing + Copy>(a: &Mat<Ff>, row: usize, col: usize) -> Ff {
     if row < a.rows() && col < a.cols() {
         a[(row, col)]
     } else {
         Ff::ZERO
+    }
+}
+
+/// Safe access into a CCS matrix M_j, returning 0 for out-of-range indices.
+#[inline]
+fn get_M<Ff: Field + PrimeCharacteristicRing + Copy>(a: &CcsMatrix<Ff>, row: usize, col: usize) -> Ff {
+    if row >= a.rows() || col >= a.cols() {
+        return Ff::ZERO;
+    }
+
+    match a {
+        CcsMatrix::Identity { .. } => {
+            if row == col {
+                Ff::ONE
+            } else {
+                Ff::ZERO
+            }
+        }
+        CcsMatrix::Csc(m) => {
+            let s = m.col_ptr[col];
+            let e = m.col_ptr[col + 1];
+            match m.row_idx[s..e].binary_search(&row) {
+                Ok(idx) => m.vals[s + idx],
+                Err(_) => Ff::ZERO,
+            }
+        }
     }
 }
 
@@ -121,7 +146,7 @@ where
         // (M_j z_1)[xr] = Σ_c M_j[xr, c] · z1[c]
         let mut acc = K::ZERO;
         for c in 0..s.m {
-            acc += K::from(get_F(&s.matrices[j], xr_mask, c)) * z1[c];
+            acc += K::from(get_M(&s.matrices[j], xr_mask, c)) * z1[c];
         }
         m_vals[j] = acc;
     }
@@ -143,7 +168,7 @@ where
     let mut y_val = K::ZERO;
     for c in 0..s.m {
         let z = K::from(get_F(Z_i, xa_mask, c));
-        let m = K::from(get_F(&s.matrices[0], xr_mask, c));
+        let m = K::from(get_M(&s.matrices[0], xr_mask, c));
         y_val += z * m;
     }
     range_product::<Ff>(y_val, b)
@@ -155,7 +180,7 @@ where
 fn Eval_ij_at_bool_point<Ff>(
     s: &CcsStructure<Ff>,
     Z_i: &Mat<Ff>,
-    Mj: &Mat<Ff>,
+    Mj: &CcsMatrix<Ff>,
     xa_mask: usize,
     xr_mask: usize,
     alpha: &[K],
@@ -194,7 +219,7 @@ where
     let mut y_val = K::ZERO;
     for c in 0..s.m {
         let z = K::from(get_F(Z_i, xa_mask, c));
-        let m = K::from(get_F(Mj, xr_mask, c));
+        let m = K::from(get_M(Mj, xr_mask, c));
         y_val += z * m;
     }
 
@@ -475,7 +500,7 @@ where
             }
             let mut y_row = K::ZERO;
             for c in 0..s.m {
-                y_row += K::from(get_F(&s.matrices[j], row, c)) * z1[c];
+                y_row += K::from(get_M(&s.matrices[j], row, c)) * z1[c];
             }
             y_eval += wr * y_row;
         }
@@ -497,7 +522,7 @@ where
             continue;
         }
         for c in 0..s.m {
-            v1[c] += K::from(get_F(&s.matrices[0], row, c)) * wr;
+            v1[c] += K::from(get_M(&s.matrices[0], row, c)) * wr;
         }
     }
 
@@ -574,7 +599,7 @@ where
                     continue;
                 }
                 for c in 0..s.m {
-                    vj[c] += K::from(get_F(&s.matrices[j], row, c)) * wr;
+                    vj[c] += K::from(get_M(&s.matrices[j], row, c)) * wr;
                 }
             }
 
@@ -969,7 +994,7 @@ where
                 continue;
             }
             for c in 0..s.m {
-                vj[c] += K::from(get_F(&s.matrices[j], row, c)) * wr;
+                vj[c] += K::from(get_M(&s.matrices[j], row, c)) * wr;
             }
         }
         vjs.push(vj);
@@ -1264,7 +1289,7 @@ where
                 continue;
             }
             for c in 0..s.m {
-                vj[c] += K::from(get_F(&s.matrices[j], row, c)) * wr;
+                vj[c] += K::from(get_M(&s.matrices[j], row, c)) * wr;
             }
         }
         vjs.push(vj);

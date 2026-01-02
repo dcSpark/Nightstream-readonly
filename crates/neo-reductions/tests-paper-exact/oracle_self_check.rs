@@ -189,14 +189,11 @@ fn nc_sum_engine_matches_paper_nc_when_m1_not_identity() {
 
     // χ_{β_r}
     let chi_beta_r = neo_ccs::utils::tensor_point::<K>(&ch.beta_r);
+    let mut mz = vec![F::ZERO; n];
+    s.matrices[0].add_mul_into(&z_vec, &mut mz, n);
     let mut f_beta = K::ZERO;
     for row in 0..n {
-        // (M_1 · z)[row]
-        let mut dot = F::ZERO;
-        for c in 0..m {
-            dot += s.matrices[0][(row, c)] * z_vec[c];
-        }
-        f_beta += chi_beta_r[row] * K::from(dot);
+        f_beta += chi_beta_r[row] * K::from(mz[row]);
     }
 
     // Paper NC component extracted as paper_total - F_beta
@@ -259,13 +256,11 @@ fn nc_sum_engine_vs_paper_drift_with_custom_m1_and_Z() {
         })
         .collect();
     let chi_beta_r = neo_ccs::utils::tensor_point::<K>(&ch.beta_r);
+    let mut mz = vec![F::ZERO; n];
+    s.matrices[0].add_mul_into(&z_vec, &mut mz, n);
     let mut f_beta = K::ZERO;
     for row in 0..n {
-        let mut dot = F::ZERO;
-        for c in 0..m {
-            dot += s.matrices[0][(row, c)] * z_vec[c];
-        }
-        f_beta += chi_beta_r[row] * K::from(dot);
+        f_beta += chi_beta_r[row] * K::from(mz[row]);
     }
 
     let _nc_paper = paper_total - f_beta;

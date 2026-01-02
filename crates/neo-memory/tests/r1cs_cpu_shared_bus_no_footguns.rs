@@ -6,6 +6,7 @@ use neo_ccs::matrix::Mat;
 use neo_ccs::poly::{SparsePoly, Term};
 use neo_ccs::relations::{check_ccs_rowwise_zero, CcsStructure};
 use neo_ccs::traits::SModuleHomomorphism;
+use neo_ccs::CcsMatrix;
 use neo_memory::cpu::constraints::{ShoutCpuBinding, TwistCpuBinding};
 use neo_memory::plain::{LutTable, PlainMemLayout};
 use neo_memory::{CpuArithmetization, R1csCpu, SharedCpuBusConfig};
@@ -54,6 +55,13 @@ fn empty_identity_first_r1cs_ccs(n: usize) -> CcsStructure<F> {
         ],
     );
     CcsStructure::new(vec![i_n, a, b, c], f).expect("CCS")
+}
+
+fn ccs_matrix_has_any_nonzero(mat: &CcsMatrix<F>) -> bool {
+    match mat {
+        CcsMatrix::Identity { n } => *n != 0,
+        CcsMatrix::Csc(csc) => !csc.vals.is_empty(),
+    }
 }
 
 fn one_empty_step_trace() -> VmTrace<u64, u64> {
@@ -135,11 +143,11 @@ fn with_shared_cpu_bus_injects_constraints_and_forces_const_one() {
 
     // Base CCS had A/B all-zero; injection should make both non-zero.
     assert!(
-        cpu.ccs.matrices[1].as_slice().iter().any(|&v| v != F::ZERO),
+        ccs_matrix_has_any_nonzero(&cpu.ccs.matrices[1]),
         "expected injected constraints in A matrix"
     );
     assert!(
-        cpu.ccs.matrices[2].as_slice().iter().any(|&v| v != F::ZERO),
+        ccs_matrix_has_any_nonzero(&cpu.ccs.matrices[2]),
         "expected injected constraints in B matrix"
     );
 

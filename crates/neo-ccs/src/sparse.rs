@@ -1,27 +1,40 @@
-//! Compressed Sparse Column (CSC) matrix format for efficient sparse operations.
+//! Sparse matrix utilities for CCS.
 //!
-//! This module provides CSC:
-//! - CSC: Efficient for column-wise operations (y = A^T·x) - better cache locality
-
+//! Neo circuits often have extremely sparse CCS matrices (e.g. exported from R1CS). Materializing
+//! dense `n×m` matrices is prohibitively expensive for large circuits, so we provide a compact
+//! representation based on Compressed Sparse Column (CSC).
+//!
+//! This module is shared by higher-level crates (folding engines) for efficient M·x and Mᵀ·x
+//! operations without scanning dense zeros.
 #![allow(non_snake_case)]
 
-use neo_ccs::{CcsMatrix, CcsStructure, Mat};
+use crate::matrix::Mat;
 use p3_field::{Field, PrimeCharacteristicRing};
 use rayon::prelude::*;
 
-/// Compressed Sparse Column format (column-major iteration).
-/// Better for A^T·x operations with dense x (contiguous accumulation into y).
-#[derive(Clone, Debug)]
+/// Compressed Sparse Column (CSC) format for sparse matrices.
+///
+/// This layout is efficient for column-wise operations and for computing `y += Aᵀ·x`.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct CscMat<Ff> {
+    /// Number of rows.
     pub nrows: usize,
+    /// Number of columns.
     pub ncols: usize,
+    /// Column pointers (length `ncols + 1`).
     pub col_ptr: Vec<usize>,
+    /// Row indices for non-zero entries (length = nnz).
     pub row_idx: Vec<usize>,
+    /// Non-zero values (length = nnz).
     pub vals: Vec<Ff>,
 }
 
 impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CscMat<Ff> {
-    /// Build CSC from a list of (row, col, val) triplets (skipping zeros and combining duplicates).
+    /// Build a CSC matrix from (row, col, val) triplets.
+    ///
+    /// - Skips exact zeros.
+    /// - Sorts by (col, row).
+    /// - Combines duplicates by summing coefficients.
     pub fn from_triplets(mut triplets: Vec<(usize, usize, Ff)>, nrows: usize, ncols: usize) -> Self {
         triplets.retain(|&(_, _, v)| v != Ff::ZERO);
         triplets.sort_unstable_by(|a, b| a.1.cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
@@ -74,15 +87,12 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CscMat<Ff> {
         }
     }
 
-    /// Build CSC from a dense row-major Mat<Ff>, skipping exact zeros.
+    /// Build CSC from a dense row-major matrix, skipping exact zeros.
     ///
-    /// This is intentionally parallel over rows: large CCS matrices are often extremely sparse
-    /// but stored densely (e.g. from exported R1CS). Scanning is memory-bound, so we want to
-    /// saturate bandwidth and amortize branch mispredictions across cores.
+    /// This is parallel over rows because scans are memory-bound for large matrices.
     pub fn from_dense_row_major(a: &Mat<Ff>) -> Self {
         let (nrows, ncols) = (a.rows(), a.cols());
 
-        // Count nnz per column and collect (row, col, val) triplets in one pass.
         let (col_counts, triplets): (Vec<usize>, Vec<(usize, usize, Ff)>) = (0..nrows)
             .into_par_iter()
             .fold(
@@ -120,7 +130,6 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CscMat<Ff> {
         let mut row_idx = vec![0usize; nnz];
         let mut vals = vec![Ff::ZERO; nnz];
 
-        // Temp write heads
         let mut next = col_ptr.clone();
         for (r, c, v) in triplets {
             let k = next[c];
@@ -129,7 +138,7 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CscMat<Ff> {
             next[c] += 1;
         }
 
-        CscMat {
+        Self {
             nrows,
             ncols,
             col_ptr,
@@ -138,19 +147,13 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CscMat<Ff> {
         }
     }
 
-    /// y += A^T * x (x: nrows, y: ncols).
-    /// Only reads rows < n_eff.
+    /// Accumulate `y += Aᵀ·x`, reading only `x[..n_eff]` and only contributing rows `< n_eff`.
     pub fn add_mul_transpose_into<Kf>(&self, x: &[Kf], y: &mut [Kf], n_eff: usize)
     where
         Kf: Copy + core::ops::AddAssign + core::ops::Mul<Output = Kf> + From<Ff>,
     {
         debug_assert!(n_eff <= self.nrows, "n_eff must be <= nrows");
-        debug_assert!(
-            x.len() >= n_eff,
-            "x.len() must be >= n_eff (got {}, need {})",
-            x.len(),
-            n_eff
-        );
+        debug_assert!(x.len() >= n_eff, "x.len() must be >= n_eff");
         debug_assert_eq!(y.len(), self.ncols);
 
         for c in 0..self.ncols {
@@ -165,8 +168,7 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CscMat<Ff> {
         }
     }
 
-    /// y += A * x (x: ncols, y: nrows).
-    /// Only updates rows < n_eff.
+    /// Accumulate `y += A·x`, updating only `y[..n_eff]`.
     pub fn add_mul_into<Kf>(&self, x: &[Kf], y: &mut [Kf], n_eff: usize)
     where
         Kf: Copy + core::ops::AddAssign + core::ops::Mul<Output = Kf> + From<Ff>,
@@ -189,18 +191,21 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CscMat<Ff> {
     }
 }
 
-/// Cache of CSC matrix formats used by optimized routines.
-#[derive(Clone)]
+/// A simple per-matrix CSC cache.
+///
+/// By convention, `None` can be used to represent an identity matrix `I_n` (when square).
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SparseCache<Ff> {
-    // For each j: None (identity), or Some(CSC)
     csc: Vec<Option<CscMat<Ff>>>,
 }
 
 impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> SparseCache<Ff> {
+    /// Construct from a fully prepared CSC list (one per CCS matrix).
     pub fn from_csc(csc: Vec<Option<CscMat<Ff>>>) -> Self {
         Self { csc }
     }
 
+    /// Construct from per-matrix triplets.
     pub fn from_triplets(
         nrows: usize,
         ncols: usize,
@@ -213,35 +218,127 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> SparseCache<Ff> {
         Self::from_csc(csc)
     }
 
-    pub fn build(s: &CcsStructure<Ff>) -> Self {
-        let t = s.t();
-
-        // `CcsStructure` stores matrices sparsely (CSC/identity). Build the cache by cloning the
-        // existing CSC data (no dense scanning).
-        let mut csc: Vec<Option<CscMat<Ff>>> = Vec::with_capacity(t);
-        for j in 0..t {
-            match &s.matrices[j] {
-                CcsMatrix::Identity { .. } => csc.push(None),
-                CcsMatrix::Csc(m) => csc.push(Some(CscMat {
-                    nrows: m.nrows,
-                    ncols: m.ncols,
-                    col_ptr: m.col_ptr.clone(),
-                    row_idx: m.row_idx.clone(),
-                    vals: m.vals.clone(),
-                })),
-            }
-        }
-
-        Self { csc }
-    }
-
+    /// Number of matrices.
     #[inline]
     pub fn len(&self) -> usize {
         self.csc.len()
     }
 
+    /// Get the CSC for matrix `j` (returns `None` if the matrix is an identity sentinel).
     #[inline]
     pub fn csc(&self, j: usize) -> Option<&CscMat<Ff>> {
         self.csc.get(j).and_then(|m| m.as_ref())
+    }
+}
+
+/// A CCS matrix representation.
+///
+/// CCS matrices are typically extremely sparse. For large circuits we avoid materializing dense
+/// matrices and instead keep a CSC form, with an explicit identity variant to represent `I_n`
+/// without storing `n` diagonal entries.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub enum CcsMatrix<Ff> {
+    /// Identity matrix `I_n` (only valid for square CCS).
+    Identity {
+        /// Dimension `n` of `I_n`.
+        n: usize,
+    },
+    /// A sparse matrix stored in CSC form.
+    Csc(CscMat<Ff>),
+}
+
+impl<Ff> CcsMatrix<Ff> {
+    /// Number of rows.
+    pub fn rows(&self) -> usize {
+        match self {
+            CcsMatrix::Identity { n } => *n,
+            CcsMatrix::Csc(m) => m.nrows,
+        }
+    }
+
+    /// Number of columns.
+    pub fn cols(&self) -> usize {
+        match self {
+            CcsMatrix::Identity { n } => *n,
+            CcsMatrix::Csc(m) => m.ncols,
+        }
+    }
+
+    /// Borrow the underlying CSC matrix, if present.
+    pub fn as_csc(&self) -> Option<&CscMat<Ff>> {
+        match self {
+            CcsMatrix::Identity { .. } => None,
+            CcsMatrix::Csc(m) => Some(m),
+        }
+    }
+}
+
+impl<Ff> CcsMatrix<Ff>
+where
+    Ff: PrimeCharacteristicRing + Copy + Eq,
+{
+    /// Check whether this matrix is exactly the identity matrix `I_n`.
+    pub fn is_identity(&self) -> bool {
+        match self {
+            CcsMatrix::Identity { .. } => true,
+            CcsMatrix::Csc(m) => {
+                if m.nrows != m.ncols {
+                    return false;
+                }
+                for col in 0..m.ncols {
+                    let s = m.col_ptr[col];
+                    let e = m.col_ptr[col + 1];
+                    if e != s + 1 {
+                        return false;
+                    }
+                    let k = s;
+                    if m.row_idx[k] != col {
+                        return false;
+                    }
+                    if m.vals[k] != Ff::ONE {
+                        return false;
+                    }
+                }
+                true
+            }
+        }
+    }
+}
+
+impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CcsMatrix<Ff> {
+    /// Accumulate `y += Aᵀ·x`, reading only `x[..n_eff]` and only contributing rows `< n_eff`.
+    pub fn add_mul_transpose_into<Kf>(&self, x: &[Kf], y: &mut [Kf], n_eff: usize)
+    where
+        Kf: Copy + core::ops::AddAssign + core::ops::Mul<Output = Kf> + From<Ff>,
+    {
+        match self {
+            CcsMatrix::Identity { n } => {
+                debug_assert_eq!(*n, y.len(), "I_n: y must have length n");
+                let limit = core::cmp::min(n_eff, core::cmp::min(*n, x.len()));
+                for i in 0..limit {
+                    // For identity: (I^T·x)[i] = x[i]
+                    y[i] += x[i];
+                }
+            }
+            CcsMatrix::Csc(m) => m.add_mul_transpose_into(x, y, n_eff),
+        }
+    }
+
+    /// Accumulate `y += A·x`, updating only `y[..n_eff]`.
+    pub fn add_mul_into<Kf>(&self, x: &[Kf], y: &mut [Kf], n_eff: usize)
+    where
+        Kf: Copy + core::ops::AddAssign + core::ops::Mul<Output = Kf> + From<Ff>,
+    {
+        match self {
+            CcsMatrix::Identity { n } => {
+                debug_assert_eq!(*n, x.len(), "I_n: x must have length n");
+                let limit = core::cmp::min(n_eff, core::cmp::min(*n, y.len()));
+                for i in 0..limit {
+                    // For identity: (I·x)[i] = x[i]
+                    y[i] += x[i];
+                }
+            }
+            CcsMatrix::Csc(m) => m.add_mul_into(x, y, n_eff),
+        }
     }
 }

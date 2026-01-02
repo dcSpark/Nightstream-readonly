@@ -575,7 +575,7 @@ pub fn sample_rot_rhos_n(
 /// - y[j] is padded to 2^{ell_d} and contains the first D digits
 /// - y_scalars[j] = Σ_{d=0}^{D-1} b^d · y[j][d] (base-b recomposition)
 pub fn compute_y_from_Z_and_r(s: &CcsStructure<F>, Z: &Mat<F>, r: &[K], ell_d: usize, b: u32) -> (Vec<Vec<K>>, Vec<K>) {
-    use neo_ccs::utils::mat_vec_mul_fk;
+    use neo_ccs::{utils::mat_vec_mul_fk, CcsMatrix};
     let d_pad = 1usize << ell_d;
     let mut y_new: Vec<Vec<K>> = Vec::with_capacity(s.t());
     // Build r^b over rows
@@ -584,14 +584,31 @@ pub fn compute_y_from_Z_and_r(s: &CcsStructure<F>, Z: &Mat<F>, r: &[K], ell_d: u
     let mut vjs: Vec<Vec<K>> = Vec::with_capacity(s.t());
     for j in 0..s.t() {
         let mut vj = vec![K::ZERO; s.m];
-        for row in 0..core::cmp::min(s.n, rb.len()) {
-            let wr = rb[row];
-            if wr == K::ZERO {
-                continue;
+        let n_eff = core::cmp::min(s.n, rb.len());
+
+        match &s.matrices[j] {
+            CcsMatrix::Identity { n } => {
+                let cap = core::cmp::min(n_eff, *n);
+                for i in 0..cap {
+                    vj[i] += rb[i];
+                }
             }
-            let row_m = s.matrices[j].row(row);
-            for c in 0..s.m {
-                vj[c] += K::from(row_m[c]) * wr;
+            CcsMatrix::Csc(csc) => {
+                for c in 0..csc.ncols {
+                    let s0 = csc.col_ptr[c];
+                    let e0 = csc.col_ptr[c + 1];
+                    for k in s0..e0 {
+                        let row = csc.row_idx[k];
+                        if row >= n_eff {
+                            continue;
+                        }
+                        let wr = rb[row];
+                        if wr == K::ZERO {
+                            continue;
+                        }
+                        vj[c] += wr.scale_base_k(K::from(csc.vals[k]));
+                    }
+                }
             }
         }
         vjs.push(vj);

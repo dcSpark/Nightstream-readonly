@@ -6,7 +6,7 @@ use bellpepper::gadgets::boolean::{AllocatedBit, Boolean};
 use bellpepper_core::{Circuit, Comparable, ConstraintSystem, Index, LinearCombination, SynthesisError};
 use ff::PrimeField;
 use neo_ajtai::{set_global_pp, setup as ajtai_setup, AjtaiSModule};
-use neo_ccs::{r1cs_to_ccs, CcsStructure, Mat};
+use neo_ccs::{CcsMatrix, CcsStructure, CscMat, SparsePoly, Term};
 use neo_fold::{pi_ccs::FoldingMode, session::{FoldingSession, ProveInput}};
 use neo_math::{D, F};
 use neo_params::NeoParams;
@@ -58,37 +58,37 @@ fn test_sha256_circuit_is_satisfied() {
 }
 
 #[test]
-#[ignore = "Very memory-heavy: builds dense n×n matrices for SHA256 R1CS; run manually."]
+#[ignore = "Slow: large SHA256 circuit; run manually."]
 fn test_sha256_preimage_64_bytes() {
     test_sha256_preimage_len_bytes(64);
 }
 
 #[test]
-#[ignore = "Very memory-heavy: builds dense n×n matrices for SHA256 R1CS; run manually."]
+#[ignore = "Slow: large SHA256 circuit; run manually."]
 fn test_sha256_preimage_128_bytes() {
     test_sha256_preimage_len_bytes(128);
 }
 
 #[test]
-#[ignore = "Very memory-heavy: builds dense n×n matrices for SHA256 R1CS; run manually."]
+#[ignore = "Slow: large SHA256 circuit; run manually."]
 fn test_sha256_preimage_256_bytes() {
     test_sha256_preimage_len_bytes(256);
 }
 
 #[test]
-#[ignore = "Very memory-heavy: builds dense n×n matrices for SHA256 R1CS; run manually."]
+#[ignore = "Slow: large SHA256 circuit; run manually."]
 fn test_sha256_preimage_512_bytes() {
     test_sha256_preimage_len_bytes(512);
 }
 
 #[test]
-#[ignore = "Very memory-heavy: builds dense n×n matrices for SHA256 R1CS; run manually."]
+#[ignore = "Slow: large SHA256 circuit; run manually."]
 fn test_sha256_preimage_4kB() {
     test_sha256_preimage_len_bytes(1 << 12);
 }
 
 #[test]
-#[ignore = "Very memory-heavy: builds dense n×n matrices for SHA256 R1CS; run manually."]
+#[ignore = "Slow: large SHA256 circuit; run manually."]
 fn test_sha256_preimage_8kB() {
     test_sha256_preimage_len_bytes(1 << 13);
 }
@@ -104,7 +104,7 @@ fn test_sha256_preimage_len_bytes(preimage_len_bytes: usize) {
         .map(|x| F::from_u64(fp_to_u64(x)))
         .collect();
 
-    let (step_ccs, witness, sparse_cache) = bellpepper_sha256_circuit(preimage_len_bytes);
+    let (step_ccs, witness) = bellpepper_sha256_circuit(preimage_len_bytes);
 
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(step_ccs.n)
         .expect("goldilocks_auto_r1cs_ccs should find valid params");
@@ -118,7 +118,8 @@ fn test_sha256_preimage_len_bytes(preimage_len_bytes: usize) {
 
     let mut session = FoldingSession::new(FoldingMode::Optimized, params, l.clone());
 
-    // Avoid scanning dense n×n matrices to build CSC by preloading a cache built from sparse triplets.
+    // Preload prover/verifier CCS cache once (shared) to avoid rebuilding for both sides.
+    let sparse_cache = std::sync::Arc::new(SparseCache::build(&step_ccs));
     session
         .preload_ccs_sparse_cache(&step_ccs, sparse_cache.clone())
         .expect("preload_ccs_sparse_cache should succeed");
@@ -221,7 +222,7 @@ impl Circuit<FpGoldilocks> for Sha256Circuit {
 
 fn bellpepper_sha256_circuit(
     preimage_len_bytes: usize,
-) -> (CcsStructure<F>, Vec<F>, std::sync::Arc<SparseCache<F>>) {
+) -> (CcsStructure<F>, Vec<F>) {
     use bellpepper_core::test_cs::TestConstraintSystem;
 
     let mut cs = TestConstraintSystem::<FpGoldilocks>::new();
@@ -252,10 +253,7 @@ fn bellpepper_sha256_circuit(
     let mut b_trips: Vec<(usize, usize, F)> = Vec::new();
     let mut c_trips: Vec<(usize, usize, F)> = Vec::new();
 
-    let f = |row: usize,
-             mat: &mut Mat<F>,
-             lc: &LinearCombination<FpGoldilocks>,
-             trips: &mut Vec<(usize, usize, F)>| {
+    let f = |row: usize, lc: &LinearCombination<FpGoldilocks>, trips: &mut Vec<(usize, usize, F)>| {
         for (var, coeff) in lc.iter() {
             let col = match var.0 {
                 Index::Input(i) => i,
@@ -267,20 +265,15 @@ fn bellpepper_sha256_circuit(
                 continue;
             }
             let v = F::from_u64(value);
-            mat[(row, col)] = mat[(row, col)] + v;
             trips.push((row, col, v));
         }
     };
 
-    let mut A = Mat::zero(n, n, F::ZERO);
-    let mut B = Mat::zero(n, n, F::ZERO);
-    let mut C = Mat::zero(n, n, F::ZERO);
-
     // Extract constraints and convert to matrix form
     for (row, constraint) in cs.constraints().iter().enumerate() {
-        f(row, &mut A, &constraint.0, &mut a_trips);
-        f(row, &mut B, &constraint.1, &mut b_trips);
-        f(row, &mut C, &constraint.2, &mut c_trips);
+        f(row, &constraint.0, &mut a_trips);
+        f(row, &constraint.1, &mut b_trips);
+        f(row, &constraint.2, &mut c_trips);
     }
 
     let mut witness: Vec<F> = Vec::with_capacity(num_variables);
@@ -295,11 +288,29 @@ fn bellpepper_sha256_circuit(
 
     debug_assert_eq!(witness.len(), num_variables);
 
-    let ccs = r1cs_to_ccs(A, B, C);
-    let sparse_cache = std::sync::Arc::new(SparseCache::from_triplets(
-        n,
-        n,
-        vec![None, Some(a_trips), Some(b_trips), Some(c_trips)],
-    ));
-    (ccs, witness, sparse_cache)
+    // R1CS → CCS embedding with identity-first form: M_0 = I_n, M_1=A, M_2=B, M_3=C.
+    let f_base = SparsePoly::new(
+        3,
+        vec![
+            Term {
+                coeff: F::ONE,
+                exps: vec![1, 1, 0],
+            }, // X1 * X2
+            Term {
+                coeff: -F::ONE,
+                exps: vec![0, 0, 1],
+            }, // -X3
+        ],
+    );
+
+    let matrices = vec![
+        CcsMatrix::Identity { n },
+        CcsMatrix::Csc(CscMat::from_triplets(a_trips, n, n)),
+        CcsMatrix::Csc(CscMat::from_triplets(b_trips, n, n)),
+        CcsMatrix::Csc(CscMat::from_triplets(c_trips, n, n)),
+    ];
+    let f = f_base.insert_var_at_front();
+
+    let ccs = CcsStructure::new_sparse(matrices, f).expect("valid R1CS→CCS structure");
+    (ccs, witness)
 }

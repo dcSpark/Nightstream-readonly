@@ -158,6 +158,13 @@ where
         }
         true
     }
+
+    /// Fast-path marker for identity matrices created via `Mat::identity`.
+    ///
+    /// This is an optimization hint only; it is not serialized and is cleared on any mutable access.
+    pub fn is_identity_hint(&self) -> bool {
+        self.identity_hint
+    }
 }
 
 /// TRUE Compressed Sparse Row (CSR) format - only stores non-zeros!

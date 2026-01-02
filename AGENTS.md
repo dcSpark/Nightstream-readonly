@@ -5,7 +5,9 @@
 
 ## Build & Test Commands
 - When running tests use --release eg cargo test --workspace --release
+- For extra debugs use debug-logs eg --features paper-exact,debug-logs
 
 ## Profiling
 
-- You can easily profile with an easy to read output by just using this script: ./scripts/profile_for_ai.sh e.g., ./scripts/profile_for_ai.sh neo-fold test_sha256_single_step test_sha256_preimage_64_bytes --ignored
+- CPU + Memory profiling: ./scripts/profile_for_ai.sh neo-fold test_sha256_single_step test_sha256_preimage_256_bytes --ignored
+- Deep memory profiling (allocation sites with full call context): ./scripts/profile_memory_deep.sh neo-fold test_sha256_single_step test_sha256_preimage_256_bytes --ignored

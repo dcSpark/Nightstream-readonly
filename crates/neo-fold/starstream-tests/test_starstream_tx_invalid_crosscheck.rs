@@ -10,7 +10,7 @@ use std::sync::Arc;
 use serde::{Deserialize, Serialize};
 use neo_fold::session::{FoldingSession, NeoStep, StepArtifacts, StepSpec};
 use neo_fold::pi_ccs::FoldingMode;
-use neo_ccs::{Mat, r1cs_to_ccs, CcsStructure};
+use neo_ccs::{CcsMatrix, CcsStructure, Mat, r1cs_to_ccs};
 use neo_ajtai::{setup as ajtai_setup, set_global_pp, AjtaiSModule};
 use rand_chacha::rand_core::SeedableRng;
 use neo_params::NeoParams;
@@ -132,7 +132,37 @@ fn ccs_equal(a: &CcsStructure<F>, b: &CcsStructure<F>) -> bool {
     if (a.n, a.m, a.t()) != (b.n, b.m, b.t()) {
         return false;
     }
-    a.matrices.iter().zip(&b.matrices).all(|(x, y)| x.as_slice() == y.as_slice())
+    let matrix_equal = |x: &CcsMatrix<F>, y: &CcsMatrix<F>| -> bool {
+        if (x.rows(), x.cols()) != (y.rows(), y.cols()) {
+            return false;
+        }
+        if x.is_identity() || y.is_identity() {
+            return x.is_identity() && y.is_identity();
+        }
+
+        let to_sorted_triplets = |m: &CcsMatrix<F>| -> Vec<(usize, usize, F)> {
+            let CcsMatrix::Csc(csc) = m else {
+                return Vec::new();
+            };
+            let mut out = Vec::with_capacity(csc.vals.len());
+            for col in 0..csc.ncols {
+                let s0 = csc.col_ptr[col];
+                let e0 = csc.col_ptr[col + 1];
+                for k in s0..e0 {
+                    out.push((csc.row_idx[k], col, csc.vals[k]));
+                }
+            }
+            out.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            out
+        };
+
+        to_sorted_triplets(x) == to_sorted_triplets(y)
+    };
+
+    a.matrices
+        .iter()
+        .zip(&b.matrices)
+        .all(|(x, y)| matrix_equal(x, y))
 }
 
 #[derive(Clone)]

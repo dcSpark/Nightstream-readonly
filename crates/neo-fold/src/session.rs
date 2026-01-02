@@ -328,16 +328,7 @@ pub fn me_from_z_balanced<Lm: SModuleHomomorphism<F, Cmt>>(
     let mut vjs: Vec<Vec<K>> = Vec::with_capacity(t);
     for j in 0..t {
         let mut vj = vec![K::ZERO; s.m];
-        // Only rows < s.n contribute (others are zero rows)
-        for row in 0..s.n {
-            let wr = chi_r[row];
-            if wr == K::ZERO {
-                continue;
-            }
-            for c in 0..s.m {
-                vj[c] += K::from(s.matrices[j][(row, c)]) * wr;
-            }
-        }
+        s.matrices[j].add_mul_transpose_into(&chi_r, &mut vj, s.n);
         vjs.push(vj);
     }
 
@@ -465,16 +456,7 @@ pub fn me_from_z_balanced_select<Lm: SModuleHomomorphism<F, Cmt>>(
     let mut vjs: Vec<Vec<K>> = Vec::with_capacity(t);
     for j in 0..t {
         let mut vj = vec![K::ZERO; s.m];
-        // Only rows < s.n contribute (others are zero rows)
-        for row in 0..s.n {
-            let wr = chi_r[row];
-            if wr == K::ZERO {
-                continue;
-            }
-            for c in 0..s.m {
-                vj[c] += K::from(s.matrices[j][(row, c)]) * wr;
-            }
-        }
+        s.matrices[j].add_mul_transpose_into(&chi_r, &mut vj, s.n);
         vjs.push(vj);
     }
 

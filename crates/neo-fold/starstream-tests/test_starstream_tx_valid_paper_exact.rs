@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use neo_fold::session::{FoldingSession, NeoStep, StepArtifacts, StepSpec};
 use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::shard::StepLinkingConfig;
-use neo_ccs::{Mat, r1cs_to_ccs, CcsStructure};
+use neo_ccs::{CcsMatrix, CcsStructure, Mat, r1cs_to_ccs};
 use neo_ajtai::{setup as ajtai_setup, set_global_pp, AjtaiSModule};
 use rand_chacha::rand_core::SeedableRng;
 use neo_params::NeoParams;
@@ -137,7 +137,37 @@ fn ccs_equal(a: &CcsStructure<F>, b: &CcsStructure<F>) -> bool {
     if (a.n, a.m, a.t()) != (b.n, b.m, b.t()) {
         return false;
     }
-    a.matrices.iter().zip(&b.matrices).all(|(x, y)| x.as_slice() == y.as_slice())
+    let matrix_equal = |x: &CcsMatrix<F>, y: &CcsMatrix<F>| -> bool {
+        if (x.rows(), x.cols()) != (y.rows(), y.cols()) {
+            return false;
+        }
+        if x.is_identity() || y.is_identity() {
+            return x.is_identity() && y.is_identity();
+        }
+
+        let to_sorted_triplets = |m: &CcsMatrix<F>| -> Vec<(usize, usize, F)> {
+            let CcsMatrix::Csc(csc) = m else {
+                return Vec::new();
+            };
+            let mut out = Vec::with_capacity(csc.vals.len());
+            for col in 0..csc.ncols {
+                let s0 = csc.col_ptr[col];
+                let e0 = csc.col_ptr[col + 1];
+                for k in s0..e0 {
+                    out.push((csc.row_idx[k], col, csc.vals[k]));
+                }
+            }
+            out.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
+            out
+        };
+
+        to_sorted_triplets(x) == to_sorted_triplets(y)
+    };
+
+    a.matrices
+        .iter()
+        .zip(&b.matrices)
+        .all(|(x, y)| matrix_equal(x, y))
 }
 
 /// Verify that M₁ is identity-first: M₁ = [Iₙ | 0] where first n columns form identity.
@@ -149,35 +179,69 @@ fn verify_identity_first(s: &CcsStructure<F>) {
     
     let m1 = &s.matrices[0];
     
-    // Check that M₁ has at least n columns
+    assert!(
+        m1.rows() == s.n,
+        "M₁ must have n={} rows, but has {}",
+        s.n,
+        m1.rows()
+    );
     assert!(
         m1.cols() >= s.n,
         "M₁ must have at least n={} columns, but has {}",
-        s.n, m1.cols()
+        s.n,
+        m1.cols()
     );
-    
-    // Check that the first n columns form the identity matrix
-    for r in 0..s.n {
-        for c in 0..s.n {
-            let expected = if r == c { F::ONE } else { F::ZERO };
-            let actual = m1[(r, c)];
+
+    match m1 {
+        CcsMatrix::Identity { n } => {
             assert_eq!(
-                actual, expected,
-                "M₁ not [I|0] at ({},{}): expected {:?}, got {:?}",
-                r, c, expected, actual
+                *n, s.n,
+                "M₁ identity dimension mismatch: expected n={}, got {}",
+                s.n, n
+            );
+            assert_eq!(
+                m1.cols(),
+                s.n,
+                "M₁=Iₙ must be square: expected cols=n={}, got {}",
+                s.n,
+                m1.cols()
             );
         }
-    }
-    
-    // If m > n, check that columns n..m are zero
-    if m1.cols() > s.n {
-        for r in 0..s.n {
-            for c in s.n..m1.cols() {
-                assert_eq!(
-                    m1[(r, c)], F::ZERO,
-                    "M₁ column {} (beyond n={}) should be zero at row {}, but got {:?}",
-                    c, s.n, r, m1[(r, c)]
-                );
+        CcsMatrix::Csc(csc) => {
+            // Check that the first n columns form identity, and any remaining columns are zero.
+            for c in 0..m1.cols() {
+                let s0 = csc.col_ptr[c];
+                let e0 = csc.col_ptr[c + 1];
+                if c < s.n {
+                    assert_eq!(
+                        e0,
+                        s0 + 1,
+                        "M₁ column {} should have exactly one nonzero for identity",
+                        c
+                    );
+                    let k = s0;
+                    assert_eq!(
+                        csc.row_idx[k],
+                        c,
+                        "M₁ identity column {} should have row {} but got {}",
+                        c,
+                        c,
+                        csc.row_idx[k]
+                    );
+                    assert_eq!(
+                        csc.vals[k],
+                        F::ONE,
+                        "M₁ identity entry at ({},{}) must be 1",
+                        c,
+                        c
+                    );
+                } else {
+                    assert_eq!(
+                        e0, s0,
+                        "M₁ column {} (beyond n={}) should be all-zero",
+                        c, s.n
+                    );
+                }
             }
         }
     }

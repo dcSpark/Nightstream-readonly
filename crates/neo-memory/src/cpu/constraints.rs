@@ -34,10 +34,11 @@
 //! (e.g., `rv` from Twist).
 
 use core::ops::Range;
+use neo_ccs::{CcsMatrix, CscMat};
 use neo_ccs::matrix::Mat;
 use neo_ccs::poly::{SparsePoly, Term};
 use neo_ccs::relations::CcsStructure;
-use p3_field::Field;
+use p3_field::{Field, PrimeCharacteristicRing};
 
 use crate::cpu::bus_layout::{build_bus_layout_for_instances, BusLayout, ShoutCols, TwistCols};
 use crate::witness::{LutInstance, MemInstance};
@@ -584,7 +585,10 @@ impl<F: Field> CpuConstraintBuilder<F> {
     /// - C matrix: all zeros
     ///
     /// The resulting CCS uses f(x1, x2, x3) = x1 * x2 - x3 (standard R1CS embedding).
-    pub fn build(&self) -> Result<CcsStructure<F>, String> {
+    pub fn build(&self) -> Result<CcsStructure<F>, String>
+    where
+        F: PrimeCharacteristicRing + Copy + Eq + Send + Sync,
+    {
         if self.constraints.is_empty() {
             return Err("no constraints added".to_string());
         }
@@ -686,7 +690,10 @@ impl<F: Field> CpuConstraintBuilder<F> {
         &self,
         base_ccs: &CcsStructure<F>,
         constraint_start_row: usize,
-    ) -> Result<CcsStructure<F>, String> {
+    ) -> Result<CcsStructure<F>, String>
+    where
+        F: PrimeCharacteristicRing + Copy + Eq + Send + Sync,
+    {
         if self.constraints.is_empty() {
             return Ok(base_ccs.clone());
         }
@@ -707,8 +714,8 @@ impl<F: Field> CpuConstraintBuilder<F> {
         let _m = base_ccs.m;
         let _n = base_ccs.n;
 
-        // Clone base matrices
-        let mut matrices: Vec<Mat<F>> = base_ccs.matrices.clone();
+        // Clone base matrices (sparse CCS matrices).
+        let mut matrices: Vec<CcsMatrix<F>> = base_ccs.matrices.clone();
 
         // Determine which matrix indices are A, B, C
         // For identity-first CCS: M_0 = I_n, M_1 = A, M_2 = B, M_3 = C
@@ -719,37 +726,64 @@ impl<F: Field> CpuConstraintBuilder<F> {
             (0, 1, 2)
         };
 
-        // Add constraints to A and B matrices
+        let to_triplets = |mat: &CcsMatrix<F>| -> Vec<(usize, usize, F)> {
+            match mat {
+                CcsMatrix::Identity { n } => {
+                    let mut trips = Vec::with_capacity(*n);
+                    for i in 0..*n {
+                        trips.push((i, i, F::ONE));
+                    }
+                    trips
+                }
+                CcsMatrix::Csc(csc) => {
+                    let mut trips = Vec::with_capacity(csc.vals.len());
+                    for col in 0..csc.ncols {
+                        let s0 = csc.col_ptr[col];
+                        let e0 = csc.col_ptr[col + 1];
+                        for k in s0..e0 {
+                            trips.push((csc.row_idx[k], col, csc.vals[k]));
+                        }
+                    }
+                    trips
+                }
+            }
+        };
+
+        // Extract existing A/B entries as triplets and append new constraint contributions.
+        let mut a_trips = to_triplets(&matrices[a_idx]);
+        let mut b_trips = to_triplets(&matrices[b_idx]);
+
         for (i, constraint) in self.constraints.iter().enumerate() {
             let row = constraint_start_row + i;
 
-            // A matrix: condition
+            // A matrix: condition.
             if constraint.negate_condition {
-                let current = matrices[a_idx][(row, self.const_one_col)];
-                matrices[a_idx].set(row, self.const_one_col, current + F::ONE);
-                let current = matrices[a_idx][(row, constraint.condition_col)];
-                matrices[a_idx].set(row, constraint.condition_col, current - F::ONE);
+                // (1 - condition - Σ additional_conditions)
+                a_trips.push((row, self.const_one_col, F::ONE));
+                a_trips.push((row, constraint.condition_col, -F::ONE));
                 for &col in &constraint.additional_condition_cols {
-                    let current = matrices[a_idx][(row, col)];
-                    matrices[a_idx].set(row, col, current - F::ONE);
+                    a_trips.push((row, col, -F::ONE));
                 }
             } else {
-                let current = matrices[a_idx][(row, constraint.condition_col)];
-                matrices[a_idx].set(row, constraint.condition_col, current + F::ONE);
+                // (condition + Σ additional_conditions)
+                a_trips.push((row, constraint.condition_col, F::ONE));
                 for &col in &constraint.additional_condition_cols {
-                    let current = matrices[a_idx][(row, col)];
-                    matrices[a_idx].set(row, col, current + F::ONE);
+                    a_trips.push((row, col, F::ONE));
                 }
             }
 
             // B matrix: Σ coeffᵢ · z[colᵢ]
             for &(col, coeff) in &constraint.b_terms {
-                let current = matrices[b_idx][(row, col)];
-                matrices[b_idx].set(row, col, current + coeff);
+                b_trips.push((row, col, coeff));
             }
         }
 
-        CcsStructure::new(matrices, base_ccs.f.clone()).map_err(|e| format!("failed to extend CCS: {:?}", e))
+        // Rebuild A/B in CSC form, combining duplicates by summing coefficients.
+        matrices[a_idx] = CcsMatrix::Csc(CscMat::from_triplets(a_trips, base_ccs.n, base_ccs.m));
+        matrices[b_idx] = CcsMatrix::Csc(CscMat::from_triplets(b_trips, base_ccs.n, base_ccs.m));
+
+        CcsStructure::new_sparse(matrices, base_ccs.f.clone())
+            .map_err(|e| format!("failed to extend CCS: {:?}", e))
     }
 }
 
@@ -769,7 +803,7 @@ impl<F: Field> CpuConstraintBuilder<F> {
 /// This function assumes the caller passes instances in canonical bus order:
 /// 1) all Shout instances (table_id-sorted order upstream),
 /// 2) all Twist instances (mem_id-sorted order upstream).
-pub fn extend_ccs_with_shared_cpu_bus_constraints<F: Field + Copy, Cmt>(
+pub fn extend_ccs_with_shared_cpu_bus_constraints<F: Field + PrimeCharacteristicRing + Copy + Eq + Send + Sync, Cmt>(
     base_ccs: &CcsStructure<F>,
     m_in: usize,
     const_one_col: usize,
@@ -869,18 +903,32 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints<F: Field + Copy, Cmt>(
     };
 
     // Refuse to overwrite any existing constraints: require trailing rows are empty in A/B/C.
-    for row in start..base_ccs.n {
-        for col in 0..base_ccs.m {
-            if base_ccs.matrices[a_idx][(row, col)] != F::ZERO
-                || base_ccs.matrices[b_idx][(row, col)] != F::ZERO
-                || base_ccs.matrices[c_idx][(row, col)] != F::ZERO
-            {
-                return Err(format!(
-                    "cannot inject shared-bus constraints: base CCS row {row} is not empty in A/B/C.\n\
-                     Fix: reserve the LAST {needed} rows of the base CPU R1CS as padding rows (all-zero in A/B/C)."
-                ));
-            }
+    let first_nonzero_from_row = |m: &CcsMatrix<F>, start_row: usize| -> Option<usize> {
+        match m {
+            CcsMatrix::Identity { n } => (start_row < *n).then_some(start_row),
+            CcsMatrix::Csc(csc) => csc
+                .row_idx
+                .iter()
+                .copied()
+                .filter(|&r| r >= start_row)
+                .min(),
         }
+    };
+
+    let first_bad_row = [
+        first_nonzero_from_row(&base_ccs.matrices[a_idx], start),
+        first_nonzero_from_row(&base_ccs.matrices[b_idx], start),
+        first_nonzero_from_row(&base_ccs.matrices[c_idx], start),
+    ]
+    .into_iter()
+    .flatten()
+    .min();
+
+    if let Some(row) = first_bad_row {
+        return Err(format!(
+            "cannot inject shared-bus constraints: base CCS row {row} is not empty in A/B/C.\n\
+             Fix: reserve the LAST {needed} rows of the base CPU R1CS as padding rows (all-zero in A/B/C)."
+        ));
     }
 
     builder.extend_ccs(base_ccs, start)

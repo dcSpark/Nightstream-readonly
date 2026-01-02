@@ -229,11 +229,7 @@ impl RowStreamState {
         let mut f_var_tables: Vec<Vec<K>> = Vec::with_capacity(f_var_indices.len());
         for &j in &f_var_indices {
             let mut out = vec![K::ZERO; n_pad];
-            if j == 0 {
-                let cap = core::cmp::min(n_eff, z1.len());
-                out[..cap].copy_from_slice(&z1[..cap]);
-            } else {
-                let csc = sparse.csc(j).unwrap_or_else(|| panic!("missing CSC for matrix j={j}"));
+            if let Some(csc) = sparse.csc(j) {
                 if csc.ncols != z1.len() {
                     panic!(
                         "matrix-vector dim mismatch for j={j}: csc.ncols={} != z1.len()={}",
@@ -258,6 +254,10 @@ impl RowStreamState {
                         }
                     }
                 }
+            } else {
+                // Identity sentinel: (I · z1)[row] = z1[row]
+                let cap = core::cmp::min(n_eff, z1.len());
+                out[..cap].copy_from_slice(&z1[..cap]);
             }
             f_var_tables.push(out);
         }
@@ -328,7 +328,8 @@ impl RowStreamState {
                         continue;
                     }
 
-                    if j == 0 {
+                    if sparse.csc(j).is_none() {
+                        // Identity sentinel: (I · s_alpha)[row] = s_alpha[row]
                         let cap = core::cmp::min(n_eff, s_alpha.len());
                         for r in 0..cap {
                             eval_tbl[r] += coeff * s_alpha[r];
@@ -1094,6 +1095,12 @@ where
         vjs_nz.push(v1_nz);
 
         for j in 1..t {
+            // Identity sentinel: v_j = χ_r (same as v1).
+            if sparse.csc(j).is_none() {
+                vjs_nz.push(vjs_nz[0].clone());
+                continue;
+            }
+
             let csc = sparse
                 .csc(j)
                 .unwrap_or_else(|| panic!("optimized oracle: missing CSC matrix for j={j}"));

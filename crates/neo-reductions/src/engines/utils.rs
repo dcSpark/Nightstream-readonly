@@ -6,7 +6,7 @@
 
 use crate::error::PiCcsError;
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::{CcsStructure, MatRef, McsInstance, MeInstance, SparsePoly};
+use neo_ccs::{CcsMatrix, CcsStructure, McsInstance, MeInstance, SparsePoly};
 use neo_math::{KExtensions, D, F, K};
 use neo_params::NeoParams;
 use neo_transcript::{labels as tr_labels, Poseidon2Transcript, Transcript};
@@ -221,21 +221,55 @@ pub fn digest_ccs_matrices<F: Field + PrimeField64>(s: &CcsStructure<F>) -> Vec<
         state[absorbed] = Goldilocks::from_u64(j as u64);
         absorbed += 1;
 
-        let mat_ref = MatRef::from_mat(matrix);
+        let mut emit = |row: usize, col: usize, val_u64: u64| {
+            if absorbed + 3 > 15 {
+                poseidon2.permute_mut(&mut state);
+                absorbed = 0;
+            }
+            state[absorbed] = Goldilocks::from_u64(row as u64);
+            state[absorbed + 1] = Goldilocks::from_u64(col as u64);
+            state[absorbed + 2] = Goldilocks::from_u64(val_u64);
+            absorbed += 3;
+        };
 
-        for row in 0..s.n {
-            let row_slice = mat_ref.row(row);
-            for (col, &val) in row_slice.iter().enumerate() {
-                if val != F::ZERO {
-                    if absorbed + 3 > 15 {
-                        poseidon2.permute_mut(&mut state);
-                        absorbed = 0;
+        match matrix {
+            CcsMatrix::Identity { n } => {
+                debug_assert_eq!(*n, s.n);
+                debug_assert_eq!(*n, s.m);
+                let one_u = F::ONE.as_canonical_u64();
+                for row in 0..s.n {
+                    emit(row, row, one_u);
+                }
+            }
+            CcsMatrix::Csc(csc) => {
+                // Enumerate non-zeros in row-major order (matches dense scan) without a global sort.
+                let mut row_counts = vec![0usize; csc.nrows];
+                for col in 0..csc.ncols {
+                    let s0 = csc.col_ptr[col];
+                    let e0 = csc.col_ptr[col + 1];
+                    for k in s0..e0 {
+                        row_counts[csc.row_idx[k]] += 1;
                     }
+                }
 
-                    state[absorbed] = Goldilocks::from_u64(row as u64);
-                    state[absorbed + 1] = Goldilocks::from_u64(col as u64);
-                    state[absorbed + 2] = Goldilocks::from_u64(val.as_canonical_u64());
-                    absorbed += 3;
+                let mut rows: Vec<Vec<(usize, u64)>> = row_counts
+                    .into_iter()
+                    .map(|cnt| Vec::with_capacity(cnt))
+                    .collect();
+
+                for col in 0..csc.ncols {
+                    let s0 = csc.col_ptr[col];
+                    let e0 = csc.col_ptr[col + 1];
+                    for k in s0..e0 {
+                        let row = csc.row_idx[k];
+                        rows[row].push((col, csc.vals[k].as_canonical_u64()));
+                    }
+                }
+
+                for row in 0..csc.nrows {
+                    for &(col, val_u64) in &rows[row] {
+                        emit(row, col, val_u64);
+                    }
                 }
             }
         }
@@ -252,114 +286,11 @@ pub fn digest_ccs_matrices<F: Field + PrimeField64>(s: &CcsStructure<F>) -> Vec<
 /// but enumerates non-zeros from the cache and sorts them into row-major order.
 pub fn digest_ccs_matrices_with_sparse_cache<Ff: Field + PrimeField64>(
     s: &CcsStructure<Ff>,
-    sparse: Option<&crate::engines::optimized_engine::oracle::SparseCache<Ff>>,
+    _sparse: Option<&crate::engines::optimized_engine::oracle::SparseCache<Ff>>,
 ) -> Vec<Goldilocks> {
-    use rand_chacha::{rand_core::SeedableRng, ChaCha8Rng};
-
-    if sparse.is_none() {
-        return digest_ccs_matrices(s);
-    }
-    let sparse = sparse.expect("checked above");
-
-    const CCS_DIGEST_SEED: u64 = 0x434353445F4D4154;
-    let mut rng = ChaCha8Rng::seed_from_u64(CCS_DIGEST_SEED);
-    let poseidon2 = Poseidon2Goldilocks::<16>::new_from_rng_128(&mut rng);
-
-    let mut state = [Goldilocks::ZERO; 16];
-    let mut absorbed = 0;
-
-    const DOMAIN_STRING: &[u8] = b"neo/ccs/matrices/v1";
-    for &byte in DOMAIN_STRING {
-        if absorbed >= 15 {
-            poseidon2.permute_mut(&mut state);
-            absorbed = 0;
-        }
-        state[absorbed] = Goldilocks::from_u32(byte as u32);
-        absorbed += 1;
-    }
-
-    if absorbed + 3 >= 16 {
-        poseidon2.permute_mut(&mut state);
-        absorbed = 0;
-    }
-    state[absorbed] = Goldilocks::from_u64(s.n as u64);
-    state[absorbed + 1] = Goldilocks::from_u64(s.m as u64);
-    state[absorbed + 2] = Goldilocks::from_u64(s.t() as u64);
-
-    poseidon2.permute_mut(&mut state);
-
-    for (j, matrix) in s.matrices.iter().enumerate() {
-        absorbed = 0;
-        state[absorbed] = Goldilocks::from_u64(j as u64);
-        absorbed += 1;
-
-        // M₀ is identity in all identity-first CCS paths; handle without scanning.
-        if j == 0 && sparse.csc(0).is_none() && s.n == s.m {
-            // Emit only the diagonal non-zeros in row-major order.
-            let one_u = Ff::ONE.as_canonical_u64();
-            for row in 0..s.n {
-                if absorbed + 3 > 15 {
-                    poseidon2.permute_mut(&mut state);
-                    absorbed = 0;
-                }
-                state[absorbed] = Goldilocks::from_u64(row as u64);
-                state[absorbed + 1] = Goldilocks::from_u64(row as u64);
-                state[absorbed + 2] = Goldilocks::from_u64(one_u);
-                absorbed += 3;
-            }
-
-            poseidon2.permute_mut(&mut state);
-            continue;
-        }
-
-        if let Some(csc) = sparse.csc(j) {
-            // Collect and sort non-zeros into row-major order (matches dense scan).
-            let mut entries: Vec<(usize, usize, u64)> = Vec::with_capacity(csc.vals.len());
-            for col in 0..csc.ncols {
-                let s0 = csc.col_ptr[col];
-                let e0 = csc.col_ptr[col + 1];
-                for k in s0..e0 {
-                    entries.push((csc.row_idx[k], col, csc.vals[k].as_canonical_u64()));
-                }
-            }
-            entries.sort_unstable_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.cmp(&b.1)));
-
-            for (row, col, val_u64) in entries {
-                if absorbed + 3 > 15 {
-                    poseidon2.permute_mut(&mut state);
-                    absorbed = 0;
-                }
-                state[absorbed] = Goldilocks::from_u64(row as u64);
-                state[absorbed + 1] = Goldilocks::from_u64(col as u64);
-                state[absorbed + 2] = Goldilocks::from_u64(val_u64);
-                absorbed += 3;
-            }
-
-            poseidon2.permute_mut(&mut state);
-            continue;
-        }
-
-        // Fallback: scan dense (should not happen for identity-first optimized paths).
-        let mat_ref = MatRef::from_mat(matrix);
-        for row in 0..s.n {
-            let row_slice = mat_ref.row(row);
-            for (col, &val) in row_slice.iter().enumerate() {
-                if val != Ff::ZERO {
-                    if absorbed + 3 > 15 {
-                        poseidon2.permute_mut(&mut state);
-                        absorbed = 0;
-                    }
-                    state[absorbed] = Goldilocks::from_u64(row as u64);
-                    state[absorbed + 1] = Goldilocks::from_u64(col as u64);
-                    state[absorbed + 2] = Goldilocks::from_u64(val.as_canonical_u64());
-                    absorbed += 3;
-                }
-            }
-        }
-        poseidon2.permute_mut(&mut state);
-    }
-
-    state[0..4].to_vec()
+    // `CcsStructure` stores matrices sparsely (CSC/identity), so the dense-scan cache is no longer
+    // required. Keep the signature for compatibility and compute directly from `s`.
+    digest_ccs_matrices(s)
 }
 
 fn absorb_sparse_polynomial(tr: &mut Poseidon2Transcript, f: &SparsePoly<F>) {

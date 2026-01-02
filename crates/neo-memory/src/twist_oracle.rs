@@ -16,8 +16,6 @@
 use crate::bit_ops::eq_bit_affine;
 use crate::mle::{eq_single, lt_eval};
 use crate::sparse_time::SparseIdxVec;
-#[cfg(feature = "debug-logs")]
-use neo_math::KExtensions;
 use neo_math::K;
 use neo_reductions::sumcheck::RoundOracle;
 use p3_field::PrimeCharacteristicRing;
