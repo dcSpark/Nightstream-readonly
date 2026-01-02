@@ -143,6 +143,49 @@ where
 {
     use crate::engines::pi_rlc_dec::{OptimizedRlcDec, RlcDecOps};
 
+    // Fast path: with a single ME claim there is nothing to mix, so Π_RLC can be the identity.
+    //
+    // We still sample/store `rhos` at the shard layer for transcript binding, but skipping the
+    // S-action here avoids an extremely expensive D×D by D×m witness multiplication.
+    if me_inputs.len() == 1 {
+        assert_eq!(rhos.len(), 1, "Π_RLC(k=1): |rhos| must equal |inputs|");
+        assert_eq!(Zs.len(), 1, "Π_RLC(k=1): |Zs| must equal |inputs|");
+
+        let inp = &me_inputs[0];
+        let t = inp.y.len();
+        assert!(t >= s.t(), "Π_RLC(k=1): ME y.len() must be >= s.t()");
+
+        let inputs_c = vec![inp.c.clone()];
+        let c = mix_commits(rhos, &inputs_c);
+
+        // Recompute y_scalars from digits (canonical).
+        let bK = K::from(F::from_u64(params.b as u64));
+        let mut y_scalars = Vec::with_capacity(t);
+        for j in 0..t {
+            let mut sc = K::ZERO;
+            let mut pow = K::ONE;
+            for rho in 0..D {
+                sc += pow * inp.y[j][rho];
+                pow *= bK;
+            }
+            y_scalars.push(sc);
+        }
+
+        let out = MeInstance::<Cmt, F, K> {
+            c_step_coords: vec![],
+            u_offset: 0,
+            u_len: 0,
+            c,
+            X: inp.X.clone(),
+            r: inp.r.clone(),
+            y: inp.y.clone(),
+            y_scalars,
+            m_in: inp.m_in,
+            fold_digest: inp.fold_digest,
+        };
+        return (out, Zs[0].clone());
+    }
+
     match mode {
         FoldingMode::Optimized => OptimizedRlcDec::rlc_with_commit(s, params, rhos, me_inputs, Zs, ell_d, mix_commits),
         #[cfg(feature = "paper-exact")]
@@ -302,6 +345,40 @@ where
 
     assert!(!inputs.is_empty());
     assert_eq!(rhos.len(), inputs.len());
+    if inputs.len() == 1 {
+        let inp = &inputs[0];
+        let t = inp.y.len();
+        assert!(t >= s.t(), "rlc_public(k=1): ME y.len() must be >= s.t()");
+
+        let inputs_c = vec![inp.c.clone()];
+        let c = mix_rhos_commits(rhos, &inputs_c);
+
+        // Recompute y_scalars from digits (canonical).
+        let bK = K::from(F::from_u64(params.b as u64));
+        let mut y_scalars = Vec::with_capacity(t);
+        for j in 0..t {
+            let mut sc = K::ZERO;
+            let mut pow = K::ONE;
+            for rho in 0..D {
+                sc += pow * inp.y[j][rho];
+                pow *= bK;
+            }
+            y_scalars.push(sc);
+        }
+
+        return MeInstance {
+            c_step_coords: vec![],
+            u_offset: 0,
+            u_len: 0,
+            c,
+            X: inp.X.clone(),
+            r: inp.r.clone(),
+            y: inp.y.clone(),
+            y_scalars,
+            m_in: inp.m_in,
+            fold_digest: inp.fold_digest,
+        };
+    }
     let d = D;
     let m_in = inputs[0].m_in;
     let d_pad = 1usize << ell_d;

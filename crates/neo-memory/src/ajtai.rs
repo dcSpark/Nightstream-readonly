@@ -25,9 +25,11 @@ pub fn encode_vector_balanced_to_mat(params: &NeoParams, z: &[BaseField]) -> Mat
 
     // Convert to row-major Mat<F> of shape d×m.
     let mut row_major = vec![BaseField::ZERO; d * m];
-    for col in 0..m {
-        for row in 0..d {
-            row_major[row * m + col] = digits_col_major[col * d + row];
+    // Write row-major contiguously for better cache behavior on large matrices.
+    for row in 0..d {
+        let row_offset = row * m;
+        for col in 0..m {
+            row_major[row_offset + col] = digits_col_major[col * d + row];
         }
     }
     Mat::from_row_major(d, m, row_major)

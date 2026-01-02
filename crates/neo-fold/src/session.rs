@@ -147,6 +147,9 @@ fn rot_matrix_to_rq(mat: &Mat<F>) -> RqEl {
 /// Default Ajtai mixers (hidden internally).
 fn default_mixers() -> CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32) -> Cmt> {
     fn mix_rhos_commits(rhos: &[Mat<F>], cs: &[Cmt]) -> Cmt {
+        if cs.len() == 1 {
+            return cs[0].clone();
+        }
         let rq_els: Vec<RqEl> = rhos.iter().map(rot_matrix_to_rq).collect();
         s_lincomb(&rq_els, cs).expect("s_lincomb should succeed")
     }

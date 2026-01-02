@@ -1,5 +1,5 @@
 use crate::error::{AjtaiError, AjtaiResult};
-use crate::util::to_balanced_i128;
+use crate::util::to_balanced_i64;
 use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as Fq;
 
@@ -16,25 +16,28 @@ pub fn decomp_b(z: &[Fq], b: u32, d: usize, style: DecompStyle) -> Vec<Fq> {
     let m = z.len();
     let mut Z = vec![Fq::ZERO; d * m]; // col-major by input convention: columns are cf digits of each entry
     for (j, &zij) in z.iter().enumerate() {
-        let mut a = to_balanced_i128(zij);
+        let mut a = to_balanced_i64(zij);
         for i in 0..d {
             // Constant-time: always compute digit even if a == 0 to prevent timing side-channel
             let (digit, new_a) = match style {
                 DecompStyle::NonNegative => {
-                    let b_i128 = b as i128;
-                    let r = ((a % b_i128) + b_i128) % b_i128;
-                    (r as i32, (a - r) / b_i128)
+                    let b_i64 = b as i64;
+                    let r = a.rem_euclid(b_i64);
+                    let q = a.div_euclid(b_i64);
+                    (r as i32, q)
                 }
                 DecompStyle::Balanced => {
                     // balanced in [-(b-1)..(b-1)]; choose residue with smallest absolute value
-                    let mut r = a % (b as i128);
-                    if r > (b as i128) / 2 {
-                        r -= b as i128;
+                    let b_i64 = b as i64;
+                    let mut r = a % b_i64;
+                    let half = b_i64 / 2;
+                    if r > half {
+                        r -= b_i64;
                     }
-                    if r < -((b as i128) / 2) {
-                        r += b as i128;
+                    if r < -half {
+                        r += b_i64;
                     }
-                    (r as i32, (a - r) / b as i128)
+                    (r as i32, (a - r) / b_i64)
                 }
             };
             Z[j * d + i] = if digit >= 0 {
@@ -56,25 +59,28 @@ pub fn split_b(Z: &[Fq], b: u32, d: usize, m: usize, k: usize, style: DecompStyl
     for col in 0..m {
         for row in 0..d {
             let idx = col * d + row;
-            let mut a = to_balanced_i128(Z[idx]);
+            let mut a = to_balanced_i64(Z[idx]);
             #[allow(clippy::needless_range_loop)]
             for i in 0..k {
                 // Constant-time: always compute digit even if a == 0 to prevent timing side-channel
                 let (digit, new_a) = match style {
                     DecompStyle::NonNegative => {
-                        let b_i128 = b as i128;
-                        let r = ((a % b_i128) + b_i128) % b_i128;
-                        (r as i32, (a - r) / b_i128)
+                        let b_i64 = b as i64;
+                        let r = a.rem_euclid(b_i64);
+                        let q = a.div_euclid(b_i64);
+                        (r as i32, q)
                     }
                     DecompStyle::Balanced => {
-                        let mut r = a % (b as i128);
-                        if r > (b as i128) / 2 {
-                            r -= b as i128;
+                        let b_i64 = b as i64;
+                        let mut r = a % b_i64;
+                        let half = b_i64 / 2;
+                        if r > half {
+                            r -= b_i64;
                         }
-                        if r < -((b as i128) / 2) {
-                            r += b as i128;
+                        if r < -half {
+                            r += b_i64;
                         }
-                        (r as i32, (a - r) / b as i128)
+                        (r as i32, (a - r) / b_i64)
                     }
                 };
                 out[i][idx] = if digit >= 0 {

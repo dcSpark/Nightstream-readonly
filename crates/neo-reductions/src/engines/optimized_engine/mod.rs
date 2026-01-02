@@ -49,6 +49,7 @@ pub use common::{
     // Paper-exact RLC/DEC
     rlc_reduction_paper_exact,
     rlc_reduction_paper_exact_with_commit_mix,
+    rlc_reduction_optimized,
     sum_q_over_hypercube_paper_exact,
 };
 

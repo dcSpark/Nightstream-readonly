@@ -2,6 +2,7 @@ use crate::error::{AjtaiError, AjtaiResult};
 use crate::types::{Commitment, PP};
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_goldilocks::Goldilocks as Fq;
+use rayon::prelude::*;
 use rand::{CryptoRng, RngCore};
 
 /// Bring in ring & S-action APIs from neo-math.
@@ -72,12 +73,10 @@ pub fn setup<R: RngCore + CryptoRng>(rng: &mut R, d: usize, kappa: usize, m: usi
         let mut row = Vec::with_capacity(m);
         for _ in 0..m {
             // sample ring element uniformly by sampling d random coefficients in F_q and mapping via cf^{-1}
-            let coeffs_vec: Vec<Fq> = (0..neo_math::ring::D)
-                .map(|_| sample_uniform_fq(rng))
-                .collect();
-            let coeffs: [Fq; neo_math::ring::D] = coeffs_vec
-                .try_into()
-                .map_err(|_| AjtaiError::InvalidDimensions("Failed to create coefficient array".to_string()))?;
+            let mut coeffs = [Fq::ZERO; neo_math::ring::D];
+            for c in coeffs.iter_mut() {
+                *c = sample_uniform_fq(rng);
+            }
             row.push(cf_unmap(coeffs));
         }
         rows.push(row);
@@ -307,24 +306,57 @@ pub fn commit_precomp_ct(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
 
     let mut C = Commitment::zeros(d, kappa);
 
-    // Heap-allocated scratch for columns of rot(a_ij) to avoid stack overflow
-    // 54×54×8 ≈ 23 KiB per allocation, hoisted outside inner loop for reuse
-    let mut cols = vec![[Fq::ZERO; D]; D].into_boxed_slice();
+    if m == 0 {
+        return C;
+    }
 
-    for i in 0..kappa {
-        let acc_i = C.col_mut(i);
-        for j in 0..m {
-            precompute_rot_columns(pp.m_rows[i][j], &mut cols);
-            let base = j * d;
-            // Constant schedule: always loop over all t
-            for t in 0..d {
-                let mask = Z[base + t];
-                let col_t = &cols[t];
-                for r in 0..d {
-                    acc_i[r] += col_t[r] * mask;
-                }
+    struct Acc {
+        acc: [Fq; D],
+        cols: Box<[[Fq; D]]>,
+    }
+
+    impl Acc {
+        #[inline]
+        fn new() -> Self {
+            Self {
+                acc: [Fq::ZERO; D],
+                cols: vec![[Fq::ZERO; D]; D].into_boxed_slice(),
             }
         }
     }
+
+    for i in 0..kappa {
+        let row = &pp.m_rows[i];
+        debug_assert_eq!(row.len(), m);
+
+        let acc = row
+            .par_iter()
+            .zip(Z.par_chunks_exact(d))
+            .fold(
+                Acc::new,
+                |mut st, (&a_ij, z_col)| {
+                    precompute_rot_columns(a_ij, &mut st.cols);
+                    // Constant schedule: always loop over all t
+                    for t in 0..d {
+                        let mask = z_col[t];
+                        let col_t = &st.cols[t];
+                        for r in 0..d {
+                            st.acc[r] += col_t[r] * mask;
+                        }
+                    }
+                    st
+                },
+            )
+            .reduce_with(|mut a, b| {
+                for r in 0..d {
+                    a.acc[r] += b.acc[r];
+                }
+                a
+            })
+            .unwrap_or_else(Acc::new);
+
+        C.col_mut(i).copy_from_slice(&acc.acc);
+    }
+
     C
 }

@@ -1211,6 +1211,173 @@ where
     (out, Z)
 }
 
+/// --- Π_RLC (optimized) -----------------------------------------------------
+///
+/// Optimized Random Linear Combination for the prover path.
+///
+/// Semantics match `rlc_reduction_paper_exact`, but this implementation:
+/// - Fast-paths the common `k=1` case (no mixing) to avoid a D×D by D×m multiply.
+/// - Uses cache-friendly row-major loops for the large witness matrix `Z` when k>1.
+pub fn rlc_reduction_optimized<Ff>(
+    s: &CcsStructure<Ff>,
+    params: &NeoParams,
+    rhos: &[Mat<Ff>],
+    me_inputs: &[MeInstance<Cmt, Ff, K>],
+    Zs: &[Mat<Ff>],
+    ell_d: usize,
+) -> (MeInstance<Cmt, Ff, K>, Mat<Ff>)
+where
+    Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<Ff>,
+{
+    assert!(
+        !me_inputs.is_empty(),
+        "Π_RLC(optimized): need at least one input"
+    );
+    let k1 = me_inputs.len();
+    assert_eq!(rhos.len(), k1, "Π_RLC: |rhos| must equal |inputs|");
+    assert_eq!(Zs.len(), k1, "Π_RLC: |Zs| must equal |inputs|");
+
+    // IMPORTANT: The folding layer may append extra ME outputs (e.g. shared-bus openings)
+    // beyond `s.t()`. Π_RLC in this module mixes only the core CCS outputs; the sidecar
+    // outputs are recomputed later from `Z_mix` and appended once.
+    let t_core = s.t();
+
+    // k=1: no mixing needed (common for the first step and for CCS-only flows).
+    // We still return only the core CCS outputs to preserve the "append sidecar once" invariant.
+    if k1 == 1 {
+        let mut out = me_inputs[0].clone();
+        out.y.truncate(t_core);
+        out.y_scalars.truncate(t_core);
+        return (out, Zs[0].clone());
+    }
+
+    let d = D;
+    let d_pad = 1usize << ell_d;
+    let m_in = me_inputs[0].m_in;
+    let r = me_inputs[0].r.clone();
+
+    // X := Σ ρ_i X_i
+    let mut X = Mat::zero(d, m_in, Ff::ZERO);
+    {
+        let x_out = X.as_mut_slice();
+        for i in 0..k1 {
+            let rho = &rhos[i];
+            let xi = &me_inputs[i].X;
+            debug_assert_eq!(rho.rows(), d);
+            debug_assert_eq!(rho.cols(), d);
+            debug_assert_eq!(xi.rows(), d);
+            debug_assert_eq!(xi.cols(), m_in);
+
+            let rho_data = rho.as_slice();
+            let x_in = xi.as_slice();
+            for rr in 0..d {
+                let rho_row = &rho_data[rr * d..(rr + 1) * d];
+                let out_off = rr * m_in;
+                for kk in 0..d {
+                    let coeff = rho_row[kk];
+                    if coeff == Ff::ZERO {
+                        continue;
+                    }
+                    let in_off = kk * m_in;
+                    for c in 0..m_in {
+                        x_out[out_off + c] += coeff * x_in[in_off + c];
+                    }
+                }
+            }
+        }
+    }
+
+    // y_j := Σ ρ_i y_(i,j) (apply ρ to the first D digits; keep padding to 2^{ell_d})
+    let mut y: Vec<Vec<K>> = Vec::with_capacity(t_core);
+    for j in 0..t_core {
+        let mut yj_acc = vec![K::ZERO; d_pad];
+        for i in 0..k1 {
+            let yi = &me_inputs[i].y[j];
+            debug_assert!(yi.len() >= d, "ME.y[{j}] must have length >= D");
+            let rho = &rhos[i];
+            for rr in 0..d.min(d_pad) {
+                let mut acc_rr = K::ZERO;
+                for kk in 0..d {
+                    acc_rr += K::from(rho[(rr, kk)]) * yi[kk];
+                }
+                yj_acc[rr] += acc_rr;
+            }
+        }
+        y.push(yj_acc);
+    }
+
+    // y_scalars: base-b recomposition of the first D digits of each y_j
+    let bF = Ff::from_u64(params.b as u64);
+    let mut pow_b = vec![Ff::ONE; D];
+    for i in 1..D {
+        pow_b[i] = pow_b[i - 1] * bF;
+    }
+    let pow_b_k: Vec<K> = pow_b.iter().copied().map(K::from).collect();
+    let y_scalars: Vec<K> = y
+        .iter()
+        .map(|yj| {
+            let mut acc = K::ZERO;
+            for rho in 0..d {
+                acc += yj[rho] * pow_b_k[rho];
+            }
+            acc
+        })
+        .collect();
+
+    // Z := Σ ρ_i Z_i (this is the hot path: D×m is huge).
+    let mut Z = Mat::zero(d, s.m, Ff::ZERO);
+    {
+        let m = s.m;
+        let z_out = Z.as_mut_slice();
+        const BLOCK_COLS: usize = 1024;
+
+        for i in 0..k1 {
+            let rho = &rhos[i];
+            let zi = &Zs[i];
+            debug_assert_eq!(rho.rows(), d);
+            debug_assert_eq!(rho.cols(), d);
+            debug_assert_eq!(zi.rows(), d);
+            debug_assert_eq!(zi.cols(), m);
+
+            let rho_data = rho.as_slice();
+            let z_in = zi.as_slice();
+
+            for col0 in (0..m).step_by(BLOCK_COLS) {
+                let len = core::cmp::min(BLOCK_COLS, m - col0);
+                for kk in 0..d {
+                    let in_off = kk * m + col0;
+                    for rr in 0..d {
+                        let coeff = rho_data[rr * d + kk];
+                        if coeff == Ff::ZERO {
+                            continue;
+                        }
+                        let out_off = rr * m + col0;
+                        for t in 0..len {
+                            z_out[out_off + t] += coeff * z_in[in_off + t];
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    let out = MeInstance::<Cmt, Ff, K> {
+        c_step_coords: vec![],
+        u_offset: 0,
+        u_len: 0,
+        c: me_inputs[0].c.clone(), // NOTE: caller can replace with true Σ ρ_i·c_i
+        X,
+        r,
+        y,
+        y_scalars,
+        m_in,
+        fold_digest: me_inputs[0].fold_digest,
+    };
+
+    (out, Z)
+}
+
 /// Same as `rlc_reduction_paper_exact`, but also computes the combined commitment via a caller-supplied
 /// mixing function over commitments. This matches the paper's Π_RLC output when `combine_commit` implements
 /// the correct S-module action on commitments.
