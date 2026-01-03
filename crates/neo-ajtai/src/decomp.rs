@@ -157,6 +157,51 @@ pub fn decomp_b_row_major(z: &[Fq], b: u32, d: usize, style: DecompStyle) -> Vec
         }
         return Z;
     }
+    if b == 3 {
+        // Fast path: constant divisor enables LLVM to optimize division/mod by 3.
+        let mut a_vals: Vec<i64> = z.iter().copied().map(to_balanced_i64).collect();
+        let mut Z = Vec::with_capacity(d * m);
+        match style {
+            DecompStyle::NonNegative => {
+                let two = Fq::from_u64(2);
+                for _row in 0..d {
+                    for a in a_vals.iter_mut() {
+                        let r = a.rem_euclid(3);
+                        Z.push(match r {
+                            0 => Fq::ZERO,
+                            1 => Fq::ONE,
+                            2 => two,
+                            _ => unreachable!("rem_euclid(3) must be in 0..=2"),
+                        });
+                        *a = a.div_euclid(3);
+                    }
+                }
+            }
+            DecompStyle::Balanced => {
+                let one = Fq::ONE;
+                let neg_one = Fq::ZERO - one;
+                for _row in 0..d {
+                    for a in a_vals.iter_mut() {
+                        let mut r = *a % 3;
+                        if r > 1 {
+                            r -= 3;
+                        }
+                        if r < -1 {
+                            r += 3;
+                        }
+                        Z.push(match r {
+                            -1 => neg_one,
+                            0 => Fq::ZERO,
+                            1 => one,
+                            _ => unreachable!("balanced mod 3 digit must be -1/0/1"),
+                        });
+                        *a = (*a - r) / 3;
+                    }
+                }
+            }
+        }
+        return Z;
+    }
     let b_i64 = b as i64;
     // Row-major output: write contiguously by iterating rows outermost. This avoids the
     // strided stores of the column-outer decomposition and also avoids zero-filling a

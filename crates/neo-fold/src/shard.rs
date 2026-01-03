@@ -25,7 +25,7 @@ pub use crate::shard_proof_types::{
 use crate::PiCcsError;
 use neo_ajtai::{
     get_global_pp_for_dims, get_global_pp_seeded_params_for_dims, has_global_pp_for_dims, precompute_rot_columns,
-    sample_uniform_rq, seeded_pp_chunk_seeds, Commitment as Cmt,
+    sample_uniform_rq, seeded_pp_chunk_seeds, try_get_loaded_global_pp_for_dims, Commitment as Cmt,
 };
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::{CcsStructure, Mat, MeInstance};
@@ -372,31 +372,33 @@ where
         },
     }
 
-    let pp_access = match get_global_pp_seeded_params_for_dims(D, s.m) {
-        Ok((kappa, seed)) => {
-            if kappa == 0 {
-                return Err(PiCcsError::InvalidInput("DEC: PP.kappa must be > 0".into()));
-            }
-            let (chunk_size, chunk_seeds_by_row) = seeded_pp_chunk_seeds(seed, kappa, s.m);
-            PpAccess::Seeded {
-                kappa,
-                chunk_size,
-                chunk_seeds_by_row,
-            }
+    let pp_access = if let Some(pp) = try_get_loaded_global_pp_for_dims(D, s.m) {
+        if pp.kappa == 0 {
+            return Err(PiCcsError::InvalidInput("DEC: PP.kappa must be > 0".into()));
         }
-        Err(_) => {
-            // Fallback: non-seeded entry. This will materialize PP if needed.
-            let pp = get_global_pp_for_dims(D, s.m).map_err(|e| {
-                PiCcsError::InvalidInput(format!(
-                    "DEC: Ajtai PP unavailable for (d,m)=({},{}) ({})",
-                    D, s.m, e
-                ))
-            })?;
-            if pp.kappa == 0 {
-                return Err(PiCcsError::InvalidInput("DEC: PP.kappa must be > 0".into()));
-            }
-            PpAccess::Loaded { pp }
+        PpAccess::Loaded { pp }
+    } else if let Ok((kappa, seed)) = get_global_pp_seeded_params_for_dims(D, s.m) {
+        if kappa == 0 {
+            return Err(PiCcsError::InvalidInput("DEC: PP.kappa must be > 0".into()));
         }
+        let (chunk_size, chunk_seeds_by_row) = seeded_pp_chunk_seeds(seed, kappa, s.m);
+        PpAccess::Seeded {
+            kappa,
+            chunk_size,
+            chunk_seeds_by_row,
+        }
+    } else {
+        // Fallback: non-seeded entry. This will materialize PP if needed.
+        let pp = get_global_pp_for_dims(D, s.m).map_err(|e| {
+            PiCcsError::InvalidInput(format!(
+                "DEC: Ajtai PP unavailable for (d,m)=({},{}) ({})",
+                D, s.m, e
+            ))
+        })?;
+        if pp.kappa == 0 {
+            return Err(PiCcsError::InvalidInput("DEC: PP.kappa must be > 0".into()));
+        }
+        PpAccess::Loaded { pp }
     };
 
     // Build χ_r and v_j = M_j^T · χ_r (same as the reference DEC).

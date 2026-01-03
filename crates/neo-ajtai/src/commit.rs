@@ -71,6 +71,23 @@ pub fn rot_step(cur: &[Fq; D], next: &mut [Fq; D]) {
     rot_step_phi_81(cur, next)
 }
 
+#[inline]
+fn acc_mul_add_inplace(acc: &mut [Fq; D], col: &[Fq; D], scalar: Fq) {
+    // Unrolled to encourage LLVM auto-vectorization on platforms that support it.
+    let mut r = 0usize;
+    while r + 3 < D {
+        acc[r] += col[r] * scalar;
+        acc[r + 1] += col[r + 1] * scalar;
+        acc[r + 2] += col[r + 2] * scalar;
+        acc[r + 3] += col[r + 3] * scalar;
+        r += 4;
+    }
+    while r < D {
+        acc[r] += col[r] * scalar;
+        r += 1;
+    }
+}
+
 /// MUST: Setup(κ,m) → sample M ← R_q^{κ×m} uniformly (Def. 9).
 pub fn setup<R: RngCore + CryptoRng>(rng: &mut R, d: usize, kappa: usize, m: usize) -> AjtaiResult<PP<RqEl>> {
     // Ensure d matches the fixed ring dimension from neo-math
@@ -224,16 +241,12 @@ pub fn commit_row_major_seeded(seed: [u8; 32], d: usize, kappa: usize, m: usize,
 
     struct Acc {
         acc: [Fq; D],
-        cols: Box<[[Fq; D]]>,
     }
 
     impl Acc {
         #[inline]
         fn new() -> Self {
-            Self {
-                acc: [Fq::ZERO; D],
-                cols: vec![[Fq::ZERO; D]; D].into_boxed_slice(),
-            }
+            Self { acc: [Fq::ZERO; D] }
         }
     }
 
@@ -249,15 +262,15 @@ pub fn commit_row_major_seeded(seed: [u8; 32], d: usize, kappa: usize, m: usize,
                 let start = chunk_idx * chunk_size;
                 let end = core::cmp::min(m, start + chunk_size);
                 let mut rng = ChaCha8Rng::from_seed(chunk_seeds[chunk_idx]);
-                for col in start..end {
+                let mut nxt = [Fq::ZERO; D];
+                for col_idx in start..end {
                     let a_ij = sample_uniform_rq(&mut rng);
-                    precompute_rot_columns(a_ij, &mut st.cols);
+                    let mut rot_col = cf(a_ij);
                     for t in 0..d {
-                        let mask = z_rows[t][col];
-                        let col_t = &st.cols[t];
-                        for r in 0..d {
-                            st.acc[r] += col_t[r] * mask;
-                        }
+                        let mask = z_rows[t][col_idx];
+                        acc_mul_add_inplace(&mut st.acc, &rot_col, mask);
+                        rot_step(&rot_col, &mut nxt);
+                        core::mem::swap(&mut rot_col, &mut nxt);
                     }
                 }
                 st

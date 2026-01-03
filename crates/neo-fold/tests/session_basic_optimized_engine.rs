@@ -12,7 +12,7 @@ use rand_chacha::rand_core::SeedableRng;
 fn setup_ajtai_for_dims(m: usize) {
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(7);
     let pp = ajtai_setup(&mut rng, D, 4, m).expect("Ajtai setup should succeed");
-    let _ = set_global_pp(pp);
+    set_global_pp(pp).expect("set_global_pp");
 }
 
 #[test]

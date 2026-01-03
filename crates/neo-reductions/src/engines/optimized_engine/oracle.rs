@@ -1038,14 +1038,14 @@ impl RowStreamState {
         }
     }
 
-    fn evals_row_phase<Ff>(&self, xs: &[K]) -> Vec<K>
+    fn evals_row_phase_impl<Ff>(&self, xs: &[K], allow_base: bool) -> Vec<K>
     where
         Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
         K: From<Ff>,
     {
         debug_assert!(self.cur_len >= 2 && self.cur_len % 2 == 0);
         let tail_len = self.cur_len / 2;
-        let xs_all_base = self.all_base && xs.iter().all(|&x| x.imag() == Fq::ZERO);
+        let xs_all_base = allow_base && self.all_base && xs.iter().all(|&x| x.imag() == Fq::ZERO);
 
         // Fast path for b=2: build the univariate coefficients once per round,
         // then evaluate cheaply at all requested points.
@@ -1386,6 +1386,24 @@ impl RowStreamState {
                 sum_x
             })
             .collect()
+    }
+
+    #[inline]
+    fn evals_row_phase<Ff>(&self, xs: &[K]) -> Vec<K>
+    where
+        Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+        K: From<Ff>,
+    {
+        self.evals_row_phase_impl::<Ff>(xs, true)
+    }
+
+    #[inline]
+    fn evals_row_phase_force_generic<Ff>(&self, xs: &[K]) -> Vec<K>
+    where
+        Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+        K: From<Ff>,
+    {
+        self.evals_row_phase_impl::<Ff>(xs, false)
     }
 }
 
@@ -1757,6 +1775,19 @@ where
             "row_stream out of sync with round_idx"
         );
         self.row_stream.evals_row_phase::<F>(xs)
+    }
+
+    #[doc(hidden)]
+    pub fn __test_row_phase_base_vs_generic(&self, xs: &[K]) -> (Vec<K>, Vec<K>) {
+        debug_assert!(self.round_idx < self.ell_n, "__test_row_phase_* requires row phase");
+        let base = self.row_stream.evals_row_phase::<F>(xs);
+        let generic = self.row_stream.evals_row_phase_force_generic::<F>(xs);
+        (base, generic)
+    }
+
+    #[doc(hidden)]
+    pub fn __test_row_stream_all_base(&self) -> bool {
+        self.row_stream.all_base
     }
 
     /// Compute the univariate round polynomial for an Ajtai-bit round.

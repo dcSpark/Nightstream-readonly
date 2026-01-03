@@ -32,6 +32,16 @@ pub fn set_global_pp(pp: PP<RqEl>) -> Result<(), AjtaiError> {
     let mut w = registry()
         .write()
         .map_err(|_| AjtaiError::Internal("PP registry poisoned".to_string()))?;
+    if let Some(existing) = w.get(&key) {
+        if existing.seed.is_some() {
+            return Err(AjtaiError::InvalidInput(format!(
+                "Ajtai PP seed is already registered for (d,m)=({},{}) so `set_global_pp` is disallowed",
+                pp.d, pp.m
+            )));
+        }
+        // Idempotent: keep the existing PP to avoid accidentally changing commitments mid-process.
+        return Ok(());
+    }
     w.insert(
         key,
         RegistryEntry {
@@ -52,13 +62,65 @@ pub fn set_global_pp_seeded(d: usize, kappa: usize, m: usize, seed: [u8; 32]) ->
     let mut w = registry()
         .write()
         .map_err(|_| AjtaiError::Internal("PP registry poisoned".to_string()))?;
-    let entry = w.entry(key).or_insert_with(|| RegistryEntry {
-        kappa,
-        seed: Some(seed),
-        pp: None,
-    });
-    entry.kappa = kappa;
-    entry.seed = Some(seed);
+    if let Some(entry) = w.get_mut(&key) {
+        // If a PP is already materialized, we must not allow changing/adding a seed unless it
+        // exactly matches the existing seeded configuration. Otherwise, later unload/reload would
+        // silently change commitments and break proofs.
+        if let Some(pp) = entry.pp.as_ref() {
+            match entry.seed {
+                Some(existing_seed) if existing_seed == seed => {
+                    if entry.kappa != kappa || pp.kappa != kappa {
+                        return Err(AjtaiError::InvalidInput(format!(
+                            "Ajtai seeded PP kappa mismatch for (d,m)=({},{}) (existing κ={}, requested κ={})",
+                            d, m, entry.kappa, kappa
+                        )));
+                    }
+                    return Ok(());
+                }
+                Some(_) => {
+                    return Err(AjtaiError::InvalidInput(format!(
+                        "Ajtai PP seed mismatch for already-loaded (d,m)=({},{}); refusing to overwrite",
+                        d, m
+                    )));
+                }
+                None => {
+                    return Err(AjtaiError::InvalidInput(format!(
+                        "Ajtai PP for (d,m)=({},{}) is already loaded without a seed; cannot register a seed",
+                        d, m
+                    )));
+                }
+            }
+        }
+
+        if let Some(existing_seed) = entry.seed {
+            if existing_seed != seed {
+                return Err(AjtaiError::InvalidInput(format!(
+                    "Ajtai PP seed already registered for (d,m)=({},{}) and does not match the provided seed",
+                    d, m
+                )));
+            }
+            if entry.kappa != kappa {
+                return Err(AjtaiError::InvalidInput(format!(
+                    "Ajtai seeded PP kappa mismatch for (d,m)=({},{}) (existing κ={}, requested κ={})",
+                    d, m, entry.kappa, kappa
+                )));
+            }
+            return Ok(());
+        }
+
+        entry.kappa = kappa;
+        entry.seed = Some(seed);
+        return Ok(());
+    }
+
+    w.insert(
+        key,
+        RegistryEntry {
+            kappa,
+            seed: Some(seed),
+            pp: None,
+        },
+    );
     Ok(())
 }
 
@@ -98,9 +160,23 @@ pub fn unload_global_pp_for_dims(d: usize, m: usize) -> Result<bool, AjtaiError>
     let Some(entry) = w.get_mut(&key) else {
         return Ok(false);
     };
+    if entry.seed.is_none() {
+        return Err(AjtaiError::InvalidInput(format!(
+            "Ajtai PP for (d,m)=({},{}) is not seeded; refusing to unload because it cannot be reloaded",
+            d, m
+        )));
+    }
     let had = entry.pp.is_some();
     entry.pp = None;
     Ok(had)
+}
+
+/// If the PP for (d,m) is already materialized, return it without loading.
+pub fn try_get_loaded_global_pp_for_dims(d: usize, m: usize) -> Option<PPRef> {
+    registry()
+        .read()
+        .ok()
+        .and_then(|r| r.get(&(d, m)).and_then(|e| e.pp.as_ref().cloned()))
 }
 
 fn get_or_load_global_pp_for_dims(d: usize, m: usize) -> Result<PPRef, AjtaiError> {
