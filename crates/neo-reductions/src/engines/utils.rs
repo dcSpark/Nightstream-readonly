@@ -242,32 +242,47 @@ pub fn digest_ccs_matrices<F: Field + PrimeField64>(s: &CcsStructure<F>) -> Vec<
                 }
             }
             CcsMatrix::Csc(csc) => {
-                // Enumerate non-zeros in row-major order (matches dense scan) without a global sort.
-                let mut row_counts = vec![0usize; csc.nrows];
-                for col in 0..csc.ncols {
-                    let s0 = csc.col_ptr[col];
-                    let e0 = csc.col_ptr[col + 1];
-                    for k in s0..e0 {
-                        row_counts[csc.row_idx[k]] += 1;
-                    }
+                // Enumerate non-zeros in row-major order (matches dense scan) without allocating
+                // a `Vec<Vec<_>>` of length `nrows` (which is massive for large circuits).
+                //
+                // Strategy: build CSR-style row segments in one contiguous allocation.
+                let nrows = csc.nrows;
+                let nnz = csc.vals.len();
+                debug_assert_eq!(csc.row_idx.len(), nnz);
+
+                // 1) Count entries per row.
+                let mut row_counts = vec![0u32; nrows];
+                for &r in csc.row_idx.iter() {
+                    row_counts[r] += 1;
                 }
 
-                let mut rows: Vec<Vec<(usize, u64)>> = row_counts
-                    .into_iter()
-                    .map(|cnt| Vec::with_capacity(cnt))
-                    .collect();
+                // 2) Prefix sums to get row offsets.
+                let mut row_offsets = vec![0usize; nrows + 1];
+                for r in 0..nrows {
+                    row_offsets[r + 1] = row_offsets[r] + (row_counts[r] as usize);
+                }
+                debug_assert_eq!(row_offsets[nrows], nnz);
+
+                // 3) Fill (col,val) pairs into per-row segments while scanning columns in order.
+                let mut write_pos = row_offsets[..nrows].to_vec();
+                let mut entries = vec![(0usize, 0u64); nnz];
 
                 for col in 0..csc.ncols {
                     let s0 = csc.col_ptr[col];
                     let e0 = csc.col_ptr[col + 1];
                     for k in s0..e0 {
                         let row = csc.row_idx[k];
-                        rows[row].push((col, csc.vals[k].as_canonical_u64()));
+                        let idx = write_pos[row];
+                        write_pos[row] = idx + 1;
+                        entries[idx] = (col, csc.vals[k].as_canonical_u64());
                     }
                 }
 
-                for row in 0..csc.nrows {
-                    for &(col, val_u64) in &rows[row] {
+                // 4) Emit in row-major order.
+                for row in 0..nrows {
+                    let start = row_offsets[row];
+                    let end = row_offsets[row + 1];
+                    for &(col, val_u64) in &entries[start..end] {
                         emit(row, col, val_u64);
                     }
                 }
@@ -288,8 +303,6 @@ pub fn digest_ccs_matrices_with_sparse_cache<Ff: Field + PrimeField64>(
     s: &CcsStructure<Ff>,
     _sparse: Option<&crate::engines::optimized_engine::oracle::SparseCache<Ff>>,
 ) -> Vec<Goldilocks> {
-    // `CcsStructure` stores matrices sparsely (CSC/identity), so the dense-scan cache is no longer
-    // required. Keep the signature for compatibility and compute directly from `s`.
     digest_ccs_matrices(s)
 }
 

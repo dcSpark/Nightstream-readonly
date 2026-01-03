@@ -29,7 +29,7 @@ mod circuit;
 pub use circuit::*;
 pub use crate::witness_layout;
 
-use neo_ajtai::{s_lincomb, s_mul, Commitment as Cmt};
+use neo_ajtai::{has_seed_for_dims, s_lincomb, s_mul, unload_global_pp_for_dims, Commitment as Cmt};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
 use neo_math::ring::Rq as RqEl;
@@ -1155,6 +1155,12 @@ where
                 }
                 None => (&[], &[]), // k=1
             };
+
+            // If PP is reloadable (seeded), unload it before memory-heavy oracle/sumcheck work.
+            // This keeps peak RSS low on constrained runtimes (e.g. WASM).
+            if has_seed_for_dims(D, s_norm.m) {
+                let _ = unload_global_pp_for_dims(D, s_norm.m);
+            }
 
             shard::fold_shard_prove_with_context(
                 self.mode.clone(),

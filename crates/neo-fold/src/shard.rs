@@ -23,7 +23,10 @@ pub use crate::shard_proof_types::{
     ShardObligations, ShardProof, ShoutProofK, StepProof, TwistProofK,
 };
 use crate::PiCcsError;
-use neo_ajtai::Commitment as Cmt;
+use neo_ajtai::{
+    get_global_pp_for_dims, get_global_pp_seeded_params_for_dims, has_global_pp_for_dims, precompute_rot_columns,
+    sample_uniform_rq, seeded_pp_chunk_seeds, Commitment as Cmt,
+};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::{CcsStructure, Mat, MeInstance};
 use neo_math::{KExtensions, D, F, K};
@@ -35,7 +38,9 @@ use neo_reductions::engines::utils;
 use neo_reductions::paper_exact_engine::{build_me_outputs_paper_exact, claimed_initial_sum_from_inputs};
 use neo_reductions::sumcheck::{poly_eval_k, RoundOracle};
 use neo_transcript::{Poseidon2Transcript, Transcript};
-use p3_field::PrimeCharacteristicRing;
+use p3_field::{PrimeCharacteristicRing, PrimeField64};
+use rand_chacha::rand_core::SeedableRng;
+use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -283,16 +288,740 @@ fn validate_me_batch_invariants(batch: &[MeInstance<Cmt, F, K>], context: &str) 
     Ok(())
 }
 
-fn pad_mats_to_ccs_width(mats: &[Mat<F>], target_cols: usize) -> Result<Vec<Mat<F>>, PiCcsError> {
-    mats.iter()
-        .map(|m| ts::pad_mat_to_ccs_width(m, target_cols))
-        .collect()
-}
-
 #[derive(Clone, Copy, Debug)]
 enum RlcLane {
     Main,
     Val,
+}
+
+#[inline]
+fn balanced_divrem_i64(v: i64, b: i64) -> (i64, i64) {
+    debug_assert!(b >= 2);
+    let mut r = v % b;
+    let mut q = (v - r) / b;
+    let half = b / 2;
+    if r > half {
+        r -= b;
+        q += 1;
+    } else if r < -half {
+        r += b;
+        q -= 1;
+    }
+    (r, q)
+}
+
+#[inline]
+fn balanced_divrem_i128(v: i128, b: i128) -> (i128, i128) {
+    debug_assert!(b >= 2);
+    let mut r = v % b;
+    let mut q = (v - r) / b;
+    let half = b / 2;
+    if r > half {
+        r -= b;
+        q += 1;
+    } else if r < -half {
+        r += b;
+        q -= 1;
+    }
+    (r, q)
+}
+
+#[inline]
+fn f_from_i64(x: i64) -> F {
+    if x >= 0 {
+        F::from_u64(x as u64)
+    } else {
+        F::ZERO - F::from_u64((-x) as u64)
+    }
+}
+
+fn dec_stream_no_witness<MB>(
+    params: &NeoParams,
+    s: &CcsStructure<F>,
+    parent: &MeInstance<Cmt, F, K>,
+    Z_mix: &Mat<F>,
+    ell_d: usize,
+    k_dec: usize,
+    combine_b_pows: MB,
+    sparse: Option<&SparseCache<F>>,
+) -> Result<(Vec<MeInstance<Cmt, F, K>>, Vec<Cmt>, bool, bool, bool), PiCcsError>
+where
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    if k_dec == 0 {
+        return Err(PiCcsError::InvalidInput("DEC: k_dec must be > 0".into()));
+    }
+    if Z_mix.rows() != D || Z_mix.cols() != s.m {
+        return Err(PiCcsError::InvalidInput(format!(
+            "DEC: Z_mix must have shape D×m = {}×{} (got {}×{})",
+            D,
+            s.m,
+            Z_mix.rows(),
+            Z_mix.cols()
+        )));
+    }
+
+    enum PpAccess {
+        Seeded {
+            kappa: usize,
+            chunk_size: usize,
+            chunk_seeds_by_row: Vec<Vec<[u8; 32]>>,
+        },
+        Loaded {
+            pp: Arc<neo_ajtai::PP<neo_math::ring::Rq>>,
+        },
+    }
+
+    let pp_access = match get_global_pp_seeded_params_for_dims(D, s.m) {
+        Ok((kappa, seed)) => {
+            if kappa == 0 {
+                return Err(PiCcsError::InvalidInput("DEC: PP.kappa must be > 0".into()));
+            }
+            let (chunk_size, chunk_seeds_by_row) = seeded_pp_chunk_seeds(seed, kappa, s.m);
+            PpAccess::Seeded {
+                kappa,
+                chunk_size,
+                chunk_seeds_by_row,
+            }
+        }
+        Err(_) => {
+            // Fallback: non-seeded entry. This will materialize PP if needed.
+            let pp = get_global_pp_for_dims(D, s.m).map_err(|e| {
+                PiCcsError::InvalidInput(format!(
+                    "DEC: Ajtai PP unavailable for (d,m)=({},{}) ({})",
+                    D, s.m, e
+                ))
+            })?;
+            if pp.kappa == 0 {
+                return Err(PiCcsError::InvalidInput("DEC: PP.kappa must be > 0".into()));
+            }
+            PpAccess::Loaded { pp }
+        }
+    };
+
+    // Build χ_r and v_j = M_j^T · χ_r (same as the reference DEC).
+    let ell_n = parent.r.len();
+    let n_sz = 1usize
+        .checked_shl(ell_n as u32)
+        .ok_or_else(|| PiCcsError::InvalidInput("DEC: 2^ell_n overflow".into()))?;
+    let n_eff = core::cmp::min(s.n, n_sz);
+
+    let mut chi_r = vec![K::ZERO; n_sz];
+    for row in 0..n_sz {
+        let mut w = K::ONE;
+        for (bit, &rb) in parent.r.iter().enumerate() {
+            let is_one = ((row >> bit) & 1) == 1;
+            w *= if is_one { rb } else { K::ONE - rb };
+        }
+        chi_r[row] = w;
+    }
+
+    let t_mats = s.t();
+
+    enum VjsAccess<'a> {
+        Dense(Vec<Vec<K>>),
+        Sparse {
+            cap: usize,
+            cache: &'a SparseCache<F>,
+        },
+    }
+
+    let vjs_access = if let Some(cache) = sparse {
+        if cache.len() != t_mats {
+            return Err(PiCcsError::InvalidInput(format!(
+                "DEC: sparse cache matrix count mismatch: got {}, expected {}",
+                cache.len(),
+                t_mats
+            )));
+        }
+        let cap = core::cmp::min(s.m, n_eff);
+        VjsAccess::Sparse { cap, cache }
+    } else {
+        let mut vjs: Vec<Vec<K>> = vec![vec![K::ZERO; s.m]; t_mats];
+        for j in 0..t_mats {
+            s.matrices[j].add_mul_transpose_into(&chi_r, &mut vjs[j], n_eff);
+        }
+        VjsAccess::Dense(vjs)
+    };
+
+    // Base-b powers in K for y_scalar recomposition.
+    let bF = F::from_u64(params.b as u64);
+    let bK = K::from(bF);
+    let mut pow_b_k = [K::ONE; D];
+    for rho in 1..D {
+        pow_b_k[rho] = pow_b_k[rho - 1] * bK;
+    }
+
+    // Precompute parameters for bounded signed decoding of Z_mix entries.
+    let b_u = params.b as u128;
+    let mut B_u: u128 = 1;
+    for _ in 0..k_dec {
+        B_u = B_u.saturating_mul(b_u);
+    }
+    let p: u128 = F::ORDER_U64 as u128;
+
+    // Fast row-major access.
+    let z_rows: Vec<&[F]> = (0..D).map(|r| Z_mix.row(r)).collect();
+
+    struct Acc {
+        commit: Vec<[F; D]>, // [digit][kappa] -> [D]
+        y: Vec<[K; D]>,      // [digit][t] -> [D]
+        any_nonzero: Vec<bool>,
+        vj: Vec<K>,               // scratch: t
+        digits: Vec<F>,            // scratch: k*D
+        cols: Box<[[F; D]]>,       // scratch: D×D
+        err: Option<String>, // first error wins
+    }
+
+    impl Acc {
+        fn new(k_dec: usize, kappa: usize, t: usize) -> Self {
+            Self {
+                commit: vec![[F::ZERO; D]; k_dec * kappa],
+                y: vec![[K::ZERO; D]; k_dec * t],
+                any_nonzero: vec![false; k_dec],
+                vj: vec![K::ZERO; t],
+                digits: vec![F::ZERO; k_dec * D],
+                cols: vec![[F::ZERO; D]; D].into_boxed_slice(),
+                err: None,
+            }
+        }
+
+        fn add_inplace(&mut self, rhs: &Acc, k_dec: usize, kappa: usize, t: usize) {
+            for (dst, src) in self.commit.iter_mut().zip(rhs.commit.iter()) {
+                for r in 0..D {
+                    dst[r] += src[r];
+                }
+            }
+            for (dst, src) in self.y.iter_mut().zip(rhs.y.iter()) {
+                for r in 0..D {
+                    dst[r] += src[r];
+                }
+            }
+            for i in 0..k_dec {
+                self.any_nonzero[i] |= rhs.any_nonzero[i];
+            }
+            if self.err.is_none() {
+                self.err = rhs.err.clone();
+            }
+            // silence unused warnings when parameters are const-propagated
+            let _ = (k_dec, kappa, t);
+        }
+    }
+
+    let m = s.m;
+    let b_i64 = params.b as i64;
+    let b_i128 = params.b as i128;
+
+    let (kappa, acc) = match &pp_access {
+        PpAccess::Loaded { pp } => {
+            let kappa = pp.kappa;
+            let acc = (0..m)
+                .into_par_iter()
+                .fold(
+                    || Acc::new(k_dec, kappa, t_mats),
+                    |mut st, col| {
+                        if st.err.is_some() {
+                            return st;
+                        }
+
+                        // Decompose the column's D entries into balanced base-b digits for each DEC child.
+                        for rho in 0..D {
+                            let u = z_rows[rho][col].as_canonical_u64() as u128;
+                            if B_u <= i64::MAX as u128 {
+                                let val_opt: Option<i64> = if u < B_u {
+                                    Some(u as i64)
+                                } else if p.checked_sub(u).map(|w| w < B_u).unwrap_or(false) {
+                                    Some(-((p - u) as i64))
+                                } else {
+                                    None
+                                };
+                                let mut v = match val_opt {
+                                    Some(v) => v,
+                                    None => {
+                                        st.err = Some(format!(
+                                            "DEC split: Z_mix[{},{}] is out of range for k_rho={}, b={}",
+                                            rho, col, k_dec, params.b
+                                        ));
+                                        return st;
+                                    }
+                                };
+                                for i in 0..k_dec {
+                                    if v == 0 {
+                                        st.digits[i * D + rho] = F::ZERO;
+                                        continue;
+                                    }
+                                    let (r_i, q) = balanced_divrem_i64(v, b_i64);
+                                    if r_i != 0 {
+                                        st.any_nonzero[i] = true;
+                                    }
+                                    st.digits[i * D + rho] = f_from_i64(r_i);
+                                    v = q;
+                                }
+                                if v != 0 {
+                                    st.err = Some(format!(
+                                        "DEC split: Z_mix[{},{}] needs more than k_rho={} digits in base b={}",
+                                        rho, col, k_dec, params.b
+                                    ));
+                                    return st;
+                                }
+                            } else {
+                                let val_opt: Option<i128> = if u < B_u {
+                                    Some(u as i128)
+                                } else if p.checked_sub(u).map(|w| w < B_u).unwrap_or(false) {
+                                    Some(-((p - u) as i128))
+                                } else {
+                                    None
+                                };
+                                let mut v = match val_opt {
+                                    Some(v) => v,
+                                    None => {
+                                        st.err = Some(format!(
+                                            "DEC split: Z_mix[{},{}] is out of range for k_rho={}, b={}",
+                                            rho, col, k_dec, params.b
+                                        ));
+                                        return st;
+                                    }
+                                };
+                                for i in 0..k_dec {
+                                    if v == 0 {
+                                        st.digits[i * D + rho] = F::ZERO;
+                                        continue;
+                                    }
+                                    let (r_i, q) = balanced_divrem_i128(v, b_i128);
+                                    if r_i != 0 {
+                                        st.any_nonzero[i] = true;
+                                    }
+                                    st.digits[i * D + rho] = f_from_i64(r_i as i64);
+                                    v = q;
+                                }
+                                if v != 0 {
+                                    st.err = Some(format!(
+                                        "DEC split: Z_mix[{},{}] needs more than k_rho={} digits in base b={}",
+                                        rho, col, k_dec, params.b
+                                    ));
+                                    return st;
+                                }
+                            }
+                        }
+
+                        // vj[col] := M_j^T · χ_r (compute per column to avoid materializing all vjs).
+                        match &vjs_access {
+                            VjsAccess::Dense(vjs) => {
+                                for j in 0..t_mats {
+                                    st.vj[j] = vjs[j][col];
+                                }
+                            }
+                            VjsAccess::Sparse { cap, cache } => {
+                                for j in 0..t_mats {
+                                    st.vj[j] = if let Some(csc) = cache.csc(j) {
+                                        let mut sum = K::ZERO;
+                                        let s = csc.col_ptr[col];
+                                        let e = csc.col_ptr[col + 1];
+                                        for k in s..e {
+                                            let r = csc.row_idx[k];
+                                            if r < n_eff {
+                                                sum += K::from(csc.vals[k]) * chi_r[r];
+                                            }
+                                        }
+                                        sum
+                                    } else if col < *cap {
+                                        chi_r[col]
+                                    } else {
+                                        K::ZERO
+                                    };
+                                }
+                            }
+                        }
+
+                        // y_(i,j)[rho] += Z_i[rho,col] * vj[col]
+                        for i in 0..k_dec {
+                            let y_base = i * t_mats;
+                            for rho in 0..D {
+                                let mask = st.digits[i * D + rho];
+                                if mask == F::ZERO {
+                                    continue;
+                                }
+                                for j in 0..t_mats {
+                                    let vj = st.vj[j];
+                                    if vj != K::ZERO {
+                                        st.y[y_base + j][rho] += vj.scale_base(mask);
+                                    }
+                                }
+                            }
+                        }
+
+                        // Commitment accumulators per digit.
+                        for kr in 0..kappa {
+                            precompute_rot_columns(pp.m_rows[kr][col], &mut st.cols);
+                            for rho in 0..D {
+                                let col_t = &st.cols[rho];
+                                for i in 0..k_dec {
+                                    let mask = st.digits[i * D + rho];
+                                    if mask == F::ZERO {
+                                        continue;
+                                    }
+                                    let acc = &mut st.commit[i * kappa + kr];
+                                    for r in 0..D {
+                                        acc[r] += col_t[r] * mask;
+                                    }
+                                }
+                            }
+                        }
+
+                        st
+                    },
+                )
+                .reduce(
+                    || Acc::new(k_dec, kappa, t_mats),
+                    |mut a, b| {
+                        if a.err.is_none() {
+                            a.add_inplace(&b, k_dec, kappa, t_mats);
+                        }
+                        a
+                    },
+                );
+            (kappa, acc)
+        }
+        PpAccess::Seeded {
+            kappa,
+            chunk_size,
+            chunk_seeds_by_row,
+        } => {
+            let kappa = *kappa;
+            let chunk_size = *chunk_size;
+            let num_chunks = (m + chunk_size - 1) / chunk_size;
+
+            let acc = (0..num_chunks)
+                .into_par_iter()
+                .fold(
+                    || Acc::new(k_dec, kappa, t_mats),
+                    |mut st, chunk_idx| {
+                        if st.err.is_some() {
+                            return st;
+                        }
+
+                        let start = chunk_idx * chunk_size;
+                        let end = core::cmp::min(m, start + chunk_size);
+
+                        let mut rngs: Vec<ChaCha8Rng> = (0..kappa)
+                            .map(|kr| ChaCha8Rng::from_seed(chunk_seeds_by_row[kr][chunk_idx]))
+                            .collect();
+
+                        for col in start..end {
+                            // Decompose the column's D entries into balanced base-b digits for each DEC child.
+                            for rho in 0..D {
+                                let u = z_rows[rho][col].as_canonical_u64() as u128;
+                                if B_u <= i64::MAX as u128 {
+                                    let val_opt: Option<i64> = if u < B_u {
+                                        Some(u as i64)
+                                    } else if p.checked_sub(u).map(|w| w < B_u).unwrap_or(false) {
+                                        Some(-((p - u) as i64))
+                                    } else {
+                                        None
+                                    };
+                                    let mut v = match val_opt {
+                                        Some(v) => v,
+                                        None => {
+                                            st.err = Some(format!(
+                                                "DEC split: Z_mix[{},{}] is out of range for k_rho={}, b={}",
+                                                rho, col, k_dec, params.b
+                                            ));
+                                            return st;
+                                        }
+                                    };
+                                    for i in 0..k_dec {
+                                        if v == 0 {
+                                            st.digits[i * D + rho] = F::ZERO;
+                                            continue;
+                                        }
+                                        let (r_i, q) = balanced_divrem_i64(v, b_i64);
+                                        if r_i != 0 {
+                                            st.any_nonzero[i] = true;
+                                        }
+                                        st.digits[i * D + rho] = f_from_i64(r_i);
+                                        v = q;
+                                    }
+                                    if v != 0 {
+                                        st.err = Some(format!(
+                                            "DEC split: Z_mix[{},{}] needs more than k_rho={} digits in base b={}",
+                                            rho, col, k_dec, params.b
+                                        ));
+                                        return st;
+                                    }
+                                } else {
+                                    let val_opt: Option<i128> = if u < B_u {
+                                        Some(u as i128)
+                                    } else if p.checked_sub(u).map(|w| w < B_u).unwrap_or(false) {
+                                        Some(-((p - u) as i128))
+                                    } else {
+                                        None
+                                    };
+                                    let mut v = match val_opt {
+                                        Some(v) => v,
+                                        None => {
+                                            st.err = Some(format!(
+                                                "DEC split: Z_mix[{},{}] is out of range for k_rho={}, b={}",
+                                                rho, col, k_dec, params.b
+                                            ));
+                                            return st;
+                                        }
+                                    };
+                                    for i in 0..k_dec {
+                                        if v == 0 {
+                                            st.digits[i * D + rho] = F::ZERO;
+                                            continue;
+                                        }
+                                        let (r_i, q) = balanced_divrem_i128(v, b_i128);
+                                        if r_i != 0 {
+                                            st.any_nonzero[i] = true;
+                                        }
+                                        st.digits[i * D + rho] = f_from_i64(r_i as i64);
+                                        v = q;
+                                    }
+                                    if v != 0 {
+                                        st.err = Some(format!(
+                                            "DEC split: Z_mix[{},{}] needs more than k_rho={} digits in base b={}",
+                                            rho, col, k_dec, params.b
+                                        ));
+                                        return st;
+                                    }
+                                }
+                            }
+
+                            // vj[col] := M_j^T · χ_r (compute per column to avoid materializing all vjs).
+                            match &vjs_access {
+                                VjsAccess::Dense(vjs) => {
+                                    for j in 0..t_mats {
+                                        st.vj[j] = vjs[j][col];
+                                    }
+                                }
+                                VjsAccess::Sparse { cap, cache } => {
+                                    for j in 0..t_mats {
+                                        st.vj[j] = if let Some(csc) = cache.csc(j) {
+                                            let mut sum = K::ZERO;
+                                            let s = csc.col_ptr[col];
+                                            let e = csc.col_ptr[col + 1];
+                                            for k in s..e {
+                                                let r = csc.row_idx[k];
+                                                if r < n_eff {
+                                                    sum += K::from(csc.vals[k]) * chi_r[r];
+                                                }
+                                            }
+                                            sum
+                                        } else if col < *cap {
+                                            chi_r[col]
+                                        } else {
+                                            K::ZERO
+                                        };
+                                    }
+                                }
+                            }
+
+                            // y_(i,j)[rho] += Z_i[rho,col] * vj[col]
+                            for i in 0..k_dec {
+                                let y_base = i * t_mats;
+                                for rho in 0..D {
+                                    let mask = st.digits[i * D + rho];
+                                    if mask == F::ZERO {
+                                        continue;
+                                    }
+                                    for j in 0..t_mats {
+                                        let vj = st.vj[j];
+                                        if vj != K::ZERO {
+                                            st.y[y_base + j][rho] += vj.scale_base(mask);
+                                        }
+                                    }
+                                }
+                            }
+
+                            // Commitment accumulators per digit.
+                            for kr in 0..kappa {
+                                let a_kr_col = sample_uniform_rq(&mut rngs[kr]);
+                                precompute_rot_columns(a_kr_col, &mut st.cols);
+                                for rho in 0..D {
+                                    let col_t = &st.cols[rho];
+                                    for i in 0..k_dec {
+                                        let mask = st.digits[i * D + rho];
+                                        if mask == F::ZERO {
+                                            continue;
+                                        }
+                                        let acc = &mut st.commit[i * kappa + kr];
+                                        for r in 0..D {
+                                            acc[r] += col_t[r] * mask;
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
+                        st
+                    },
+                )
+                .reduce(
+                    || Acc::new(k_dec, kappa, t_mats),
+                    |mut a, b| {
+                        if a.err.is_none() {
+                            a.add_inplace(&b, k_dec, kappa, t_mats);
+                        }
+                        a
+                    },
+                );
+            (kappa, acc)
+        }
+    };
+
+    if let Some(err) = acc.err {
+        return Err(PiCcsError::ProtocolError(err));
+    }
+
+    // Commitments c_i from accumulated columns.
+    let mut child_cs: Vec<Cmt> = Vec::with_capacity(k_dec);
+    for i in 0..k_dec {
+        if !acc.any_nonzero[i] {
+            child_cs.push(Cmt::zeros(D, kappa));
+            continue;
+        }
+        let mut c = Cmt::zeros(D, kappa);
+        for kr in 0..kappa {
+            c.col_mut(kr).copy_from_slice(&acc.commit[i * kappa + kr]);
+        }
+        child_cs.push(c);
+    }
+
+    // X_i: project first m_in columns from Z_i (small; compute sequentially).
+    let m_in = parent.m_in;
+    let mut xs_row_major: Vec<Vec<F>> = vec![vec![F::ZERO; D * m_in]; k_dec];
+    for col in 0..m_in {
+        for rho in 0..D {
+            let u = z_rows[rho][col].as_canonical_u64() as u128;
+            if B_u <= i64::MAX as u128 {
+                let val_opt: Option<i64> = if u < B_u {
+                    Some(u as i64)
+                } else if p.checked_sub(u).map(|w| w < B_u).unwrap_or(false) {
+                    Some(-((p - u) as i64))
+                } else {
+                    None
+                };
+                let mut v = val_opt.ok_or_else(|| {
+                    PiCcsError::ProtocolError(format!(
+                        "DEC split(X): Z_mix[{},{}] out of range for k_rho={}, b={}",
+                        rho, col, k_dec, params.b
+                    ))
+                })?;
+                for i in 0..k_dec {
+                    if v == 0 {
+                        break;
+                    }
+                    let (r_i, q) = balanced_divrem_i64(v, b_i64);
+                    xs_row_major[i][rho * m_in + col] = f_from_i64(r_i);
+                    v = q;
+                }
+                if v != 0 {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "DEC split(X): Z_mix[{},{}] needs more than k_rho={} digits in base b={}",
+                        rho, col, k_dec, params.b
+                    )));
+                }
+            } else {
+                let val_opt: Option<i128> = if u < B_u {
+                    Some(u as i128)
+                } else if p.checked_sub(u).map(|w| w < B_u).unwrap_or(false) {
+                    Some(-((p - u) as i128))
+                } else {
+                    None
+                };
+                let mut v = val_opt.ok_or_else(|| {
+                    PiCcsError::ProtocolError(format!(
+                        "DEC split(X): Z_mix[{},{}] out of range for k_rho={}, b={}",
+                        rho, col, k_dec, params.b
+                    ))
+                })?;
+                for i in 0..k_dec {
+                    if v == 0 {
+                        break;
+                    }
+                    let (r_i, q) = balanced_divrem_i128(v, b_i128);
+                    xs_row_major[i][rho * m_in + col] = f_from_i64(r_i as i64);
+                    v = q;
+                }
+                if v != 0 {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "DEC split(X): Z_mix[{},{}] needs more than k_rho={} digits in base b={}",
+                        rho, col, k_dec, params.b
+                    )));
+                }
+            }
+        }
+    }
+
+    let d_pad = 1usize << ell_d;
+    let parent_r = parent.r.clone();
+    let fold_digest = parent.fold_digest;
+
+    let mut children: Vec<MeInstance<Cmt, F, K>> = Vec::with_capacity(k_dec);
+    for i in 0..k_dec {
+        let Xi = Mat::from_row_major(D, m_in, xs_row_major[i].clone());
+        let mut y_i: Vec<Vec<K>> = Vec::with_capacity(t_mats);
+        let mut y_scalars_i: Vec<K> = Vec::with_capacity(t_mats);
+        for j in 0..t_mats {
+            let mut yj = vec![K::ZERO; d_pad];
+            let row = &acc.y[i * t_mats + j];
+            for rho in 0..D {
+                yj[rho] = row[rho];
+            }
+            let mut sc = K::ZERO;
+            for rho in 0..D {
+                sc += yj[rho] * pow_b_k[rho];
+            }
+            y_i.push(yj);
+            y_scalars_i.push(sc);
+        }
+
+        children.push(MeInstance::<Cmt, F, K> {
+            c_step_coords: vec![],
+            u_offset: 0,
+            u_len: 0,
+            c: child_cs[i].clone(),
+            X: Xi,
+            r: parent_r.clone(),
+            y: y_i,
+            y_scalars: y_scalars_i,
+            m_in,
+            fold_digest,
+        });
+    }
+
+    // Public checks (mirror paper-exact DEC).
+    let mut ok_y = true;
+    for j in 0..t_mats {
+        let mut lhs = vec![K::ZERO; d_pad];
+        let mut pow = K::ONE;
+        for i in 0..k_dec {
+            for t in 0..d_pad {
+                lhs[t] += pow * children[i].y[j][t];
+            }
+            pow *= bK;
+        }
+        if lhs != parent.y[j] {
+            ok_y = false;
+            break;
+        }
+    }
+
+    let mut lhs_X = Mat::zero(D, m_in, F::ZERO);
+    let mut pow = F::ONE;
+    for i in 0..k_dec {
+        for r in 0..D {
+            for c in 0..m_in {
+                lhs_X[(r, c)] += pow * children[i].X[(r, c)];
+            }
+        }
+        pow *= bF;
+    }
+    let ok_X = lhs_X.as_slice() == parent.X.as_slice();
+
+    let ok_c = combine_b_pows(&child_cs, params.b) == parent.c;
+    Ok((children, child_cs, ok_y, ok_X, ok_c))
 }
 
 fn bind_rlc_inputs(
@@ -353,7 +1082,8 @@ fn prove_rlc_dec_lane<L, MR, MB>(
     k_dec: usize,
     step_idx: usize,
     me_inputs: &[MeInstance<Cmt, F, K>],
-    wit_inputs: &[Mat<F>],
+    wit_inputs: &[&Mat<F>],
+    want_witnesses: bool,
     l: &L,
     mixers: CommitMixers<MR, MB>,
 ) -> Result<(RlcDecProof, Vec<Mat<F>>), PiCcsError>
@@ -364,35 +1094,103 @@ where
 {
     bind_rlc_inputs(tr, lane, step_idx, me_inputs)?;
     let rlc_rhos = ccs::sample_rot_rhos_n(tr, params, ring, me_inputs.len())?;
-    let (mut rlc_parent, Z_mix) = ccs::rlc_with_commit(
-        mode.clone(),
-        s,
-        params,
-        &rlc_rhos,
-        me_inputs,
-        wit_inputs,
-        ell_d,
-        mixers.mix_rhos_commits,
-    );
+    let (mut rlc_parent, Z_mix) = if me_inputs.len() == 1 {
+        assert_eq!(rlc_rhos.len(), 1, "Π_RLC(k=1): |rhos| must equal |inputs|");
+        assert_eq!(wit_inputs.len(), 1, "Π_RLC(k=1): |wits| must equal |inputs|");
+        let inp = &me_inputs[0];
 
-    let (Z_split, digit_nonzero) = ccs::split_b_matrix_k_with_nonzero_flags(&Z_mix, k_dec, params.b)?;
-    let zero_c = Cmt::zeros(rlc_parent.c.d, rlc_parent.c.kappa);
-    let child_cs: Vec<Cmt> = Z_split
-        .par_iter()
-        .enumerate()
-        .map(|(idx, Zi)| if digit_nonzero[idx] { l.commit(Zi) } else { zero_c.clone() })
-        .collect();
-    let (mut dec_children, ok_y, ok_X, ok_c) = ccs::dec_children_with_commit_cached(
-        mode.clone(),
-        s,
-        params,
-        &rlc_parent,
-        &Z_split,
-        ell_d,
-        &child_cs,
-        mixers.combine_b_pows,
-        ccs_sparse_cache,
-    );
+        // Match `neo_reductions::api::rlc_with_commit` semantics for k=1 without cloning Z.
+        let inputs_c = vec![inp.c.clone()];
+        let c = (mixers.mix_rhos_commits)(&rlc_rhos, &inputs_c);
+
+        // Recompute y_scalars from digits (canonical).
+        let t = inp.y.len();
+        assert!(t >= s.t(), "Π_RLC(k=1): ME y.len() must be >= s.t()");
+        let bK = K::from(F::from_u64(params.b as u64));
+        let mut y_scalars = Vec::with_capacity(t);
+        for j in 0..t {
+            let mut sc = K::ZERO;
+            let mut pow = K::ONE;
+            for rho in 0..D {
+                sc += pow * inp.y[j][rho];
+                pow *= bK;
+            }
+            y_scalars.push(sc);
+        }
+
+        let out = MeInstance::<Cmt, F, K> {
+            c_step_coords: vec![],
+            u_offset: 0,
+            u_len: 0,
+            c,
+            X: inp.X.clone(),
+            r: inp.r.clone(),
+            y: inp.y.clone(),
+            y_scalars,
+            m_in: inp.m_in,
+            fold_digest: inp.fold_digest,
+        };
+
+        (out, Cow::Borrowed(wit_inputs[0]))
+    } else {
+        // `ccs::rlc_with_commit` expects an owned slice; avoid changing the public API by cloning here.
+        let wit_owned: Vec<Mat<F>> = wit_inputs.iter().map(|m| (*m).clone()).collect();
+        let (out, Z_mix) = ccs::rlc_with_commit(
+            mode.clone(),
+            s,
+            params,
+            &rlc_rhos,
+            me_inputs,
+            &wit_owned,
+            ell_d,
+            mixers.mix_rhos_commits,
+        );
+        (out, Cow::Owned(Z_mix))
+    };
+
+    let Z_mix = Z_mix.as_ref();
+
+    let can_stream_dec = !want_witnesses
+        && has_global_pp_for_dims(D, s.m)
+        && !cpu_bus.map(|b| b.bus_cols > 0).unwrap_or(false);
+
+    let (mut dec_children, ok_y, ok_X, ok_c, maybe_wits) = if can_stream_dec {
+        // Memory-optimized DEC: compute children + commitments without materializing Z_split.
+        //
+        // This is only used when we don't need to carry digit witnesses forward.
+        let (children, _child_cs, ok_y, ok_X, ok_c) = dec_stream_no_witness(
+            params,
+            s,
+            &rlc_parent,
+            Z_mix,
+            ell_d,
+            k_dec,
+            mixers.combine_b_pows,
+            ccs_sparse_cache,
+        )?;
+        (children, ok_y, ok_X, ok_c, Vec::new())
+    } else {
+        // Standard DEC: materialize digit matrices (needed when carrying witnesses forward).
+        let (Z_split, digit_nonzero) = ccs::split_b_matrix_k_with_nonzero_flags(Z_mix, k_dec, params.b)?;
+        let zero_c = Cmt::zeros(rlc_parent.c.d, rlc_parent.c.kappa);
+        let child_cs: Vec<Cmt> = Z_split
+            .par_iter()
+            .enumerate()
+            .map(|(idx, Zi)| if digit_nonzero[idx] { l.commit(Zi) } else { zero_c.clone() })
+            .collect();
+        let (dec_children, ok_y, ok_X, ok_c) = ccs::dec_children_with_commit_cached(
+            mode.clone(),
+            s,
+            params,
+            &rlc_parent,
+            &Z_split,
+            ell_d,
+            &child_cs,
+            mixers.combine_b_pows,
+            ccs_sparse_cache,
+        );
+        (dec_children, ok_y, ok_X, ok_c, Z_split)
+    };
     if !(ok_y && ok_X && ok_c) {
         let lane_label = match lane {
             RlcLane::Main => "DEC",
@@ -413,10 +1211,10 @@ where
                 params,
                 bus,
                 core_t,
-                &Z_mix,
+                Z_mix,
                 &mut rlc_parent,
             )?;
-            for (child, Zi) in dec_children.iter_mut().zip(Z_split.iter()) {
+            for (child, Zi) in dec_children.iter_mut().zip(maybe_wits.iter()) {
                 crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
                     params, bus, core_t, Zi, child,
                 )?;
@@ -430,7 +1228,7 @@ where
             rlc_parent,
             dec_children,
         },
-        Z_split,
+        maybe_wits,
     ))
 }
 
@@ -933,10 +1731,10 @@ where
         ccs_proof.sumcheck_final = running_sum;
         ccs_proof.header_digest = fold_digest.to_vec();
 
-        // Witnesses for CCS outputs: [Z_mcs, Z_seed...]
-        let mut outs_Z: Vec<Mat<F>> = Vec::with_capacity(k);
-        outs_Z.push(mcs_wit.Z.clone());
-        outs_Z.extend(accumulator_wit.iter().cloned());
+        // Witnesses for CCS outputs: [Z_mcs, Z_seed...] (borrow; avoid multi-GB clones)
+        let mut outs_Z: Vec<&Mat<F>> = Vec::with_capacity(k);
+        outs_Z.push(&mcs_wit.Z);
+        outs_Z.extend(accumulator_wit.iter());
 
         // Memory sidecar: emit ME claims at the shared r_time (no fixed-challenge sumcheck).
         let prev_step = (idx > 0).then(|| &steps[idx - 1]);
@@ -966,6 +1764,7 @@ where
 
         validate_me_batch_invariants(&ccs_out, "prove step ccs outputs")?;
 
+        let want_main_wits = collect_val_lane_wits || idx + 1 < steps.len();
         let (main_fold, Z_split) = prove_rlc_dec_lane(
             &mode,
             RlcLane::Main,
@@ -980,6 +1779,7 @@ where
             idx,
             &ccs_out,
             &outs_Z,
+            want_main_wits,
             l,
             mixers,
         )?;
@@ -998,19 +1798,35 @@ where
             validate_me_batch_invariants(&mem_proof.cpu_me_claims_val, "prove step memory val outputs")?;
 
             tr.append_message(b"fold/val_lane_start", &(idx as u64).to_le_bytes());
-            let mut val_wits = Vec::with_capacity(mem_proof.cpu_me_claims_val.len());
-            val_wits.push(mcs_wit.Z.clone());
+            let mut val_wit_refs: Vec<&Mat<F>> = Vec::with_capacity(mem_proof.cpu_me_claims_val.len());
+            val_wit_refs.push(&mcs_wit.Z);
             if let Some(prev) = prev_step {
-                val_wits.push(prev.mcs.1.Z.clone());
+                val_wit_refs.push(&prev.mcs.1.Z);
             }
-            if val_wits.len() != mem_proof.cpu_me_claims_val.len() {
+            if val_wit_refs.len() != mem_proof.cpu_me_claims_val.len() {
                 return Err(PiCcsError::ProtocolError(format!(
                     "Twist(val) witness count mismatch (have {}, need {})",
-                    val_wits.len(),
+                    val_wit_refs.len(),
                     mem_proof.cpu_me_claims_val.len()
                 )));
             }
-            let val_wits = pad_mats_to_ccs_width(&val_wits, s.m)?;
+
+            // Avoid cloning/padding unless needed.
+            let need_pad = val_wit_refs.iter().any(|m| m.cols() != s.m);
+            let val_wits_owned: Option<Vec<Mat<F>>> = if need_pad {
+                Some(
+                    val_wit_refs
+                        .iter()
+                        .map(|m| ts::pad_mat_to_ccs_width(m, s.m))
+                        .collect::<Result<Vec<_>, _>>()?,
+                )
+            } else {
+                None
+            };
+            let val_wit_refs2: Vec<&Mat<F>> = match &val_wits_owned {
+                Some(v) => v.iter().collect(),
+                None => val_wit_refs,
+            };
             let (val_fold, mut Z_split_val) = prove_rlc_dec_lane(
                 &mode,
                 RlcLane::Val,
@@ -1024,7 +1840,8 @@ where
                 k_dec,
                 idx,
                 &mem_proof.cpu_me_claims_val,
-                &val_wits,
+                &val_wit_refs2,
+                collect_val_lane_wits,
                 l,
                 mixers,
             )?;
@@ -1037,7 +1854,7 @@ where
         };
 
         accumulator = children.clone();
-        accumulator_wit = Z_split;
+        accumulator_wit = if want_main_wits { Z_split } else { Vec::new() };
 
         step_proofs.push(StepProof {
             fold: FoldStep {

@@ -7,14 +7,13 @@ use bellpepper_core::{
     Circuit, ConstraintSystem, Index, LinearCombination, SynthesisError, Variable,
 };
 use ff::PrimeField;
-use neo_ajtai::{set_global_pp, setup as ajtai_setup, AjtaiSModule};
+use neo_ajtai::{set_global_pp_seeded, AjtaiSModule};
 use neo_ccs::{CcsMatrix, CcsStructure, CscMat, SparsePoly, Term};
 use neo_fold::{pi_ccs::FoldingMode, session::{FoldingSession, ProveInput}};
 use neo_math::{D, F};
 use neo_params::NeoParams;
 use neo_reductions::engines::optimized_engine::oracle::SparseCache;
 use p3_field::PrimeCharacteristicRing;
-use rand_chacha::rand_core::SeedableRng;
 use sha2::{Digest, Sha256};
 
 extern crate ff;
@@ -27,9 +26,10 @@ fn pad_witness_to_m(mut z: Vec<F>, m_target: usize) -> Vec<F> {
 }
 
 fn setup_ajtai_for_dims(m: usize) {
-    let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-    let pp = ajtai_setup(&mut rng, D, 4, m).expect("Ajtai setup should succeed");
-    let _ = set_global_pp(pp);
+    // Deterministic, reloadable PP: allows unloading the multi-GB Ajtai matrix between phases.
+    let mut seed = [0u8; 32];
+    seed[..8].copy_from_slice(&42u64.to_le_bytes());
+    set_global_pp_seeded(D, 4, m, seed).expect("set_global_pp_seeded");
 }
 
 fn fp_to_u64(x: &FpGoldilocks) -> u64 {
