@@ -24,8 +24,8 @@ pub use crate::shard_proof_types::{
 };
 use crate::PiCcsError;
 use neo_ajtai::{
-    get_global_pp_for_dims, get_global_pp_seeded_params_for_dims, has_global_pp_for_dims, precompute_rot_columns,
-    sample_uniform_rq, seeded_pp_chunk_seeds, try_get_loaded_global_pp_for_dims, Commitment as Cmt,
+    get_global_pp_for_dims, get_global_pp_seeded_params_for_dims, has_global_pp_for_dims, sample_uniform_rq,
+    seeded_pp_chunk_seeds, try_get_loaded_global_pp_for_dims, Commitment as Cmt,
 };
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::{CcsStructure, Mat, MeInstance};
@@ -38,7 +38,7 @@ use neo_reductions::engines::utils;
 use neo_reductions::paper_exact_engine::{build_me_outputs_paper_exact, claimed_initial_sum_from_inputs};
 use neo_reductions::sumcheck::{poly_eval_k, RoundOracle};
 use neo_transcript::{Poseidon2Transcript, Transcript};
-use p3_field::{PrimeCharacteristicRing, PrimeField64};
+use p3_field::{Field, PackedValue, PrimeCharacteristicRing, PrimeField64};
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha8Rng;
 use rayon::prelude::*;
@@ -408,15 +408,30 @@ where
         .ok_or_else(|| PiCcsError::InvalidInput("DEC: 2^ell_n overflow".into()))?;
     let n_eff = core::cmp::min(s.n, n_sz);
 
-    let mut chi_r = vec![K::ZERO; n_sz];
-    for row in 0..n_sz {
-        let mut w = K::ONE;
-        for (bit, &rb) in parent.r.iter().enumerate() {
-            let is_one = ((row >> bit) & 1) == 1;
-            w *= if is_one { rb } else { K::ONE - rb };
+    // χ_r table over the row/time hypercube.
+    //
+    // IMPORTANT: Use the same bit order as `eq_points_bool_mask` / `chi_tail_weights`
+    // (bit 0 = LSB) so CSC column traversals match the reference DEC.
+    #[inline]
+    fn chi_tail_weights(bits: &[K]) -> Vec<K> {
+        let t = bits.len();
+        let len = 1usize << t;
+        let mut w = vec![K::ZERO; len];
+        w[0] = K::ONE;
+        for (i, &b) in bits.iter().enumerate() {
+            let step = 1usize << i;
+            let one_minus = K::ONE - b;
+            for mask in 0..step {
+                let v = w[mask];
+                w[mask] = v * one_minus;
+                w[mask + step] = v * b;
+            }
         }
-        chi_r[row] = w;
+        w
     }
+
+    let chi_r = chi_tail_weights(&parent.r);
+    debug_assert_eq!(chi_r.len(), n_sz);
 
     let t_mats = s.t();
 
@@ -470,8 +485,8 @@ where
         y: Vec<[K; D]>,      // [digit][t] -> [D]
         any_nonzero: Vec<bool>,
         vj: Vec<K>,               // scratch: t
-        digits: Vec<F>,            // scratch: k*D
-        cols: Box<[[F; D]]>,       // scratch: D×D
+        digits: Vec<i32>,          // scratch: k*D (balanced digits)
+        rot_next: [F; D],          // scratch: rotation step output (written fully each time)
         err: Option<String>, // first error wins
     }
 
@@ -482,8 +497,8 @@ where
                 y: vec![[K::ZERO; D]; k_dec * t],
                 any_nonzero: vec![false; k_dec],
                 vj: vec![K::ZERO; t],
-                digits: vec![F::ZERO; k_dec * D],
-                cols: vec![[F::ZERO; D]; D].into_boxed_slice(),
+                digits: vec![0i32; k_dec * D],
+                rot_next: [F::ZERO; D],
                 err: None,
             }
         }
@@ -513,6 +528,73 @@ where
     let m = s.m;
     let b_i64 = params.b as i64;
     let b_i128 = params.b as i128;
+
+    // Specialized rot_step for Φ₈₁(X) = X^54 + X^27 + 1 (η=81, D=54).
+    // Mirrors `neo_ajtai::commit::rot_step_phi_81` but kept local to avoid pulling a large
+    // D×D scratch table (`precompute_rot_columns`) into the hot DEC streaming loop.
+    #[inline]
+    fn rot_step_phi_81(cur: &[F; D], next: &mut [F; D]) {
+        let last = cur[D - 1];
+        next[0] = F::ZERO;
+        next[1..D].copy_from_slice(&cur[..(D - 1)]);
+        next[0] -= last;
+        next[27] -= last;
+    }
+
+    #[inline]
+    fn acc_add_assign(acc: &mut [F; D], col: &[F; D]) {
+        type P = <F as Field>::Packing;
+        let prefix_len = D - (D % P::WIDTH);
+        let (acc_prefix, acc_suffix) = acc.split_at_mut(prefix_len);
+        let (col_prefix, col_suffix) = col.split_at(prefix_len);
+
+        for (a, b) in P::pack_slice_mut(acc_prefix)
+            .iter_mut()
+            .zip(P::pack_slice(col_prefix).iter())
+        {
+            *a += *b;
+        }
+        for (a, &b) in acc_suffix.iter_mut().zip(col_suffix.iter()) {
+            *a += b;
+        }
+    }
+
+    #[inline]
+    fn acc_sub_assign(acc: &mut [F; D], col: &[F; D]) {
+        type P = <F as Field>::Packing;
+        let prefix_len = D - (D % P::WIDTH);
+        let (acc_prefix, acc_suffix) = acc.split_at_mut(prefix_len);
+        let (col_prefix, col_suffix) = col.split_at(prefix_len);
+
+        for (a, b) in P::pack_slice_mut(acc_prefix)
+            .iter_mut()
+            .zip(P::pack_slice(col_prefix).iter())
+        {
+            *a -= *b;
+        }
+        for (a, &b) in acc_suffix.iter_mut().zip(col_suffix.iter()) {
+            *a -= b;
+        }
+    }
+
+    #[inline]
+    fn acc_mul_add_assign(acc: &mut [F; D], col: &[F; D], scalar: F) {
+        type P = <F as Field>::Packing;
+        let prefix_len = D - (D % P::WIDTH);
+        let (acc_prefix, acc_suffix) = acc.split_at_mut(prefix_len);
+        let (col_prefix, col_suffix) = col.split_at(prefix_len);
+        let scalar_p: P = scalar.into();
+
+        for (a, b) in P::pack_slice_mut(acc_prefix)
+            .iter_mut()
+            .zip(P::pack_slice(col_prefix).iter())
+        {
+            *a += *b * scalar_p;
+        }
+        for (a, &b) in acc_suffix.iter_mut().zip(col_suffix.iter()) {
+            *a += b * scalar;
+        }
+    }
 
     let (kappa, acc) = match &pp_access {
         PpAccess::Loaded { pp } => {
@@ -549,14 +631,14 @@ where
                                 };
                                 for i in 0..k_dec {
                                     if v == 0 {
-                                        st.digits[i * D + rho] = F::ZERO;
+                                        st.digits[i * D + rho] = 0;
                                         continue;
                                     }
                                     let (r_i, q) = balanced_divrem_i64(v, b_i64);
                                     if r_i != 0 {
                                         st.any_nonzero[i] = true;
                                     }
-                                    st.digits[i * D + rho] = f_from_i64(r_i);
+                                    st.digits[i * D + rho] = r_i as i32;
                                     v = q;
                                 }
                                 if v != 0 {
@@ -586,14 +668,14 @@ where
                                 };
                                 for i in 0..k_dec {
                                     if v == 0 {
-                                        st.digits[i * D + rho] = F::ZERO;
+                                        st.digits[i * D + rho] = 0;
                                         continue;
                                     }
                                     let (r_i, q) = balanced_divrem_i128(v, b_i128);
                                     if r_i != 0 {
                                         st.any_nonzero[i] = true;
                                     }
-                                    st.digits[i * D + rho] = f_from_i64(r_i as i64);
+                                    st.digits[i * D + rho] = r_i as i32;
                                     v = q;
                                 }
                                 if v != 0 {
@@ -639,14 +721,18 @@ where
                         for i in 0..k_dec {
                             let y_base = i * t_mats;
                             for rho in 0..D {
-                                let mask = st.digits[i * D + rho];
-                                if mask == F::ZERO {
+                                let digit = st.digits[i * D + rho];
+                                if digit == 0 {
                                     continue;
                                 }
                                 for j in 0..t_mats {
                                     let vj = st.vj[j];
                                     if vj != K::ZERO {
-                                        st.y[y_base + j][rho] += vj.scale_base(mask);
+                                        match digit {
+                                            1 => st.y[y_base + j][rho] += vj,
+                                            -1 => st.y[y_base + j][rho] -= vj,
+                                            _ => st.y[y_base + j][rho] += vj.scale_base(f_from_i64(digit as i64)),
+                                        }
                                     }
                                 }
                             }
@@ -654,19 +740,22 @@ where
 
                         // Commitment accumulators per digit.
                         for kr in 0..kappa {
-                            precompute_rot_columns(pp.m_rows[kr][col], &mut st.cols);
+                            let mut rot_col = neo_math::ring::cf(pp.m_rows[kr][col]);
                             for rho in 0..D {
-                                let col_t = &st.cols[rho];
                                 for i in 0..k_dec {
-                                    let mask = st.digits[i * D + rho];
-                                    if mask == F::ZERO {
+                                    let digit = st.digits[i * D + rho];
+                                    if digit == 0 {
                                         continue;
                                     }
                                     let acc = &mut st.commit[i * kappa + kr];
-                                    for r in 0..D {
-                                        acc[r] += col_t[r] * mask;
+                                    match digit {
+                                        1 => acc_add_assign(acc, &rot_col),
+                                        -1 => acc_sub_assign(acc, &rot_col),
+                                        _ => acc_mul_add_assign(acc, &rot_col, f_from_i64(digit as i64)),
                                     }
                                 }
+                                rot_step_phi_81(&rot_col, &mut st.rot_next);
+                                core::mem::swap(&mut rot_col, &mut st.rot_next);
                             }
                         }
 
@@ -733,14 +822,14 @@ where
                                     };
                                     for i in 0..k_dec {
                                         if v == 0 {
-                                            st.digits[i * D + rho] = F::ZERO;
+                                            st.digits[i * D + rho] = 0;
                                             continue;
                                         }
                                         let (r_i, q) = balanced_divrem_i64(v, b_i64);
                                         if r_i != 0 {
                                             st.any_nonzero[i] = true;
                                         }
-                                        st.digits[i * D + rho] = f_from_i64(r_i);
+                                        st.digits[i * D + rho] = r_i as i32;
                                         v = q;
                                     }
                                     if v != 0 {
@@ -770,14 +859,14 @@ where
                                     };
                                     for i in 0..k_dec {
                                         if v == 0 {
-                                            st.digits[i * D + rho] = F::ZERO;
+                                            st.digits[i * D + rho] = 0;
                                             continue;
                                         }
                                         let (r_i, q) = balanced_divrem_i128(v, b_i128);
                                         if r_i != 0 {
                                             st.any_nonzero[i] = true;
                                         }
-                                        st.digits[i * D + rho] = f_from_i64(r_i as i64);
+                                        st.digits[i * D + rho] = r_i as i32;
                                         v = q;
                                     }
                                     if v != 0 {
@@ -823,14 +912,18 @@ where
                             for i in 0..k_dec {
                                 let y_base = i * t_mats;
                                 for rho in 0..D {
-                                    let mask = st.digits[i * D + rho];
-                                    if mask == F::ZERO {
+                                    let digit = st.digits[i * D + rho];
+                                    if digit == 0 {
                                         continue;
                                     }
                                     for j in 0..t_mats {
                                         let vj = st.vj[j];
                                         if vj != K::ZERO {
-                                            st.y[y_base + j][rho] += vj.scale_base(mask);
+                                            match digit {
+                                                1 => st.y[y_base + j][rho] += vj,
+                                                -1 => st.y[y_base + j][rho] -= vj,
+                                                _ => st.y[y_base + j][rho] += vj.scale_base(f_from_i64(digit as i64)),
+                                            }
                                         }
                                     }
                                 }
@@ -839,19 +932,22 @@ where
                             // Commitment accumulators per digit.
                             for kr in 0..kappa {
                                 let a_kr_col = sample_uniform_rq(&mut rngs[kr]);
-                                precompute_rot_columns(a_kr_col, &mut st.cols);
+                                let mut rot_col = neo_math::ring::cf(a_kr_col);
                                 for rho in 0..D {
-                                    let col_t = &st.cols[rho];
                                     for i in 0..k_dec {
-                                        let mask = st.digits[i * D + rho];
-                                        if mask == F::ZERO {
+                                        let digit = st.digits[i * D + rho];
+                                        if digit == 0 {
                                             continue;
                                         }
                                         let acc = &mut st.commit[i * kappa + kr];
-                                        for r in 0..D {
-                                            acc[r] += col_t[r] * mask;
+                                        match digit {
+                                            1 => acc_add_assign(acc, &rot_col),
+                                            -1 => acc_sub_assign(acc, &rot_col),
+                                            _ => acc_mul_add_assign(acc, &rot_col, f_from_i64(digit as i64)),
                                         }
                                     }
+                                    rot_step_phi_81(&rot_col, &mut st.rot_next);
+                                    core::mem::swap(&mut rot_col, &mut st.rot_next);
                                 }
                             }
                         }

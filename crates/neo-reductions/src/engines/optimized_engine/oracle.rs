@@ -504,9 +504,13 @@ impl RowStreamState {
 
     #[inline]
     fn poly_mul_affine_inplace_base(poly: &mut [Fq], a: Fq, b: Fq) {
-        for d in (0..poly.len()).rev() {
-            let prev = if d == 0 { Fq::ZERO } else { poly[d - 1] };
-            poly[d] = a * poly[d] + b * prev;
+        // Coeffs are low→high. Output truncates to input length:
+        // new[0] = a*old[0]; new[d] = a*old[d] + b*old[d-1] (d>=1).
+        let mut prev = Fq::ZERO;
+        for coeff in poly.iter_mut() {
+            let old = *coeff;
+            *coeff = a * old + b * prev;
+            prev = old;
         }
     }
 
@@ -1032,9 +1036,11 @@ impl RowStreamState {
     /// Coefficients are in low→high order. Output is truncated to the input length.
     #[inline]
     fn poly_mul_affine_inplace(poly: &mut [K], a: K, b: K) {
-        for d in (0..poly.len()).rev() {
-            let prev = if d == 0 { K::ZERO } else { poly[d - 1] };
-            poly[d] = a * poly[d] + b * prev;
+        let mut prev = K::ZERO;
+        for coeff in poly.iter_mut() {
+            let old = *coeff;
+            *coeff = a * old + b * prev;
+            prev = old;
         }
     }
 
@@ -1045,7 +1051,8 @@ impl RowStreamState {
     {
         debug_assert!(self.cur_len >= 2 && self.cur_len % 2 == 0);
         let tail_len = self.cur_len / 2;
-        let xs_all_base = allow_base && self.all_base && xs.iter().all(|&x| x.imag() == Fq::ZERO);
+        let xs_are_base = xs.iter().all(|&x| x.imag() == Fq::ZERO);
+        let xs_all_base = allow_base && self.all_base && xs_are_base;
 
         // Fast path for b=2: build the univariate coefficients once per round,
         // then evaluate cheaply at all requested points.
@@ -1159,10 +1166,15 @@ impl RowStreamState {
                 }
             }
 
-            return xs
-                .iter()
-                .map(|&x| crate::sumcheck::poly_eval_k(&coeffs, x))
-                .collect();
+            return if xs_are_base {
+                xs.iter()
+                    .map(|&x| crate::sumcheck::poly_eval_k_base(&coeffs, x.real()))
+                    .collect()
+            } else {
+                xs.iter()
+                    .map(|&x| crate::sumcheck::poly_eval_k(&coeffs, x))
+                    .collect()
+            };
         }
 
         // Fast path for b=3: range polynomial is N(y) = y(y^2-1)(y^2-4) = y^5 - 5y^3 + 4y.
@@ -1315,10 +1327,15 @@ impl RowStreamState {
                     },
                 );
 
-            return xs
-                .iter()
-                .map(|&x| crate::sumcheck::poly_eval_k(&coeffs, x))
-                .collect();
+            return if xs_are_base {
+                xs.iter()
+                    .map(|&x| crate::sumcheck::poly_eval_k_base(&coeffs, x.real()))
+                    .collect()
+            } else {
+                xs.iter()
+                    .map(|&x| crate::sumcheck::poly_eval_k(&coeffs, x))
+                    .collect()
+            };
         }
 
         // Generic fallback: evaluate directly at each x (slower, but supports any b).

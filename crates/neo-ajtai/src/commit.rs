@@ -73,6 +73,47 @@ pub fn rot_step(cur: &[Fq; D], next: &mut [Fq; D]) {
 
 #[inline]
 fn acc_mul_add_inplace(acc: &mut [Fq; D], col: &[Fq; D], scalar: Fq) {
+    // Fast paths for the common balanced-digit case (b ∈ {2,3} ⇒ scalar ∈ {-1,0,1}).
+    //
+    // NOTE: This is intentionally variable-time w.r.t. `scalar`. It is only used in the
+    // seeded PP row-major commitment path, which is a prover-only performance hot loop.
+    if scalar == Fq::ZERO {
+        return;
+    }
+    if scalar == Fq::ONE {
+        // Unrolled to encourage LLVM auto-vectorization on platforms that support it.
+        let mut r = 0usize;
+        while r + 3 < D {
+            acc[r] += col[r];
+            acc[r + 1] += col[r + 1];
+            acc[r + 2] += col[r + 2];
+            acc[r + 3] += col[r + 3];
+            r += 4;
+        }
+        while r < D {
+            acc[r] += col[r];
+            r += 1;
+        }
+        return;
+    }
+    let neg_one = Fq::ZERO - Fq::ONE;
+    if scalar == neg_one {
+        let mut r = 0usize;
+        while r + 3 < D {
+            acc[r] -= col[r];
+            acc[r + 1] -= col[r + 1];
+            acc[r + 2] -= col[r + 2];
+            acc[r + 3] -= col[r + 3];
+            r += 4;
+        }
+        while r < D {
+            acc[r] -= col[r];
+            r += 1;
+        }
+        return;
+    }
+
+    // Fallback: generic scalar multiply-add.
     // Unrolled to encourage LLVM auto-vectorization on platforms that support it.
     let mut r = 0usize;
     while r + 3 < D {
