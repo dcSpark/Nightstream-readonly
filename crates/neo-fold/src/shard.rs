@@ -1421,6 +1421,286 @@ where
     Ok(())
 }
 
+#[cfg(feature = "paper-exact")]
+fn crosscheck_route_a_ccs_step<L>(
+    cfg: &neo_reductions::engines::CrosscheckCfg,
+    step_idx: usize,
+    params: &NeoParams,
+    s: &CcsStructure<F>,
+    cpu_bus: &neo_memory::cpu::BusLayout,
+    mcs_inst: &neo_ccs::McsInstance<Cmt, F>,
+    mcs_wit: &neo_ccs::McsWitness<F>,
+    me_inputs: &[MeInstance<Cmt, F, K>],
+    me_witnesses: &[Mat<F>],
+    ccs_out: &[MeInstance<Cmt, F, K>],
+    ccs_proof: &crate::PiCcsProof,
+    ell_d: usize,
+    ell_n: usize,
+    d_sc: usize,
+    fold_digest: [u8; 32],
+    log: &L,
+) -> Result<(), PiCcsError>
+where
+    L: SModuleHomomorphism<F, Cmt> + Sync,
+{
+    let want_rounds_total = ell_n
+        .checked_add(ell_d)
+        .ok_or_else(|| PiCcsError::ProtocolError("ell_n + ell_d overflow".into()))?;
+    if ccs_proof.sumcheck_rounds.len() != want_rounds_total {
+        return Err(PiCcsError::ProtocolError(format!(
+            "step {}: crosscheck expects {} CCS sumcheck rounds, got {}",
+            step_idx,
+            want_rounds_total,
+            ccs_proof.sumcheck_rounds.len(),
+        )));
+    }
+    if ccs_proof.sumcheck_challenges.len() != want_rounds_total {
+        return Err(PiCcsError::ProtocolError(format!(
+            "step {}: crosscheck expects {} CCS sumcheck challenges, got {}",
+            step_idx,
+            want_rounds_total,
+            ccs_proof.sumcheck_challenges.len(),
+        )));
+    }
+
+    let (r_prime, alpha_prime) = ccs_proof.sumcheck_challenges.split_at(ell_n);
+    let r_inputs = me_inputs.first().map(|mi| mi.r.as_slice());
+
+    if cfg.initial_sum {
+        let lhs_exact = crate::paper_exact_engine::sum_q_over_hypercube_paper_exact(
+            s,
+            params,
+            core::slice::from_ref(mcs_wit),
+            me_witnesses,
+            &ccs_proof.challenges_public,
+            ell_d,
+            ell_n,
+            r_inputs,
+        );
+        let initial_sum_prover = match ccs_proof.sc_initial_sum {
+            Some(x) => x,
+            None => ccs_proof
+                .sumcheck_rounds
+                .first()
+                .map(|p0| poly_eval_k(p0, K::ZERO) + poly_eval_k(p0, K::ONE))
+                .ok_or_else(|| PiCcsError::ProtocolError("crosscheck: missing sumcheck round 0".into()))?,
+        };
+        if lhs_exact != initial_sum_prover {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: crosscheck initial sum mismatch (optimized vs paper-exact)",
+                step_idx
+            )));
+        }
+    }
+
+    if cfg.per_round {
+        let mut paper_oracle = crate::paper_exact_engine::oracle::PaperExactOracle::new(
+            s,
+            params,
+            core::slice::from_ref(mcs_wit),
+            me_witnesses,
+            ccs_proof.challenges_public.clone(),
+            ell_d,
+            ell_n,
+            d_sc,
+            r_inputs,
+        );
+
+        let mut any_mismatch = false;
+        for (round_idx, (opt_coeffs, &challenge)) in ccs_proof
+            .sumcheck_rounds
+            .iter()
+            .zip(ccs_proof.sumcheck_challenges.iter())
+            .enumerate()
+        {
+            let deg = paper_oracle.degree_bound();
+            let xs: Vec<K> = (0..=deg).map(|t| K::from(F::from_u64(t as u64))).collect();
+            let paper_evals = paper_oracle.evals_at(&xs);
+
+            for (&x, &expected) in xs.iter().zip(paper_evals.iter()) {
+                let actual = poly_eval_k(opt_coeffs, x);
+                if actual != expected {
+                    any_mismatch = true;
+                    if cfg.fail_fast {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "step {}: crosscheck round {} polynomial mismatch",
+                            step_idx, round_idx
+                        )));
+                    }
+                }
+            }
+
+            paper_oracle.fold(challenge);
+        }
+        if any_mismatch {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: crosscheck per-round polynomial mismatch",
+                step_idx
+            )));
+        }
+    }
+
+    if cfg.terminal {
+        let running_sum_prover = if let Some(initial) = ccs_proof.sc_initial_sum {
+            let mut running = initial;
+            for (coeffs, &ri) in ccs_proof
+                .sumcheck_rounds
+                .iter()
+                .zip(ccs_proof.sumcheck_challenges.iter())
+            {
+                running = poly_eval_k(coeffs, ri);
+            }
+            running
+        } else {
+            ccs_proof
+                .sumcheck_rounds
+                .first()
+                .map(|p0| poly_eval_k(p0, K::ZERO) + poly_eval_k(p0, K::ONE))
+                .unwrap_or(K::ZERO)
+        };
+
+        let rhs_opt = crate::optimized_engine::rhs_terminal_identity_paper_exact(
+            s,
+            params,
+            &ccs_proof.challenges_public,
+            r_prime,
+            alpha_prime,
+            ccs_out,
+            r_inputs,
+        );
+
+        let (lhs_exact, _rhs_unused) = crate::paper_exact_engine::q_eval_at_ext_point_paper_exact_with_inputs(
+            s,
+            params,
+            core::slice::from_ref(mcs_wit),
+            me_witnesses,
+            alpha_prime,
+            r_prime,
+            &ccs_proof.challenges_public,
+            r_inputs,
+        );
+
+        if rhs_opt != lhs_exact || rhs_opt != running_sum_prover {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: crosscheck terminal evaluation claim mismatch",
+                step_idx
+            )));
+        }
+    }
+
+    if cfg.outputs {
+        let mut out_me_ref = build_me_outputs_paper_exact(
+            s,
+            params,
+            core::slice::from_ref(mcs_inst),
+            core::slice::from_ref(mcs_wit),
+            me_inputs,
+            me_witnesses,
+            r_prime,
+            ell_d,
+            fold_digest,
+            log,
+        );
+
+        if cpu_bus.bus_cols > 0 {
+            let core_t = s.t();
+            if out_me_ref.len() != 1 + me_witnesses.len() {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: crosscheck CCS output count mismatch for bus openings (out_me_ref.len()={}, expected {})",
+                    step_idx,
+                    out_me_ref.len(),
+                    1 + me_witnesses.len()
+                )));
+            }
+
+            crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
+                params,
+                cpu_bus,
+                core_t,
+                &mcs_wit.Z,
+                &mut out_me_ref[0],
+            )?;
+            for (out, Z) in out_me_ref.iter_mut().skip(1).zip(me_witnesses.iter()) {
+                crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(params, cpu_bus, core_t, Z, out)?;
+            }
+        }
+
+        if out_me_ref.len() != ccs_out.len() {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: crosscheck output length mismatch (paper={}, optimized={})",
+                step_idx,
+                out_me_ref.len(),
+                ccs_out.len()
+            )));
+        }
+
+        for (idx, (a, b)) in out_me_ref.iter().zip(ccs_out.iter()).enumerate() {
+            if a.m_in != b.m_in {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: crosscheck output[{idx}] m_in mismatch (paper={}, optimized={})",
+                    step_idx, a.m_in, b.m_in
+                )));
+            }
+            if a.r != b.r {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: crosscheck output[{idx}] r mismatch",
+                    step_idx
+                )));
+            }
+            if a.c.data != b.c.data {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: crosscheck output[{idx}] commitment mismatch",
+                    step_idx
+                )));
+            }
+            if a.y.len() != b.y.len() {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: crosscheck output[{idx}] y.len mismatch (paper={}, optimized={})",
+                    step_idx,
+                    a.y.len(),
+                    b.y.len()
+                )));
+            }
+            for (j, (ya, yb)) in a.y.iter().zip(b.y.iter()).enumerate() {
+                if ya != yb {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: crosscheck output[{idx}] y row {j} mismatch",
+                        step_idx
+                    )));
+                }
+            }
+            if a.y_scalars != b.y_scalars {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: crosscheck output[{idx}] y_scalars mismatch",
+                    step_idx
+                )));
+            }
+            if a.X.rows() != b.X.rows() || a.X.cols() != b.X.cols() {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: crosscheck output[{idx}] X dims mismatch (paper={}x{}, optimized={}x{})",
+                    step_idx,
+                    a.X.rows(),
+                    a.X.cols(),
+                    b.X.rows(),
+                    b.X.cols()
+                )));
+            }
+            for r in 0..a.X.rows() {
+                for c in 0..a.X.cols() {
+                    if a.X[(r, c)] != b.X[(r, c)] {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "step {}: crosscheck output[{idx}] X mismatch at ({},{})",
+                            step_idx, r, c
+                        )));
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(())
+}
+
 // ============================================================================
 // Shard Proving
 // ============================================================================
@@ -1828,6 +2108,28 @@ where
         ccs_proof.challenges_public = ch;
         ccs_proof.sumcheck_final = running_sum;
         ccs_proof.header_digest = fold_digest.to_vec();
+
+        #[cfg(feature = "paper-exact")]
+        if let FoldingMode::OptimizedWithCrosscheck(cfg) = &mode {
+            crosscheck_route_a_ccs_step(
+                cfg,
+                idx,
+                params,
+                &s,
+                &cpu_bus,
+                mcs_inst,
+                mcs_wit,
+                &accumulator,
+                &accumulator_wit,
+                &ccs_out,
+                &ccs_proof,
+                ell_d,
+                ell_n,
+                d_sc,
+                fold_digest,
+                l,
+            )?;
+        }
 
         // Witnesses for CCS outputs: [Z_mcs, Z_seed...] (borrow; avoid multi-GB clones)
         let mut outs_Z: Vec<&Mat<F>> = Vec::with_capacity(k);

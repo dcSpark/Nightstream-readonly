@@ -136,20 +136,45 @@ pub fn bind_header_and_instances_with_digest(
 
 /// Bind ME inputs to transcript
 pub fn bind_me_inputs(tr: &mut Poseidon2Transcript, me_inputs: &[MeInstance<Cmt, F, K>]) -> Result<(), PiCcsError> {
-    tr.append_message(b"neo/ccs/me_inputs", b"");
+    // v2 batches (r, y) coefficient absorption under a single label+len framing for performance.
+    // This is NOT transcript-equivalent to the previous per-limb/per-element `append_fields` loop.
+    tr.append_message(b"neo/ccs/me_inputs/v2", b"");
     tr.append_u64s(b"me_count", &[me_inputs.len() as u64]);
+
+    let k_coeffs_len = K::ONE.as_coeffs().len();
 
     for me in me_inputs {
         tr.append_fields(b"c_data_in", &me.c.data);
         tr.append_u64s(b"m_in_in", &[me.m_in as u64]);
-        for limb in &me.r {
-            tr.append_fields(b"r_in", &limb.as_coeffs());
-        }
-        for yj in &me.y {
-            for &y_elem in yj {
-                tr.append_fields(b"y_elem", &y_elem.as_coeffs());
-            }
-        }
+
+        let r_field_len = me
+            .r
+            .len()
+            .checked_mul(k_coeffs_len)
+            .ok_or_else(|| PiCcsError::InvalidInput("ME.r length overflow".into()))?;
+        tr.append_fields_iter(
+            b"r_in",
+            r_field_len,
+            me.r.iter().flat_map(|limb| limb.as_coeffs().into_iter()),
+        );
+
+        let y_elem_count: usize = me
+            .y
+            .iter()
+            .try_fold(0usize, |acc, yj| {
+                acc.checked_add(yj.len())
+                    .ok_or_else(|| PiCcsError::InvalidInput("ME.y length overflow".into()))
+            })?;
+        let y_field_len = y_elem_count
+            .checked_mul(k_coeffs_len)
+            .ok_or_else(|| PiCcsError::InvalidInput("ME.y length overflow".into()))?;
+        tr.append_fields_iter(
+            b"y_elem",
+            y_field_len,
+            me.y
+                .iter()
+                .flat_map(|yj| yj.iter().flat_map(|y_elem| y_elem.as_coeffs().into_iter())),
+        );
     }
 
     Ok(())

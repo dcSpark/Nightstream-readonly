@@ -9,7 +9,7 @@ use bellpepper_core::{
 use ff::PrimeField;
 use neo_ajtai::{set_global_pp_seeded, AjtaiSModule};
 use neo_ccs::{CcsMatrix, CcsStructure, CscMat, SparsePoly, Term};
-use neo_fold::{pi_ccs::FoldingMode, session::{FoldingSession, ProveInput}};
+use neo_fold::{pi_ccs::FoldingMode, session::FoldingSession};
 use neo_math::{D, F};
 use neo_params::NeoParams;
 use neo_reductions::engines::optimized_engine::oracle::SparseCache;
@@ -260,14 +260,8 @@ fn test_sha256_preimage_len_bytes(preimage_len_bytes: usize) {
     let witness = &z[m_in..];
 
     let step_start = Instant::now();
-    let input = ProveInput {
-        ccs: &step_ccs,
-        public_input,
-        witness,
-        output_claims: &[],
-    };
     session
-        .add_step_from_io(&input)
+        .add_step_io(&step_ccs, public_input, witness)
         .expect("add_step should succeed with optimized");
     println!("Add step duration: {:?}", step_start.elapsed());
 
