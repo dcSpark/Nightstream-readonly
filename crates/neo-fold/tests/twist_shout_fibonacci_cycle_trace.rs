@@ -54,6 +54,7 @@ use neo_fold::session::{CcsBuilder, FoldingSession, NeoCircuit, ShoutPort, Share
 use neo_fold::session::{Lane, Public, Scalar};
 use neo_fold::session::{preprocess_shared_bus_r1cs, witness_layout};
 use neo_fold::shard::MemOrLutProof;
+use neo_fold::shard::StepLinkingConfig;
 use neo_math::{D, F};
 use neo_memory::plain::PlainMemLayout;
 use neo_params::NeoParams;
@@ -302,7 +303,7 @@ fn twist_shout_fibonacci_cycle_trace() {
     let outputs = run.compute_fold_outputs(&[]);
 
     let t_verify = Instant::now();
-    session.unsafe_allow_unlinked_steps();
+    session.set_step_linking(StepLinkingConfig::new(vec![(0, 0)]));
     let ok = session
         .verify_with_output_binding_collected_simple(prover.ccs(), &run, &ob_cfg)
         .expect("verify should run");

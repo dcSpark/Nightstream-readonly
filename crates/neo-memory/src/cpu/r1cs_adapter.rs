@@ -533,26 +533,32 @@ where
                     .iter()
                     .map(|inst| vec![None; inst.lanes.len()])
                     .collect();
+                let mut used_shout: Vec<usize> = vec![0; shout_events.len()];
                 let mut twist_reads: Vec<Vec<Option<(u64, Goldilocks)>>> = shared
                     .layout
                     .twist_cols
                     .iter()
                     .map(|inst| vec![None; inst.lanes.len()])
                     .collect();
+                let mut used_twist_reads: Vec<usize> = vec![0; twist_reads.len()];
                 let mut twist_writes: Vec<Vec<Option<(u64, Goldilocks)>>> = shared
                     .layout
                     .twist_cols
                     .iter()
                     .map(|inst| vec![None; inst.lanes.len()])
                     .collect();
+                let mut used_twist_writes: Vec<usize> = vec![0; twist_writes.len()];
 
                 for (j, step) in chunk.iter().enumerate() {
+                    used_shout.fill(0);
                     for lanes in shout_events.iter_mut() {
                         lanes.fill(None);
                     }
+                    used_twist_reads.fill(0);
                     for lanes in twist_reads.iter_mut() {
                         lanes.fill(None);
                     }
+                    used_twist_writes.fill(0);
                     for lanes in twist_writes.iter_mut() {
                         lanes.fill(None);
                     }
@@ -565,13 +571,14 @@ where
                             .binary_search(&id)
                             .map_err(|_| format!("unexpected shout_id={id} in one step (chunk_start={chunk_start}, j={j})"))?;
                         let lanes = shout_events[idx].len();
-                        if let Some(slot) = shout_events[idx].iter_mut().find(|v| v.is_none()) {
-                            *slot = Some((ev.key, Goldilocks::from_u64(ev.value)));
-                        } else {
+                        let lane_idx = used_shout[idx];
+                        if lane_idx >= lanes {
                             return Err(format!(
                                 "too many shout events for shout_id={id} in one step (chunk_start={chunk_start}, j={j}): lanes={lanes}"
                             ));
                         }
+                        shout_events[idx][lane_idx] = Some((ev.key, Goldilocks::from_u64(ev.value)));
+                        used_shout[idx] += 1;
                     }
 
                     // Collect Twist events keyed by (sorted) mem_id list.
@@ -584,18 +591,21 @@ where
                         match ev.kind {
                             neo_vm_trace::TwistOpKind::Read => {
                                 let lanes = twist_reads[idx].len();
-                                if let Some(slot) = twist_reads[idx].iter_mut().find(|v| v.is_none()) {
-                                    *slot = Some((ev.addr, Goldilocks::from_u64(ev.value)));
-                                } else {
+                                let lane_idx = used_twist_reads[idx];
+                                if lane_idx >= lanes {
                                     return Err(format!(
                                         "too many twist reads for twist_id={id} in one step (chunk_start={chunk_start}, j={j}): lanes={lanes}"
                                     ));
                                 }
+                                twist_reads[idx][lane_idx] = Some((ev.addr, Goldilocks::from_u64(ev.value)));
+                                used_twist_reads[idx] += 1;
                             }
                             neo_vm_trace::TwistOpKind::Write => {
                                 let lanes = twist_writes[idx].len();
+                                let lane_idx = used_twist_writes[idx];
                                 if twist_writes[idx]
                                     .iter()
+                                    .take(lane_idx)
                                     .flatten()
                                     .any(|(addr, _)| *addr == ev.addr)
                                 {
@@ -604,13 +614,13 @@ where
                                         ev.addr
                                     ));
                                 }
-                                if let Some(slot) = twist_writes[idx].iter_mut().find(|v| v.is_none()) {
-                                    *slot = Some((ev.addr, Goldilocks::from_u64(ev.value)));
-                                } else {
+                                if lane_idx >= lanes {
                                     return Err(format!(
                                         "too many twist writes for twist_id={id} in one step (chunk_start={chunk_start}, j={j}): lanes={lanes}"
                                     ));
                                 }
+                                twist_writes[idx][lane_idx] = Some((ev.addr, Goldilocks::from_u64(ev.value)));
+                                used_twist_writes[idx] += 1;
                             }
                         }
                     }

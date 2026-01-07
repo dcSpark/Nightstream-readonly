@@ -339,19 +339,20 @@ impl<const N: usize> ShoutPort<N> {
 
         for (j, step) in chunk.iter().enumerate() {
             lookups.fill(None);
+            let mut used = 0usize;
 
             for ev in &step.shout_events {
                 if ev.shout_id.0 != shout_id {
                     continue;
                 }
-                if let Some(slot) = lookups.iter_mut().find(|v| v.is_none()) {
-                    *slot = Some((ev.key, ev.value));
-                } else {
+                if used >= lookups.len() {
                     return Err(format!(
                         "too many shout events for shout_id={shout_id} in one step (j={j}): lanes={}",
                         lanes.len()
                     ));
                 }
+                lookups[used] = Some((ev.key, ev.value));
+                used += 1;
             }
 
             for (lane_idx, port) in lanes.iter().enumerate() {
@@ -480,6 +481,8 @@ impl<const N: usize> TwistPort<N> {
         for (j, step) in chunk.iter().enumerate() {
             reads.fill(None);
             writes.fill(None);
+            let mut used_reads = 0usize;
+            let mut used_writes = 0usize;
 
             for ev in &step.twist_events {
                 if ev.twist_id.0 != twist_id {
@@ -487,30 +490,35 @@ impl<const N: usize> TwistPort<N> {
                 }
                 match ev.kind {
                     TwistOpKind::Read => {
-                        if let Some(slot) = reads.iter_mut().find(|v| v.is_none()) {
-                            *slot = Some((ev.addr, ev.value));
-                        } else {
+                        if used_reads >= reads.len() {
                             return Err(format!(
                                 "too many twist reads for twist_id={twist_id} in one step (j={j}): lanes={}",
                                 lanes.len()
                             ));
                         }
+                        reads[used_reads] = Some((ev.addr, ev.value));
+                        used_reads += 1;
                     }
                     TwistOpKind::Write => {
-                        if writes.iter().flatten().any(|(addr, _)| *addr == ev.addr) {
+                        if writes
+                            .iter()
+                            .take(used_writes)
+                            .flatten()
+                            .any(|(addr, _)| *addr == ev.addr)
+                        {
                             return Err(format!(
                                 "duplicate twist write addr for twist_id={twist_id} in one step (j={j}): addr={}",
                                 ev.addr
                             ));
                         }
-                        if let Some(slot) = writes.iter_mut().find(|v| v.is_none()) {
-                            *slot = Some((ev.addr, ev.value));
-                        } else {
+                        if used_writes >= writes.len() {
                             return Err(format!(
                                 "too many twist writes for twist_id={twist_id} in one step (j={j}): lanes={}",
                                 lanes.len()
                             ));
                         }
+                        writes[used_writes] = Some((ev.addr, ev.value));
+                        used_writes += 1;
                     }
                 }
             }

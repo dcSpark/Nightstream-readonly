@@ -7,6 +7,7 @@ use neo_ajtai::{setup as ajtai_setup, AjtaiSModule};
 use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::session::{preprocess_shared_bus_r1cs, witness_layout, FoldingSession, NeoCircuit, SharedBusResources, TwistPort};
 use neo_fold::session::{Public, Scalar};
+use neo_fold::shard::StepLinkingConfig;
 use neo_math::{D, F};
 use neo_memory::plain::PlainMemLayout;
 use neo_params::NeoParams;
@@ -187,7 +188,7 @@ fn twist_multi_write_two_writes_per_step_prove_verify() {
         .expect("execute_into_session should succeed");
 
     let run = session.fold_and_prove(prover.ccs()).expect("prove should succeed");
-    session.unsafe_allow_unlinked_steps();
+    session.set_step_linking(StepLinkingConfig::new(vec![(0, 0)]));
     let ok = session.verify_collected(prover.ccs(), &run).expect("verify should run");
     assert!(ok, "verification should pass");
 }

@@ -178,14 +178,12 @@ pub fn build_plain_lut_traces_with_lanes<F: PrimeField64>(
             };
 
             let lane_idx = used_lanes.entry(table_id).or_insert(0);
-            debug_assert!(
-                *lane_idx < lanes.len(),
-                "too many shouts for shout_id {table_id} at step {j}: have {}, need > {}",
-                lanes.len(),
-                lane_idx
-            );
             if *lane_idx >= lanes.len() {
-                continue;
+                panic!(
+                    "too many shouts for shout_id {table_id} at step {j}: lanes={}, got index {}",
+                    lanes.len(),
+                    lane_idx
+                );
             }
 
             let t = &mut lanes[*lane_idx];
