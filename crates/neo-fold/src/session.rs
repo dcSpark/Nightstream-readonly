@@ -817,6 +817,7 @@ where
                 &resources.mem_layouts,
                 &resources.lut_tables,
                 &resources.lut_table_specs,
+                &resources.lut_lanes,
                 &resources.initial_mem,
                 cpu_arith,
             )
@@ -1123,6 +1124,7 @@ where
         mem_layouts: &HashMap<u32, PlainMemLayout>,
         lut_tables: &HashMap<u32, LutTable<F>>,
         lut_table_specs: &HashMap<u32, LutTableSpec>,
+        lut_lanes: &HashMap<u32, usize>,
         initial_mem: &HashMap<(u32, u64), F>,
         cpu_arith: &A,
     ) -> Result<(), PiCcsError>
@@ -1141,6 +1143,7 @@ where
             mem_layouts,
             lut_tables,
             lut_table_specs,
+            lut_lanes,
             initial_mem,
             cpu_arith,
         )

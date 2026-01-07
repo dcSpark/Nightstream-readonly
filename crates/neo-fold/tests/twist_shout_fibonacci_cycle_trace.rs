@@ -101,7 +101,7 @@ impl<const N: usize> NeoCircuit for FibCircuit<N> {
     fn resources(&self, resources: &mut SharedBusResources) {
         resources
             .twist(0)
-            .layout(PlainMemLayout { k: 2, d: 1, n_side: 2 })
+            .layout(PlainMemLayout { k: 2, d: 1, n_side: 2 , lanes: 1})
             .init_cell(0, F::ONE);
         resources.set_binary_table(0, vec![F::ZERO, F::ONE]);
     }
@@ -111,14 +111,14 @@ impl<const N: usize> NeoCircuit for FibCircuit<N> {
         layout: &Self::Layout,
     ) -> Result<
         (
-            HashMap<u32, neo_memory::cpu::ShoutCpuBinding>,
-            HashMap<u32, neo_memory::cpu::TwistCpuBinding>,
+            HashMap<u32, Vec<neo_memory::cpu::ShoutCpuBinding>>,
+            HashMap<u32, Vec<neo_memory::cpu::TwistCpuBinding>>,
         ),
         String,
     > {
         Ok((
-            HashMap::from([(0u32, layout.shout0.cpu_binding())]),
-            HashMap::from([(0u32, layout.twist0.cpu_binding())]),
+            HashMap::from([(0u32, vec![layout.shout0.cpu_binding()])]),
+            HashMap::from([(0u32, vec![layout.twist0.cpu_binding()])]),
         ))
     }
 
@@ -400,9 +400,9 @@ fn twist_shout_fibonacci_cycle_trace() {
                 step_proof.mem.proofs.len()
             );
             println!(
-                "shout_addr_pre: claimed_sums={} active_mask=0x{:x} rounds={} r_addr_len={}",
+                "shout_addr_pre: claimed_sums={} active_lanes={} rounds={} r_addr_len={}",
                 step_proof.mem.shout_addr_pre.claimed_sums.len(),
-                step_proof.mem.shout_addr_pre.active_mask,
+                step_proof.mem.shout_addr_pre.active_lanes.len(),
                 step_proof.mem.shout_addr_pre.round_polys.len(),
                 step_proof.mem.shout_addr_pre.r_addr.len()
             );
