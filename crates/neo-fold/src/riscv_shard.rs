@@ -158,7 +158,17 @@ fn infer_required_shout_opcodes(program: &[RiscvInstruction]) -> HashSet<RiscvOp
     for instr in program {
         match instr {
             RiscvInstruction::RAlu { op, .. } => {
-                ops.insert(*op);
+                match op {
+                    // RV32 B1 proves MUL in-circuit (no Shout table required).
+                    RiscvOpcode::Mul => {}
+                    // RV32 B1 proves DIVU/REMU in-circuit; it uses a SLTU lookup to prove `rem < divisor` when divisor != 0.
+                    RiscvOpcode::Divu | RiscvOpcode::Remu => {
+                        ops.insert(RiscvOpcode::Sltu);
+                    }
+                    _ => {
+                        ops.insert(*op);
+                    }
+                }
             }
             RiscvInstruction::IAlu { op, .. } => {
                 ops.insert(*op);
@@ -206,10 +216,9 @@ fn infer_required_shout_opcodes(program: &[RiscvInstruction]) -> HashSet<RiscvOp
 
 fn all_shout_opcodes() -> HashSet<RiscvOpcode> {
     use RiscvOpcode::*;
-    HashSet::from([
-        And, Xor, Or, Sub, Add, Mul, Mulh, Mulhu, Mulhsu, Div, Divu, Rem, Remu, Sltu, Slt, Eq, Neq, Sll, Srl, Sra,
-        Addw, Subw, Sllw, Srlw, Sraw, Mulw, Divw, Divuw, Remw, Remuw, Andn,
-    ])
+    // RV32 B1 uses implicit Shout tables only for opcodes with a closed-form MLE implementation.
+    // RV32M ops are proven in-circuit (MUL/DIVU/REMU) or not yet supported (MULH/DIV/REM, etc.).
+    HashSet::from([And, Xor, Or, Sub, Add, Sltu, Slt, Eq, Neq, Sll, Srl, Sra])
 }
 
 /// High-level “few lines” builder for proving/verifying an RV32 program using the B1 shared-bus step circuit.

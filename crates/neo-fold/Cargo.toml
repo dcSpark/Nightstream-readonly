@@ -37,6 +37,7 @@ paper-exact = ["neo-reductions/paper-exact"]
 debug-logs = ["neo-reductions/debug-logs", "neo-memory/debug-logs"]
 
 [dev-dependencies]
+bincode = { workspace = true }
 criterion = { workspace = true }
 rand = { workspace = true }
 bellpepper = { workspace = true }
