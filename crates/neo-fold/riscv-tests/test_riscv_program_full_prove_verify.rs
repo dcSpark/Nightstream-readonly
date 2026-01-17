@@ -633,7 +633,7 @@ fn test_riscv_program_chunk_size_equivalence() {
     ];
 
     let program_bytes = encode_program(&program);
-    let max_steps = program.len() + 2; // include padding steps after HALT under fixed-length semantics
+    let max_steps = program.len();
 
     // Keep k small to reduce bus tail width and proof work.
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
@@ -745,21 +745,9 @@ fn test_riscv_program_chunk_size_equivalence() {
                 "expected step linking failure for chunk_size={chunk_size}"
             );
 
-            // With max_steps > program_len, the final chunk is padding and must be chained via halted_out -> halted_in.
-            let last = steps_public.len() - 1;
-            assert_eq!(
-                steps_public[last].mcs_inst.x[layout.halted_in],
-                F::ONE,
-                "final chunk must have halted_in=1"
-            );
-            assert_eq!(
-                steps_public[last - 1].mcs_inst.x[layout.halted_out],
-                F::ONE,
-                "chunk before final must have halted_out=1"
-            );
-
+            // Also ensure the `halted_out -> halted_in` step linking is enforced (even when both are 0).
             let mut bad_steps = steps_public.clone();
-            bad_steps[last].mcs_inst.x[layout.halted_in] = F::ZERO;
+            bad_steps[1].mcs_inst.x[layout.halted_in] = F::ONE;
             let mut tr_bad_halt = Poseidon2Transcript::new(b"riscv-b1-chunk-eq");
             assert!(
                 fold_shard_verify_rv32_b1_with_statement_mem_init(

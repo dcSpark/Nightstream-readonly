@@ -152,16 +152,16 @@ fn test_riscv_fibonacci_compiled_full_prove_verify() {
         let w = &mcs_wit.w;
         let z_len = x.len() + w.len();
 
-        let z_sha256 = hex32(sha256_fields_concat(x, w));
-        let w_sha256 = hex32(sha256_field_slice(w));
-        let Z_sha256 = hex32(sha256_field_slice(mcs_wit.Z.as_slice()));
+        let z_debug_sha256 = hex32(sha256_fields_concat(x, w));
+        let w_debug_sha256 = hex32(sha256_field_slice(w));
+        let Z_debug_sha256 = hex32(sha256_field_slice(mcs_wit.Z.as_slice()));
         let z_nonzero = nonzero_concat(x, w);
 
         let (z_first, z_last) = preview_first_last_concat(x, w, preview_len);
         let (Z_first, Z_last) = preview_first_last(mcs_wit.Z.as_slice(), preview_len);
 
         println!(
-            "Fold {fold_idx}: m_in={} x_len={} w_len={} z_len={} z_nonzero={} lut_instances={} mem_instances={} z_sha256={} w_sha256={} Z_sha256={}",
+            "Fold {fold_idx}: m_in={} x_len={} w_len={} z_len={} z_nonzero={} lut_instances={} mem_instances={} z_debug_sha256={} w_debug_sha256={} Z_debug_sha256={}",
             mcs_inst.m_in,
             x.len(),
             w.len(),
@@ -169,9 +169,9 @@ fn test_riscv_fibonacci_compiled_full_prove_verify() {
             z_nonzero,
             step.lut_instances.len(),
             step.mem_instances.len(),
-            z_sha256,
-            w_sha256,
-            Z_sha256,
+            z_debug_sha256,
+            w_debug_sha256,
+            Z_debug_sha256,
         );
         println!("  z_first={z_first:?}");
         println!("  z_last ={z_last:?}");

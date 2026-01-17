@@ -2,7 +2,6 @@ use crate::mem_init::mem_init_from_state_map;
 use crate::plain::{LutTable, PlainMemLayout};
 use crate::witness::{LutInstance, LutTableSpec, LutWitness, MemInstance, MemWitness, StepWitnessBundle};
 use neo_vm_trace::VmTrace;
-use neo_vm_trace::StepTrace;
 use neo_vm_trace::TwistOpKind;
 
 use neo_ccs::relations::{McsInstance, McsWitness};
@@ -130,8 +129,14 @@ where
         return Err(ShardBuildError::InvalidChunkSize("chunk_size must be >= 1".into()));
     }
 
-    // 1) Run VM and collect full trace for this shard (then pad to fixed length).
-    let mut trace = neo_vm_trace::trace_program(vm, twist, shout, max_steps)
+    // 1) Run VM and collect the executed trace for this shard (up to `max_steps`).
+    //
+    // NOTE: We intentionally do **not** pad out to `max_steps` here. Padding is handled at the
+    // per-chunk level by the CPU arithmetization via `is_active`, so the last chunk may be partial.
+    //
+    // This keeps the proof size proportional to the executed trace length instead of the caller's
+    // safety bound.
+    let trace = neo_vm_trace::trace_program(vm, twist, shout, max_steps)
         .map_err(|e| ShardBuildError::VmError(e.to_string()))?;
     let original_len = trace.steps.len();
     debug_assert!(
@@ -140,56 +145,6 @@ where
         original_len,
         max_steps
     );
-
-    // L1-style fixed-row execution: pad to exactly `max_steps` by repeating the final architectural
-    // state with no Twist/Shout events. (Per-row padding is expressed via `is_active` in the CPU CCS.)
-    if original_len < max_steps {
-        if let Some(last) = trace.steps.last() {
-            let pc = last.pc_after;
-            let regs = last.regs_after.clone();
-            let start = original_len;
-            trace.steps.reserve(max_steps - start);
-            for t in start..max_steps {
-                trace.steps.push(StepTrace {
-                    cycle: t as u64,
-                    pc_before: pc,
-                    pc_after: pc,
-                    opcode: 0,
-                    regs_before: regs.clone(),
-                    regs_after: regs.clone(),
-                    twist_events: Vec::new(),
-                    shout_events: Vec::new(),
-                    halted: true,
-                });
-            }
-        }
-    }
-    if original_len > 0 && original_len < max_steps {
-        debug_assert_eq!(
-            trace.steps.len(),
-            max_steps,
-            "internal error: expected builder padding to reach max_steps"
-        );
-        for (t, step) in trace.steps.iter().enumerate().skip(original_len) {
-            debug_assert!(
-                step.twist_events.is_empty(),
-                "padded step {t} must have no twist events"
-            );
-            debug_assert!(
-                step.shout_events.is_empty(),
-                "padded step {t} must have no shout events"
-            );
-            debug_assert!(step.halted, "padded step {t} must be halted");
-            debug_assert_eq!(
-                step.pc_before, step.pc_after,
-                "padded step {t} must keep pc constant"
-            );
-            debug_assert_eq!(
-                step.regs_before, step.regs_after,
-                "padded step {t} must keep regs constant"
-            );
-        }
-    }
 
     // Shared-bus mode does not support "silent dropping" of trace events: if the trace contains
     // Twist/Shout events, the corresponding instance metadata must be provided so the prover
