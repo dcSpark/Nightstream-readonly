@@ -132,6 +132,34 @@ fn test_riscv_fibonacci_compiled_full_prove_verify() {
     );
     println!("Folds: {}", run.fold_count());
 
+    // Print proof size estimate
+    {
+        let proof = run.proof();
+        let num_steps = proof.steps.len();
+        // Each MeInstance has exactly one commitment
+        let num_commitments: usize = proof.steps.iter().map(|s| {
+            s.fold.ccs_out.len() + s.fold.dec_children.len() + 1 // +1 for rlc_parent
+                + s.mem.cpu_me_claims_val.len()
+                + s.val_fold.as_ref().map(|v| v.dec_children.len() + 1).unwrap_or(0)
+        }).sum();
+        // Commitment size: d * kappa * 8 bytes (d=54, kappa varies)
+        // Get d and kappa from the first commitment in the proof
+        let (d, kappa) = proof.steps.first()
+            .map(|s| (s.fold.rlc_parent.c.d, s.fold.rlc_parent.c.kappa))
+            .unwrap_or((54, 2));
+        let commitment_bytes = d * kappa * 8;
+        let estimated_bytes = num_commitments * commitment_bytes;
+        println!(
+            "Proof structure: {} steps, {} commitments (d={}, kappa={})",
+            num_steps, num_commitments, d, kappa
+        );
+        println!(
+            "Estimated proof size (commitments only): {} bytes ({:.2} KB)",
+            estimated_bytes,
+            estimated_bytes as f64 / 1024.0
+        );
+    }
+
     let preview_len: usize = std::env::var("NIGHTSTREAM_WITNESS_PREVIEW_LEN")
         .ok()
         .and_then(|v| v.parse().ok())

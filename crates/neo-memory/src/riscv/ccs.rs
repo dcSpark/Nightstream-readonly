@@ -53,7 +53,10 @@ mod witness;
 
 pub use bus_bindings::rv32_b1_shared_cpu_bus_config;
 pub use layout::Rv32B1Layout;
-pub use witness::{rv32_b1_chunk_to_witness, rv32_b1_chunk_to_witness_checked};
+pub use witness::{
+    rv32_b1_chunk_to_full_witness, rv32_b1_chunk_to_full_witness_checked, rv32_b1_chunk_to_witness,
+    rv32_b1_chunk_to_witness_checked,
+};
 
 /// Verifier-side step-linking pairs for chaining multi-chunk executions.
 ///

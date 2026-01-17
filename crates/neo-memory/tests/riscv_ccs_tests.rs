@@ -7,7 +7,7 @@ use neo_ccs::relations::check_ccs_rowwise_zero;
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_memory::plain::PlainMemLayout;
 use neo_memory::riscv::ccs::{
-    build_rv32_b1_step_ccs, rv32_b1_chunk_to_witness, rv32_b1_chunk_to_witness_checked, rv32_b1_shared_cpu_bus_config,
+    build_rv32_b1_step_ccs, rv32_b1_chunk_to_full_witness_checked, rv32_b1_chunk_to_witness, rv32_b1_shared_cpu_bus_config,
 };
 use neo_memory::riscv::lookups::{
     decode_instruction, encode_program, BranchCondition, RiscvCpu, RiscvInstruction, RiscvMemOp, RiscvMemory, RiscvOpcode,
@@ -708,7 +708,7 @@ fn rv32_b1_witness_bus_alu_step() {
     ]);
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (_ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let z = rv32_b1_chunk_to_witness_checked(&layout, std::slice::from_ref(&step)).expect("witness");
+    let z = rv32_b1_chunk_to_full_witness_checked(&layout, std::slice::from_ref(&step)).expect("witness");
 
     let shout_tables = RiscvShoutTables::new(xlen);
     let add_id = shout_tables.opcode_to_id(RiscvOpcode::Add).0;
@@ -774,7 +774,7 @@ fn rv32_b1_witness_bus_lw_step() {
     ]);
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (_ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let z = rv32_b1_chunk_to_witness_checked(&layout, std::slice::from_ref(&step)).expect("witness");
+    let z = rv32_b1_chunk_to_full_witness_checked(&layout, std::slice::from_ref(&step)).expect("witness");
 
     let shout_tables = RiscvShoutTables::new(xlen);
     let add_id = shout_tables.opcode_to_id(RiscvOpcode::Add).0;
@@ -854,7 +854,7 @@ fn rv32_b1_witness_bus_amoaddw_step() {
     ]);
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (_ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let z = rv32_b1_chunk_to_witness_checked(&layout, std::slice::from_ref(&step)).expect("witness");
+    let z = rv32_b1_chunk_to_full_witness_checked(&layout, std::slice::from_ref(&step)).expect("witness");
 
     let shout_tables = RiscvShoutTables::new(xlen);
     let add_id = shout_tables.opcode_to_id(RiscvOpcode::Add).0;
@@ -1155,6 +1155,230 @@ fn rv32_b1_ccs_byte_store_updates_aligned_word() {
     for (mcs_inst, mcs_wit) in steps {
         check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).expect("CCS satisfied");
     }
+}
+
+#[test]
+fn rv32_b1_ccs_rejects_misaligned_lh() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::Load {
+            op: RiscvMemOp::Lh,
+            rd: 1,
+            rs1: 0,
+            imm: 0x101, // misaligned (addr % 2 != 0)
+        },
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 8).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x200);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+    let table_specs = rv32i_table_specs(xlen);
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    let (mcs_inst, mcs_wit) = steps.remove(0);
+    assert!(
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
+        "misaligned LH should not satisfy CCS"
+    );
+}
+
+#[test]
+fn rv32_b1_ccs_rejects_misaligned_lw() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::Load {
+            op: RiscvMemOp::Lw,
+            rd: 1,
+            rs1: 0,
+            imm: 0x102, // misaligned (addr % 4 != 0)
+        },
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 8).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x200);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+    let table_specs = rv32i_table_specs(xlen);
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    let (mcs_inst, mcs_wit) = steps.remove(0);
+    assert!(
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
+        "misaligned LW should not satisfy CCS"
+    );
+}
+
+#[test]
+fn rv32_b1_ccs_rejects_misaligned_sh() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::Store {
+            op: RiscvMemOp::Sh,
+            rs1: 0,
+            rs2: 0,
+            imm: 0x101, // misaligned (addr % 2 != 0)
+        },
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 8).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x200);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+    let table_specs = rv32i_table_specs(xlen);
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    let (mcs_inst, mcs_wit) = steps.remove(0);
+    assert!(
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
+        "misaligned SH should not satisfy CCS"
+    );
+}
+
+#[test]
+fn rv32_b1_ccs_rejects_misaligned_sw() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::Store {
+            op: RiscvMemOp::Sw,
+            rs1: 0,
+            rs2: 0,
+            imm: 0x102, // misaligned (addr % 4 != 0)
+        },
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 8).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x200);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+    let table_specs = rv32i_table_specs(xlen);
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    let (mcs_inst, mcs_wit) = steps.remove(0);
+    assert!(
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
+        "misaligned SW should not satisfy CCS"
+    );
 }
 
 #[test]
@@ -2795,6 +3019,729 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch() {
 }
 
 #[test]
+fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_lw_eff_addr() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::Load {
+            op: RiscvMemOp::Lw,
+            rd: 1,
+            rs1: 0,
+            imm: 0,
+        },
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 16).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(4);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+    let table_specs = rv32i_table_specs(xlen);
+
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    let lw_step_idx = 0usize;
+    let (mcs_inst, mut mcs_wit) = steps.remove(lw_step_idx);
+
+    let add_id = RiscvShoutTables::new(xlen).opcode_to_id(RiscvOpcode::Add).0;
+    let add_shout_idx = layout.shout_idx(add_id).expect("ADD shout idx");
+    let shout_cols = &layout.bus.shout_cols[add_shout_idx].lanes[0];
+    let bit_col_id = shout_cols.addr_bits.start + 0; // operand0 bit 0
+    let bit_z = layout.bus.bus_cell(bit_col_id, 0);
+    let bit_w_idx = bit_z.checked_sub(layout.m_in).expect("bit in witness");
+    let old_bit = mcs_wit.w[bit_w_idx];
+    mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
+
+    assert!(
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
+        "shout key mismatch (LW effective address) should not satisfy CCS"
+    );
+}
+
+#[test]
+fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_amoaddw() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 0,
+            imm: 5,
+        },
+        RiscvInstruction::Store {
+            op: RiscvMemOp::Sw,
+            rs1: 0,
+            rs2: 2,
+            imm: 0,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 0,
+            imm: 7,
+        },
+        RiscvInstruction::Amo {
+            op: RiscvMemOp::AmoaddW,
+            rd: 3,
+            rs1: 0,
+            rs2: 2,
+        },
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 16).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(4);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+    let table_specs = rv32i_table_specs(xlen);
+
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    let amoadd_step_idx = 3usize;
+    let (mcs_inst, mut mcs_wit) = steps.remove(amoadd_step_idx);
+
+    let add_id = RiscvShoutTables::new(xlen).opcode_to_id(RiscvOpcode::Add).0;
+    let add_shout_idx = layout.shout_idx(add_id).expect("ADD shout idx");
+    let shout_cols = &layout.bus.shout_cols[add_shout_idx].lanes[0];
+    let bit_col_id = shout_cols.addr_bits.start + 0; // operand0 bit 0 (mem_rv bit 0)
+    let bit_z = layout.bus.bus_cell(bit_col_id, 0);
+    let bit_w_idx = bit_z.checked_sub(layout.m_in).expect("bit in witness");
+    let old_bit = mcs_wit.w[bit_w_idx];
+    mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
+
+    assert!(
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
+        "shout key mismatch (AMOADD.W operands) should not satisfy CCS"
+    );
+}
+
+#[test]
+fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_beq() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        }, // x1 = 1
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 0,
+            imm: 2,
+        }, // x2 = 2
+        RiscvInstruction::Branch {
+            cond: BranchCondition::Eq,
+            rs1: 1,
+            rs2: 2,
+            imm: 8,
+        }, // not taken -> execute HALT
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 16).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(4);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+    let table_specs = rv32i_table_specs(xlen);
+
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    let beq_step_idx = 2usize;
+    let (mcs_inst, mut mcs_wit) = steps.remove(beq_step_idx);
+
+    let eq_id = RiscvShoutTables::new(xlen).opcode_to_id(RiscvOpcode::Eq).0;
+    let eq_shout_idx = layout.shout_idx(eq_id).expect("EQ shout idx");
+    let shout_cols = &layout.bus.shout_cols[eq_shout_idx].lanes[0];
+    let bit_col_id = shout_cols.addr_bits.start + 0; // operand0 bit 0
+    let bit_z = layout.bus.bus_cell(bit_col_id, 0);
+    let bit_w_idx = bit_z.checked_sub(layout.m_in).expect("bit in witness");
+    let old_bit = mcs_wit.w[bit_w_idx];
+    mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
+
+    assert!(
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
+        "shout key mismatch (BEQ operands) should not satisfy CCS"
+    );
+}
+
+#[test]
+fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_bne() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 5,
+        }, // x1 = 5
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 0,
+            imm: 5,
+        }, // x2 = 5
+        RiscvInstruction::Branch {
+            cond: BranchCondition::Ne,
+            rs1: 1,
+            rs2: 2,
+            imm: 8,
+        }, // not taken -> execute next
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 3,
+            rs1: 0,
+            imm: 7,
+        },
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 32).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x80);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+    let table_specs = rv32i_table_specs(xlen);
+
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    let bne_step_idx = 2usize;
+    let (mcs_inst, mut mcs_wit) = steps.remove(bne_step_idx);
+
+    let neq_id = RiscvShoutTables::new(xlen).opcode_to_id(RiscvOpcode::Neq).0;
+    let neq_shout_idx = layout.shout_idx(neq_id).expect("NEQ shout idx");
+    let shout_cols = &layout.bus.shout_cols[neq_shout_idx].lanes[0];
+    let bit_col_id = shout_cols.addr_bits.start + 0; // operand0 bit 0
+    let bit_z = layout.bus.bus_cell(bit_col_id, 0);
+    let bit_w_idx = bit_z.checked_sub(layout.m_in).expect("bit in witness");
+    let old_bit = mcs_wit.w[bit_w_idx];
+    mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
+
+    assert!(
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
+        "shout key mismatch (BNE operands) should not satisfy CCS"
+    );
+}
+
+#[test]
+fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_ori() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 0x123,
+        }, // x1 = 0x123
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Or,
+            rd: 2,
+            rs1: 1,
+            imm: 0x55,
+        }, // x2 = x1 | 0x55 (Shout OR active)
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 16).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x80);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+    let table_specs = rv32i_table_specs(xlen);
+
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    let ori_step_idx = 1usize;
+    let (mcs_inst, mut mcs_wit) = steps.remove(ori_step_idx);
+
+    let or_id = RiscvShoutTables::new(xlen).opcode_to_id(RiscvOpcode::Or).0;
+    let or_shout_idx = layout.shout_idx(or_id).expect("OR shout idx");
+    let shout_cols = &layout.bus.shout_cols[or_shout_idx].lanes[0];
+    let bit_col_id = shout_cols.addr_bits.start + 0; // operand0 bit 0
+    let bit_z = layout.bus.bus_cell(bit_col_id, 0);
+    let bit_w_idx = bit_z.checked_sub(layout.m_in).expect("bit in witness");
+    let old_bit = mcs_wit.w[bit_w_idx];
+    mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
+
+    assert!(
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
+        "shout key mismatch (ORI imm) should not satisfy CCS"
+    );
+}
+
+#[test]
+fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_slli() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        }, // x1 = 1
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Sll,
+            rd: 2,
+            rs1: 1,
+            imm: 3,
+        }, // x2 = x1 << 3 (Shout SLL active)
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 16).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x80);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+    let table_specs = rv32i_table_specs(xlen);
+
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    let slli_step_idx = 1usize;
+    let (mcs_inst, mut mcs_wit) = steps.remove(slli_step_idx);
+
+    let sll_id = RiscvShoutTables::new(xlen).opcode_to_id(RiscvOpcode::Sll).0;
+    let sll_shout_idx = layout.shout_idx(sll_id).expect("SLL shout idx");
+    let shout_cols = &layout.bus.shout_cols[sll_shout_idx].lanes[0];
+    let bit_col_id = shout_cols.addr_bits.start + 0; // operand0 bit 0
+    let bit_z = layout.bus.bus_cell(bit_col_id, 0);
+    let bit_w_idx = bit_z.checked_sub(layout.m_in).expect("bit in witness");
+    let old_bit = mcs_wit.w[bit_w_idx];
+    mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
+
+    assert!(
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
+        "shout key mismatch (SLLI imm) should not satisfy CCS"
+    );
+}
+
+#[test]
+fn rv32_b1_ccs_rejects_sltu_key_bit_mismatch_divu_remainder_check() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 10,
+        }, // x1 = 10
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 0,
+            imm: 3,
+        }, // x2 = 3
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Divu,
+            rd: 3,
+            rs1: 1,
+            rs2: 2,
+        }, // x3 = x1 / x2 (sltu(rem, divisor) lookup when divisor != 0)
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 16).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x80);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+    let table_specs = rv32i_table_specs(xlen);
+
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    let divu_step_idx = 2usize;
+    let (mcs_inst, mut mcs_wit) = steps.remove(divu_step_idx);
+
+    let sltu_id = RiscvShoutTables::new(xlen).opcode_to_id(RiscvOpcode::Sltu).0;
+    let sltu_shout_idx = layout.shout_idx(sltu_id).expect("SLTU shout idx");
+    let shout_cols = &layout.bus.shout_cols[sltu_shout_idx].lanes[0];
+    let bit_col_id = shout_cols.addr_bits.start + 0; // operand0 bit 0 (remainder bit 0)
+    let bit_z = layout.bus.bus_cell(bit_col_id, 0);
+    let bit_w_idx = bit_z.checked_sub(layout.m_in).expect("bit in witness");
+    let old_bit = mcs_wit.w[bit_w_idx];
+    mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
+
+    assert!(
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
+        "sltu(rem, divisor) shout key mismatch should not satisfy CCS"
+    );
+}
+
+#[test]
+fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_auipc_pc_operand() {
+    let xlen = 32usize;
+    let program = vec![RiscvInstruction::Auipc { rd: 1, imm: 0 }, RiscvInstruction::Halt];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 16).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x80);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+    let table_specs = rv32i_table_specs(xlen);
+
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    let auipc_step_idx = 0usize;
+    let (mcs_inst, mut mcs_wit) = steps.remove(auipc_step_idx);
+
+    let add_id = RiscvShoutTables::new(xlen).opcode_to_id(RiscvOpcode::Add).0;
+    let add_shout_idx = layout.shout_idx(add_id).expect("ADD shout idx");
+    let shout_cols = &layout.bus.shout_cols[add_shout_idx].lanes[0];
+    let bit_col_id = shout_cols.addr_bits.start + 0; // operand0 bit 0 (pc bit 0)
+    let bit_z = layout.bus.bus_cell(bit_col_id, 0);
+    let bit_w_idx = bit_z.checked_sub(layout.m_in).expect("bit in witness");
+    let old_bit = mcs_wit.w[bit_w_idx];
+    mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
+
+    assert!(
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
+        "shout key mismatch (AUIPC pc operand) should not satisfy CCS"
+    );
+}
+
+#[test]
+fn rv32_b1_ccs_rejects_cheating_mul_hi_all_ones() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        }, // x1 = 1
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 0,
+            imm: 1,
+        }, // x2 = 1
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Mul,
+            rd: 3,
+            rs1: 1,
+            rs2: 2,
+        }, // x3 = 1 * 1
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 16).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x80);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+    let table_specs = rv32i_table_specs(xlen);
+
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    let mul_step_idx = 2usize;
+    let (mcs_inst, mut mcs_wit) = steps.remove(mul_step_idx);
+
+    let mul_hi = u32::MAX as u64;
+    let mul_lo = 2u64;
+
+    let mul_hi_z = layout.mul_hi(0);
+    let mul_hi_w = mul_hi_z.checked_sub(layout.m_in).expect("mul_hi in witness");
+    mcs_wit.w[mul_hi_w] = F::from_u64(mul_hi);
+
+    let mul_lo_z = layout.mul_lo(0);
+    let mul_lo_w = mul_lo_z.checked_sub(layout.m_in).expect("mul_lo in witness");
+    mcs_wit.w[mul_lo_w] = F::from_u64(mul_lo);
+
+    let rd_write_z = layout.rd_write_val(0);
+    let rd_write_w = rd_write_z
+        .checked_sub(layout.m_in)
+        .expect("rd_write_val in witness");
+    mcs_wit.w[rd_write_w] = F::from_u64(mul_lo);
+
+    let reg_out_z = layout.reg_out(3, 0);
+    let reg_out_w = reg_out_z.checked_sub(layout.m_in).expect("reg_out in witness");
+    mcs_wit.w[reg_out_w] = F::from_u64(mul_lo);
+
+    // Make the u32 bit decompositions consistent with the cheated values.
+    for bit in 0..32 {
+        let hi_bit_z = layout.mul_hi_bit(bit, 0);
+        let hi_bit_w = hi_bit_z.checked_sub(layout.m_in).expect("mul_hi_bit in witness");
+        mcs_wit.w[hi_bit_w] = F::ONE;
+
+        let lo_bit = (mul_lo >> bit) & 1;
+        let lo_bit_z = layout.mul_lo_bit(bit, 0);
+        let lo_bit_w = lo_bit_z.checked_sub(layout.m_in).expect("mul_lo_bit in witness");
+        mcs_wit.w[lo_bit_w] = if lo_bit == 1 { F::ONE } else { F::ZERO };
+
+        let rd_bit_z = layout.rd_write_bit(bit, 0);
+        let rd_bit_w = rd_bit_z
+            .checked_sub(layout.m_in)
+            .expect("rd_write_bit in witness");
+        mcs_wit.w[rd_bit_w] = if lo_bit == 1 { F::ONE } else { F::ZERO };
+    }
+    for k in 0..31 {
+        let prefix_z = layout.mul_hi_prefix(k, 0);
+        let prefix_w = prefix_z.checked_sub(layout.m_in).expect("mul_hi_prefix in witness");
+        mcs_wit.w[prefix_w] = F::ONE;
+    }
+
+    assert!(
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
+        "cheating MUL decomposition should not satisfy CCS"
+    );
+}
+
+#[test]
 fn rv32_b1_ccs_rejects_wrong_shout_table_activation() {
     let xlen = 32usize;
     let program = vec![
@@ -2859,7 +3806,8 @@ fn rv32_b1_ccs_rejects_wrong_shout_table_activation() {
     let add_step_idx = 2usize;
     let (mcs_inst, mut mcs_wit) = steps.remove(add_step_idx);
 
-    let eq_shout_idx = layout.shout_idx(10).expect("EQ shout idx");
+    let eq_id = RiscvShoutTables::new(xlen).opcode_to_id(RiscvOpcode::Eq).0;
+    let eq_shout_idx = layout.shout_idx(eq_id).expect("EQ shout idx");
     let eq_cols = &layout.bus.shout_cols[eq_shout_idx].lanes[0];
     let has_lookup_z = layout.bus.bus_cell(eq_cols.has_lookup, 0);
     let has_lookup_w_idx = has_lookup_z

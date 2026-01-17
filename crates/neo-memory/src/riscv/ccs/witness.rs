@@ -91,7 +91,10 @@ fn set_ecall_helpers(
     Ok(())
 }
 
-/// Build a CPU witness vector `z` (bus tail is populated here and may be overwritten by `R1csCpu`).
+/// Build a CPU witness vector `z` for shared-bus mode.
+///
+/// In shared-bus mode, `R1csCpu` overwrites the reserved bus tail from `StepTrace` events, so this
+/// witness builder leaves the bus region at its zero default and only populates CPU columns.
 pub fn rv32_b1_chunk_to_witness(
     layout: Rv32B1Layout,
 ) -> Box<dyn Fn(&[StepTrace<u64, u64>]) -> Vec<F> + Send + Sync> {
@@ -102,7 +105,30 @@ pub fn rv32_b1_chunk_to_witness(
     })
 }
 
+/// Build a full witness vector `z`, including the bus tail (standalone/debug/test use).
+pub fn rv32_b1_chunk_to_full_witness(
+    layout: Rv32B1Layout,
+) -> Box<dyn Fn(&[StepTrace<u64, u64>]) -> Vec<F> + Send + Sync> {
+    Box::new(move |chunk: &[StepTrace<u64, u64>]| {
+        rv32_b1_chunk_to_full_witness_checked(&layout, chunk).unwrap_or_else(|e| {
+            panic!("RV32 B1 full witness build failed: {e}");
+        })
+    })
+}
+
 pub fn rv32_b1_chunk_to_witness_checked(layout: &Rv32B1Layout, chunk: &[StepTrace<u64, u64>]) -> Result<Vec<F>, String> {
+    rv32_b1_chunk_to_witness_internal(layout, chunk, /*fill_bus=*/ false)
+}
+
+pub fn rv32_b1_chunk_to_full_witness_checked(layout: &Rv32B1Layout, chunk: &[StepTrace<u64, u64>]) -> Result<Vec<F>, String> {
+    rv32_b1_chunk_to_witness_internal(layout, chunk, /*fill_bus=*/ true)
+}
+
+fn rv32_b1_chunk_to_witness_internal(
+    layout: &Rv32B1Layout,
+    chunk: &[StepTrace<u64, u64>],
+    fill_bus: bool,
+) -> Result<Vec<F>, String> {
     let mut z = vec![F::ZERO; layout.m];
 
     z[layout.const_one] = F::ONE;
@@ -287,19 +313,21 @@ pub fn rv32_b1_chunk_to_witness_checked(layout: &Rv32B1Layout, chunk: &[StepTrac
             )
         })?;
         z[layout.instr_word(j)] = F::from_u64(instr_word_u32 as u64);
-        set_bus_cell(&mut z, layout, prog_lane.has_read, j, F::ONE);
-        set_bus_cell(&mut z, layout, prog_lane.has_write, j, F::ZERO);
-        write_bus_u64_bits(
-            &mut z,
-            layout,
-            prog_lane.ra_bits.start,
-            prog_lane.ra_bits.end - prog_lane.ra_bits.start,
-            j,
-            prog_addr,
-        );
-        set_bus_cell(&mut z, layout, prog_lane.rv, j, F::from_u64(prog_value));
-        set_bus_cell(&mut z, layout, prog_lane.wv, j, F::ZERO);
-        set_bus_cell(&mut z, layout, prog_lane.inc, j, F::ZERO);
+        if fill_bus {
+            set_bus_cell(&mut z, layout, prog_lane.has_read, j, F::ONE);
+            set_bus_cell(&mut z, layout, prog_lane.has_write, j, F::ZERO);
+            write_bus_u64_bits(
+                &mut z,
+                layout,
+                prog_lane.ra_bits.start,
+                prog_lane.ra_bits.end - prog_lane.ra_bits.start,
+                j,
+                prog_addr,
+            );
+            set_bus_cell(&mut z, layout, prog_lane.rv, j, F::from_u64(prog_value));
+            set_bus_cell(&mut z, layout, prog_lane.wv, j, F::ZERO);
+            set_bus_cell(&mut z, layout, prog_lane.inc, j, F::ZERO);
+        }
 
         // Bits.
         for i in 0..32 {
@@ -874,45 +902,47 @@ pub fn rv32_b1_chunk_to_witness_checked(layout: &Rv32B1Layout, chunk: &[StepTrac
             z[layout.ram_wv(j)] = F::from_u64(value);
         }
 
-        let ram_bus_has_read = ram_read.is_some();
-        let ram_bus_has_write = ram_write.is_some();
-        set_bus_cell(
-            &mut z,
-            layout,
-            ram_lane.has_read,
-            j,
-            if ram_bus_has_read { F::ONE } else { F::ZERO },
-        );
-        set_bus_cell(
-            &mut z,
-            layout,
-            ram_lane.has_write,
-            j,
-            if ram_bus_has_write { F::ONE } else { F::ZERO },
-        );
-        if let Some((addr, value)) = ram_read {
-            write_bus_u64_bits(
+        if fill_bus {
+            let ram_bus_has_read = ram_read.is_some();
+            let ram_bus_has_write = ram_write.is_some();
+            set_bus_cell(
                 &mut z,
                 layout,
-                ram_lane.ra_bits.start,
-                ram_lane.ra_bits.end - ram_lane.ra_bits.start,
+                ram_lane.has_read,
                 j,
-                addr,
+                if ram_bus_has_read { F::ONE } else { F::ZERO },
             );
-            set_bus_cell(&mut z, layout, ram_lane.rv, j, F::from_u64(value));
-        }
-        if let Some((addr, value)) = ram_write {
-            write_bus_u64_bits(
+            set_bus_cell(
                 &mut z,
                 layout,
-                ram_lane.wa_bits.start,
-                ram_lane.wa_bits.end - ram_lane.wa_bits.start,
+                ram_lane.has_write,
                 j,
-                addr,
+                if ram_bus_has_write { F::ONE } else { F::ZERO },
             );
-            set_bus_cell(&mut z, layout, ram_lane.wv, j, F::from_u64(value));
+            if let Some((addr, value)) = ram_read {
+                write_bus_u64_bits(
+                    &mut z,
+                    layout,
+                    ram_lane.ra_bits.start,
+                    ram_lane.ra_bits.end - ram_lane.ra_bits.start,
+                    j,
+                    addr,
+                );
+                set_bus_cell(&mut z, layout, ram_lane.rv, j, F::from_u64(value));
+            }
+            if let Some((addr, value)) = ram_write {
+                write_bus_u64_bits(
+                    &mut z,
+                    layout,
+                    ram_lane.wa_bits.start,
+                    ram_lane.wa_bits.end - ram_lane.wa_bits.start,
+                    j,
+                    addr,
+                );
+                set_bus_cell(&mut z, layout, ram_lane.wv, j, F::from_u64(value));
+            }
+            set_bus_cell(&mut z, layout, ram_lane.inc, j, F::ZERO);
         }
-        set_bus_cell(&mut z, layout, ram_lane.inc, j, F::ZERO);
 
         // Shout events: expect at most one lookup and bind it to a single lane.
         let shout_ev = match step.shout_events.as_slice() {
@@ -986,23 +1016,33 @@ pub fn rv32_b1_chunk_to_witness_checked(layout: &Rv32B1Layout, chunk: &[StepTrac
                     .shout_idx(expected)
                     .map_err(|e| format!("RV32 B1: {e} at pc={:#x} (chunk j={j})", step.pc_before))?;
                 let lane = &layout.bus.shout_cols[table_idx].lanes[0];
-                set_bus_cell(&mut z, layout, lane.has_lookup, j, F::ONE);
-                write_bus_u64_bits(
-                    &mut z,
-                    layout,
-                    lane.addr_bits.start,
-                    lane.addr_bits.end - lane.addr_bits.start,
-                    j,
-                    ev.key,
-                );
-                set_bus_cell(&mut z, layout, lane.val, j, F::from_u64(ev.value));
+                if fill_bus {
+                    set_bus_cell(&mut z, layout, lane.has_lookup, j, F::ONE);
+                    write_bus_u64_bits(
+                        &mut z,
+                        layout,
+                        lane.addr_bits.start,
+                        lane.addr_bits.end - lane.addr_bits.start,
+                        j,
+                        ev.key,
+                    );
+                    set_bus_cell(&mut z, layout, lane.val, j, F::from_u64(ev.value));
+                }
                 z[layout.alu_out(j)] = F::from_u64(ev.value);
             }
         }
 
-        let add_a0 = z[layout.bus.bus_cell(add_lane.addr_bits.start + 0, j)];
-        let add_b0 = z[layout.bus.bus_cell(add_lane.addr_bits.start + 1, j)];
-        z[layout.add_a0b0(j)] = add_a0 * add_b0;
+        if fill_bus {
+            let add_a0 = z[layout.bus.bus_cell(add_lane.addr_bits.start + 0, j)];
+            let add_b0 = z[layout.bus.bus_cell(add_lane.addr_bits.start + 1, j)];
+            z[layout.add_a0b0(j)] = add_a0 * add_b0;
+        } else if let Some(ev) = shout_ev {
+            if ev.shout_id.0 == ADD_TABLE_ID {
+                let a0 = if (ev.key & 1) == 1 { F::ONE } else { F::ZERO };
+                let b0 = if ((ev.key >> 1) & 1) == 1 { F::ONE } else { F::ZERO };
+                z[layout.add_a0b0(j)] = a0 * b0;
+            }
+        }
 
         let rs1_i32 = rs1_u32 as i32;
         let rs2_i32 = rs2_u32 as i32;
