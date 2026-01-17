@@ -821,17 +821,8 @@ fn test_riscv_program_chunk_size_equivalence() {
 }
 
 #[test]
-#[ignore = "RV32M end-to-end requires implicit Shout table MLE support for MUL/DIV (M5)."]
 fn test_riscv_program_rv32m_full_prove_verify() {
     let xlen = 32usize;
-    // This test requires implicit Shout table MLE support for RV32M (M5). When that support is
-    // missing, running `cargo test -- --ignored` without a name filter should not fail.
-    for opcode in [RiscvOpcode::Mul, RiscvOpcode::Div] {
-        if let Err(err) = neo_memory::riscv::shout_oracle::RiscvAddressLookupOracleSparse::validate_spec(opcode, xlen) {
-            eprintln!("skipping RV32M full prove+verify: {err:?}");
-            return;
-        }
-    }
     let program = vec![
         RiscvInstruction::IAlu {
             op: RiscvOpcode::Add,
@@ -875,30 +866,11 @@ fn test_riscv_program_rv32m_full_prove_verify() {
     ]);
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
-    // Minimal table set: ADD + MUL + DIV.
-    let shout_table_ids: Vec<u32> = vec![3, 12, 16];
+    // Minimal table set: ADD (for ADD/ADDI) + SLTU (for signed DIV/REM remainder-bound check when divisor != 0).
+    let shout_table_ids: Vec<u32> = vec![3, 6];
     let table_specs = HashMap::from([
-        (
-            3u32,
-            LutTableSpec::RiscvOpcode {
-                opcode: RiscvOpcode::Add,
-                xlen,
-            },
-        ),
-        (
-            12u32,
-            LutTableSpec::RiscvOpcode {
-                opcode: RiscvOpcode::Mul,
-                xlen,
-            },
-        ),
-        (
-            16u32,
-            LutTableSpec::RiscvOpcode {
-                opcode: RiscvOpcode::Div,
-                xlen,
-            },
-        ),
+        (3u32, LutTableSpec::RiscvOpcode { opcode: RiscvOpcode::Add, xlen }),
+        (6u32, LutTableSpec::RiscvOpcode { opcode: RiscvOpcode::Sltu, xlen }),
     ]);
 
     let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");

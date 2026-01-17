@@ -6,10 +6,12 @@ use neo_ccs::matrix::Mat;
 use neo_ccs::relations::check_ccs_rowwise_zero;
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_memory::plain::PlainMemLayout;
-use neo_memory::riscv::ccs::{build_rv32_b1_step_ccs, rv32_b1_chunk_to_witness, rv32_b1_shared_cpu_bus_config};
+use neo_memory::riscv::ccs::{
+    build_rv32_b1_step_ccs, rv32_b1_chunk_to_witness, rv32_b1_chunk_to_witness_checked, rv32_b1_shared_cpu_bus_config,
+};
 use neo_memory::riscv::lookups::{
     decode_instruction, encode_program, BranchCondition, RiscvCpu, RiscvInstruction, RiscvMemOp, RiscvMemory, RiscvOpcode,
-    RiscvShoutTables, PROG_ID,
+    RiscvShoutTables, JOLT_CYCLE_TRACK_ECALL_NUM, JOLT_PRINT_ECALL_NUM, RAM_ID, PROG_ID,
 };
 use neo_memory::riscv::rom_init::prog_init_words;
 use neo_memory::witness::LutTableSpec;
@@ -41,6 +43,20 @@ fn pow2_ceil_k(min_k: usize) -> (usize, usize) {
     let k = min_k.next_power_of_two().max(2);
     let d = k.trailing_zeros() as usize;
     (k, d)
+}
+
+fn load_u32_imm(rd: u8, value: u32) -> Vec<RiscvInstruction> {
+    let upper = ((value as i64 + 0x800) >> 12) as i32;
+    let lower = (value as i32) - (upper << 12);
+    vec![
+        RiscvInstruction::Lui { rd, imm: upper },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd,
+            rs1: rd,
+            imm: lower,
+        },
+    ]
 }
 
 const RV32I_SHOUT_TABLE_IDS: [u32; 12] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11];
@@ -219,6 +235,182 @@ fn rv32_b1_ccs_happy_path_small_program() {
 }
 
 #[test]
+fn rv32_b1_ccs_happy_path_rv32i_fence_program() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        }, // x1 = 1
+        RiscvInstruction::Fence { pred: 0, succ: 0 },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 1,
+            imm: 2,
+        }, // x2 = 3
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 64).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let regs = &trace.steps.last().expect("steps").regs_after;
+    assert_eq!(regs[1], 1, "ADD before FENCE");
+    assert_eq!(regs[2], 3, "ADD after FENCE");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x40);
+    let mem_layouts = HashMap::from([
+        (
+            0u32,
+            PlainMemLayout {
+                k: k_ram,
+                d: d_ram,
+                n_side: 2,
+                lanes: 1,
+            },
+        ),
+        (
+            1u32,
+            PlainMemLayout {
+                k: k_prog,
+                d: d_prog,
+                n_side: 2,
+                lanes: 1,
+            },
+        ),
+    ]);
+
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+
+    let table_specs = rv32i_table_specs(xlen);
+
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    for (mcs_inst, mcs_wit) in steps {
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).expect("CCS satisfied");
+    }
+}
+
+#[test]
+fn rv32_b1_ccs_happy_path_rv32i_ecall_markers_program() {
+    let xlen = 32usize;
+    let mut program = Vec::new();
+    program.extend(load_u32_imm(10, JOLT_CYCLE_TRACK_ECALL_NUM));
+    program.push(RiscvInstruction::Halt);
+    program.push(RiscvInstruction::IAlu {
+        op: RiscvOpcode::Add,
+        rd: 1,
+        rs1: 0,
+        imm: 7,
+    });
+    program.extend(load_u32_imm(10, JOLT_PRINT_ECALL_NUM));
+    program.push(RiscvInstruction::Halt);
+    program.push(RiscvInstruction::IAlu {
+        op: RiscvOpcode::Add,
+        rd: 2,
+        rs1: 1,
+        imm: 1,
+    });
+    program.push(RiscvInstruction::IAlu {
+        op: RiscvOpcode::Add,
+        rd: 10,
+        rs1: 0,
+        imm: 0,
+    });
+    program.push(RiscvInstruction::Halt);
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 128).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let regs = &trace.steps.last().expect("steps").regs_after;
+    assert_eq!(regs[1], 7, "instruction after ECALL marker executes");
+    assert_eq!(regs[2], 8, "instruction after ECALL print executes");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x40);
+    let mem_layouts = HashMap::from([
+        (
+            0u32,
+            PlainMemLayout {
+                k: k_ram,
+                d: d_ram,
+                n_side: 2,
+                lanes: 1,
+            },
+        ),
+        (
+            1u32,
+            PlainMemLayout {
+                k: k_prog,
+                d: d_prog,
+                n_side: 2,
+                lanes: 1,
+            },
+        ),
+    ]);
+
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+
+    let table_specs = rv32i_table_specs(xlen);
+
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    for (mcs_inst, mcs_wit) in steps {
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).expect("CCS satisfied");
+    }
+}
+
+#[test]
 fn rv32_b1_ccs_happy_path_rv32m_program() {
     let xlen = 32usize;
     let program = vec![
@@ -241,44 +433,14 @@ fn rv32_b1_ccs_happy_path_rv32m_program() {
             rs2: 2,
         },
         RiscvInstruction::RAlu {
-            op: RiscvOpcode::Mulh,
-            rd: 4,
-            rs1: 1,
-            rs2: 2,
-        },
-        RiscvInstruction::RAlu {
-            op: RiscvOpcode::Mulhu,
-            rd: 5,
-            rs1: 1,
-            rs2: 2,
-        },
-        RiscvInstruction::RAlu {
-            op: RiscvOpcode::Mulhsu,
-            rd: 6,
-            rs1: 1,
-            rs2: 2,
-        },
-        RiscvInstruction::RAlu {
-            op: RiscvOpcode::Div,
-            rd: 7,
-            rs1: 1,
-            rs2: 2,
-        },
-        RiscvInstruction::RAlu {
             op: RiscvOpcode::Divu,
-            rd: 8,
-            rs1: 1,
-            rs2: 2,
-        },
-        RiscvInstruction::RAlu {
-            op: RiscvOpcode::Rem,
-            rd: 9,
-            rs1: 1,
+            rd: 4,
+            rs1: 3,
             rs2: 2,
         },
         RiscvInstruction::RAlu {
             op: RiscvOpcode::Remu,
-            rd: 10,
+            rd: 5,
             rs1: 1,
             rs2: 2,
         },
@@ -301,76 +463,678 @@ fn rv32_b1_ccs_happy_path_rv32m_program() {
     ]);
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
-    // Minimal table set for this program: ADD + RV32M (MUL/DIV/REM families).
-    let shout_table_ids: [u32; 9] = [3, 12, 13, 14, 15, 16, 17, 18, 19];
+    // Minimal table set for this program:
+    // - ADD (address/ALU wiring + ADDI),
+    // - SLTU (DIVU/REMU remainder bound check).
+    let shout_tables = RiscvShoutTables::new(xlen);
+    let add_id = shout_tables.opcode_to_id(RiscvOpcode::Add).0;
+    let sltu_id = shout_tables.opcode_to_id(RiscvOpcode::Sltu).0;
+    let shout_table_ids: [u32; 2] = [add_id, sltu_id];
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
 
     let table_specs = HashMap::from([
         (
-            3u32,
+            add_id,
             LutTableSpec::RiscvOpcode {
                 opcode: RiscvOpcode::Add,
                 xlen,
             },
         ),
         (
-            12u32,
+            sltu_id,
             LutTableSpec::RiscvOpcode {
-                opcode: RiscvOpcode::Mul,
-                xlen,
-            },
-        ),
-        (
-            13u32,
-            LutTableSpec::RiscvOpcode {
-                opcode: RiscvOpcode::Mulh,
-                xlen,
-            },
-        ),
-        (
-            14u32,
-            LutTableSpec::RiscvOpcode {
-                opcode: RiscvOpcode::Mulhu,
-                xlen,
-            },
-        ),
-        (
-            15u32,
-            LutTableSpec::RiscvOpcode {
-                opcode: RiscvOpcode::Mulhsu,
-                xlen,
-            },
-        ),
-        (
-            16u32,
-            LutTableSpec::RiscvOpcode {
-                opcode: RiscvOpcode::Div,
-                xlen,
-            },
-        ),
-        (
-            17u32,
-            LutTableSpec::RiscvOpcode {
-                opcode: RiscvOpcode::Divu,
-                xlen,
-            },
-        ),
-        (
-            18u32,
-            LutTableSpec::RiscvOpcode {
-                opcode: RiscvOpcode::Rem,
-                xlen,
-            },
-        ),
-        (
-            19u32,
-            LutTableSpec::RiscvOpcode {
-                opcode: RiscvOpcode::Remu,
+                opcode: RiscvOpcode::Sltu,
                 xlen,
             },
         ),
     ]);
+
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    for (mcs_inst, mcs_wit) in steps {
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).expect("CCS satisfied");
+    }
+}
+
+#[test]
+fn rv32_b1_ccs_happy_path_rv32m_signed_program() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 0,
+        }, // x1 = 0
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 0,
+            imm: -3,
+        }, // x2 = -3
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Div,
+            rd: 3,
+            rs1: 1,
+            rs2: 2,
+        }, // x3 = 0 / -3
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Rem,
+            rd: 4,
+            rs1: 1,
+            rs2: 2,
+        }, // x4 = 0 % -3
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 5,
+            rs1: 0,
+            imm: -4,
+        }, // x5 = -4
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 6,
+            rs1: 0,
+            imm: 2,
+        }, // x6 = 2
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Rem,
+            rd: 7,
+            rs1: 5,
+            rs2: 6,
+        }, // x7 = -4 % 2
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Div,
+            rd: 8,
+            rs1: 5,
+            rs2: 6,
+        }, // x8 = -4 / 2
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Mulh,
+            rd: 9,
+            rs1: 5,
+            rs2: 6,
+        },
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Mulhsu,
+            rd: 10,
+            rs1: 5,
+            rs2: 6,
+        },
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Mulhu,
+            rd: 11,
+            rs1: 5,
+            rs2: 6,
+        },
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Div,
+            rd: 12,
+            rs1: 5,
+            rs2: 0,
+        }, // div by zero
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Rem,
+            rd: 13,
+            rs1: 5,
+            rs2: 0,
+        }, // rem by zero
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 128).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let regs = &trace.steps.last().expect("steps").regs_after;
+    assert_eq!(regs[3], 0, "DIV 0 / -3");
+    assert_eq!(regs[4], 0, "REM 0 % -3");
+    assert_eq!(regs[7], 0, "REM -4 % 2");
+    assert_eq!(regs[8], 0xffff_fffe, "DIV -4 / 2");
+    assert_eq!(regs[9], 0xffff_ffff, "MULH -4 * 2");
+    assert_eq!(regs[10], 0xffff_ffff, "MULHSU -4 * 2");
+    assert_eq!(regs[11], 0x0000_0001, "MULHU 0xffff_fffc * 2");
+    assert_eq!(regs[12], 0xffff_ffff, "DIV by zero returns -1");
+    assert_eq!(regs[13], 0xffff_fffc, "REM by zero returns dividend");
+
+    let shout_tables = RiscvShoutTables::new(xlen);
+    let sltu_id = shout_tables.opcode_to_id(RiscvOpcode::Sltu).0;
+    for &idx in &[2usize, 3, 6, 7] {
+        let events = &trace.steps[idx].shout_events;
+        assert_eq!(events.len(), 1, "expected SLTU lookup at step {idx}");
+        assert_eq!(events[0].shout_id.0, sltu_id, "expected SLTU table id at step {idx}");
+    }
+    for &idx in &[11usize, 12] {
+        assert!(
+            trace.steps[idx].shout_events.is_empty(),
+            "expected no lookup for div/rem by zero at step {idx}"
+        );
+    }
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x80);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2 , lanes: 1}),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2 , lanes: 1}),
+    ]);
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let add_id = shout_tables.opcode_to_id(RiscvOpcode::Add).0;
+    let shout_table_ids: [u32; 2] = [add_id, sltu_id];
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+
+    let table_specs = HashMap::from([
+        (
+            add_id,
+            LutTableSpec::RiscvOpcode {
+                opcode: RiscvOpcode::Add,
+                xlen,
+            },
+        ),
+        (
+            sltu_id,
+            LutTableSpec::RiscvOpcode {
+                opcode: RiscvOpcode::Sltu,
+                xlen,
+            },
+        ),
+    ]);
+
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    for (mcs_inst, mcs_wit) in steps {
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).expect("CCS satisfied");
+    }
+}
+
+#[test]
+fn rv32_b1_witness_bus_alu_step() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 5,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 8).expect("trace");
+
+    let step = trace.steps.first().expect("step").clone();
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(4);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (_ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let z = rv32_b1_chunk_to_witness_checked(&layout, std::slice::from_ref(&step)).expect("witness");
+
+    let shout_tables = RiscvShoutTables::new(xlen);
+    let add_id = shout_tables.opcode_to_id(RiscvOpcode::Add).0;
+    let add_idx = layout.shout_idx(add_id).expect("add idx");
+    let add_lane = &layout.bus.shout_cols[add_idx].lanes[0];
+    let prog_lane = &layout.bus.twist_cols[layout.prog_twist_idx].lanes[0];
+    let ram_lane = &layout.bus.twist_cols[layout.ram_twist_idx].lanes[0];
+
+    assert_eq!(z[layout.bus.bus_cell(prog_lane.has_read, 0)], F::ONE);
+    assert_eq!(z[layout.bus.bus_cell(prog_lane.has_write, 0)], F::ZERO);
+    assert_eq!(z[layout.bus.bus_cell(ram_lane.has_read, 0)], F::ZERO);
+    assert_eq!(z[layout.bus.bus_cell(ram_lane.has_write, 0)], F::ZERO);
+    assert_eq!(z[layout.bus.bus_cell(add_lane.has_lookup, 0)], F::ONE);
+
+    let shout_ev = step.shout_events.first().expect("shout event");
+    assert_eq!(z[layout.bus.bus_cell(add_lane.val, 0)], F::from_u64(shout_ev.value));
+    assert_eq!(z[layout.lookup_key(0)], F::ZERO);
+    assert_eq!(z[layout.alu_out(0)], F::from_u64(shout_ev.value));
+    for (bit_idx, col_id) in add_lane.addr_bits.clone().enumerate() {
+        let bit = if bit_idx < 64 { (shout_ev.key >> bit_idx) & 1 } else { 0 };
+        let expected = if bit == 1 { F::ONE } else { F::ZERO };
+        assert_eq!(z[layout.bus.bus_cell(col_id, 0)], expected);
+    }
+}
+
+#[test]
+fn rv32_b1_witness_bus_lw_step() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 0,
+            imm: 42,
+        },
+        RiscvInstruction::Store {
+            op: RiscvMemOp::Sw,
+            rs1: 0,
+            rs2: 2,
+            imm: 0,
+        },
+        RiscvInstruction::Load {
+            op: RiscvMemOp::Lw,
+            rd: 3,
+            rs1: 0,
+            imm: 0,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 16).expect("trace");
+
+    let step = trace.steps.get(2).expect("lw step").clone();
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(4);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (_ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let z = rv32_b1_chunk_to_witness_checked(&layout, std::slice::from_ref(&step)).expect("witness");
+
+    let shout_tables = RiscvShoutTables::new(xlen);
+    let add_id = shout_tables.opcode_to_id(RiscvOpcode::Add).0;
+    let add_idx = layout.shout_idx(add_id).expect("add idx");
+    let add_lane = &layout.bus.shout_cols[add_idx].lanes[0];
+    let shout_ev = step.shout_events.first().expect("shout event");
+
+    let ram_lane = &layout.bus.twist_cols[layout.ram_twist_idx].lanes[0];
+    let ram_read = step
+        .twist_events
+        .iter()
+        .find(|ev| ev.twist_id == RAM_ID && ev.kind == TwistOpKind::Read)
+        .expect("ram read");
+
+    assert_eq!(z[layout.bus.bus_cell(add_lane.has_lookup, 0)], F::ONE);
+    assert_eq!(z[layout.bus.bus_cell(add_lane.val, 0)], F::from_u64(shout_ev.value));
+    // RV32 B1 no longer binds the raw 64-bit Shout key into a single field element. The authoritative
+    // witness data is in the ADD lane addr_bits.
+    assert_eq!(z[layout.lookup_key(0)], F::ZERO);
+    assert_eq!(z[layout.alu_out(0)], F::from_u64(shout_ev.value));
+    assert_eq!(z[layout.bus.bus_cell(ram_lane.has_read, 0)], F::ONE);
+    assert_eq!(z[layout.bus.bus_cell(ram_lane.has_write, 0)], F::ZERO);
+    assert_eq!(z[layout.bus.bus_cell(ram_lane.rv, 0)], F::from_u64(ram_read.value));
+    assert_eq!(z[layout.mem_rv(0)], F::from_u64(ram_read.value));
+    assert_eq!(z[layout.eff_addr(0)], F::from_u64(ram_read.addr));
+
+    for (bit_idx, col_id) in ram_lane.ra_bits.clone().enumerate() {
+        let bit = if bit_idx < 64 { (ram_read.addr >> bit_idx) & 1 } else { 0 };
+        let expected = if bit == 1 { F::ONE } else { F::ZERO };
+        assert_eq!(z[layout.bus.bus_cell(col_id, 0)], expected);
+    }
+}
+
+#[test]
+fn rv32_b1_witness_bus_amoaddw_step() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 0,
+            imm: 5,
+        },
+        RiscvInstruction::Store {
+            op: RiscvMemOp::Sw,
+            rs1: 0,
+            rs2: 2,
+            imm: 0,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 0,
+            imm: 7,
+        },
+        RiscvInstruction::Amo {
+            op: RiscvMemOp::AmoaddW,
+            rd: 3,
+            rs1: 0,
+            rs2: 2,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 16).expect("trace");
+
+    let step = trace.steps.get(3).expect("amoaddw step").clone();
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(4);
+    let mem_layouts = HashMap::from([
+        (0u32, PlainMemLayout { k: k_ram, d: d_ram, n_side: 2, lanes: 1 }),
+        (1u32, PlainMemLayout { k: k_prog, d: d_prog, n_side: 2, lanes: 1 }),
+    ]);
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (_ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let z = rv32_b1_chunk_to_witness_checked(&layout, std::slice::from_ref(&step)).expect("witness");
+
+    let shout_tables = RiscvShoutTables::new(xlen);
+    let add_id = shout_tables.opcode_to_id(RiscvOpcode::Add).0;
+    let add_idx = layout.shout_idx(add_id).expect("add idx");
+    let add_lane = &layout.bus.shout_cols[add_idx].lanes[0];
+    let shout_ev = step.shout_events.first().expect("shout event");
+
+    let ram_lane = &layout.bus.twist_cols[layout.ram_twist_idx].lanes[0];
+    let ram_read = step
+        .twist_events
+        .iter()
+        .find(|ev| ev.twist_id == RAM_ID && ev.kind == TwistOpKind::Read)
+        .expect("ram read");
+    let ram_write = step
+        .twist_events
+        .iter()
+        .find(|ev| ev.twist_id == RAM_ID && ev.kind == TwistOpKind::Write)
+        .expect("ram write");
+
+    assert_eq!(z[layout.bus.bus_cell(add_lane.has_lookup, 0)], F::ONE);
+    assert_eq!(z[layout.bus.bus_cell(add_lane.val, 0)], F::from_u64(shout_ev.value));
+    assert_eq!(z[layout.lookup_key(0)], F::ZERO);
+    assert_eq!(z[layout.alu_out(0)], F::from_u64(shout_ev.value));
+    for (bit_idx, col_id) in add_lane.addr_bits.clone().enumerate() {
+        let bit = if bit_idx < 64 { (shout_ev.key >> bit_idx) & 1 } else { 0 };
+        let expected = if bit == 1 { F::ONE } else { F::ZERO };
+        assert_eq!(z[layout.bus.bus_cell(col_id, 0)], expected);
+    }
+    assert_eq!(z[layout.bus.bus_cell(ram_lane.has_read, 0)], F::ONE);
+    assert_eq!(z[layout.bus.bus_cell(ram_lane.has_write, 0)], F::ONE);
+    assert_eq!(z[layout.bus.bus_cell(ram_lane.rv, 0)], F::from_u64(ram_read.value));
+    assert_eq!(z[layout.bus.bus_cell(ram_lane.wv, 0)], F::from_u64(ram_write.value));
+    assert_eq!(z[layout.mem_rv(0)], F::from_u64(ram_read.value));
+    assert_eq!(z[layout.ram_wv(0)], F::from_u64(ram_write.value));
+
+    for (bit_idx, col_id) in ram_lane.ra_bits.clone().enumerate() {
+        let bit = if bit_idx < 64 { (ram_read.addr >> bit_idx) & 1 } else { 0 };
+        let expected = if bit == 1 { F::ONE } else { F::ZERO };
+        assert_eq!(z[layout.bus.bus_cell(col_id, 0)], expected);
+    }
+    for (bit_idx, col_id) in ram_lane.wa_bits.clone().enumerate() {
+        let bit = if bit_idx < 64 { (ram_write.addr >> bit_idx) & 1 } else { 0 };
+        let expected = if bit == 1 { F::ONE } else { F::ZERO };
+        assert_eq!(z[layout.bus.bus_cell(col_id, 0)], expected);
+    }
+}
+
+#[test]
+fn rv32_b1_ccs_happy_path_rv32i_byte_half_load_store_program() {
+    let xlen = 32usize;
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 0x100,
+        }, // x1 = 0x100
+        RiscvInstruction::Lui { rd: 2, imm: 0x11223 },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Or,
+            rd: 2,
+            rs1: 2,
+            imm: 0x344,
+        }, // x2 = 0x11223344
+        RiscvInstruction::Store {
+            op: RiscvMemOp::Sw,
+            rs1: 1,
+            rs2: 2,
+            imm: 0,
+        }, // mem[0x100] = 0x11223344
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 6,
+            rs1: 0,
+            imm: 0xAA,
+        }, // x6 = 0xAA
+        RiscvInstruction::Store {
+            op: RiscvMemOp::Sb,
+            rs1: 1,
+            rs2: 6,
+            imm: 1,
+        }, // mem[0x101] = 0xAA
+        RiscvInstruction::Load {
+            op: RiscvMemOp::Lb,
+            rd: 7,
+            rs1: 1,
+            imm: 1,
+        }, // x7 = signext(0xAA)
+        RiscvInstruction::Load {
+            op: RiscvMemOp::Lbu,
+            rd: 8,
+            rs1: 1,
+            imm: 1,
+        }, // x8 = 0xAA
+        RiscvInstruction::Lui { rd: 9, imm: 0x8 },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 9,
+            rs1: 9,
+            imm: 1,
+        }, // x9 = 0x8001
+        RiscvInstruction::Store {
+            op: RiscvMemOp::Sh,
+            rs1: 1,
+            rs2: 9,
+            imm: 0,
+        }, // mem[0x100..] = 0x8001
+        RiscvInstruction::Load {
+            op: RiscvMemOp::Lh,
+            rd: 10,
+            rs1: 1,
+            imm: 0,
+        }, // x10 = signext(0x8001)
+        RiscvInstruction::Load {
+            op: RiscvMemOp::Lhu,
+            rd: 11,
+            rs1: 1,
+            imm: 0,
+        }, // x11 = 0x8001
+        RiscvInstruction::Load {
+            op: RiscvMemOp::Lw,
+            rd: 12,
+            rs1: 1,
+            imm: 0,
+        }, // x12 = 0x11228001
+        RiscvInstruction::Halt,
+    ];
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 128).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let regs = &trace.steps.last().expect("steps").regs_after;
+    assert_eq!(regs[7], 0xffff_ffaa, "LB sign-extends 0xAA");
+    assert_eq!(regs[8], 0x0000_00aa, "LBU zero-extends 0xAA");
+    assert_eq!(regs[10], 0xffff_8001, "LH sign-extends 0x8001");
+    assert_eq!(regs[11], 0x0000_8001, "LHU zero-extends 0x8001");
+    assert_eq!(regs[12], 0x1122_8001, "LW reads merged word");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x200);
+    let mem_layouts = HashMap::from([
+        (
+            0u32,
+            PlainMemLayout {
+                k: k_ram,
+                d: d_ram,
+                n_side: 2,
+                lanes: 1,
+            },
+        ),
+        (
+            1u32,
+            PlainMemLayout {
+                k: k_prog,
+                d: d_prog,
+                n_side: 2,
+                lanes: 1,
+            },
+        ),
+    ]);
+
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+
+    let table_specs = rv32i_table_specs(xlen);
+
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    for (mcs_inst, mcs_wit) in steps {
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).expect("CCS satisfied");
+    }
+}
+
+#[test]
+fn rv32_b1_ccs_byte_store_updates_aligned_word() {
+    let xlen = 32usize;
+    let mut program = Vec::new();
+    program.push(RiscvInstruction::IAlu {
+        op: RiscvOpcode::Add,
+        rd: 1,
+        rs1: 0,
+        imm: 0x100,
+    }); // x1 = 0x100
+    program.extend(load_u32_imm(2, 0x1122_3344)); // x2 = 0x11223344
+    program.push(RiscvInstruction::Store {
+        op: RiscvMemOp::Sw,
+        rs1: 1,
+        rs2: 2,
+        imm: 0,
+    }); // mem[0x100] = 0x11223344
+    program.push(RiscvInstruction::Load {
+        op: RiscvMemOp::Lb,
+        rd: 3,
+        rs1: 1,
+        imm: 1,
+    }); // x3 = mem[0x101] = 0x33
+    program.push(RiscvInstruction::IAlu {
+        op: RiscvOpcode::Add,
+        rd: 4,
+        rs1: 0,
+        imm: 0xAA,
+    }); // x4 = 0xAA
+    program.push(RiscvInstruction::Store {
+        op: RiscvMemOp::Sb,
+        rs1: 1,
+        rs2: 4,
+        imm: 1,
+    }); // mem[0x101] = 0xAA
+    program.push(RiscvInstruction::Load {
+        op: RiscvMemOp::Lw,
+        rd: 5,
+        rs1: 1,
+        imm: 0,
+    }); // x5 = 0x1122AA44
+    program.push(RiscvInstruction::Halt);
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 128).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
+
+    let regs = &trace.steps.last().expect("steps").regs_after;
+    assert_eq!(regs[3], 0x0000_0033, "LB reads byte from 0x11223344 at +1");
+    assert_eq!(regs[5], 0x1122_aa44, "SB updates the aligned LW word");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x200);
+    let mem_layouts = HashMap::from([
+        (
+            0u32,
+            PlainMemLayout {
+                k: k_ram,
+                d: d_ram,
+                n_side: 2,
+                lanes: 1,
+            },
+        ),
+        (
+            1u32,
+            PlainMemLayout {
+                k: k_prog,
+                d: d_prog,
+                n_side: 2,
+                lanes: 1,
+            },
+        ),
+    ]);
+
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+
+    let table_specs = rv32i_table_specs(xlen);
 
     let cpu = R1csCpu::new(
         ccs,
@@ -1479,7 +2243,8 @@ fn rv32_b1_ccs_rejects_non_boolean_shout_addr_bit() {
 
     // Flip one ADD shout key bit to a non-boolean value, and adjust CPU columns so that
     // all *linear* bindings still hold. Bitness constraints should still reject.
-    let add_shout_idx = layout.shout_idx(3).expect("ADD shout idx");
+    let add_id = RiscvShoutTables::new(xlen).opcode_to_id(RiscvOpcode::Add).0;
+    let add_shout_idx = layout.shout_idx(add_id).expect("ADD shout idx");
     let shout_cols = &layout.bus.shout_cols[add_shout_idx].lanes[0];
     let bit_col_id = shout_cols.addr_bits.start + 0; // key bit 0 (rs1 bit 0)
     let bit_z = layout.bus.bus_cell(bit_col_id, 0);
@@ -2014,7 +2779,8 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch() {
     let add_step_idx = 2usize;
     let (mcs_inst, mut mcs_wit) = steps.remove(add_step_idx);
 
-    let add_shout_idx = layout.shout_idx(3).expect("ADD shout idx");
+    let add_id = RiscvShoutTables::new(xlen).opcode_to_id(RiscvOpcode::Add).0;
+    let add_shout_idx = layout.shout_idx(add_id).expect("ADD shout idx");
     let shout_cols = &layout.bus.shout_cols[add_shout_idx].lanes[0];
     let bit_col_id = shout_cols.addr_bits.start + 0; // rs1 bit 0
     let bit_z = layout.bus.bus_cell(bit_col_id, 0);

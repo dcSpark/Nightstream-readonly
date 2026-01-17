@@ -78,12 +78,12 @@ fn shared_cpu_bus_injection_supports_independent_instances() {
     let shout_cpu = vec![
         ShoutCpuBinding {
             has_lookup: 1,
-            addr: 2,
+            addr: Some(2),
             val: 3,
         },
         ShoutCpuBinding {
             has_lookup: 4,
-            addr: 5,
+            addr: Some(5),
             val: 6,
         },
     ];

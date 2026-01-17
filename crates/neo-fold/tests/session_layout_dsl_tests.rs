@@ -59,7 +59,7 @@ fn witness_layout_allocates_contiguously() {
 
     let sb = l.shout0.cpu_binding();
     assert_eq!(sb.has_lookup, l.shout0.has_lookup.base());
-    assert_eq!(sb.addr, l.shout0.addr.base());
+    assert_eq!(sb.addr, Some(l.shout0.addr.base()));
     assert_eq!(sb.val, l.shout0.val.base());
 }
 

@@ -273,7 +273,7 @@ impl<const N: usize> ShoutPort<N> {
     pub fn cpu_binding(&self) -> ShoutCpuBinding {
         ShoutCpuBinding {
             has_lookup: self.has_lookup.base(),
-            addr: self.addr.base(),
+            addr: Some(self.addr.base()),
             val: self.val.base(),
         }
     }

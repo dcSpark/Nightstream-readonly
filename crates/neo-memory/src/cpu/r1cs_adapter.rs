@@ -278,13 +278,11 @@ where
                 ));
             }
             for (lane_idx, b) in bindings.iter().enumerate() {
-                validate_cpu_binding_cols(
-                    &format!("shout_cpu[lane={lane_idx}]"),
-                    *table_id,
-                    bus_base,
-                    chunk_size,
-                    &[("has_lookup", b.has_lookup), ("addr", b.addr), ("val", b.val)],
-                )?;
+                let mut cols = vec![("has_lookup", b.has_lookup), ("val", b.val)];
+                if let Some(addr) = b.addr {
+                    cols.push(("addr", addr));
+                }
+                validate_cpu_binding_cols(&format!("shout_cpu[lane={lane_idx}]"), *table_id, bus_base, chunk_size, &cols)?;
                 shout_cpu.push(b.clone());
             }
         }

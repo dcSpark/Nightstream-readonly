@@ -14,13 +14,14 @@ use crate::shard::{
     fold_shard_verify_with_output_binding_and_step_linking, fold_shard_verify_with_step_linking, CommitMixers,
     ShardFoldOutputs, ShardProof, StepLinkingConfig,
 };
-use crate::output_binding::simple_output_config;
+use crate::output_binding::{simple_output_config, OutputBindingConfig};
 use crate::session::FoldingSession;
 use crate::PiCcsError;
 use neo_ajtai::{AjtaiSModule, Commitment as Cmt};
 use neo_ccs::{CcsStructure, Mat, MeInstance};
 use neo_math::{F, K};
 use neo_memory::mem_init_from_initial_mem;
+use neo_memory::output_check::ProgramIO;
 use neo_memory::plain::LutTable;
 use neo_memory::plain::PlainMemLayout;
 use neo_memory::riscv::ccs::{
@@ -29,11 +30,13 @@ use neo_memory::riscv::ccs::{
 };
 use neo_memory::riscv::lookups::{decode_program, RiscvCpu, RiscvInstruction, RiscvOpcode, RiscvShoutTables, PROG_ID};
 use neo_memory::riscv::shard::{extract_boundary_state, Rv32BoundaryState};
-use neo_memory::witness::StepInstanceBundle;
+use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
 use neo_memory::witness::LutTableSpec;
 use neo_memory::R1csCpu;
 use neo_params::NeoParams;
 use neo_transcript::Poseidon2Transcript;
+use neo_vm_trace::Twist as _;
+use p3_field::PrimeCharacteristicRing;
 
 pub fn rv32_b1_step_linking_config(layout: &Rv32B1Layout) -> StepLinkingConfig {
     StepLinkingConfig::new(rv32_b1_step_linking_pairs(layout))
@@ -159,10 +162,11 @@ fn infer_required_shout_opcodes(program: &[RiscvInstruction]) -> HashSet<RiscvOp
         match instr {
             RiscvInstruction::RAlu { op, .. } => {
                 match op {
-                    // RV32 B1 proves MUL in-circuit (no Shout table required).
-                    RiscvOpcode::Mul => {}
-                    // RV32 B1 proves DIVU/REMU in-circuit; it uses a SLTU lookup to prove `rem < divisor` when divisor != 0.
-                    RiscvOpcode::Divu | RiscvOpcode::Remu => {
+                    // RV32 B1 proves RV32M MUL* in-circuit (no Shout table required).
+                    RiscvOpcode::Mul | RiscvOpcode::Mulh | RiscvOpcode::Mulhu | RiscvOpcode::Mulhsu => {}
+                    // RV32 B1 proves RV32M DIV*/REM* in-circuit, but it requires a SLTU lookup to prove
+                    // the remainder bound when divisor != 0 (unsigned and signed).
+                    RiscvOpcode::Div | RiscvOpcode::Divu | RiscvOpcode::Rem | RiscvOpcode::Remu => {
                         ops.insert(RiscvOpcode::Sltu);
                     }
                     _ => {
@@ -239,7 +243,8 @@ pub struct Rv32B1 {
     mode: FoldingMode,
     shout_auto_minimal: bool,
     shout_ops: Option<HashSet<RiscvOpcode>>,
-    output_claim: Option<(u64, F)>,
+    output_claims: ProgramIO<F>,
+    ram_init: HashMap<u64, u64>,
 }
 
 impl Rv32B1 {
@@ -255,7 +260,8 @@ impl Rv32B1 {
             mode: FoldingMode::Optimized,
             shout_auto_minimal: true,
             shout_ops: None,
-            output_claim: None,
+            output_claims: ProgramIO::new(),
+            ram_init: HashMap::new(),
         }
     }
 
@@ -306,7 +312,17 @@ impl Rv32B1 {
     }
 
     pub fn output(mut self, output_addr: u64, expected_output: F) -> Self {
-        self.output_claim = Some((output_addr, expected_output));
+        self.output_claims = ProgramIO::new().with_output(output_addr, expected_output);
+        self
+    }
+
+    pub fn output_claim(mut self, addr: u64, value: F) -> Self {
+        self.output_claims = self.output_claims.with_output(addr, value);
+        self
+    }
+
+    pub fn ram_init_u32(mut self, addr: u64, value: u32) -> Self {
+        self.ram_init.insert(addr, value as u64);
         self
     }
 
@@ -356,7 +372,7 @@ impl Rv32B1 {
             }
             None => program.len(),
         };
-        let twist = neo_memory::riscv::lookups::RiscvMemory::with_program_in_twist(
+        let mut twist = neo_memory::riscv::lookups::RiscvMemory::with_program_in_twist(
             self.xlen,
             PROG_ID,
             /*base_addr=*/ 0,
@@ -367,6 +383,12 @@ impl Rv32B1 {
         let (prog_layout, initial_mem) =
             neo_memory::riscv::rom_init::prog_rom_layout_and_init_words(PROG_ID, /*base_addr=*/ 0, &self.program_bytes)
                 .map_err(|e| PiCcsError::InvalidInput(format!("prog_rom_layout_and_init_words failed: {e}")))?;
+        let mut initial_mem = initial_mem;
+        for (addr, value) in self.ram_init {
+            let value = value as u32 as u64;
+            initial_mem.insert((neo_memory::riscv::lookups::RAM_ID.0, addr), F::from_u64(value));
+            twist.store(neo_memory::riscv::lookups::RAM_ID, addr, value);
+        }
 
         let (k_ram, d_ram) = pow2_ceil_k(self.ram_bytes.max(4));
         let mem_layouts = HashMap::from([
@@ -449,12 +471,11 @@ impl Rv32B1 {
 
         // Prove phase (timed)
         let prove_start = Instant::now();
-        let proof = match self.output_claim {
-            Some((addr, expected)) => {
-                let ob_cfg = simple_output_config(d_ram, addr, expected);
-                session.fold_and_prove_with_output_binding_auto_simple(&ccs, &ob_cfg)?
-            }
-            None => session.fold_and_prove(&ccs)?,
+        let proof = if self.output_claims.is_empty() {
+            session.fold_and_prove(&ccs)?
+        } else {
+            let ob_cfg = OutputBindingConfig::new(d_ram, self.output_claims.clone());
+            session.fold_and_prove_with_output_binding_auto_simple(&ccs, &ob_cfg)?
         };
         let prove_duration = prove_start.elapsed();
 
@@ -466,7 +487,7 @@ impl Rv32B1 {
             mem_layouts,
             initial_mem,
             ram_num_bits: d_ram,
-            output_claim: self.output_claim,
+            output_claims: self.output_claims,
             prove_duration,
             verify_duration: None,
         })
@@ -481,7 +502,7 @@ pub struct Rv32B1Run {
     mem_layouts: HashMap<u32, PlainMemLayout>,
     initial_mem: HashMap<(u32, u64), F>,
     ram_num_bits: usize,
-    output_claim: Option<(u64, F)>,
+    output_claims: ProgramIO<F>,
     prove_duration: Duration,
     verify_duration: Option<Duration>,
 }
@@ -489,13 +510,12 @@ pub struct Rv32B1Run {
 impl Rv32B1Run {
     pub fn verify(&mut self) -> Result<(), PiCcsError> {
         let verify_start = Instant::now();
-        let ok = match self.output_claim {
-            Some((addr, expected)) => {
-                let ob_cfg = simple_output_config(self.ram_num_bits, addr, expected);
-                self.session
-                    .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, &ob_cfg)?
-            }
-            None => self.session.verify_collected(&self.ccs, &self.proof)?,
+        let ok = if self.output_claims.is_empty() {
+            self.session.verify_collected(&self.ccs, &self.proof)?
+        } else {
+            let ob_cfg = OutputBindingConfig::new(self.ram_num_bits, self.output_claims.clone());
+            self.session
+                .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, &ob_cfg)?
         };
         self.verify_duration = Some(verify_start.elapsed());
 
@@ -507,6 +527,13 @@ impl Rv32B1Run {
 
     pub fn proof(&self) -> &ShardProof {
         &self.proof
+    }
+
+    /// Access the collected per-step witness bundles (includes private witness).
+    ///
+    /// This is intended for debugging/profiling and for tests that want to inspect witness shapes.
+    pub fn steps_witness(&self) -> &[StepWitnessBundle<Cmt, F, K>] {
+        self.session.steps_witness()
     }
 
     pub fn steps_public(&self) -> Vec<StepInstanceBundle<Cmt, F, K>> {
@@ -529,10 +556,88 @@ impl Rv32B1Run {
     }
 
     pub fn verify_default_output_claim(&self) -> Result<bool, PiCcsError> {
-        let Some((addr, expected)) = self.output_claim else {
+        if self.output_claims.is_empty() {
             return Err(PiCcsError::InvalidInput("no output claim configured".into()));
         };
-        self.verify_output_claim(addr, expected)
+        let ob_cfg = OutputBindingConfig::new(self.ram_num_bits, self.output_claims.clone());
+        self.session
+            .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, &ob_cfg)
+    }
+
+    pub fn verify_output_claims(&self, output_claims: ProgramIO<F>) -> Result<bool, PiCcsError> {
+        if output_claims.is_empty() {
+            return Err(PiCcsError::InvalidInput("output_claims must be non-empty".into()));
+        }
+        let ob_cfg = OutputBindingConfig::new(self.ram_num_bits, output_claims);
+        self.session
+            .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, &ob_cfg)
+    }
+
+    /// Original unpadded RV32 trace length (instruction count), if this run was built via shared-bus execution.
+    pub fn riscv_trace_len(&self) -> Result<usize, PiCcsError> {
+        let aux = self
+            .session
+            .shared_bus_aux()
+            .ok_or_else(|| PiCcsError::InvalidInput("missing shared-bus aux (trace length unavailable)".into()))?;
+        Ok(aux.original_len)
+    }
+
+    /// CCS constraint count (rows). For RV32 B1 this is the size of the per-chunk step circuit.
+    pub fn ccs_num_constraints(&self) -> usize {
+        self.ccs.n
+    }
+
+    /// CCS variable count (cols). For RV32 B1 this is the number of witness variables per chunk.
+    pub fn ccs_num_variables(&self) -> usize {
+        self.ccs.m
+    }
+
+    /// Number of folding steps proven (one per collected chunk).
+    pub fn fold_count(&self) -> usize {
+        self.proof.steps.len()
+    }
+
+    /// Count the number of Shout lookups actually used across the executed trace (active rows only).
+    pub fn shout_lookup_count(&self) -> Result<usize, PiCcsError> {
+        let mut count = 0usize;
+        for step in self.session.steps_witness() {
+            let x = &step.mcs.0.x;
+            let w = &step.mcs.1.w;
+            let m_in = step.mcs.0.m_in;
+
+            let z_at = |idx: usize| -> Result<F, PiCcsError> {
+                if idx < m_in {
+                    x.get(idx).copied().ok_or_else(|| {
+                        PiCcsError::InvalidInput(format!(
+                            "witness index {idx} out of bounds for public input len={m_in}"
+                        ))
+                    })
+                } else {
+                    let w_idx = idx - m_in;
+                    w.get(w_idx).copied().ok_or_else(|| {
+                        PiCcsError::InvalidInput(format!(
+                            "witness index {idx} (w[{w_idx}]) out of bounds for witness len={}",
+                            w.len()
+                        ))
+                    })
+                }
+            };
+
+            for j in 0..self.layout.chunk_size {
+                if z_at(self.layout.is_active(j))? == F::ZERO {
+                    continue;
+                }
+                for inst in &self.layout.bus.shout_cols {
+                    for lane in &inst.lanes {
+                        let col = self.layout.bus.bus_cell(lane.has_lookup, j);
+                        if z_at(col)? != F::ZERO {
+                            count += 1;
+                        }
+                    }
+                }
+            }
+        }
+        Ok(count)
     }
 
     pub fn mem_layouts(&self) -> &HashMap<u32, PlainMemLayout> {

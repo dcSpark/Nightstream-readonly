@@ -101,8 +101,15 @@ pub struct TwistCpuBinding {
 pub struct ShoutCpuBinding {
     /// CPU selector column for a lookup op (must equal bus `has_lookup`).
     pub has_lookup: usize,
-    /// Packed integer lookup key/address column (must equal packed bus `addr_bits` when `has_lookup=1`).
-    pub addr: usize,
+    /// Optional packed integer lookup key/address column.
+    ///
+    /// When set, shared-bus constraints bind this scalar to the bus `addr_bits` via bit-packing
+    /// (when `has_lookup=1`).
+    ///
+    /// Some circuits avoid packing large keys into a single field element (e.g. 64-bit interleaved
+    /// RISC-V Shout keys) and instead constrain the bus `addr_bits` directly. Those circuits should
+    /// set this to `None`.
+    pub addr: Option<usize>,
     /// CPU lookup output/value column (must equal bus `val` when `has_lookup=1`).
     pub val: usize,
 }
@@ -509,7 +516,7 @@ impl<F: Field> CpuConstraintBuilder<F> {
     pub fn add_shout_instance(&mut self, layout: &BusLayout, shout: &ShoutCols, cpu_layout: &CpuColumnLayout) {
         let cpu = ShoutCpuBinding {
             has_lookup: cpu_layout.is_lookup,
-            addr: cpu_layout.lookup_key,
+            addr: Some(cpu_layout.lookup_key),
             val: cpu_layout.lookup_output,
         };
         self.add_shout_instance_bound(layout, shout, &cpu);
@@ -524,7 +531,6 @@ impl<F: Field> CpuConstraintBuilder<F> {
 
             // CPU columns are assumed to be chunked (contiguous, per-step): col(j) = col_base + j.
             let cpu_has_lookup = cpu.has_lookup + j;
-            let cpu_addr = cpu.addr + j;
             let cpu_val = cpu.val + j;
 
             // Ensure bus selector is boolean so gated-bit constraints imply true {0,1} bitness.
@@ -545,13 +551,16 @@ impl<F: Field> CpuConstraintBuilder<F> {
                 bus_has_lookup,
             );
 
-            // Key binding (bit-pack): is_lookup * (lookup_key - pack(addr_bits)) = 0
-            self.constraints.push(CpuConstraint::new_terms(
-                CpuConstraintLabel::LookupKeyBinding,
-                cpu_has_lookup,
-                false,
-                pack_addr_bits::<F>(cpu_addr, shout.addr_bits.clone(), layout, j),
-            ));
+            // Optional key binding (bit-pack): is_lookup * (lookup_key - pack(addr_bits)) = 0
+            if let Some(cpu_addr_base) = cpu.addr {
+                let cpu_addr = cpu_addr_base + j;
+                self.constraints.push(CpuConstraint::new_terms(
+                    CpuConstraintLabel::LookupKeyBinding,
+                    cpu_has_lookup,
+                    false,
+                    pack_addr_bits::<F>(cpu_addr, shout.addr_bits.clone(), layout, j),
+                ));
+            }
 
             // Padding: (1 - has_lookup) * val = 0
             self.constraints.push(CpuConstraint::new_zero_negated(

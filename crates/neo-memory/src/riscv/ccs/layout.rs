@@ -79,7 +79,13 @@ pub struct Rv32B1Layout {
     pub is_srli: usize,
     pub is_srai: usize,
 
+    pub is_lb: usize,
+    pub is_lbu: usize,
+    pub is_lh: usize,
+    pub is_lhu: usize,
     pub is_lw: usize,
+    pub is_sb: usize,
+    pub is_sh: usize,
     pub is_sw: usize,
     // RV32A (atomics, word only).
     pub is_amoswap_w: usize,
@@ -97,6 +103,7 @@ pub struct Rv32B1Layout {
     pub is_bgeu: usize,
     pub is_jal: usize,
     pub is_jalr: usize,
+    pub is_fence: usize,
     pub is_halt: usize,
 
     pub br_taken: usize,
@@ -111,12 +118,14 @@ pub struct Rv32B1Layout {
 
     pub alu_out: usize,
     pub mem_rv: usize,
+    pub mem_rv_bits_start: usize, // 32
     pub eff_addr: usize,
     // RAM bus selectors/values (must be tied to instruction flags to avoid bypassing Twist).
     pub ram_has_read: usize,
     pub ram_has_write: usize,
     pub ram_wv: usize,
     pub rd_write_val: usize,
+    pub rd_write_bits_start: usize, // 32
 
     pub add_has_lookup: usize,
     pub and_has_lookup: usize,
@@ -129,6 +138,58 @@ pub struct Rv32B1Layout {
     pub sltu_has_lookup: usize,
     pub lookup_key: usize,
     pub add_a0b0: usize,
+
+    // In-circuit RV32M helpers (avoid requiring implicit Shout tables).
+    // MUL* helpers: rs1_val * rs2_val = mul_lo + 2^32 * mul_hi
+    pub mul_lo: usize,
+    pub mul_hi: usize,
+    pub mul_lo_bits_start: usize, // 32
+    pub mul_hi_bits_start: usize, // 32
+    pub mul_hi_prefix_start: usize, // 31
+    pub mul_carry: usize,
+    pub mul_carry_bits_start: usize, // 2
+
+    // Signed helpers: rs1/rs2 bits + absolute values.
+    pub rs1_bits_start: usize, // 32
+    pub rs2_bits_start: usize, // 32
+    pub rs2_zero_prefix_start: usize, // 31
+    pub rs1_abs: usize,
+    pub rs2_abs: usize,
+    pub rs1_rs2_sign_and: usize,
+    pub rs1_sign_rs2_val: usize,
+    pub rs2_sign_rs1_val: usize,
+
+    // DIV/REM helpers (unsigned + signed).
+    pub div_quot: usize,
+    pub div_rem: usize,
+    pub div_quot_signed: usize,
+    pub div_rem_signed: usize,
+    pub div_quot_carry: usize,
+    pub div_rem_carry: usize,
+    pub div_prod: usize,
+    pub div_divisor: usize,
+    pub div_quot_bits_start: usize, // 32
+    pub div_rem_bits_start: usize,  // 32
+    pub rs2_is_zero: usize,
+    pub rs2_nonzero: usize,
+    pub is_divu_or_remu: usize,
+    pub divu_by_zero: usize,
+    pub is_div_or_rem: usize,
+    pub div_nonzero: usize,
+    pub rem_nonzero: usize,
+    pub div_by_zero: usize,
+    pub rem_by_zero: usize,
+    pub div_sign: usize,
+    pub div_rem_check: usize,
+    pub div_rem_check_signed: usize,
+    // ECALL helpers (Jolt marker/print IDs).
+    pub ecall_a0_bits_start: usize, // 32
+    pub ecall_cycle_prefix_start: usize, // 31
+    pub ecall_is_cycle: usize,
+    pub ecall_print_prefix_start: usize, // 31
+    pub ecall_is_print: usize,
+    pub ecall_halts: usize,
+    pub halt_effective: usize,
 
     pub bus: BusLayout,
     pub mem_ids: Vec<u32>,
@@ -214,6 +275,11 @@ impl Rv32B1Layout {
         self.cpu_cell(self.mem_rv, j)
     }
 
+    pub fn mem_rv_bit(&self, bit: usize, j: usize) -> usize {
+        assert!(bit < 32);
+        self.mem_rv_bits_start + bit * self.chunk_size + j
+    }
+
     #[inline]
     pub fn eff_addr(&self, j: usize) -> usize {
         self.cpu_cell(self.eff_addr, j)
@@ -239,6 +305,11 @@ impl Rv32B1Layout {
         self.cpu_cell(self.rd_write_val, j)
     }
 
+    pub fn rd_write_bit(&self, bit: usize, j: usize) -> usize {
+        assert!(bit < 32);
+        self.rd_write_bits_start + bit * self.chunk_size + j
+    }
+
     #[inline]
     pub fn lookup_key(&self, j: usize) -> usize {
         self.cpu_cell(self.lookup_key, j)
@@ -262,6 +333,230 @@ impl Rv32B1Layout {
     #[inline]
     pub fn or_has_lookup(&self, j: usize) -> usize {
         self.cpu_cell(self.or_has_lookup, j)
+    }
+
+    #[inline]
+    pub fn mul_lo(&self, j: usize) -> usize {
+        self.cpu_cell(self.mul_lo, j)
+    }
+
+    pub fn mul_lo_bit(&self, bit: usize, j: usize) -> usize {
+        assert!(bit < 32);
+        self.mul_lo_bits_start + bit * self.chunk_size + j
+    }
+
+    #[inline]
+    pub fn mul_hi(&self, j: usize) -> usize {
+        self.cpu_cell(self.mul_hi, j)
+    }
+
+    pub fn mul_hi_bit(&self, bit: usize, j: usize) -> usize {
+        assert!(bit < 32);
+        self.mul_hi_bits_start + bit * self.chunk_size + j
+    }
+
+    #[inline]
+    pub fn mul_hi_prefix(&self, k: usize, j: usize) -> usize {
+        assert!(k < 31);
+        self.mul_hi_prefix_start + k * self.chunk_size + j
+    }
+
+    #[inline]
+    pub fn mul_carry(&self, j: usize) -> usize {
+        self.cpu_cell(self.mul_carry, j)
+    }
+
+    pub fn mul_carry_bit(&self, bit: usize, j: usize) -> usize {
+        assert!(bit < 2);
+        self.mul_carry_bits_start + bit * self.chunk_size + j
+    }
+
+    #[inline]
+    pub fn div_quot(&self, j: usize) -> usize {
+        self.cpu_cell(self.div_quot, j)
+    }
+
+    #[inline]
+    pub fn div_rem(&self, j: usize) -> usize {
+        self.cpu_cell(self.div_rem, j)
+    }
+
+    #[inline]
+    pub fn div_quot_signed(&self, j: usize) -> usize {
+        self.cpu_cell(self.div_quot_signed, j)
+    }
+
+    #[inline]
+    pub fn div_rem_signed(&self, j: usize) -> usize {
+        self.cpu_cell(self.div_rem_signed, j)
+    }
+
+    #[inline]
+    pub fn div_quot_carry(&self, j: usize) -> usize {
+        self.cpu_cell(self.div_quot_carry, j)
+    }
+
+    #[inline]
+    pub fn div_rem_carry(&self, j: usize) -> usize {
+        self.cpu_cell(self.div_rem_carry, j)
+    }
+
+    #[inline]
+    pub fn div_prod(&self, j: usize) -> usize {
+        self.cpu_cell(self.div_prod, j)
+    }
+
+    #[inline]
+    pub fn div_divisor(&self, j: usize) -> usize {
+        self.cpu_cell(self.div_divisor, j)
+    }
+
+    pub fn div_quot_bit(&self, bit: usize, j: usize) -> usize {
+        assert!(bit < 32);
+        self.div_quot_bits_start + bit * self.chunk_size + j
+    }
+
+    pub fn div_rem_bit(&self, bit: usize, j: usize) -> usize {
+        assert!(bit < 32);
+        self.div_rem_bits_start + bit * self.chunk_size + j
+    }
+
+    pub fn rs1_bit(&self, bit: usize, j: usize) -> usize {
+        assert!(bit < 32);
+        self.rs1_bits_start + bit * self.chunk_size + j
+    }
+
+    #[inline]
+    pub fn rs2_is_zero(&self, j: usize) -> usize {
+        self.cpu_cell(self.rs2_is_zero, j)
+    }
+
+    pub fn rs2_bit(&self, bit: usize, j: usize) -> usize {
+        assert!(bit < 32);
+        self.rs2_bits_start + bit * self.chunk_size + j
+    }
+
+    pub fn rs2_zero_prefix(&self, idx: usize, j: usize) -> usize {
+        assert!(idx < 31);
+        self.rs2_zero_prefix_start + idx * self.chunk_size + j
+    }
+
+    #[inline]
+    pub fn rs2_nonzero(&self, j: usize) -> usize {
+        self.cpu_cell(self.rs2_nonzero, j)
+    }
+
+    #[inline]
+    pub fn rs1_abs(&self, j: usize) -> usize {
+        self.cpu_cell(self.rs1_abs, j)
+    }
+
+    #[inline]
+    pub fn rs2_abs(&self, j: usize) -> usize {
+        self.cpu_cell(self.rs2_abs, j)
+    }
+
+    #[inline]
+    pub fn rs1_rs2_sign_and(&self, j: usize) -> usize {
+        self.cpu_cell(self.rs1_rs2_sign_and, j)
+    }
+
+    #[inline]
+    pub fn rs1_sign_rs2_val(&self, j: usize) -> usize {
+        self.cpu_cell(self.rs1_sign_rs2_val, j)
+    }
+
+    #[inline]
+    pub fn rs2_sign_rs1_val(&self, j: usize) -> usize {
+        self.cpu_cell(self.rs2_sign_rs1_val, j)
+    }
+
+    #[inline]
+    pub fn is_divu_or_remu(&self, j: usize) -> usize {
+        self.cpu_cell(self.is_divu_or_remu, j)
+    }
+
+    #[inline]
+    pub fn divu_by_zero(&self, j: usize) -> usize {
+        self.cpu_cell(self.divu_by_zero, j)
+    }
+
+    #[inline]
+    pub fn is_div_or_rem(&self, j: usize) -> usize {
+        self.cpu_cell(self.is_div_or_rem, j)
+    }
+
+    #[inline]
+    pub fn div_nonzero(&self, j: usize) -> usize {
+        self.cpu_cell(self.div_nonzero, j)
+    }
+
+    #[inline]
+    pub fn rem_nonzero(&self, j: usize) -> usize {
+        self.cpu_cell(self.rem_nonzero, j)
+    }
+
+    #[inline]
+    pub fn div_by_zero(&self, j: usize) -> usize {
+        self.cpu_cell(self.div_by_zero, j)
+    }
+
+    #[inline]
+    pub fn rem_by_zero(&self, j: usize) -> usize {
+        self.cpu_cell(self.rem_by_zero, j)
+    }
+
+    #[inline]
+    pub fn div_sign(&self, j: usize) -> usize {
+        self.cpu_cell(self.div_sign, j)
+    }
+
+    #[inline]
+    pub fn div_rem_check(&self, j: usize) -> usize {
+        self.cpu_cell(self.div_rem_check, j)
+    }
+
+    #[inline]
+    pub fn div_rem_check_signed(&self, j: usize) -> usize {
+        self.cpu_cell(self.div_rem_check_signed, j)
+    }
+
+    #[inline]
+    pub fn ecall_a0_bit(&self, bit: usize, j: usize) -> usize {
+        debug_assert!(bit < 32, "a0 bit out of range");
+        self.ecall_a0_bits_start + bit * self.chunk_size + j
+    }
+
+    #[inline]
+    pub fn ecall_cycle_prefix(&self, k: usize, j: usize) -> usize {
+        debug_assert!(k < 31, "ecall_cycle_prefix k out of range");
+        self.ecall_cycle_prefix_start + k * self.chunk_size + j
+    }
+
+    #[inline]
+    pub fn ecall_is_cycle(&self, j: usize) -> usize {
+        self.cpu_cell(self.ecall_is_cycle, j)
+    }
+
+    #[inline]
+    pub fn ecall_print_prefix(&self, k: usize, j: usize) -> usize {
+        debug_assert!(k < 31, "ecall_print_prefix k out of range");
+        self.ecall_print_prefix_start + k * self.chunk_size + j
+    }
+
+    #[inline]
+    pub fn ecall_is_print(&self, j: usize) -> usize {
+        self.cpu_cell(self.ecall_is_print, j)
+    }
+
+    #[inline]
+    pub fn ecall_halts(&self, j: usize) -> usize {
+        self.cpu_cell(self.ecall_halts, j)
+    }
+
+    #[inline]
+    pub fn halt_effective(&self, j: usize) -> usize {
+        self.cpu_cell(self.halt_effective, j)
     }
 
     #[inline]
@@ -506,8 +801,38 @@ impl Rv32B1Layout {
     }
 
     #[inline]
+    pub fn is_lb(&self, j: usize) -> usize {
+        self.cpu_cell(self.is_lb, j)
+    }
+
+    #[inline]
+    pub fn is_lbu(&self, j: usize) -> usize {
+        self.cpu_cell(self.is_lbu, j)
+    }
+
+    #[inline]
+    pub fn is_lh(&self, j: usize) -> usize {
+        self.cpu_cell(self.is_lh, j)
+    }
+
+    #[inline]
+    pub fn is_lhu(&self, j: usize) -> usize {
+        self.cpu_cell(self.is_lhu, j)
+    }
+
+    #[inline]
     pub fn is_lw(&self, j: usize) -> usize {
         self.cpu_cell(self.is_lw, j)
+    }
+
+    #[inline]
+    pub fn is_sb(&self, j: usize) -> usize {
+        self.cpu_cell(self.is_sb, j)
+    }
+
+    #[inline]
+    pub fn is_sh(&self, j: usize) -> usize {
+        self.cpu_cell(self.is_sh, j)
     }
 
     #[inline]
@@ -588,6 +913,11 @@ impl Rv32B1Layout {
     #[inline]
     pub fn is_jalr(&self, j: usize) -> usize {
         self.cpu_cell(self.is_jalr, j)
+    }
+
+    #[inline]
+    pub fn is_fence(&self, j: usize) -> usize {
+        self.cpu_cell(self.is_fence, j)
     }
 
     #[inline]
@@ -701,7 +1031,13 @@ pub(super) fn build_layout_with_m(
     let is_slli = alloc_scalar(&mut col);
     let is_srli = alloc_scalar(&mut col);
     let is_srai = alloc_scalar(&mut col);
+    let is_lb = alloc_scalar(&mut col);
+    let is_lbu = alloc_scalar(&mut col);
+    let is_lh = alloc_scalar(&mut col);
+    let is_lhu = alloc_scalar(&mut col);
     let is_lw = alloc_scalar(&mut col);
+    let is_sb = alloc_scalar(&mut col);
+    let is_sh = alloc_scalar(&mut col);
     let is_sw = alloc_scalar(&mut col);
     let is_amoswap_w = alloc_scalar(&mut col);
     let is_amoadd_w = alloc_scalar(&mut col);
@@ -718,6 +1054,7 @@ pub(super) fn build_layout_with_m(
     let is_bgeu = alloc_scalar(&mut col);
     let is_jal = alloc_scalar(&mut col);
     let is_jalr = alloc_scalar(&mut col);
+    let is_fence = alloc_scalar(&mut col);
     let is_halt = alloc_scalar(&mut col);
 
     let br_taken = alloc_scalar(&mut col);
@@ -732,11 +1069,13 @@ pub(super) fn build_layout_with_m(
 
     let alu_out = alloc_scalar(&mut col);
     let mem_rv = alloc_scalar(&mut col);
+    let mem_rv_bits_start = alloc_array(&mut col, 32);
     let eff_addr = alloc_scalar(&mut col);
     let ram_has_read = alloc_scalar(&mut col);
     let ram_has_write = alloc_scalar(&mut col);
     let ram_wv = alloc_scalar(&mut col);
     let rd_write_val = alloc_scalar(&mut col);
+    let rd_write_bits_start = alloc_array(&mut col, 32);
 
     let add_has_lookup = alloc_scalar(&mut col);
     let and_has_lookup = alloc_scalar(&mut col);
@@ -749,6 +1088,54 @@ pub(super) fn build_layout_with_m(
     let sltu_has_lookup = alloc_scalar(&mut col);
     let lookup_key = alloc_scalar(&mut col);
     let add_a0b0 = alloc_scalar(&mut col);
+
+    // In-circuit RV32M helpers.
+    let mul_lo = alloc_scalar(&mut col);
+    let mul_hi = alloc_scalar(&mut col);
+    let mul_lo_bits_start = alloc_array(&mut col, 32);
+    let mul_hi_bits_start = alloc_array(&mut col, 32);
+    let mul_hi_prefix_start = alloc_array(&mut col, 31);
+    let mul_carry = alloc_scalar(&mut col);
+    let mul_carry_bits_start = alloc_array(&mut col, 2);
+
+    let rs1_bits_start = alloc_array(&mut col, 32);
+    let rs2_bits_start = alloc_array(&mut col, 32);
+    let rs2_zero_prefix_start = alloc_array(&mut col, 31);
+    let rs1_abs = alloc_scalar(&mut col);
+    let rs2_abs = alloc_scalar(&mut col);
+    let rs1_rs2_sign_and = alloc_scalar(&mut col);
+    let rs1_sign_rs2_val = alloc_scalar(&mut col);
+    let rs2_sign_rs1_val = alloc_scalar(&mut col);
+
+    let div_quot = alloc_scalar(&mut col);
+    let div_rem = alloc_scalar(&mut col);
+    let div_quot_signed = alloc_scalar(&mut col);
+    let div_rem_signed = alloc_scalar(&mut col);
+    let div_quot_carry = alloc_scalar(&mut col);
+    let div_rem_carry = alloc_scalar(&mut col);
+    let div_prod = alloc_scalar(&mut col);
+    let div_divisor = alloc_scalar(&mut col);
+    let div_quot_bits_start = alloc_array(&mut col, 32);
+    let div_rem_bits_start = alloc_array(&mut col, 32);
+    let rs2_is_zero = alloc_scalar(&mut col);
+    let rs2_nonzero = alloc_scalar(&mut col);
+    let is_divu_or_remu = alloc_scalar(&mut col);
+    let divu_by_zero = alloc_scalar(&mut col);
+    let is_div_or_rem = alloc_scalar(&mut col);
+    let div_nonzero = alloc_scalar(&mut col);
+    let rem_nonzero = alloc_scalar(&mut col);
+    let div_by_zero = alloc_scalar(&mut col);
+    let rem_by_zero = alloc_scalar(&mut col);
+    let div_sign = alloc_scalar(&mut col);
+    let div_rem_check = alloc_scalar(&mut col);
+    let div_rem_check_signed = alloc_scalar(&mut col);
+    let ecall_a0_bits_start = alloc_array(&mut col, 32);
+    let ecall_cycle_prefix_start = alloc_array(&mut col, 31);
+    let ecall_is_cycle = alloc_scalar(&mut col);
+    let ecall_print_prefix_start = alloc_array(&mut col, 31);
+    let ecall_is_print = alloc_scalar(&mut col);
+    let ecall_halts = alloc_scalar(&mut col);
+    let halt_effective = alloc_scalar(&mut col);
 
     let cpu_cols_used = col;
 
@@ -834,7 +1221,13 @@ pub(super) fn build_layout_with_m(
         is_slli,
         is_srli,
         is_srai,
+        is_lb,
+        is_lbu,
+        is_lh,
+        is_lhu,
         is_lw,
+        is_sb,
+        is_sh,
         is_sw,
         is_amoswap_w,
         is_amoadd_w,
@@ -851,6 +1244,7 @@ pub(super) fn build_layout_with_m(
         is_bgeu,
         is_jal,
         is_jalr,
+        is_fence,
         is_halt,
         br_taken,
         br_not_taken,
@@ -861,11 +1255,13 @@ pub(super) fn build_layout_with_m(
         rs2_val,
         alu_out,
         mem_rv,
+        mem_rv_bits_start,
         eff_addr,
         ram_has_read,
         ram_has_write,
         ram_wv,
         rd_write_val,
+        rd_write_bits_start,
         add_has_lookup,
         and_has_lookup,
         xor_has_lookup,
@@ -877,6 +1273,50 @@ pub(super) fn build_layout_with_m(
         sltu_has_lookup,
         lookup_key,
         add_a0b0,
+        mul_lo,
+        mul_hi,
+        mul_lo_bits_start,
+        mul_hi_bits_start,
+        mul_hi_prefix_start,
+        mul_carry,
+        mul_carry_bits_start,
+        rs1_bits_start,
+        rs2_bits_start,
+        rs2_zero_prefix_start,
+        rs1_abs,
+        rs2_abs,
+        rs1_rs2_sign_and,
+        rs1_sign_rs2_val,
+        rs2_sign_rs1_val,
+        div_quot,
+        div_rem,
+        div_quot_signed,
+        div_rem_signed,
+        div_quot_carry,
+        div_rem_carry,
+        div_prod,
+        div_divisor,
+        div_quot_bits_start,
+        div_rem_bits_start,
+        rs2_is_zero,
+        rs2_nonzero,
+        is_divu_or_remu,
+        divu_by_zero,
+        is_div_or_rem,
+        div_nonzero,
+        rem_nonzero,
+        div_by_zero,
+        rem_by_zero,
+        div_sign,
+        div_rem_check,
+        div_rem_check_signed,
+        ecall_a0_bits_start,
+        ecall_cycle_prefix_start,
+        ecall_is_cycle,
+        ecall_print_prefix_start,
+        ecall_is_print,
+        ecall_halts,
+        halt_effective,
         bus,
         mem_ids,
         table_ids,

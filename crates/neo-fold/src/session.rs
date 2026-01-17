@@ -876,6 +876,16 @@ where
         self.steps.iter().map(StepInstanceBundle::from).collect()
     }
 
+    /// Access the collected per-step witness bundles (includes private witness).
+    pub fn steps_witness(&self) -> &[StepWitnessBundle<Cmt, F, K>] {
+        &self.steps
+    }
+
+    /// Access auxiliary data captured during the most recent shared-CPU-bus witness build (if any).
+    pub fn shared_bus_aux(&self) -> Option<&ShardWitnessAux> {
+        self.shared_bus_aux.as_ref()
+    }
+
     /// Add one step using the `NeoStep` synthesis adapter.
     /// This accumulates the step instance and witness without performing any folding.
     ///
@@ -1267,6 +1277,15 @@ where
                 return Ok(());
             }
         }
+        eprintln!(
+            "\x1b[33m[neo-fold] Cache miss: synthesizing circuit preprocessing (SparseCache + matrix digest).\x1b[0m"
+        );
+        eprintln!(
+            "\x1b[33m           This is a one-time cost per CCS structure. Subsequent runs with the same\x1b[0m"
+        );
+        eprintln!(
+            "\x1b[33m           CCS pointer will reuse the cache and be faster.\x1b[0m"
+        );
         self.prover_ctx = Some(self.build_ccs_cache(s, None)?);
         Ok(())
     }
