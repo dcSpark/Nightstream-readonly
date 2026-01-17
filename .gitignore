@@ -3,3 +3,5 @@ target
 .DS_Store
 proof.bin
 starstream-profile.trace
+profile-xctrace.trace
+profile-xctrace-sym.trace
