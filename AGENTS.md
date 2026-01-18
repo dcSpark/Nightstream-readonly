@@ -10,5 +10,20 @@
 
 ## Profiling
 
-- CPU + Memory profiling: ./scripts/profile_for_ai.sh neo-fold test_sha256_single_step test_sha256_preimage_256_bytes --ignored
-- Deep memory profiling (allocation sites with full call context): ./scripts/profile_memory_deep.sh neo-fold test_sha256_single_step test_sha256_preimage_256_bytes --ignored
+| Tool | Use Case | Output |
+|------|----------|--------|
+| `profile_for_ai.sh` | Quick CPU profiling, filters system calls | `profile-output.txt` |
+| `profile_xctrace.sh` | Full detail + Instruments GUI (supports `--template`) | `profile-xctrace.txt` + `.trace` |
+| `profile_memory_deep.sh` | Memory allocation debugging | Text with allocation sites |
+
+Usage: `./scripts/<tool> <package> <test_file> <test_function> [--ignored]`
+
+For xctrace, add `--template <name>` (Allocations, Leaks, File Activity, System Trace, etc.)
+
+Examples:
+```bash
+./scripts/profile_for_ai.sh neo-fold test_sha256_single_step test_sha256_preimage_4k --ignored
+./scripts/profile_xctrace.sh neo-fold test_sha256_single_step test_sha256_preimage_4k --ignored
+./scripts/profile_xctrace.sh neo-fold test_sha256_single_step test_sha256_preimage_4k --ignored --template Allocations
+./scripts/profile_memory_deep.sh neo-fold test_sha256_single_step test_sha256_preimage_4k --ignored
+```
