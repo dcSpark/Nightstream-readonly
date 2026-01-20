@@ -207,37 +207,100 @@ where
     fn evals_col_phase(&self, xs: &[K]) -> Vec<K> {
         debug_assert!(self.cur_len >= 2 && self.cur_len % 2 == 0);
         let tail_len = self.cur_len / 2;
-        let mut out = vec![K::ZERO; xs.len()];
+        let xs_len = xs.len();
+        if xs_len == 0 {
+            return Vec::new();
+        }
 
-        for t in 0..tail_len {
-            let idx = 2 * t;
-            let e0 = self.eq_beta_m_tbl[idx];
-            let e1 = self.eq_beta_m_tbl[idx + 1] - e0;
+        // `tail_len` starts at m_pad/2 and halves each column round; parallelize only when big enough.
+        const PAR_THRESHOLD: usize = 1 << 13;
+        if tail_len >= PAR_THRESHOLD {
+            let (out, _scratch_nc, _scratch_eq) = (0..tail_len)
+                .into_par_iter()
+                .fold(
+                    || (vec![K::ZERO; xs_len], vec![K::ZERO; xs_len], vec![K::ZERO; xs_len]),
+                    |(mut out, mut nc_sum_by_x, mut eq_beta_m_x), t| {
+                        nc_sum_by_x.fill(K::ZERO);
 
-            for (x_idx, &x) in xs.iter().enumerate() {
-                let eq_beta_m_x = e0 + e1 * x;
+                        let idx = 2 * t;
+                        let e0 = self.eq_beta_m_tbl[idx];
+                        let e1 = self.eq_beta_m_tbl[idx + 1] - e0;
 
-                let mut nc_sum = K::ZERO;
+                        for (x_idx, &x) in xs.iter().enumerate() {
+                            eq_beta_m_x[x_idx] = e0 + e1 * x;
+                        }
+
+                        for (wit_idx, tbl) in self.digits_tables.iter().enumerate() {
+                            let lo = &tbl[idx];
+                            let hi = &tbl[idx + 1];
+                            let weights = &self.weights[wit_idx];
+
+                            for rho in 0..D {
+                                let y0 = lo[rho];
+                                let dy = hi[rho] - y0;
+                                let w = weights[rho];
+                                for (x_idx, &x) in xs.iter().enumerate() {
+                                    let y = y0 + dy * x;
+                                    nc_sum_by_x[x_idx] += w * range_product_cached(y, &self.range_t_sq);
+                                }
+                            }
+                        }
+
+                        for x_idx in 0..xs_len {
+                            out[x_idx] += eq_beta_m_x[x_idx] * nc_sum_by_x[x_idx];
+                        }
+                        (out, nc_sum_by_x, eq_beta_m_x)
+                    },
+                )
+                .reduce(
+                    || (vec![K::ZERO; xs_len], vec![K::ZERO; xs_len], vec![K::ZERO; xs_len]),
+                    |(mut out_a, nc_a, eq_a), (out_b, _nc_b, _eq_b)| {
+                        for i in 0..xs_len {
+                            out_a[i] += out_b[i];
+                        }
+                        (out_a, nc_a, eq_a)
+                    },
+                );
+            out
+        } else {
+            let mut out = vec![K::ZERO; xs_len];
+            let mut nc_sum_by_x = vec![K::ZERO; xs_len];
+            let mut eq_beta_m_x = vec![K::ZERO; xs_len];
+
+            for t in 0..tail_len {
+                nc_sum_by_x.fill(K::ZERO);
+
+                let idx = 2 * t;
+                let e0 = self.eq_beta_m_tbl[idx];
+                let e1 = self.eq_beta_m_tbl[idx + 1] - e0;
+
+                for (x_idx, &x) in xs.iter().enumerate() {
+                    eq_beta_m_x[x_idx] = e0 + e1 * x;
+                }
+
                 for (wit_idx, tbl) in self.digits_tables.iter().enumerate() {
                     let lo = &tbl[idx];
                     let hi = &tbl[idx + 1];
                     let weights = &self.weights[wit_idx];
 
-                    let mut acc = K::ZERO;
                     for rho in 0..D {
                         let y0 = lo[rho];
-                        let y1 = hi[rho];
-                        let y = y0 + (y1 - y0) * x;
-                        acc += weights[rho] * range_product_cached(y, &self.range_t_sq);
+                        let dy = hi[rho] - y0;
+                        let w = weights[rho];
+                        for (x_idx, &x) in xs.iter().enumerate() {
+                            let y = y0 + dy * x;
+                            nc_sum_by_x[x_idx] += w * range_product_cached(y, &self.range_t_sq);
+                        }
                     }
-                    nc_sum += acc;
                 }
 
-                out[x_idx] += eq_beta_m_x * nc_sum;
+                for x_idx in 0..xs_len {
+                    out[x_idx] += eq_beta_m_x[x_idx] * nc_sum_by_x[x_idx];
+                }
             }
-        }
 
-        out
+            out
+        }
     }
 
     fn evals_ajtai_phase(&self, xs: &[K]) -> Vec<K> {
