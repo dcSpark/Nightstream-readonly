@@ -178,8 +178,10 @@ where
             c,
             X: inp.X.clone(),
             r: inp.r.clone(),
+            s_col: inp.s_col.clone(),
             y: inp.y.clone(),
             y_scalars,
+            y_zcol: inp.y_zcol.clone(),
             m_in: inp.m_in,
             fold_digest: inp.fold_digest,
         };
@@ -337,18 +339,32 @@ pub fn rlc_public<MR>(
     inputs: &[MeInstance<Cmt, F, K>],
     mix_rhos_commits: MR,
     ell_d: usize,
-) -> MeInstance<Cmt, F, K>
+) -> Result<MeInstance<Cmt, F, K>, PiCcsError>
 where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt,
 {
     use crate::common::left_mul_acc;
 
-    assert!(!inputs.is_empty());
-    assert_eq!(rhos.len(), inputs.len());
+    if inputs.is_empty() {
+        return Err(PiCcsError::InvalidInput("rlc_public: empty inputs".into()));
+    }
+    if rhos.len() != inputs.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "rlc_public: |rhos| mismatch (expected {}, got {})",
+            inputs.len(),
+            rhos.len()
+        )));
+    }
     if inputs.len() == 1 {
         let inp = &inputs[0];
         let t = inp.y.len();
-        assert!(t >= s.t(), "rlc_public(k=1): ME y.len() must be >= s.t()");
+        if t < s.t() {
+            return Err(PiCcsError::InvalidInput(format!(
+                "rlc_public(k=1): ME y.len() must be >= s.t() (got {}, s.t()={})",
+                t,
+                s.t()
+            )));
+        }
 
         let inputs_c = vec![inp.c.clone()];
         let c = mix_rhos_commits(rhos, &inputs_c);
@@ -366,33 +382,45 @@ where
             y_scalars.push(sc);
         }
 
-        return MeInstance {
+        return Ok(MeInstance {
             c_step_coords: vec![],
             u_offset: 0,
             u_len: 0,
             c,
             X: inp.X.clone(),
             r: inp.r.clone(),
+            s_col: inp.s_col.clone(),
             y: inp.y.clone(),
             y_scalars,
+            y_zcol: inp.y_zcol.clone(),
             m_in: inp.m_in,
             fold_digest: inp.fold_digest,
-        };
+        });
     }
     let d = D;
     let m_in = inputs[0].m_in;
     let d_pad = 1usize << ell_d;
     let t = inputs[0].y.len();
-    assert!(
-        t >= s.t(),
-        "rlc_public: ME input y.len() must be >= s.t()"
-    );
+    if t < s.t() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "rlc_public: ME input y.len() must be >= s.t() (got {}, s.t()={})",
+            t,
+            s.t()
+        )));
+    }
     for (idx, inst) in inputs.iter().enumerate() {
-        assert_eq!(
-            inst.m_in, m_in,
-            "rlc_public: m_in mismatch at input {idx}"
-        );
-        assert_eq!(inst.y.len(), t, "rlc_public: y.len mismatch at input {idx}");
+        if inst.m_in != m_in {
+            return Err(PiCcsError::InvalidInput(format!(
+                "rlc_public: m_in mismatch at input {idx} (expected {m_in}, got {})",
+                inst.m_in
+            )));
+        }
+        if inst.y.len() != t {
+            return Err(PiCcsError::InvalidInput(format!(
+                "rlc_public: y.len mismatch at input {idx} (expected {t}, got {})",
+                inst.y.len()
+            )));
+        }
     }
 
     // X_out := Σ ρ_i · X_i
@@ -423,6 +451,51 @@ where
         y.push(acc);
     }
 
+    // Optional NC channel: y_zcol := Σ ρ_i · y_zcol_i (same mixing as y_j, but independent of t).
+    let wants_nc_channel = inputs
+        .iter()
+        .any(|m| !(m.s_col.is_empty() && m.y_zcol.is_empty()));
+    let y_zcol = if wants_nc_channel {
+        if inputs[0].s_col.is_empty() || inputs[0].y_zcol.is_empty() {
+            return Err(PiCcsError::InvalidInput(
+                "rlc_public: incomplete NC channel on input 0 (expected both s_col and y_zcol)".into(),
+            ));
+        }
+        for (idx, inst) in inputs.iter().enumerate() {
+            if inst.s_col.is_empty() || inst.y_zcol.is_empty() {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "rlc_public: incomplete NC channel at input {idx} (expected both s_col and y_zcol)"
+                )));
+            }
+            if inst.s_col != inputs[0].s_col {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "rlc_public: s_col mismatch at input {idx}"
+                )));
+            }
+            if inst.y_zcol.len() != d_pad {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "rlc_public: y_zcol len mismatch at input {idx} (expected {d_pad}, got {})",
+                    inst.y_zcol.len()
+                )));
+            }
+        }
+
+        let mut acc = vec![K::ZERO; d_pad];
+        for (rho, inst) in rhos.iter().zip(inputs.iter()) {
+            for r in 0..d {
+                let mut sum = K::ZERO;
+                for k in 0..d {
+                    sum += K::from(rho[(r, k)]) * inst.y_zcol[k];
+                }
+                acc[r] += sum;
+            }
+        }
+        acc
+    } else {
+        // Legacy: NC channel not present.
+        Vec::new()
+    };
+
     // y_scalars (convenience)
     let bK = K::from(F::from_u64(params.b as u64));
     let mut y_scalars = Vec::with_capacity(t);
@@ -438,18 +511,20 @@ where
 
     let c = mix_rhos_commits(rhos, &inputs.iter().map(|m| m.c.clone()).collect::<Vec<_>>());
 
-    MeInstance {
+    Ok(MeInstance {
         c_step_coords: vec![],
         u_offset: 0,
         u_len: 0,
         c,
         X,
         r: inputs[0].r.clone(),
+        s_col: inputs[0].s_col.clone(),
         y,
         y_scalars,
+        y_zcol,
         m_in,
         fold_digest: inputs[0].fold_digest,
-    }
+    })
 }
 
 /// DEC public verification: Check that parent ?= Σ b^i · child_i (X, y, c).
@@ -475,6 +550,22 @@ where
         eprintln!("verify_dec_public failed: r mismatch");
         return false;
     }
+
+    // Optional NC channel: enforce consistency + decomposition for (s_col, y_zcol).
+    let want_nc_channel = !(parent.s_col.is_empty() && parent.y_zcol.is_empty());
+    if want_nc_channel && (parent.s_col.is_empty() || parent.y_zcol.is_empty()) {
+        eprintln!("verify_dec_public failed: incomplete NC channel on parent");
+        return false;
+    }
+    if !want_nc_channel
+        && children
+            .iter()
+            .any(|ch| !(ch.s_col.is_empty() && ch.y_zcol.is_empty()))
+    {
+        eprintln!("verify_dec_public failed: unexpected NC channel on child");
+        return false;
+    }
+
     let t = parent.y.len();
     if t < s.t() {
         eprintln!(
@@ -536,6 +627,22 @@ where
     // y_j
     let d_pad = 1usize << ell_d;
     let bK = K::from(F::from_u64(params.b as u64));
+
+    if want_nc_channel {
+        if parent.y_zcol.len() != d_pad {
+            eprintln!(
+                "verify_dec_public failed: parent y_zcol.len()={} != d_pad={}",
+                parent.y_zcol.len(),
+                d_pad
+            );
+            return false;
+        }
+        if !children.iter().all(|ch| ch.s_col == parent.s_col) {
+            eprintln!("verify_dec_public failed: s_col mismatch");
+            return false;
+        }
+    }
+
     for j in 0..t {
         let mut lhs = vec![K::ZERO; d_pad];
         let mut p = K::ONE;
@@ -572,6 +679,31 @@ where
         }
         if lhs != parent.y_scalars[j] {
             eprintln!("verify_dec_public failed: y_scalars check mismatch at j={j}");
+            return false;
+        }
+    }
+
+    // y_zcol: column-domain opening must also decompose (when present).
+    if want_nc_channel {
+        let mut lhs = vec![K::ZERO; d_pad];
+        let mut p = K::ONE;
+        for i in 0..k {
+            if children[i].y_zcol.len() != d_pad {
+                eprintln!(
+                    "verify_dec_public failed: child y_zcol len mismatch (child {} has {}, expected {})",
+                    i,
+                    children[i].y_zcol.len(),
+                    d_pad
+                );
+                return false;
+            }
+            for t in 0..d_pad {
+                lhs[t] += p * children[i].y_zcol[t];
+            }
+            p *= bK;
+        }
+        if lhs != parent.y_zcol {
+            eprintln!("verify_dec_public failed: y_zcol check mismatch");
             return false;
         }
     }

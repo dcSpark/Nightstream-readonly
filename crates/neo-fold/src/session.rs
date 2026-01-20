@@ -44,7 +44,6 @@ use neo_params::NeoParams;
 use neo_transcript::{Poseidon2Transcript, Transcript};
 use p3_field::PrimeCharacteristicRing;
 use rand_chacha::rand_core::{SeedableRng, TryRngCore};
-use std::borrow::Cow;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -53,7 +52,6 @@ use crate::shard::{self, CommitMixers, ShardProof as FoldRun, ShardProverContext
 use crate::PiCcsError;
 use neo_reductions::engines::utils;
 use neo_reductions::engines::optimized_engine::oracle::SparseCache;
-use neo_ccs::sparse::{CcsMatrix, CscMat};
 
 #[inline]
 fn mode_uses_sparse_cache(mode: &FoldingMode) -> bool {
@@ -64,88 +62,6 @@ fn mode_uses_sparse_cache(mode: &FoldingMode) -> bool {
         #[cfg(feature = "paper-exact")]
         FoldingMode::PaperExact => false,
     }
-}
-
-#[inline]
-fn canonical_ccs_square_dim(s: &CcsStructure<F>) -> usize {
-    s.n.max(s.m)
-}
-
-fn pad_ccs_to_square(s: &CcsStructure<F>, dim: usize) -> Result<CcsStructure<F>, PiCcsError> {
-    if dim < s.n || dim < s.m {
-        return Err(PiCcsError::InvalidInput(format!(
-            "pad_ccs_to_square requires dim >= max(n, m), got dim={} for CCS {}x{}",
-            dim, s.n, s.m
-        )));
-    }
-    if s.n == dim && s.m == dim {
-        return Ok(s.clone());
-    }
-
-    let mut matrices: Vec<CcsMatrix<F>> = Vec::with_capacity(s.matrices.len());
-    for mj in &s.matrices {
-        match mj {
-            CcsMatrix::Identity { .. } => {
-                return Err(PiCcsError::InvalidInput(
-                    "cannot pad CCS containing Identity matrix while non-square".into(),
-                ));
-            }
-            CcsMatrix::Csc(m) => {
-                let mut m_new: CscMat<F> = m.clone();
-                // Increase effective shape by adding trailing all-zero rows/cols.
-                m_new.nrows = dim;
-                if m_new.ncols < dim {
-                    let last = *m_new
-                        .col_ptr
-                        .last()
-                        .ok_or_else(|| PiCcsError::InvalidInput("CSC col_ptr is empty".into()))?;
-                    m_new.col_ptr.resize(dim + 1, last);
-                }
-                m_new.ncols = dim;
-                matrices.push(CcsMatrix::Csc(m_new));
-            }
-        }
-    }
-
-    Ok(CcsStructure {
-        matrices,
-        f: s.f.clone(),
-        n: dim,
-        m: dim,
-    })
-}
-
-/// Normalize a CCS for the Ajtai/NC pipeline used by the session layer.
-///
-/// This:
-/// - pads to a **square** CCS with `n=m=max(n,m)` by adding trailing all-zero rows/cols, then
-/// - ensures identity-first form (`M₀ = I`), which is required by the NC constraints.
-fn normalize_ccs_for_session(s: &CcsStructure<F>) -> Result<Cow<'_, CcsStructure<F>>, PiCcsError> {
-    let dim = canonical_ccs_square_dim(s);
-    let is_id0 = s.n == s.m
-        && s
-            .matrices
-            .first()
-            .map(|m0| m0.is_identity())
-            .unwrap_or(false);
-    if s.n == dim && s.m == dim && is_id0 {
-        return Ok(Cow::Borrowed(s));
-    }
-
-    let mut owned = if s.n == dim && s.m == dim {
-        s.clone()
-    } else {
-        pad_ccs_to_square(s, dim)?
-    };
-
-    owned = owned
-        .ensure_identity_first_owned()
-        .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?;
-    owned
-        .assert_m0_is_identity_for_nc()
-        .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
-
-    Ok(Cow::Owned(owned))
 }
 
 /// Optional application-level "output claim".
@@ -525,8 +441,10 @@ pub fn me_from_z_balanced<Lm: SModuleHomomorphism<F, Cmt>>(
         c,
         X,
         r: r.to_vec(),
+        s_col: Vec::new(),
         y,
         y_scalars,
+        y_zcol: Vec::new(),
         m_in,
         fold_digest: [0u8; 32],
     };
@@ -653,8 +571,10 @@ pub fn me_from_z_balanced_select<Lm: SModuleHomomorphism<F, Cmt>>(
         c,
         X,
         r: r.to_vec(),
+        s_col: Vec::new(),
         y,
         y_scalars,
+        y_zcol: Vec::new(),
         m_in,
         fold_digest: [0u8; 32],
     };
@@ -717,8 +637,6 @@ where
 struct SessionCcsCache {
     /// Address of the caller-supplied `CcsStructure` used to build this cache.
     src_ptr: usize,
-    /// Optional identity-first CCS, stored only if normalization requires insertion.
-    s_norm: Option<CcsStructure<F>>,
     /// Precomputed circuit artifacts (digest + optional sparse cache).
     ctx: ShardProverContext,
 }
@@ -765,7 +683,7 @@ where
         };
         if commit_m != m {
             return Err(PiCcsError::InvalidInput(format!(
-                "session committer configured for CCS.m={}, but this step expects CCS.m={}; construct the session from the same (padded) CCS shape",
+                "session committer configured for CCS.m={}, but this step expects CCS.m={}; construct the session from the same CCS width",
                 commit_m, m
             )));
         }
@@ -852,13 +770,7 @@ where
 
     /// Inject an explicit initial Accumulator (k = acc.me.len()). This enables k>1 multi-folding.
     pub fn with_initial_accumulator(mut self, acc: Accumulator, s: &CcsStructure<F>) -> Result<Self, PiCcsError> {
-        let s_norm_owned: Option<CcsStructure<F>> = match normalize_ccs_for_session(s)? {
-            Cow::Borrowed(_) => None,
-            Cow::Owned(s_norm) => Some(s_norm),
-        };
-        let s_norm = s_norm_owned.as_ref().unwrap_or(s);
-
-        acc.check(&self.params, s_norm)?;
+        acc.check(&self.params, s)?;
         self.acc0 = Some(acc);
         Ok(self)
     }
@@ -904,7 +816,7 @@ where
         // 2) Let the app synthesize CCS + witness given y_prev
         let StepArtifacts {
             ccs,
-            witness: mut z,
+            witness: z,
             spec,
             public_app_inputs: _,
         } = stepper.synthesize_step(step_idx, &y_prev, inputs);
@@ -930,19 +842,14 @@ where
             }
         }
 
-        // Canonicalize witness length to the padded-square CCS dimension.
+        // Canonicalize witness length to the CCS width.
         let m_expected = ccs.m;
-        let m_target = canonical_ccs_square_dim(ccs.as_ref());
-        self.ensure_committer_m_matches(m_target)?;
-        if z.len() == m_expected && m_expected < m_target {
-            z.resize(m_target, F::ZERO);
-        }
-        if z.len() != m_target {
+        self.ensure_committer_m_matches(m_expected)?;
+        if z.len() != m_expected {
             return Err(PiCcsError::InvalidInput(format!(
-                "step witness length {} must equal CCS.m={} (or CCS.m padded to {})",
+                "step witness length {} must equal CCS.m={}",
                 z.len(),
                 m_expected,
-                m_target
             )));
         }
         if spec.m_in > z.len() {
@@ -1023,26 +930,22 @@ where
     pub fn add_step_from_io(&mut self, input: &ProveInput<'_>) -> Result<(), PiCcsError> {
         let m_in = input.public_input.len();
         let m_expected = input.ccs.m;
-        let m_target = canonical_ccs_square_dim(input.ccs);
-        self.ensure_committer_m_matches(m_target)?;
+        self.ensure_committer_m_matches(m_expected)?;
         let total = m_in
             .checked_add(input.witness.len())
             .ok_or_else(|| PiCcsError::InvalidInput("len(x) + len(w) overflow".into()))?;
-        if total != m_expected && total != m_target {
+        if total != m_expected {
             return Err(PiCcsError::InvalidInput(format!(
-                "len(x) + len(w) = {} but CCS.m = {} (or padded to {})",
-                total, m_expected, m_target
+                "len(x) + len(w) = {} but CCS.m = {}",
+                total, m_expected
             )));
         }
 
         // Build z = [x | w], compute Z and commitment c
-        let mut z = Vec::with_capacity(m_target);
+        let mut z = Vec::with_capacity(m_expected);
         z.extend_from_slice(input.public_input);
         z.extend_from_slice(input.witness);
-        if total == m_expected && m_expected < m_target {
-            z.resize(m_target, F::ZERO);
-        }
-        debug_assert_eq!(z.len(), m_target);
+        debug_assert_eq!(z.len(), m_expected);
 
         let Z = encode_vector_balanced_to_mat(&self.params, &z);
         let c = self.l.commit(&Z);
@@ -1229,21 +1132,12 @@ where
     ) -> Result<SessionCcsCache, PiCcsError> {
         let src_ptr = (s as *const CcsStructure<F>) as usize;
 
-        let mut s_norm_opt: Option<CcsStructure<F>> = None;
-        let s_norm_ref: &CcsStructure<F> = match normalize_ccs_for_session(s)? {
-            Cow::Borrowed(s) => s,
-            Cow::Owned(s) => {
-                s_norm_opt = Some(s);
-                s_norm_opt.as_ref().expect("just set")
-            }
-        };
-
         if let Some(ref cache) = ccs_sparse_cache {
-            if cache.len() != s_norm_ref.t() {
+            if cache.len() != s.t() {
                 return Err(PiCcsError::InvalidInput(format!(
                     "SparseCache matrix count mismatch: cache has {}, CCS has {}",
                     cache.len(),
-                    s_norm_ref.t()
+                    s.t()
                 )));
             }
         }
@@ -1251,13 +1145,13 @@ where
         let ccs_sparse_cache = if let Some(cache) = ccs_sparse_cache {
             Some(cache)
         } else if mode_uses_sparse_cache(&self.mode) {
-            Some(Arc::new(SparseCache::build(s_norm_ref)))
+            Some(Arc::new(SparseCache::build(s)))
         } else {
             None
         };
 
         let ccs_mat_digest =
-            utils::digest_ccs_matrices_with_sparse_cache(s_norm_ref, ccs_sparse_cache.as_deref());
+            utils::digest_ccs_matrices_with_sparse_cache(s, ccs_sparse_cache.as_deref());
         let ctx = ShardProverContext {
             ccs_mat_digest,
             ccs_sparse_cache,
@@ -1265,7 +1159,6 @@ where
 
         Ok(SessionCcsCache {
             src_ptr,
-            s_norm: s_norm_opt,
             ctx,
         })
     }
@@ -1349,16 +1242,11 @@ where
 
         // Temporarily take the prover ctx to avoid borrow conflicts while we may mutate `self`.
         let cache = self.prover_ctx.take().expect("prover ctx must be set");
-        let s_norm = cache.s_norm.as_ref().unwrap_or(s);
         let ctx = cache.ctx.clone();
 
         let result = (|| {
             // Shared CPU bus: compute the prepared CCS shape (copy-outs) for accumulator validation.
-            // IMPORTANT: Use the normalized CCS so M₀=I holds even if the caller passed a non-identity-first CCS.
-            let s_prepared = self.prepared_ccs_for_accumulator(s_norm)?;
-            s_prepared
-                .assert_m0_is_identity_for_nc()
-                .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
+            let s_prepared = self.prepared_ccs_for_accumulator(s)?;
             self.ensure_accumulator_matches_ccs(s_prepared)?;
 
             // Determine canonical m_in from steps and ensure they all match (needed for RLC).
@@ -1385,15 +1273,15 @@ where
 
             // If PP is reloadable (seeded), unload it before memory-heavy oracle/sumcheck work.
             // This keeps peak RSS low on constrained runtimes (e.g. WASM).
-            if has_seed_for_dims(D, s_norm.m) {
-                let _ = unload_global_pp_for_dims(D, s_norm.m);
+            if has_seed_for_dims(D, s.m) {
+                let _ = unload_global_pp_for_dims(D, s.m);
             }
 
             shard::fold_shard_prove_with_context(
                 self.mode.clone(),
                 tr,
                 &self.params,
-                s_norm,
+                s,
                 &self.steps,
                 seed_me,
                 seed_me_wit,
@@ -1418,13 +1306,9 @@ where
 
         let cache = self.prover_ctx.take().expect("prover ctx must be set");
         let ctx = cache.ctx.clone();
-        let s_norm = cache.s_norm.as_ref().unwrap_or(s);
 
         let result = (|| {
-            let s_prepared = self.prepared_ccs_for_accumulator(s_norm)?;
-            s_prepared
-                .assert_m0_is_identity_for_nc()
-                .map_err(|e| PiCcsError::InvalidInput(e.to_string()))?;
+            let s_prepared = self.prepared_ccs_for_accumulator(s)?;
             self.ensure_accumulator_matches_ccs(s_prepared)?;
 
             let m_in_steps = self.steps.first().map(|step| step.mcs.0.m_in).unwrap_or(0);
@@ -1450,7 +1334,7 @@ where
                 self.mode.clone(),
                 tr,
                 &self.params,
-                s_norm,
+                s,
                 &self.steps,
                 seed_me,
                 seed_me_wit,
@@ -1598,19 +1482,6 @@ where
             .filter(|cache| cache.src_ptr == src_ptr);
         let verifier_ctx = verifier_cache.map(|cache| &cache.ctx);
 
-        // Normalize CCS (avoid cloning when already normalized or preloaded).
-        let s_norm_owned: Option<CcsStructure<F>> = match verifier_cache {
-            Some(_) => None,
-            None => match normalize_ccs_for_session(s)? {
-                Cow::Borrowed(_) => None,
-                Cow::Owned(s_norm) => Some(s_norm),
-            },
-        };
-        let s_norm: &CcsStructure<F> = match verifier_cache {
-            Some(cache) => cache.s_norm.as_ref().unwrap_or(s),
-            None => s_norm_owned.as_ref().unwrap_or(s),
-        };
-
         // m_in consistency across public MCS
         let m_in_steps = mcss_public.first().map(|inst| inst.m_in).unwrap_or(0);
         if !mcss_public.iter().all(|inst| inst.m_in == m_in_steps) {
@@ -1619,7 +1490,7 @@ where
 
         // Build steps_public from the internal bundles to include mem/lut instances.
         let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = self.steps.iter().map(|bundle| bundle.into()).collect();
-        let s_prepared = self.prepared_ccs_for_accumulator(s_norm)?;
+        let s_prepared = self.prepared_ccs_for_accumulator(s)?;
 
         // Validate (or empty) initial accumulator to mirror finalize()
         let seed_me: &[MeInstance<Cmt, F, K>] = match &self.acc0 {
@@ -1649,7 +1520,7 @@ where
                         self.mode.clone(),
                         tr,
                         &self.params,
-                        s_norm,
+                        s,
                         &steps_public,
                         seed_me,
                         run,
@@ -1661,7 +1532,7 @@ where
                         self.mode.clone(),
                         tr,
                         &self.params,
-                        s_norm,
+                        s,
                         &steps_public,
                         seed_me,
                         run,
@@ -1674,7 +1545,7 @@ where
                         self.mode.clone(),
                         tr,
                         &self.params,
-                        s_norm,
+                        s,
                         &steps_public,
                         seed_me,
                         run,
@@ -1685,7 +1556,7 @@ where
                         self.mode.clone(),
                         tr,
                         &self.params,
-                        s_norm,
+                        s,
                         &steps_public,
                         seed_me,
                         run,
@@ -1708,7 +1579,7 @@ where
                     self.mode.clone(),
                     tr,
                     &self.params,
-                    s_norm,
+                    s,
                     &steps_public,
                     seed_me,
                     run,
@@ -1719,7 +1590,7 @@ where
                     self.mode.clone(),
                     tr,
                     &self.params,
-                    s_norm,
+                    s,
                     &steps_public,
                     seed_me,
                     run,
@@ -1777,26 +1648,13 @@ where
             .filter(|cache| cache.src_ptr == src_ptr);
         let verifier_ctx = verifier_cache.map(|cache| &cache.ctx);
 
-        // Normalize CCS (avoid cloning when already normalized or preloaded).
-        let s_norm_owned: Option<CcsStructure<F>> = match verifier_cache {
-            Some(_) => None,
-            None => match normalize_ccs_for_session(s)? {
-                Cow::Borrowed(_) => None,
-                Cow::Owned(s_norm) => Some(s_norm),
-            },
-        };
-        let s_norm: &CcsStructure<F> = match verifier_cache {
-            Some(cache) => cache.s_norm.as_ref().unwrap_or(s),
-            None => s_norm_owned.as_ref().unwrap_or(s),
-        };
-
         let m_in_steps = mcss_public.first().map(|inst| inst.m_in).unwrap_or(0);
         if !mcss_public.iter().all(|inst| inst.m_in == m_in_steps) {
             return Err(PiCcsError::InvalidInput("all steps must share the same m_in".into()));
         }
 
         let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = self.steps.iter().map(|bundle| bundle.into()).collect();
-        let s_prepared = self.prepared_ccs_for_accumulator(s_norm)?;
+        let s_prepared = self.prepared_ccs_for_accumulator(s)?;
 
         let seed_me: &[MeInstance<Cmt, F, K>] = match &self.acc0 {
             Some(acc) => {
@@ -1824,7 +1682,7 @@ where
                         self.mode.clone(),
                         tr,
                         &self.params,
-                        s_norm,
+                        s,
                         &steps_public,
                         seed_me,
                         run,
@@ -1837,7 +1695,7 @@ where
                         self.mode.clone(),
                         tr,
                         &self.params,
-                        s_norm,
+                        s,
                         &steps_public,
                         seed_me,
                         run,
@@ -1851,7 +1709,7 @@ where
                         self.mode.clone(),
                         tr,
                         &self.params,
-                        s_norm,
+                        s,
                         &steps_public,
                         seed_me,
                         run,
@@ -1863,7 +1721,7 @@ where
                         self.mode.clone(),
                         tr,
                         &self.params,
-                        s_norm,
+                        s,
                         &steps_public,
                         seed_me,
                         run,
@@ -1887,7 +1745,7 @@ where
                     self.mode.clone(),
                     tr,
                     &self.params,
-                    s_norm,
+                    s,
                     &steps_public,
                     seed_me,
                     run,
@@ -1899,7 +1757,7 @@ where
                     self.mode.clone(),
                     tr,
                     &self.params,
-                    s_norm,
+                    s,
                     &steps_public,
                     seed_me,
                     run,
@@ -1924,13 +1782,15 @@ impl FoldingSession<AjtaiSModule> {
     /// Build a session with an Ajtai committer and auto-picked Goldilocks parameters.
     ///
     /// This is intended as a “few lines” frontend: it hides Ajtai PP generation and `NeoParams`
-    /// selection. The committer dimension uses the session's canonical square padding rule
-    /// (`m = max(ccs.n, ccs.m)`) to match internal CCS normalization.
+    /// selection.
+    ///
+    /// - Commitment width uses `ccs.m` (witness width).
+    /// - Parameters use `max(ccs.n, ccs.m)` to satisfy extension-field policy for both FE and NC.
     ///
     /// For deterministic parameters (e.g. in tests), use `new_ajtai_seeded`.
     pub fn new_ajtai(mode: FoldingMode, ccs: &CcsStructure<F>) -> Result<Self, PiCcsError> {
-        let m_commit = canonical_ccs_square_dim(ccs);
-        let params = NeoParams::goldilocks_auto_r1cs_ccs(m_commit)
+        let m_commit = ccs.m;
+        let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n.max(ccs.m))
             .map_err(|e| PiCcsError::InvalidInput(format!("NeoParams::goldilocks_auto_r1cs_ccs failed: {e}")))?;
 
         let mut seed = [0u8; 32];
@@ -1954,8 +1814,8 @@ impl FoldingSession<AjtaiSModule> {
         ccs: &CcsStructure<F>,
         seed: [u8; 32],
     ) -> Result<Self, PiCcsError> {
-        let m_commit = canonical_ccs_square_dim(ccs);
-        let params = NeoParams::goldilocks_auto_r1cs_ccs(m_commit)
+        let m_commit = ccs.m;
+        let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n.max(ccs.m))
             .map_err(|e| PiCcsError::InvalidInput(format!("NeoParams::goldilocks_auto_r1cs_ccs failed: {e}")))?;
 
         let mut rng = rand_chacha::ChaCha8Rng::from_seed(seed);

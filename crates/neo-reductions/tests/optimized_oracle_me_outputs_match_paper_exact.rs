@@ -96,8 +96,10 @@ fn optimized_oracle_outputs_match_paper_exact_builder() {
         c: l.commit(&z_me),
         X: l.project_x(&z_me, m_in),
         r: me_inputs_r.clone(),
+        s_col: Vec::new(),
         y: vec![vec![K::ZERO; 1usize << dims.ell_d]; s.t()],
         y_scalars: vec![K::ZERO; s.t()],
+        y_zcol: Vec::new(),
         m_in,
         fold_digest: [0u8; 32],
         c_step_coords: vec![],
@@ -110,6 +112,7 @@ fn optimized_oracle_outputs_match_paper_exact_builder() {
         alpha: (0..dims.ell_d).map(|i| k(1000 + i as u64, 2000 + i as u64)).collect(),
         beta_a: (0..dims.ell_d).map(|i| k(3000 + i as u64, 4000 + i as u64)).collect(),
         beta_r: (0..dims.ell_n).map(|i| k(5000 + i as u64, 6000 + i as u64)).collect(),
+        beta_m: Vec::new(),
         gamma: k(7777, 8888),
     };
 
@@ -138,7 +141,7 @@ fn optimized_oracle_outputs_match_paper_exact_builder() {
 
     let fold_digest = [7u8; 32];
     let out_fast =
-        oracle.build_me_outputs_from_ajtai_precomp(core::slice::from_ref(&mcs_inst), &me_inputs, fold_digest, &l);
+        oracle.build_me_outputs_from_ajtai_precomp(core::slice::from_ref(&mcs_inst), &me_inputs, &[], fold_digest, &l);
     let out_ref = build_me_outputs_paper_exact(
         &s,
         &params,
@@ -147,6 +150,7 @@ fn optimized_oracle_outputs_match_paper_exact_builder() {
         &me_inputs,
         &me_witnesses,
         &r_prime,
+        &[],
         dims.ell_d,
         fold_digest,
         &l,

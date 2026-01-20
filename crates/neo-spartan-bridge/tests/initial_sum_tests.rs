@@ -8,6 +8,7 @@ use neo_ccs::{Mat, MeInstance};
 use neo_fold::shard::ShardProof as FoldRun;
 use neo_math::{D, F as NeoF, K as NeoK};
 use neo_reductions::PiCcsProof;
+use neo_reductions::optimized_engine::PiCcsProofVariant;
 use neo_spartan_bridge::circuit::witness::PiCcsChallenges;
 use neo_spartan_bridge::circuit::{FoldRunCircuit, FoldRunInstance, FoldRunWitness};
 use neo_spartan_bridge::CircuitF;
@@ -44,8 +45,10 @@ fn tiny_me_instance() -> MeInstance<Cmt, NeoF, NeoK> {
         c,
         X,
         r,
+        s_col: Vec::new(),
         y,
         y_scalars,
+        y_zcol: Vec::new(),
         m_in: 1,
         fold_digest: [0u8; 32],
         c_step_coords: Vec::new(),
@@ -71,6 +74,7 @@ fn claimed_initial_sum_gadget_matches_paper_exact_for_tiny_instance() {
         alpha: alpha.clone(),
         beta_a: beta_a.clone(),
         beta_r: beta_r.clone(),
+        beta_m: Vec::new(),
         gamma,
     };
 
@@ -83,10 +87,14 @@ fn claimed_initial_sum_gadget_matches_paper_exact_for_tiny_instance() {
         alpha: alpha.clone(),
         beta_a,
         beta_r,
+        beta_m: Vec::new(),
         gamma,
         r_prime: Vec::new(),
         alpha_prime: Vec::new(),
         sumcheck_challenges: Vec::new(),
+        s_col_prime: Vec::new(),
+        alpha_prime_nc: Vec::new(),
+        sumcheck_challenges_nc: Vec::new(),
     };
 
     // Public instance: initial_accumulator = [me], empty final_accumulator.
@@ -115,11 +123,16 @@ fn claimed_initial_sum_gadget_matches_paper_exact_for_tiny_instance() {
     // Dummy Π-CCS proof carrying sc_initial_sum = T_native so that the
     // initial-sum binding constraint is meaningful.
     let proof = PiCcsProof {
+        variant: PiCcsProofVariant::SplitNcV1,
         sumcheck_rounds: Vec::new(),
         sc_initial_sum: Some(T_native),
         sumcheck_challenges: Vec::new(),
+        sumcheck_rounds_nc: Vec::new(),
+        sc_initial_sum_nc: None,
+        sumcheck_challenges_nc: Vec::new(),
         challenges_public: native_challenges.clone(),
         sumcheck_final: NeoK::ZERO,
+        sumcheck_final_nc: NeoK::ZERO,
         header_digest: Vec::new(),
         _extra: None,
     };

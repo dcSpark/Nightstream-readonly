@@ -406,6 +406,180 @@ where
     )
 }
 
+/// Evaluate the FE-only polynomial Q_fe at an arbitrary extension point (α', r') directly from witnesses.
+///
+/// This matches the split-NC protocol variant: the NC/range-check terms are *excluded*.
+pub fn q_eval_at_ext_point_fe_paper_exact<Ff>(
+    s: &CcsStructure<Ff>,
+    params: &NeoParams,
+    mcs_witnesses: &[McsWitness<Ff>],
+    me_witnesses: &[Mat<Ff>],
+    alpha_prime: &[K],
+    r_prime: &[K],
+    ch: &Challenges,
+) -> (K, K)
+where
+    Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<Ff>,
+{
+    q_eval_at_ext_point_fe_paper_exact_with_inputs::<Ff>(
+        s,
+        params,
+        mcs_witnesses,
+        me_witnesses,
+        alpha_prime,
+        r_prime,
+        ch,
+        None,
+    )
+}
+
+/// Evaluate the FE-only polynomial Q_fe at an arbitrary extension point (α', r') directly from witnesses.
+///
+/// This is identical to `q_eval_at_ext_point_paper_exact_with_inputs` but with the NC block removed.
+pub fn q_eval_at_ext_point_fe_paper_exact_with_inputs<Ff>(
+    s: &CcsStructure<Ff>,
+    params: &NeoParams,
+    mcs_witnesses: &[McsWitness<Ff>],
+    me_witnesses: &[Mat<Ff>],
+    alpha_prime: &[K],
+    r_prime: &[K],
+    ch: &Challenges,
+    r_inputs: Option<&[K]>,
+) -> (K, K)
+where
+    Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<Ff>,
+{
+    // ---------------------------
+    // χ tables (Ajtai & row)
+    // ---------------------------
+    let d_sz = 1usize << alpha_prime.len();
+    let n_sz = 1usize << r_prime.len();
+
+    let mut chi_a = vec![K::ZERO; d_sz];
+    for rho in 0..d_sz {
+        let mut w = K::ONE;
+        for bit in 0..alpha_prime.len() {
+            let a = alpha_prime[bit];
+            let is_one = ((rho >> bit) & 1) == 1;
+            w *= if is_one { a } else { K::ONE - a };
+        }
+        chi_a[rho] = w;
+    }
+
+    let mut chi_r = vec![K::ZERO; n_sz];
+    for row in 0..n_sz {
+        let mut w = K::ONE;
+        for bit in 0..r_prime.len() {
+            let r = r_prime[bit];
+            let is_one = ((row >> bit) & 1) == 1;
+            w *= if is_one { r } else { K::ONE - r };
+        }
+        chi_r[row] = w;
+    }
+
+    // eq((α′,r′), β)
+    let eq_beta = eq_points(alpha_prime, &ch.beta_a) * eq_points(r_prime, &ch.beta_r);
+
+    // eq((α′,r′), (α, r)) gating for the Eval block
+    let eq_ar = if let Some(r) = r_inputs {
+        eq_points(alpha_prime, &ch.alpha) * eq_points(r_prime, r)
+    } else {
+        K::ZERO
+    };
+
+    // ---------------------------
+    // F' := f( Ẽ(M_j z_1)(r') )_j, z_1 from first MCS instance
+    // ---------------------------
+    let z1 = recomposed_z_from_Z::<Ff>(params, &mcs_witnesses[0].Z);
+    let mut m_vals = vec![K::ZERO; s.t()];
+    for j in 0..s.t() {
+        let mut y_eval = K::ZERO;
+        for row in 0..n_sz {
+            let wr = if row < s.n { chi_r[row] } else { K::ZERO };
+            if wr == K::ZERO {
+                continue;
+            }
+            let mut y_row = K::ZERO;
+            for c in 0..s.m {
+                y_row += K::from(get_M(&s.matrices[j], row, c)) * z1[c];
+            }
+            y_eval += wr * y_row;
+        }
+        m_vals[j] = y_eval;
+    }
+    let F_prime = s.f.eval_in_ext::<K>(&m_vals);
+
+    // ---------------------------------------
+    // Eval block: γ^k · Σ_{j=1,i=2}^{t,k} γ^{i+(j-1)k-1} · E_{(i,j)}
+    // ---------------------------------------
+    let mut eval_sum = K::ZERO;
+    let k_total = mcs_witnesses.len() + me_witnesses.len();
+    if k_total >= 2 {
+        // Precompute γ^k
+        let mut gamma_to_k = K::ONE;
+        for _ in 0..k_total {
+            gamma_to_k *= ch.gamma;
+        }
+
+        for j in 0..s.t() {
+            // vj := M_j^T χ_{r'}
+            let mut vj = vec![K::ZERO; s.m];
+            for row in 0..n_sz {
+                let wr = if row < s.n { chi_r[row] } else { K::ZERO };
+                if wr == K::ZERO {
+                    continue;
+                }
+                for c in 0..s.m {
+                    vj[c] += K::from(get_M(&s.matrices[j], row, c)) * wr;
+                }
+            }
+
+            for (i_abs, Zi) in mcs_witnesses
+                .iter()
+                .map(|w| &w.Z)
+                .chain(me_witnesses.iter())
+                .enumerate()
+                .skip(1)
+            {
+                let mut y_digits = vec![K::ZERO; D];
+                for rho in 0..D {
+                    let mut acc = K::ZERO;
+                    for c in 0..s.m {
+                        acc += K::from(Zi[(rho, c)]) * vj[c];
+                    }
+                    y_digits[rho] = acc;
+                }
+                let mut y_eval = K::ZERO;
+                for rho in 0..core::cmp::min(D, d_sz) {
+                    y_eval += y_digits[rho] * chi_a[rho];
+                }
+
+                // inner weight = γ^{i-1} · (γ^k)^j
+                let mut weight = K::ONE;
+                for _ in 0..i_abs {
+                    weight *= ch.gamma;
+                }
+                for _ in 0..j {
+                    weight *= gamma_to_k;
+                }
+
+                eval_sum += weight * y_eval;
+            }
+        }
+
+        // Multiply by the outer γ^k and by eq_ar
+        eval_sum = eq_ar * (gamma_to_k * eval_sum);
+    } else {
+        eval_sum = K::ZERO;
+    }
+
+    // Assemble Q_fe(α′, r′)
+    let lhs = eq_beta * F_prime + eval_sum;
+    (lhs, K::ZERO)
+}
+
 /// Evaluate Q at an arbitrary extension point (α', r') directly from witnesses.
 ///
 /// This variant matches the paper's Step 4 LHS exactly, including gating the Eval block by
@@ -814,6 +988,153 @@ where
     eq_aprp_beta * (F_prime + nc_prime_sum) + eq_aprp_ar * (gamma_to_k_outer * eval_sum)
 }
 
+/// FE-only terminal identity (Step 4), i.e. the paper RHS with the NC block removed.
+///
+/// This is the verifier RHS for the "split NC" protocol variant:
+/// - FE sumcheck proves `eq(·,β)·F + Eval` (no digit-range terms).
+/// - NC is handled by a separate sumcheck over `y_zcol`.
+pub fn rhs_terminal_identity_fe_paper_exact<Ff>(
+    s: &CcsStructure<Ff>,
+    params: &NeoParams,
+    ch: &Challenges,
+    r_prime: &[K],
+    alpha_prime: &[K],
+    out_me: &[MeInstance<Cmt, Ff, K>],
+    me_inputs_r_opt: Option<&[K]>,
+) -> K
+where
+    Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<Ff>,
+{
+    assert!(!out_me.is_empty(), "terminal: need at least one output");
+    let k_total = out_me.len();
+
+    let eq_aprp_beta = eq_points(alpha_prime, &ch.beta_a) * eq_points(r_prime, &ch.beta_r);
+    let eq_aprp_ar = if let Some(r) = me_inputs_r_opt {
+        eq_points(alpha_prime, &ch.alpha) * eq_points(r_prime, r)
+    } else {
+        K::ZERO
+    };
+
+    // --- F' ---
+    let bK = K::from(Ff::from_u64(params.b as u64));
+    let mut m_vals = vec![K::ZERO; s.t()];
+    {
+        let y_first = &out_me[0];
+        for j in 0..s.t() {
+            let row = &y_first.y[j];
+            let mut acc = K::ZERO;
+            let mut pow = K::ONE;
+            for rho in 0..D {
+                acc += pow * row.get(rho).copied().unwrap_or(K::ZERO);
+                pow *= bK;
+            }
+            m_vals[j] = acc;
+        }
+    }
+    let F_prime = s.f.eval_in_ext::<K>(&m_vals);
+
+    // --- Eval' ---
+    let d_sz = 1usize << alpha_prime.len();
+    let mut chi_alpha_prime = vec![K::ZERO; d_sz];
+    for rho in 0..d_sz {
+        let mut w = K::ONE;
+        for bit in 0..alpha_prime.len() {
+            let a = alpha_prime[bit];
+            let bit_is_one = ((rho >> bit) & 1) == 1;
+            w *= if bit_is_one { a } else { K::ONE - a };
+        }
+        chi_alpha_prime[rho] = w;
+    }
+
+    let mut eval_sum = K::ZERO;
+    if me_inputs_r_opt.is_some() && k_total >= 2 {
+        let mut gamma_to_k = K::ONE;
+        for _ in 0..k_total {
+            gamma_to_k *= ch.gamma;
+        }
+
+        for j in 0..s.t() {
+            for (i_abs, out) in out_me.iter().enumerate().skip(1) {
+                let y = &out.y[j];
+                let mut y_eval = K::ZERO;
+                let limit = core::cmp::min(chi_alpha_prime.len(), y.len());
+                for rho in 0..limit {
+                    y_eval += y[rho] * chi_alpha_prime[rho];
+                }
+
+                let mut weight = K::ONE;
+                for _ in 0..i_abs {
+                    weight *= ch.gamma;
+                }
+                for _ in 0..j {
+                    weight *= gamma_to_k;
+                }
+
+                eval_sum += weight * y_eval;
+            }
+        }
+    }
+
+    let mut gamma_to_k_outer = K::ONE;
+    for _ in 0..k_total {
+        gamma_to_k_outer *= ch.gamma;
+    }
+
+    eq_aprp_beta * F_prime + eq_aprp_ar * (gamma_to_k_outer * eval_sum)
+}
+
+/// NC-only terminal identity (Step 4) for the split-NC protocol variant.
+///
+/// This checks the digit-range polynomial on `y_zcol := Z · χ_{s_col}` using a separate sumcheck.
+pub fn rhs_terminal_identity_nc_paper_exact<Ff>(
+    params: &NeoParams,
+    ch: &Challenges,
+    s_col_prime: &[K],
+    alpha_prime: &[K],
+    out_me: &[MeInstance<Cmt, Ff, K>],
+) -> K
+where
+    Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<Ff>,
+{
+    assert!(!out_me.is_empty(), "terminal: need at least one output");
+
+    let eq_apsp_beta = eq_points(alpha_prime, &ch.beta_a) * eq_points(s_col_prime, &ch.beta_m);
+
+    let d_sz = 1usize << alpha_prime.len();
+    let mut chi_alpha_prime = vec![K::ZERO; d_sz];
+    for rho in 0..d_sz {
+        let mut w = K::ONE;
+        for bit in 0..alpha_prime.len() {
+            let a = alpha_prime[bit];
+            let bit_is_one = ((rho >> bit) & 1) == 1;
+            w *= if bit_is_one { a } else { K::ONE - a };
+        }
+        chi_alpha_prime[rho] = w;
+    }
+
+    let mut nc_prime_sum = K::ZERO;
+    {
+        let mut g = ch.gamma; // γ^1
+        for out in out_me {
+            debug_assert!(out.s_col.is_empty() || out.s_col.as_slice() == s_col_prime);
+
+            let y = &out.y_zcol;
+            let limit = core::cmp::min(chi_alpha_prime.len(), y.len());
+            let mut y_eval = K::ZERO;
+            for rho in 0..limit {
+                y_eval += y[rho] * chi_alpha_prime[rho];
+            }
+            let Ni = range_product::<Ff>(y_eval, params.b);
+            nc_prime_sum += g * Ni;
+            g *= ch.gamma;
+        }
+    }
+
+    eq_apsp_beta * nc_prime_sum
+}
+
 /// --- Public claimed sum T for sumcheck ------------------------------------
 ///
 /// Compute the public claimed sum used by sumcheck:
@@ -962,6 +1283,7 @@ pub fn build_me_outputs_paper_exact<Ff, L>(
     me_inputs: &[MeInstance<Cmt, Ff, K>],
     me_witnesses: &[Mat<Ff>],
     r_prime: &[K],
+    s_col: &[K],
     ell_d: usize,
     fold_digest: [u8; 32],
     l: &L,
@@ -983,6 +1305,23 @@ where
         }
         chi_rp[row] = w;
     }
+
+    let chi_sp = if s_col.is_empty() {
+        Vec::new()
+    } else {
+        let m_sz = 1usize << s_col.len();
+        let mut chi = vec![K::ZERO; m_sz];
+        for col in 0..m_sz {
+            let mut w = K::ONE;
+            for bit in 0..s_col.len() {
+                let sb = s_col[bit];
+                let is_one = ((col >> bit) & 1) == 1;
+                w *= if is_one { sb } else { K::ONE - sb };
+            }
+            chi[col] = w;
+        }
+        chi
+    };
 
     // v_j := M_j^T · χ_{r'} ∈ K^m, computed with literal nested loops.
     let mut vjs: Vec<Vec<K>> = Vec::with_capacity(s.t());
@@ -1041,6 +1380,21 @@ where
         }
         let y_scalars: Vec<K> = y.iter().map(|yj| recompose(yj)).collect();
 
+        let y_zcol = if chi_sp.is_empty() {
+            Vec::new()
+        } else {
+            assert!(chi_sp.len() >= s.m, "chi(s_col) too short for CCS width");
+            let mut yz = vec![K::ZERO; D];
+            for rho in 0..D {
+                let mut acc = K::ZERO;
+                for c in 0..s.m {
+                    acc += K::from(wit.Z[(rho, c)]) * chi_sp[c];
+                }
+                yz[rho] = acc;
+            }
+            pad_to_pow2(yz)
+        };
+
         out.push(MeInstance {
             c_step_coords: vec![],
             u_offset: 0,
@@ -1048,8 +1402,10 @@ where
             c: inst.c.clone(),
             X,
             r: r_prime.to_vec(),
+            s_col: s_col.to_vec(),
             y,
             y_scalars,
+            y_zcol,
             m_in: inst.m_in,
             fold_digest,
         });
@@ -1071,6 +1427,21 @@ where
         }
         let y_scalars: Vec<K> = y.iter().map(|yj| recompose(yj)).collect();
 
+        let y_zcol = if chi_sp.is_empty() {
+            Vec::new()
+        } else {
+            assert!(chi_sp.len() >= s.m, "chi(s_col) too short for CCS width");
+            let mut yz = vec![K::ZERO; D];
+            for rho in 0..D {
+                let mut acc = K::ZERO;
+                for c in 0..s.m {
+                    acc += K::from(Zi[(rho, c)]) * chi_sp[c];
+                }
+                yz[rho] = acc;
+            }
+            pad_to_pow2(yz)
+        };
+
         out.push(MeInstance {
             c_step_coords: vec![],
             u_offset: 0,
@@ -1078,8 +1449,10 @@ where
             c: inp.c.clone(),
             X: inp.X.clone(),
             r: r_prime.to_vec(),
+            s_col: s_col.to_vec(),
             y,
             y_scalars,
+            y_zcol,
             m_in: inp.m_in,
             fold_digest,
         });
@@ -1190,6 +1563,39 @@ where
         })
         .collect();
 
+    // Optional NC channel: y_zcol := Σ ρ_i · y_zcol_i.
+    let wants_nc_channel = !(me_inputs[0].s_col.is_empty() && me_inputs[0].y_zcol.is_empty());
+    let y_zcol = if wants_nc_channel {
+        assert!(
+            !me_inputs[0].s_col.is_empty() && !me_inputs[0].y_zcol.is_empty(),
+            "Π_RLC: incomplete NC channel on input 0 (expected both s_col and y_zcol)"
+        );
+        for (idx, inst) in me_inputs.iter().enumerate() {
+            assert_eq!(inst.s_col, me_inputs[0].s_col, "Π_RLC: s_col mismatch at input {idx}");
+            assert_eq!(
+                inst.y_zcol.len(),
+                d_pad,
+                "Π_RLC: y_zcol len mismatch at input {idx} (expected {d_pad}, got {})",
+                inst.y_zcol.len()
+            );
+        }
+
+        let mut acc = vec![K::ZERO; d_pad];
+        for i in 0..k1 {
+            let yi = &me_inputs[i].y_zcol;
+            for rr in 0..d.min(d_pad) {
+                let mut acc_rr = K::ZERO;
+                for kk in 0..d {
+                    acc_rr += K::from(get_F(&rhos[i], rr, kk)) * yi[kk];
+                }
+                acc[rr] += acc_rr;
+            }
+        }
+        acc
+    } else {
+        Vec::new()
+    };
+
     // Z := Σ ρ_i Z_i
     let mut Z = Mat::zero(d, s.m, Ff::ZERO);
     for i in 0..k1 {
@@ -1203,8 +1609,10 @@ where
         c: me_inputs[0].c.clone(), // NOTE: caller can replace with true Σ ρ_i·c_i
         X,
         r,
+        s_col: me_inputs[0].s_col.clone(),
         y,
         y_scalars,
+        y_zcol,
         m_in,
         fold_digest: me_inputs[0].fold_digest,
     };
@@ -1299,6 +1707,31 @@ where
     let bF = Ff::from_u64(params.b as u64);
     let bK = K::from(bF);
 
+    // Optional NC channel: build χ_{s_col} once for all children.
+    let want_nc_channel = !(parent.s_col.is_empty() && parent.y_zcol.is_empty());
+    let chi_s = if want_nc_channel {
+        assert!(
+            !parent.s_col.is_empty() && !parent.y_zcol.is_empty(),
+            "Π_DEC: incomplete NC channel on parent (expected both s_col and y_zcol)"
+        );
+        assert_eq!(
+            parent.y_zcol.len(),
+            d_pad,
+            "Π_DEC: parent y_zcol len mismatch (expected {d_pad}, got {})",
+            parent.y_zcol.len()
+        );
+        let chi = neo_ccs::utils::tensor_point::<K>(&parent.s_col);
+        assert!(
+            chi.len() >= s.m,
+            "Π_DEC: chi(s_col) too short for CCS width (need >= {}, got {})",
+            s.m,
+            chi.len()
+        );
+        chi
+    } else {
+        Vec::new()
+    };
+
     // Helper: project first m_in columns from Z
     let project_x = |Z: &Mat<Ff>| {
         let mut X = Mat::zero(d, m_in, Ff::ZERO);
@@ -1348,6 +1781,20 @@ where
             })
             .collect();
 
+        let y_zcol = if chi_s.is_empty() {
+            Vec::new()
+        } else {
+            let mut yz_pad = vec![K::ZERO; d_pad];
+            for rho in 0..d {
+                let mut acc = K::ZERO;
+                for c in 0..s.m {
+                    acc += K::from(get_F(&Z_split[i], rho, c)) * chi_s[c];
+                }
+                yz_pad[rho] = acc;
+            }
+            yz_pad
+        };
+
         children.push(MeInstance::<Cmt, Ff, K> {
             c_step_coords: vec![],
             u_offset: 0,
@@ -1355,8 +1802,10 @@ where
             c: parent.c.clone(), // NOTE: caller can replace with L(Z_i)
             X: Xi,
             r: parent.r.clone(),
+            s_col: parent.s_col.clone(),
             y: y_i,
             y_scalars: y_scalars_i,
+            y_zcol,
             m_in,
             fold_digest: parent.fold_digest,
         });
@@ -1376,6 +1825,21 @@ where
         if lhs != parent.y[j] {
             ok_y = false;
             break;
+        }
+    }
+
+    // Verify: y_zcol ?= Σ b^i · (y_zcol)_i (when present).
+    if ok_y && want_nc_channel {
+        let mut lhs = vec![K::ZERO; d_pad];
+        let mut pow = K::ONE;
+        for i in 0..k {
+            for t in 0..d_pad {
+                lhs[t] += pow * children[i].y_zcol[t];
+            }
+            pow *= bK;
+        }
+        if lhs != parent.y_zcol {
+            ok_y = false;
         }
     }
 

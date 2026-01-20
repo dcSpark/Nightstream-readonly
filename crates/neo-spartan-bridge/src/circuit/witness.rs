@@ -47,6 +47,9 @@ pub struct PiCcsChallenges {
     pub beta_a: Vec<K>,
     pub beta_r: Vec<K>,
 
+    /// β_m challenge (column-domain, SplitNcV1 only).
+    pub beta_m: Vec<K>,
+
     /// γ challenge
     pub gamma: K,
 
@@ -58,6 +61,15 @@ pub struct PiCcsChallenges {
 
     /// Per-round sumcheck challenges
     pub sumcheck_challenges: Vec<K>,
+
+    /// s_col' challenge (NC sumcheck point, column part; SplitNcV1 only).
+    pub s_col_prime: Vec<K>,
+
+    /// α'_nc challenge (NC sumcheck point, Ajtai part; SplitNcV1 only).
+    pub alpha_prime_nc: Vec<K>,
+
+    /// Per-round NC sumcheck challenges (SplitNcV1 only).
+    pub sumcheck_challenges_nc: Vec<K>,
 }
 
 /// Private witness for the FoldRun circuit

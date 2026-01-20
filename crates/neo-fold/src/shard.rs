@@ -361,6 +361,21 @@ where
         )));
     }
 
+    let d_pad = 1usize << ell_d;
+    let want_nc_channel = !(parent.s_col.is_empty() && parent.y_zcol.is_empty());
+    if want_nc_channel && (parent.s_col.is_empty() || parent.y_zcol.is_empty()) {
+        return Err(PiCcsError::InvalidInput(
+            "DEC: incomplete NC channel on parent (expected both s_col and y_zcol)".into(),
+        ));
+    }
+    if want_nc_channel && parent.y_zcol.len() != d_pad {
+        return Err(PiCcsError::InvalidInput(format!(
+            "DEC: parent y_zcol length mismatch (expected {}, got {})",
+            d_pad,
+            parent.y_zcol.len()
+        )));
+    }
+
     enum PpAccess {
         Seeded {
             kappa: usize,
@@ -433,6 +448,20 @@ where
     let chi_r = chi_tail_weights(&parent.r);
     debug_assert_eq!(chi_r.len(), n_sz);
 
+    let chi_s = if want_nc_channel {
+        let chi = chi_tail_weights(&parent.s_col);
+        if chi.len() < s.m {
+            return Err(PiCcsError::InvalidInput(format!(
+                "DEC: chi(s_col) too short for CCS width (need >= {}, got {})",
+                s.m,
+                chi.len()
+            )));
+        }
+        chi
+    } else {
+        Vec::new()
+    };
+
     let t_mats = s.t();
 
     enum VjsAccess<'a> {
@@ -483,6 +512,7 @@ where
     struct Acc {
         commit: Vec<[F; D]>, // [digit][kappa] -> [D]
         y: Vec<[K; D]>,      // [digit][t] -> [D]
+        y_zcol: Vec<[K; D]>, // [digit] -> [D]
         any_nonzero: Vec<bool>,
         vj: Vec<K>,               // scratch: t
         digits: Vec<i32>,          // scratch: k*D (balanced digits)
@@ -495,6 +525,7 @@ where
             Self {
                 commit: vec![[F::ZERO; D]; k_dec * kappa],
                 y: vec![[K::ZERO; D]; k_dec * t],
+                y_zcol: vec![[K::ZERO; D]; k_dec],
                 any_nonzero: vec![false; k_dec],
                 vj: vec![K::ZERO; t],
                 digits: vec![0i32; k_dec * D],
@@ -510,6 +541,11 @@ where
                 }
             }
             for (dst, src) in self.y.iter_mut().zip(rhs.y.iter()) {
+                for r in 0..D {
+                    dst[r] += src[r];
+                }
+            }
+            for (dst, src) in self.y_zcol.iter_mut().zip(rhs.y_zcol.iter()) {
                 for r in 0..D {
                     dst[r] += src[r];
                 }
@@ -738,6 +774,26 @@ where
                             }
                         }
 
+                        // y_zcol_i[rho] += Z_i[rho,col] * χ_{s_col}[col] (optional).
+                        if !chi_s.is_empty() {
+                            let w_col = chi_s[col];
+                            if w_col != K::ZERO {
+                                for i in 0..k_dec {
+                                    for rho in 0..D {
+                                        let digit = st.digits[i * D + rho];
+                                        if digit == 0 {
+                                            continue;
+                                        }
+                                        match digit {
+                                            1 => st.y_zcol[i][rho] += w_col,
+                                            -1 => st.y_zcol[i][rho] -= w_col,
+                                            _ => st.y_zcol[i][rho] += w_col.scale_base(f_from_i64(digit as i64)),
+                                        }
+                                    }
+                                }
+                            }
+                        }
+
                         // Commitment accumulators per digit.
                         for kr in 0..kappa {
                             let mut rot_col = neo_math::ring::cf(pp.m_rows[kr][col]);
@@ -929,6 +985,26 @@ where
                                 }
                             }
 
+                            // y_zcol_i[rho] += Z_i[rho,col] * χ_{s_col}[col] (optional).
+                            if !chi_s.is_empty() {
+                                let w_col = chi_s[col];
+                                if w_col != K::ZERO {
+                                    for i in 0..k_dec {
+                                        for rho in 0..D {
+                                            let digit = st.digits[i * D + rho];
+                                            if digit == 0 {
+                                                continue;
+                                            }
+                                            match digit {
+                                                1 => st.y_zcol[i][rho] += w_col,
+                                                -1 => st.y_zcol[i][rho] -= w_col,
+                                                _ => st.y_zcol[i][rho] += w_col.scale_base(f_from_i64(digit as i64)),
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+
                             // Commitment accumulators per digit.
                             for kr in 0..kappa {
                                 let a_kr_col = sample_uniform_rq(&mut rngs[kr]);
@@ -1052,7 +1128,6 @@ where
         }
     }
 
-    let d_pad = 1usize << ell_d;
     let parent_r = parent.r.clone();
     let fold_digest = parent.fold_digest;
 
@@ -1075,6 +1150,17 @@ where
             y_scalars_i.push(sc);
         }
 
+        let y_zcol = if chi_s.is_empty() {
+            Vec::new()
+        } else {
+            let mut yz = vec![K::ZERO; d_pad];
+            let row = &acc.y_zcol[i];
+            for rho in 0..D {
+                yz[rho] = row[rho];
+            }
+            yz
+        };
+
         children.push(MeInstance::<Cmt, F, K> {
             c_step_coords: vec![],
             u_offset: 0,
@@ -1082,8 +1168,10 @@ where
             c: child_cs[i].clone(),
             X: Xi,
             r: parent_r.clone(),
+            s_col: parent.s_col.clone(),
             y: y_i,
             y_scalars: y_scalars_i,
+            y_zcol,
             m_in,
             fold_digest,
         });
@@ -1103,6 +1191,21 @@ where
         if lhs != parent.y[j] {
             ok_y = false;
             break;
+        }
+    }
+
+    // y_zcol: column-domain opening must also decompose (when present).
+    if ok_y && !chi_s.is_empty() {
+        let mut lhs = vec![K::ZERO; d_pad];
+        let mut pow = K::ONE;
+        for i in 0..k_dec {
+            for t in 0..d_pad {
+                lhs[t] += pow * children[i].y_zcol[t];
+            }
+            pow *= bK;
+        }
+        if lhs != parent.y_zcol {
+            ok_y = false;
         }
     }
 
@@ -1223,8 +1326,10 @@ where
             c,
             X: inp.X.clone(),
             r: inp.r.clone(),
+            s_col: inp.s_col.clone(),
             y: inp.y.clone(),
             y_scalars,
+            y_zcol: inp.y_zcol.clone(),
             m_in: inp.m_in,
             fold_digest: inp.fold_digest,
         };
@@ -1374,7 +1479,7 @@ where
         }
     }
 
-    let parent_pub = ccs::rlc_public(s, params, rlc_rhos, rlc_inputs, mixers.mix_rhos_commits, ell_d);
+    let parent_pub = ccs::rlc_public(s, params, rlc_rhos, rlc_inputs, mixers.mix_rhos_commits, ell_d)?;
 
     let prefix = match lane {
         RlcLane::Main => "",
@@ -1398,6 +1503,12 @@ where
             step_idx
         )));
     }
+    if parent_pub.s_col != rlc_parent.s_col {
+        return Err(PiCcsError::ProtocolError(format!(
+            "step {}: {prefix}RLC s_col mismatch",
+            step_idx
+        )));
+    }
     if parent_pub.y != rlc_parent.y {
         return Err(PiCcsError::ProtocolError(format!(
             "step {}: {prefix}RLC y mismatch",
@@ -1407,6 +1518,12 @@ where
     if parent_pub.y_scalars != rlc_parent.y_scalars {
         return Err(PiCcsError::ProtocolError(format!(
             "step {}: {prefix}RLC y_scalars mismatch",
+            step_idx
+        )));
+    }
+    if parent_pub.y_zcol != rlc_parent.y_zcol {
+        return Err(PiCcsError::ProtocolError(format!(
+            "step {}: {prefix}RLC y_zcol mismatch",
             step_idx
         )));
     }
@@ -1436,6 +1553,7 @@ fn crosscheck_route_a_ccs_step<L>(
     ccs_proof: &crate::PiCcsProof,
     ell_d: usize,
     ell_n: usize,
+    ell_m: usize,
     d_sc: usize,
     fold_digest: [u8; 32],
     log: &L,
@@ -1462,6 +1580,30 @@ where
             ccs_proof.sumcheck_challenges.len(),
         )));
     }
+    let (s_col_prime, alpha_prime_nc) = if ccs_proof.variant == crate::optimized_engine::PiCcsProofVariant::SplitNcV1 {
+        let want_nc_rounds_total = ell_m
+            .checked_add(ell_d)
+            .ok_or_else(|| PiCcsError::ProtocolError("ell_m + ell_d overflow".into()))?;
+        if ccs_proof.sumcheck_rounds_nc.len() != want_nc_rounds_total {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: crosscheck expects {} NC sumcheck rounds, got {}",
+                step_idx,
+                want_nc_rounds_total,
+                ccs_proof.sumcheck_rounds_nc.len(),
+            )));
+        }
+        if ccs_proof.sumcheck_challenges_nc.len() != want_nc_rounds_total {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: crosscheck expects {} NC sumcheck challenges, got {}",
+                step_idx,
+                want_nc_rounds_total,
+                ccs_proof.sumcheck_challenges_nc.len(),
+            )));
+        }
+        ccs_proof.sumcheck_challenges_nc.split_at(ell_m)
+    } else {
+        (&[][..], &[][..])
+    };
 
     let (r_prime, alpha_prime) = ccs_proof.sumcheck_challenges.split_at(ell_n);
     let r_inputs = me_inputs.first().map(|mi| mi.r.as_slice());
@@ -1559,7 +1701,7 @@ where
                 .unwrap_or(K::ZERO)
         };
 
-        let rhs_opt = crate::optimized_engine::rhs_terminal_identity_paper_exact(
+        let rhs_fe = crate::paper_exact_engine::rhs_terminal_identity_fe_paper_exact(
             s,
             params,
             &ccs_proof.challenges_public,
@@ -1568,8 +1710,7 @@ where
             ccs_out,
             r_inputs,
         );
-
-        let (lhs_exact, _rhs_unused) = crate::paper_exact_engine::q_eval_at_ext_point_paper_exact_with_inputs(
+        let (lhs_fe, _rhs_unused) = crate::paper_exact_engine::q_eval_at_ext_point_fe_paper_exact_with_inputs(
             s,
             params,
             core::slice::from_ref(mcs_wit),
@@ -1579,10 +1720,23 @@ where
             &ccs_proof.challenges_public,
             r_inputs,
         );
-
-        if rhs_opt != lhs_exact || rhs_opt != running_sum_prover {
+        if rhs_fe != lhs_fe || rhs_fe != running_sum_prover {
             return Err(PiCcsError::ProtocolError(format!(
-                "step {}: crosscheck terminal evaluation claim mismatch",
+                "step {}: crosscheck FE terminal evaluation claim mismatch",
+                step_idx
+            )));
+        }
+
+        let rhs_nc = crate::paper_exact_engine::rhs_terminal_identity_nc_paper_exact(
+            params,
+            &ccs_proof.challenges_public,
+            s_col_prime,
+            alpha_prime_nc,
+            ccs_out,
+        );
+        if rhs_nc != ccs_proof.sumcheck_final_nc {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: crosscheck NC terminal evaluation claim mismatch",
                 step_idx
             )));
         }
@@ -1597,6 +1751,7 @@ where
             me_inputs,
             me_witnesses,
             r_prime,
+            s_col_prime,
             ell_d,
             fold_digest,
             log,
@@ -1647,6 +1802,12 @@ where
                     step_idx
                 )));
             }
+            if a.s_col != b.s_col {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: crosscheck output[{idx}] s_col mismatch",
+                    step_idx
+                )));
+            }
             if a.c.data != b.c.data {
                 return Err(PiCcsError::ProtocolError(format!(
                     "step {}: crosscheck output[{idx}] commitment mismatch",
@@ -1672,6 +1833,12 @@ where
             if a.y_scalars != b.y_scalars {
                 return Err(PiCcsError::ProtocolError(format!(
                     "step {}: crosscheck output[{idx}] y_scalars mismatch",
+                    step_idx
+                )));
+            }
+            if a.y_zcol != b.y_zcol {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: crosscheck output[{idx}] y_zcol mismatch",
                     step_idx
                 )));
             }
@@ -1741,32 +1908,16 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let is_id0 = s_me.n == s_me.m
-        && s_me
-            .matrices
-            .first()
-            .map(|m0| m0.is_identity())
-            .unwrap_or(false);
-    let s0: Cow<'_, CcsStructure<F>> = if is_id0 {
-        Cow::Borrowed(s_me)
-    } else {
-        Cow::Owned(
-            s_me
-                .ensure_identity_first()
-                .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?,
-        )
-    };
-    let (s, cpu_bus) =
-        crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(s0.as_ref(), steps)?;
-    // Route A terminal checks interpret `ME.y_scalars[0]` as MLE(column)(r_time), which requires M₀ = I.
-    s.assert_m0_is_identity_for_nc()
-        .map_err(|e| PiCcsError::InvalidInput(format!("identity-first (M₀=I) required: {e:?}")))?;
+    let (s, cpu_bus) = crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(s_me, steps)?;
+    let dims = utils::build_dims_and_policy(params, s)?;
     let utils::Dims {
         ell_d,
         ell_n,
+        ell_m,
         ell,
         d_sc,
-    } = utils::build_dims_and_policy(params, s)?;
+        ..
+    } = dims;
     let ccs_sparse_cache: Option<Arc<SparseCache<F>>> = if mode_uses_sparse_cache(&mode) {
         Some(
             prover_ctx
@@ -1878,17 +2029,10 @@ where
         // 5) Finish CCS alone for remaining ell_d Ajtai rounds
         // 6) Emit CCS + memory ME claims at the shared r_time and fold via RLC/DEC
 
-        utils::bind_header_and_instances_with_digest(
-            tr,
-            params,
-            &s,
-            core::slice::from_ref(mcs_inst),
-            ell,
-            d_sc,
-            &ccs_mat_digest,
-        )?;
+        utils::bind_header_and_instances_with_digest(tr, params, &s, core::slice::from_ref(mcs_inst), dims, &ccs_mat_digest)?;
         utils::bind_me_inputs(tr, &accumulator)?;
-        let ch = utils::sample_challenges(tr, ell_d, ell)?;
+        let mut ch = utils::sample_challenges(tr, ell_d, ell)?;
+        ch.beta_m = utils::sample_beta_m(tr, ell_m)?;
         let ccs_initial_sum = claimed_initial_sum_from_inputs(&s, &ch, &accumulator);
         tr.append_fields(b"sumcheck/initial_sum", &ccs_initial_sum.as_coeffs());
 
@@ -2050,12 +2194,34 @@ where
         sumcheck_rounds.extend_from_slice(&ajtai_rounds);
         sumcheck_chals.extend_from_slice(&ajtai_chals);
 
+        // --------------------------------------------------------------------
+        // NC-only sumcheck (digit-range / norm-check) over {0,1}^{ell_m + ell_d}.
+        // --------------------------------------------------------------------
+        let mut ccs_nc_oracle = neo_reductions::engines::optimized_engine::oracle::NcOracle::new(
+            &s,
+            params,
+            core::slice::from_ref(mcs_wit),
+            &accumulator_wit,
+            ch.clone(),
+            ell_d,
+            ell_m,
+            d_sc,
+        );
+        let (sumcheck_rounds_nc, sumcheck_chals_nc) =
+            run_sumcheck_prover_ds(tr, b"ccs/nc", idx, &mut ccs_nc_oracle, K::ZERO)?;
+        let mut running_sum_nc = K::ZERO;
+        for (round_poly, &r_i) in sumcheck_rounds_nc.iter().zip(sumcheck_chals_nc.iter()) {
+            running_sum_nc = poly_eval_k(round_poly, r_i);
+        }
+        let (s_col, _alpha_prime_nc) = sumcheck_chals_nc.split_at(ell_m);
+
         // Build CCS ME outputs at r_time.
         let fold_digest = tr.digest32();
         let mut ccs_out = match &mut ccs_oracle {
             CcsOracleDispatch::Optimized(oracle) => oracle.build_me_outputs_from_ajtai_precomp(
                 core::slice::from_ref(mcs_inst),
                 &accumulator,
+                s_col,
                 fold_digest,
                 l,
             ),
@@ -2068,6 +2234,7 @@ where
                 &accumulator,
                 &accumulator_wit,
                 &r_time,
+                s_col,
                 ell_d,
                 fold_digest,
                 l,
@@ -2115,9 +2282,14 @@ where
         }
 
         let mut ccs_proof = crate::PiCcsProof::new(sumcheck_rounds, Some(ccs_initial_sum));
+        ccs_proof.variant = crate::optimized_engine::PiCcsProofVariant::SplitNcV1;
         ccs_proof.sumcheck_challenges = sumcheck_chals;
+        ccs_proof.sumcheck_rounds_nc = sumcheck_rounds_nc;
+        ccs_proof.sc_initial_sum_nc = Some(K::ZERO);
+        ccs_proof.sumcheck_challenges_nc = sumcheck_chals_nc;
         ccs_proof.challenges_public = ch;
         ccs_proof.sumcheck_final = running_sum;
+        ccs_proof.sumcheck_final_nc = running_sum_nc;
         ccs_proof.header_digest = fold_digest.to_vec();
 
         #[cfg(feature = "paper-exact")]
@@ -2136,6 +2308,7 @@ where
                 &ccs_proof,
                 ell_d,
                 ell_n,
+                ell_m,
                 d_sc,
                 fold_digest,
                 l,
@@ -2506,32 +2679,16 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let is_id0 = s_me.n == s_me.m
-        && s_me
-            .matrices
-            .first()
-            .map(|m0| m0.is_identity())
-            .unwrap_or(false);
-    let s0: Cow<'_, CcsStructure<F>> = if is_id0 {
-        Cow::Borrowed(s_me)
-    } else {
-        Cow::Owned(
-            s_me
-                .ensure_identity_first()
-                .map_err(|e| PiCcsError::InvalidInput(format!("identity-first required: {e:?}")))?,
-        )
-    };
-    let (s, cpu_bus) =
-        crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(s0.as_ref(), steps)?;
-    // Route A terminal checks interpret `ME.y_scalars[0]` as MLE(column)(r_time), which requires M₀ = I.
-    s.assert_m0_is_identity_for_nc()
-        .map_err(|e| PiCcsError::InvalidInput(format!("identity-first (M₀=I) required: {e:?}")))?;
+    let (s, cpu_bus) = crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(s_me, steps)?;
+    let dims = utils::build_dims_and_policy(params, s)?;
     let utils::Dims {
         ell_d,
         ell_n,
+        ell_m,
         ell,
         d_sc,
-    } = utils::build_dims_and_policy(params, s)?;
+        ..
+    } = dims;
     let ring = ccs::RotRing::goldilocks();
 
     if steps.len() != proof.steps.len() {
@@ -2632,21 +2789,17 @@ where
         // --------------------------------------------------------------------
 
         // Bind CCS header + ME inputs and sample public challenges.
-        utils::bind_header_and_instances_with_digest(
-            tr,
-            params,
-            &s,
-            core::slice::from_ref(mcs_inst),
-            ell,
-            d_sc,
-            &ccs_mat_digest,
-        )?;
+        utils::bind_header_and_instances_with_digest(tr, params, &s, core::slice::from_ref(mcs_inst), dims, &ccs_mat_digest)?;
         utils::bind_me_inputs(tr, &accumulator)?;
-        let ch = utils::sample_challenges(tr, ell_d, ell)?;
+        let mut ch = utils::sample_challenges(tr, ell_d, ell)?;
+        if step_proof.fold.ccs_proof.variant == crate::optimized_engine::PiCcsProofVariant::SplitNcV1 {
+            ch.beta_m = utils::sample_beta_m(tr, ell_m)?;
+        }
         let expected_ch = &step_proof.fold.ccs_proof.challenges_public;
         if expected_ch.alpha != ch.alpha
             || expected_ch.beta_a != ch.beta_a
             || expected_ch.beta_r != ch.beta_r
+            || expected_ch.beta_m != ch.beta_m
             || expected_ch.gamma != ch.gamma
         {
             return Err(PiCcsError::ProtocolError(format!(
@@ -2759,6 +2912,66 @@ where
             )));
         }
 
+        // Bind Π_CCS outputs to the public MCS instance and carried ME inputs.
+        //
+        // - Commitments must match (Π_CCS does not change commitments).
+        // - `X` must match the digit-decomposition of public `x` for the MCS output.
+        // - `X` must match the carried ME inputs for subsequent outputs.
+        {
+            let out0 = &step_proof.fold.ccs_out[0];
+            if out0.c != mcs_inst.c {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: Π_CCS output[0].c does not match mcs_inst.c",
+                    idx
+                )));
+            }
+            if out0.m_in != mcs_inst.m_in {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: Π_CCS output[0].m_in={}, expected {}",
+                    idx, out0.m_in, mcs_inst.m_in
+                )));
+            }
+            if out0.X.rows() != D || out0.X.cols() != mcs_inst.m_in {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: Π_CCS output[0].X has shape {}×{}, expected {}×{}",
+                    idx,
+                    out0.X.rows(),
+                    out0.X.cols(),
+                    D,
+                    mcs_inst.m_in
+                )));
+            }
+
+            for (i, inp) in accumulator.iter().enumerate() {
+                let out = &step_proof.fold.ccs_out[i + 1];
+                if out.c != inp.c {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: Π_CCS output[{}].c does not match accumulator[{}].c",
+                        idx,
+                        i + 1,
+                        i
+                    )));
+                }
+                if out.m_in != inp.m_in {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: Π_CCS output[{}].m_in={}, expected {}",
+                        idx,
+                        i + 1,
+                        out.m_in,
+                        inp.m_in
+                    )));
+                }
+                if out.X != inp.X {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: Π_CCS output[{}].X does not match accumulator[{}].X",
+                        idx,
+                        i + 1,
+                        i
+                    )));
+                }
+            }
+        }
+
         // Finish CCS Ajtai rounds alone (continuing transcript state after batched rounds).
         let ajtai_rounds = &step_proof.fold.ccs_proof.sumcheck_rounds[ell_n..];
         let (ajtai_chals, running_sum, ok) =
@@ -2796,40 +3009,122 @@ where
             }
         }
 
-        // Engine-selected RHS assembly for CCS terminal identity.
-        let rhs = match &mode {
-            FoldingMode::Optimized => crate::optimized_engine::rhs_terminal_identity_paper_exact(
-                &s,
-                params,
-                &ch,
-                &r_time,
-                &ajtai_chals,
-                &step_proof.fold.ccs_out,
-                accumulator.first().map(|mi| mi.r.as_slice()),
-            ),
-            #[cfg(feature = "paper-exact")]
-            FoldingMode::PaperExact => crate::paper_exact_engine::rhs_terminal_identity_paper_exact(
-                &s,
-                params,
-                &ch,
-                &r_time,
-                &ajtai_chals,
-                &step_proof.fold.ccs_out,
-                accumulator.first().map(|mi| mi.r.as_slice()),
-            ),
-            #[cfg(feature = "paper-exact")]
-            FoldingMode::OptimizedWithCrosscheck(_) => crate::optimized_engine::rhs_terminal_identity_paper_exact(
-                &s,
-                params,
-                &ch,
-                &r_time,
-                &ajtai_chals,
-                &step_proof.fold.ccs_out,
-                accumulator.first().map(|mi| mi.r.as_slice()),
-            ),
-        };
-        if running_sum != rhs {
-            return Err(PiCcsError::SumcheckError("Π_CCS terminal identity check failed".into()));
+        if step_proof.fold.ccs_proof.variant != crate::optimized_engine::PiCcsProofVariant::SplitNcV1 {
+            return Err(PiCcsError::ProtocolError("unsupported Π_CCS proof variant".into()));
+        }
+
+        // FE-only terminal identity.
+        let rhs_fe = crate::paper_exact_engine::rhs_terminal_identity_fe_paper_exact(
+            &s,
+            params,
+            &ch,
+            &r_time,
+            &ajtai_chals,
+            &step_proof.fold.ccs_out,
+            accumulator.first().map(|mi| mi.r.as_slice()),
+        );
+        if running_sum != rhs_fe {
+            return Err(PiCcsError::SumcheckError(
+                "Π_CCS FE-only terminal identity check failed".into(),
+            ));
+        }
+
+        // NC-only sumcheck + terminal identity.
+        if step_proof.fold.ccs_proof.sumcheck_rounds_nc.is_empty() {
+            return Err(PiCcsError::InvalidInput(
+                "Π_CCS SplitNcV1 requires non-empty sumcheck_rounds_nc".into(),
+            ));
+        }
+        if let Some(x) = step_proof.fold.ccs_proof.sc_initial_sum_nc {
+            if x != K::ZERO {
+                return Err(PiCcsError::InvalidInput(
+                    "Π_CCS SplitNcV1 requires sc_initial_sum_nc == 0".into(),
+                ));
+            }
+        }
+        let want_nc_rounds_total = ell_m
+            .checked_add(ell_d)
+            .ok_or_else(|| PiCcsError::ProtocolError("ell_m + ell_d overflow".into()))?;
+        if step_proof.fold.ccs_proof.sumcheck_rounds_nc.len() != want_nc_rounds_total {
+            return Err(PiCcsError::InvalidInput(format!(
+                "step {}: Π_CCS NC sumcheck_rounds_nc.len()={}, expected {}",
+                idx,
+                step_proof.fold.ccs_proof.sumcheck_rounds_nc.len(),
+                want_nc_rounds_total
+            )));
+        }
+        if step_proof.fold.ccs_proof.sumcheck_challenges_nc.len() != want_nc_rounds_total {
+            return Err(PiCcsError::InvalidInput(format!(
+                "step {}: Π_CCS NC sumcheck_challenges_nc.len()={}, expected {}",
+                idx,
+                step_proof.fold.ccs_proof.sumcheck_challenges_nc.len(),
+                want_nc_rounds_total
+            )));
+        }
+
+        let (nc_chals, running_sum_nc, ok_nc) = verify_sumcheck_rounds_ds(
+            tr,
+            b"ccs/nc",
+            idx,
+            d_sc,
+            K::ZERO,
+            &step_proof.fold.ccs_proof.sumcheck_rounds_nc,
+        );
+        if !ok_nc {
+            return Err(PiCcsError::SumcheckError("Π_CCS NC rounds invalid".into()));
+        }
+
+        if nc_chals != step_proof.fold.ccs_proof.sumcheck_challenges_nc {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: Π_CCS NC sumcheck challenges mismatch",
+                idx
+            )));
+        }
+        if running_sum_nc != step_proof.fold.ccs_proof.sumcheck_final_nc {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: Π_CCS sumcheck_final_nc mismatch",
+                idx
+            )));
+        }
+
+        let (s_col_prime, alpha_prime_nc) = nc_chals.split_at(ell_m);
+        let d_pad = 1usize
+            .checked_shl(ell_d as u32)
+            .ok_or_else(|| PiCcsError::ProtocolError("2^ell_d overflow".into()))?;
+        for (out_idx, out) in step_proof.fold.ccs_out.iter().enumerate() {
+            if out.r != r_time {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: Π_CCS output[{out_idx}] r != r_time",
+                    idx
+                )));
+            }
+            if out.s_col.as_slice() != s_col_prime {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: Π_CCS output[{out_idx}] s_col mismatch",
+                    idx
+                )));
+            }
+            if out.y_zcol.len() != d_pad {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: Π_CCS output[{out_idx}] y_zcol.len()={}, expected {}",
+                    idx,
+                    out.y_zcol.len(),
+                    d_pad
+                )));
+            }
+        }
+
+        let rhs_nc = crate::paper_exact_engine::rhs_terminal_identity_nc_paper_exact(
+            params,
+            &ch,
+            s_col_prime,
+            alpha_prime_nc,
+            &step_proof.fold.ccs_out,
+        );
+        if running_sum_nc != rhs_nc {
+            return Err(PiCcsError::SumcheckError(
+                "Π_CCS NC terminal identity check failed".into(),
+            ));
         }
 
         let observed_digest = tr.digest32();

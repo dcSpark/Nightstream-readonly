@@ -47,8 +47,10 @@ fn dummy_me_instance() -> MeInstance<Cmt, F, K> {
         c,
         X,
         r,
+        s_col: vec![],
         y,
         y_scalars,
+        y_zcol: vec![K::ZERO; D],
         m_in: 1,
         fold_digest: [0u8; 32],
     }
@@ -56,16 +58,22 @@ fn dummy_me_instance() -> MeInstance<Cmt, F, K> {
 
 fn dummy_pi_ccs_proof_zero() -> PiCcsProof {
     PiCcsProof {
+        variant: neo_reductions::optimized_engine::PiCcsProofVariant::SplitNcV1,
         sumcheck_rounds: Vec::new(),
         sc_initial_sum: Some(K::ZERO),
         sumcheck_challenges: Vec::new(),
+        sumcheck_rounds_nc: Vec::new(),
+        sc_initial_sum_nc: Some(K::ZERO),
+        sumcheck_challenges_nc: Vec::new(),
         challenges_public: neo_reductions::Challenges {
             alpha: Vec::new(),
             beta_a: Vec::new(),
             beta_r: Vec::new(),
+            beta_m: Vec::new(),
             gamma: K::ZERO,
         },
         sumcheck_final: K::ZERO,
+        sumcheck_final_nc: K::ZERO,
         header_digest: Vec::new(),
         _extra: None,
     }
@@ -76,10 +84,14 @@ fn dummy_pi_ccs_challenges_zero() -> PiCcsChallenges {
         alpha: Vec::new(),
         beta_a: Vec::new(),
         beta_r: Vec::new(),
+        beta_m: Vec::new(),
         gamma: K::ZERO,
         r_prime: Vec::new(),
         alpha_prime: Vec::new(),
         sumcheck_challenges: Vec::new(),
+        s_col_prime: Vec::new(),
+        alpha_prime_nc: Vec::new(),
+        sumcheck_challenges_nc: Vec::new(),
     }
 }
 

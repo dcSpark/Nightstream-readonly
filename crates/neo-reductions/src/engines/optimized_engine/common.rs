@@ -9,7 +9,7 @@
 #![allow(non_snake_case)]
 
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::{CcsMatrix, CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
+use neo_ccs::{CcsMatrix, CcsStructure, Mat, McsWitness, MeInstance};
 use neo_math::{D, K};
 use neo_params::NeoParams;
 use p3_field::{Field, PrimeCharacteristicRing};
@@ -23,6 +23,8 @@ pub struct Challenges {
     /// β = (β_a, β_r) ∈ K^{log(dn)} split into Ajtai and row parts
     pub beta_a: Vec<K>,
     pub beta_r: Vec<K>,
+    /// β_m ∈ K^{log m} - column part for the split-NC variant
+    pub beta_m: Vec<K>,
     /// γ ∈ K - random linear combination weight
     pub gamma: K,
 }
@@ -686,148 +688,6 @@ where
     (lhs, K::ZERO)
 }
 
-/// --- Terminal identity (Step 4) -------------------------------------------
-///
-/// The original paper formula (no factoring):
-///
-/// v ?= eq((α',r'), β)·(F' + Σ_i γ^i·N_i')
-///      + γ^k · Σ_{j=1,i=2}^{t,k} γ^{i+(j-1)k-1} · E_{(i,j)}
-///
-/// with:
-///   E_{(i,j)} := eq((α',r'), (α,r))·ẏ'_{(i,j)}(α')
-///
-/// Where:
-///   - F' uses y' of the first output (i=1) to reconstruct m_j and f.
-///   - N_i' = ∏_{t=-(b-1)}^{b-1} ( ẏ'_{(i,1)}(α') - t )
-pub fn rhs_terminal_identity_paper_exact<Ff>(
-    s: &CcsStructure<Ff>,
-    params: &NeoParams,
-    ch: &Challenges, // contains (α, β, γ)
-    r_prime: &[K],
-    alpha_prime: &[K],
-    out_me: &[MeInstance<Cmt, Ff, K>], // outputs y' (i ∈ [k], j ∈ [t])
-    me_inputs_r_opt: Option<&[K]>,     // r from inputs, required if k>1
-) -> K
-where
-    Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
-    K: From<Ff>,
-{
-    assert!(!out_me.is_empty(), "terminal: need at least one output");
-    let k_total = out_me.len();
-
-    // eq((α',r'), β) = eq(α', β_a) * eq(r', β_r)
-    let eq_aprp_beta = {
-        let e1 = eq_points(alpha_prime, &ch.beta_a);
-        let e2 = eq_points(r_prime, &ch.beta_r);
-        e1 * e2
-    };
-
-    // eq((α',r'),(α,r)) if we have ME inputs; else 0 (so the Eval block vanishes).
-    let eq_aprp_ar = if let Some(r) = me_inputs_r_opt {
-        eq_points(alpha_prime, &ch.alpha) * eq_points(r_prime, r)
-    } else {
-        K::ZERO
-    };
-
-    // --- F' ---
-    // Recompose m_j from y'_{(1,j)} using base-b digits (Ajtai rows) and evaluate f.
-    let bK = K::from(Ff::from_u64(params.b as u64));
-    let mut m_vals = vec![K::ZERO; s.t()];
-    {
-        let y_first = &out_me[0];
-        for j in 0..s.t() {
-            let row = &y_first.y[j]; // K^d (padded)
-            let mut acc = K::ZERO;
-            let mut pow = K::ONE;
-            for rho in 0..D {
-                acc += pow * row.get(rho).copied().unwrap_or(K::ZERO);
-                pow *= bK;
-            }
-            m_vals[j] = acc;
-        }
-    }
-    let F_prime = s.f.eval_in_ext::<K>(&m_vals);
-
-    // --- Σ γ^i · N_i' ---
-    // N_i' = ∏_{t} ( ẏ'_{(i,1)}(α') - t ), with ẏ' evaluated at α' as MLE:
-    //        ẏ'_{(i,1)}(α') = ⟨ y'_{(i,1)}, χ_{α'} ⟩.
-    let chi_alpha_prime = {
-        // Build χ_{α'} over Ajtai domain by tensoring the bits explicitly.
-        let d_sz = 1usize << alpha_prime.len();
-        let mut tbl = vec![K::ZERO; d_sz];
-        for rho in 0..d_sz {
-            let mut w = K::ONE;
-            for bit in 0..alpha_prime.len() {
-                let a = alpha_prime[bit];
-                let bit_is_one = ((rho >> bit) & 1) == 1;
-                w *= if bit_is_one { a } else { K::ONE - a };
-            }
-            tbl[rho] = w;
-        }
-        tbl
-    };
-
-    let mut nc_prime_sum = K::ZERO;
-    {
-        let mut g = ch.gamma; // γ^1
-        for out in out_me {
-            // ẏ'_{(i,1)}(α') = Σ_ρ y'_{(i,1)}[ρ] · χ_{α'}[ρ]
-            let y1 = &out.y[0];
-            let limit = core::cmp::min(chi_alpha_prime.len(), y1.len());
-            let mut y_eval = K::ZERO;
-            for rho in 0..limit {
-                y_eval += y1[rho] * chi_alpha_prime[rho];
-            }
-            let Ni = range_product::<Ff>(y_eval, params.b);
-            nc_prime_sum += g * Ni;
-            g *= ch.gamma;
-        }
-    }
-
-    // --- Eval' block ---
-    // γ^k · Σ_{j=1,i=2}^{t,k} γ^{i+(j-1)k-1} · E_{(i,j)} with
-    // E_{(i,j)} = eq((α',r'),(α,r)) · ẏ'_{(i,j)}(α').
-    let mut eval_sum = K::ZERO;
-    if me_inputs_r_opt.is_some() && k_total >= 2 {
-        // Precompute γ^k
-        let mut gamma_to_k = K::ONE;
-        for _ in 0..k_total {
-            gamma_to_k *= ch.gamma;
-        }
-
-        for j in 0..s.t() {
-            for (i_abs, out) in out_me.iter().enumerate().skip(1) {
-                // ẏ'_{(i,j)}(α') = Σ_ρ y'_{(i,j)}[ρ] · χ_{α'}[ρ]
-                let y = &out.y[j];
-                let mut y_eval = K::ZERO;
-                let limit = core::cmp::min(chi_alpha_prime.len(), y.len());
-                for rho in 0..limit {
-                    y_eval += y[rho] * chi_alpha_prime[rho];
-                }
-
-                // Inner weight: γ^{i-1} * (γ^k)^j (0-based i_abs, 0-based j)
-                let mut weight = K::ONE;
-                for _ in 0..i_abs {
-                    weight *= ch.gamma;
-                } // γ^{i-1}
-                for _ in 0..j {
-                    weight *= gamma_to_k;
-                } // (γ^k)^j
-
-                eval_sum += weight * y_eval;
-            }
-        }
-    }
-
-    // Assemble RHS exactly like the paper:
-    // v = eq((α',r'), β)·(F' + Σ γ^i N_i') + γ^k · eq((α',r'), (α,r)) · Eval'.
-    let mut gamma_to_k_outer = K::ONE;
-    for _ in 0..k_total {
-        gamma_to_k_outer *= ch.gamma;
-    }
-    eq_aprp_beta * (F_prime + nc_prime_sum) + eq_aprp_ar * (gamma_to_k_outer * eval_sum)
-}
-
 /// --- Public claimed sum T for sumcheck ------------------------------------
 ///
 /// Compute the public claimed sum used by sumcheck:
@@ -946,152 +806,6 @@ where
     result
 }
 
-/// --- Step 3 outputs, literal form -----------------------------------------
-///
-/// For each i ∈ [k] and j ∈ [t], send:
-///   y'_{(i,j)} := Z_i · M_j^T · ẑ_{r'}  ∈ K^d
-///
-/// where ẑ_{r'} is χ_{r'} over {0,1}^{ℓ_n}, i.e., the row-table weights.
-/// This function builds those outputs exactly by literal dense loops.
-///
-/// Notes:
-/// - First `insts.len()` outputs correspond to MCS instances (`mcs_list` order).
-/// - Next `me_witnesses.len()` outputs correspond to ME inputs in order.
-/// - Each y[j] is padded to 2^{ℓ_d}.
-pub fn build_me_outputs_paper_exact<Ff, L>(
-    s: &CcsStructure<Ff>,
-    params: &NeoParams,
-    mcs_list: &[McsInstance<Cmt, Ff>],
-    witnesses: &[McsWitness<Ff>],
-    me_inputs: &[MeInstance<Cmt, Ff, K>],
-    me_witnesses: &[Mat<Ff>],
-    r_prime: &[K],
-    ell_d: usize,
-    fold_digest: [u8; 32],
-    l: &L,
-) -> Vec<MeInstance<Cmt, Ff, K>>
-where
-    Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
-    K: From<Ff>,
-    L: neo_ccs::traits::SModuleHomomorphism<Ff, Cmt>,
-{
-    // Build χ_{r'}(row) table literally.
-    let n_sz = 1usize << r_prime.len();
-    let mut chi_rp = vec![K::ZERO; n_sz];
-    for row in 0..n_sz {
-        let mut w = K::ONE;
-        for bit in 0..r_prime.len() {
-            let rb = r_prime[bit];
-            let is_one = ((row >> bit) & 1) == 1;
-            w *= if is_one { rb } else { K::ONE - rb };
-        }
-        chi_rp[row] = w;
-    }
-
-    // v_j := M_j^T · χ_{r'} ∈ K^m, computed with literal nested loops.
-    let mut vjs: Vec<Vec<K>> = Vec::with_capacity(s.t());
-    for j in 0..s.t() {
-        let mut vj = vec![K::ZERO; s.m];
-        for row in 0..n_sz {
-            let wr = if row < s.n { chi_rp[row] } else { K::ZERO };
-            if wr == K::ZERO {
-                continue;
-            }
-            for c in 0..s.m {
-                vj[c] += K::from(get_M(&s.matrices[j], row, c)) * wr;
-            }
-        }
-        vjs.push(vj);
-    }
-
-    // Pad helper
-    let pad_to_pow2 = |mut y: Vec<K>| -> Vec<K> {
-        let want = 1usize << ell_d;
-        y.resize(want, K::ZERO);
-        y
-    };
-
-    let base_f = K::from(Ff::from_u64(params.b as u64));
-    let mut pow_cache = vec![K::ONE; D];
-    for i in 1..D {
-        pow_cache[i] = pow_cache[i - 1] * base_f;
-    }
-    let recompose = |y: &[K]| -> K {
-        let mut acc = K::ZERO;
-        for (rho, &v) in y.iter().enumerate().take(D) {
-            acc += v * pow_cache[rho];
-        }
-        acc
-    };
-
-    let mut out = Vec::with_capacity(witnesses.len() + me_witnesses.len());
-
-    // MCS outputs (keep order)
-    for (inst, wit) in mcs_list.iter().zip(witnesses.iter()) {
-        let X = l.project_x(&wit.Z, inst.m_in);
-
-        let mut y = Vec::with_capacity(s.t());
-        // For each j, y_j = Z · v_j
-        for vj in &vjs {
-            let mut yj = vec![K::ZERO; D];
-            for rho in 0..D {
-                let mut acc = K::ZERO;
-                for c in 0..s.m {
-                    acc += K::from(wit.Z[(rho, c)]) * vj[c];
-                }
-                yj[rho] = acc;
-            }
-            y.push(pad_to_pow2(yj));
-        }
-        let y_scalars: Vec<K> = y.iter().map(|yj| recompose(yj)).collect();
-
-        out.push(MeInstance {
-            c_step_coords: vec![],
-            u_offset: 0,
-            u_len: 0,
-            c: inst.c.clone(),
-            X,
-            r: r_prime.to_vec(),
-            y,
-            y_scalars,
-            m_in: inst.m_in,
-            fold_digest,
-        });
-    }
-
-    // ME outputs (keep order)
-    for (inp, Zi) in me_inputs.iter().zip(me_witnesses.iter()) {
-        let mut y = Vec::with_capacity(s.t());
-        for vj in &vjs {
-            let mut yj = vec![K::ZERO; D];
-            for rho in 0..D {
-                let mut acc = K::ZERO;
-                for c in 0..s.m {
-                    acc += K::from(Zi[(rho, c)]) * vj[c];
-                }
-                yj[rho] = acc;
-            }
-            y.push(pad_to_pow2(yj));
-        }
-        let y_scalars: Vec<K> = y.iter().map(|yj| recompose(yj)).collect();
-
-        out.push(MeInstance {
-            c_step_coords: vec![],
-            u_offset: 0,
-            u_len: 0,
-            c: inp.c.clone(),
-            X: inp.X.clone(),
-            r: r_prime.to_vec(),
-            y,
-            y_scalars,
-            m_in: inp.m_in,
-            fold_digest,
-        });
-    }
-
-    out
-}
-
 /// --- Π_RLC (Section 4.5) ---------------------------------------------------
 ///
 /// Paper-exact Random Linear Combination using explicit S-action matrices ρ_i ∈ F^{D×D}.
@@ -1189,6 +903,39 @@ where
         })
         .collect();
 
+    // Optional NC channel: y_zcol := Σ ρ_i · y_zcol_i (same mixing as y_j).
+    let wants_nc_channel = !(me_inputs[0].s_col.is_empty() && me_inputs[0].y_zcol.is_empty());
+    let y_zcol = if wants_nc_channel {
+        assert!(
+            !me_inputs[0].s_col.is_empty() && !me_inputs[0].y_zcol.is_empty(),
+            "Π_RLC: incomplete NC channel on input 0 (expected both s_col and y_zcol)"
+        );
+        for (idx, inst) in me_inputs.iter().enumerate() {
+            assert_eq!(inst.s_col, me_inputs[0].s_col, "Π_RLC: s_col mismatch at input {idx}");
+            assert_eq!(
+                inst.y_zcol.len(),
+                d_pad,
+                "Π_RLC: y_zcol len mismatch at input {idx} (expected {d_pad}, got {})",
+                inst.y_zcol.len()
+            );
+        }
+
+        let mut acc = vec![K::ZERO; d_pad];
+        for i in 0..k1 {
+            let yi = &me_inputs[i].y_zcol;
+            for rr in 0..d.min(d_pad) {
+                let mut acc_rr = K::ZERO;
+                for kk in 0..d {
+                    acc_rr += K::from(get_F(&rhos[i], rr, kk)) * yi[kk];
+                }
+                acc[rr] += acc_rr;
+            }
+        }
+        acc
+    } else {
+        Vec::new()
+    };
+
     // Z := Σ ρ_i Z_i
     let mut Z = Mat::zero(d, s.m, Ff::ZERO);
     for i in 0..k1 {
@@ -1202,8 +949,10 @@ where
         c: me_inputs[0].c.clone(), // NOTE: caller can replace with true Σ ρ_i·c_i
         X,
         r,
+        s_col: me_inputs[0].s_col.clone(),
         y,
         y_scalars,
+        y_zcol,
         m_in,
         fold_digest: me_inputs[0].fold_digest,
     };
@@ -1307,6 +1056,40 @@ where
         y.push(yj_acc);
     }
 
+    // Optional NC channel: y_zcol := Σ ρ_i · y_zcol_i.
+    let wants_nc_channel = !(me_inputs[0].s_col.is_empty() && me_inputs[0].y_zcol.is_empty());
+    let y_zcol = if wants_nc_channel {
+        assert!(
+            !me_inputs[0].s_col.is_empty() && !me_inputs[0].y_zcol.is_empty(),
+            "Π_RLC: incomplete NC channel on input 0 (expected both s_col and y_zcol)"
+        );
+        for (idx, inst) in me_inputs.iter().enumerate() {
+            assert_eq!(inst.s_col, me_inputs[0].s_col, "Π_RLC: s_col mismatch at input {idx}");
+            assert_eq!(
+                inst.y_zcol.len(),
+                d_pad,
+                "Π_RLC: y_zcol len mismatch at input {idx} (expected {d_pad}, got {})",
+                inst.y_zcol.len()
+            );
+        }
+
+        let mut acc = vec![K::ZERO; d_pad];
+        for i in 0..k1 {
+            let yi = &me_inputs[i].y_zcol;
+            let rho = &rhos[i];
+            for rr in 0..d.min(d_pad) {
+                let mut acc_rr = K::ZERO;
+                for kk in 0..d {
+                    acc_rr += K::from(rho[(rr, kk)]) * yi[kk];
+                }
+                acc[rr] += acc_rr;
+            }
+        }
+        acc
+    } else {
+        Vec::new()
+    };
+
     // y_scalars: base-b recomposition of the first D digits of each y_j
     let bF = Ff::from_u64(params.b as u64);
     let mut pow_b = vec![Ff::ONE; D];
@@ -1369,8 +1152,10 @@ where
         c: me_inputs[0].c.clone(), // NOTE: caller can replace with true Σ ρ_i·c_i
         X,
         r,
+        s_col: me_inputs[0].s_col.clone(),
         y,
         y_scalars,
+        y_zcol,
         m_in,
         fold_digest: me_inputs[0].fold_digest,
     };
@@ -1491,11 +1276,8 @@ where
             );
         }
 
-        // M_0 is identity in our identity-first CCS normalization.
         let cap = core::cmp::min(s.m, n_eff);
-        vjs[0][..cap].copy_from_slice(&chi_r[..cap]);
-
-        for j in 1..t_mats {
+        for j in 0..t_mats {
             if let Some(csc) = sparse.csc(j) {
                 csc.add_mul_transpose_into(&chi_r, &mut vjs[j], n_eff);
             } else {
@@ -1543,6 +1325,31 @@ where
     let parent_r = &parent.r;
     let fold_digest = parent.fold_digest;
 
+    // Optional NC channel: build χ_{s_col} once for all children.
+    let want_nc_channel = !(parent.s_col.is_empty() && parent.y_zcol.is_empty());
+    let chi_s = if want_nc_channel {
+        assert!(
+            !parent.s_col.is_empty() && !parent.y_zcol.is_empty(),
+            "Π_DEC: incomplete NC channel on parent (expected both s_col and y_zcol)"
+        );
+        assert_eq!(
+            parent.y_zcol.len(),
+            d_pad,
+            "Π_DEC: parent y_zcol len mismatch (expected {d_pad}, got {})",
+            parent.y_zcol.len()
+        );
+        let chi = neo_ccs::utils::tensor_point::<K>(&parent.s_col);
+        assert!(
+            chi.len() >= s.m,
+            "Π_DEC: chi(s_col) too short for CCS width (need >= {}, got {})",
+            s.m,
+            chi.len()
+        );
+        chi
+    } else {
+        Vec::new()
+    };
+
     // Build children (parallel over digits).
     let children: Vec<MeInstance<Cmt, Ff, K>> = (0..k)
         .into_par_iter()
@@ -1576,6 +1383,20 @@ where
                 y_scalars_i.push(sc);
             }
 
+            let y_zcol = if chi_s.is_empty() {
+                Vec::new()
+            } else {
+                let mut yz_pad = vec![K::ZERO; d_pad];
+                for rho in 0..d {
+                    let mut acc = K::ZERO;
+                    for c in 0..s.m {
+                        acc += K::from(get_F(Zi, rho, c)) * chi_s[c];
+                    }
+                    yz_pad[rho] = acc;
+                }
+                yz_pad
+            };
+
             MeInstance::<Cmt, Ff, K> {
                 c_step_coords: vec![],
                 u_offset: 0,
@@ -1583,8 +1404,10 @@ where
                 c: parent_c.clone(), // caller patches with L(Z_i)
                 X: Xi,
                 r: parent_r.clone(),
+                s_col: parent.s_col.clone(),
                 y: y_i,
                 y_scalars: y_scalars_i,
+                y_zcol,
                 m_in,
                 fold_digest,
             }
@@ -1605,6 +1428,21 @@ where
         if lhs != parent.y[j] {
             ok_y = false;
             break;
+        }
+    }
+
+    // Verify: y_zcol ?= Σ b^i · (y_zcol)_i (when present).
+    if ok_y && want_nc_channel {
+        let mut lhs = vec![K::ZERO; d_pad];
+        let mut pow = K::ONE;
+        for i in 0..k {
+            for t in 0..d_pad {
+                lhs[t] += pow * children[i].y_zcol[t];
+            }
+            pow *= bK;
+        }
+        if lhs != parent.y_zcol {
+            ok_y = false;
         }
     }
 

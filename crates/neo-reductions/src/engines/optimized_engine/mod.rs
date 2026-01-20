@@ -19,11 +19,15 @@ pub mod verify;
 // Re-export commonly used items
 pub use common::Challenges;
 
+/// Proof format variant for Π_CCS.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PiCcsProofVariant {
+    /// Split-NC proof with two sumchecks: FE-only + NC-only.
+    SplitNcV1,
+}
+
 // Re-export core functions for building proofs and cross-checking
 pub use common::{
-    // Step 3 outputs
-    build_me_outputs_paper_exact,
-
     chi_ajtai_at_bool_point,
 
     chi_row_at_bool_point,
@@ -43,9 +47,6 @@ pub use common::{
     // Utilities
     recomposed_z_from_Z,
 
-    // Terminal identity (verifier RHS)
-    rhs_terminal_identity_paper_exact,
-
     // Paper-exact RLC/DEC
     rlc_reduction_paper_exact,
     rlc_reduction_paper_exact_with_commit_mix,
@@ -56,6 +57,9 @@ pub use common::{
 /// Proof structure for the Π_CCS protocol
 #[derive(Debug, Clone)]
 pub struct PiCcsProof {
+    /// Proof format variant.
+    pub variant: PiCcsProofVariant,
+
     /// Sumcheck rounds (each round is a vector of polynomial coefficients)
     pub sumcheck_rounds: Vec<Vec<K>>,
 
@@ -65,11 +69,23 @@ pub struct PiCcsProof {
     /// Sumcheck challenges (r' || α' from the sumcheck protocol)
     pub sumcheck_challenges: Vec<K>,
 
+    /// NC-only sumcheck rounds (digit-range / norm-check).
+    pub sumcheck_rounds_nc: Vec<Vec<K>>,
+
+    /// Initial sum for the NC sumcheck (optional; typically 0).
+    pub sc_initial_sum_nc: Option<K>,
+
+    /// NC sumcheck challenges (s' || α'_nc from the sumcheck protocol)
+    pub sumcheck_challenges_nc: Vec<K>,
+
     /// Public challenges (α, β, γ)
     pub challenges_public: Challenges,
 
     /// Final running sum after all sumcheck rounds
     pub sumcheck_final: K,
+
+    /// Final running sum after all NC sumcheck rounds
+    pub sumcheck_final_nc: K,
 
     /// Header digest for binding
     pub header_digest: Vec<u8>,
@@ -82,16 +98,22 @@ impl PiCcsProof {
     /// Create a new proof
     pub fn new(sumcheck_rounds: Vec<Vec<K>>, sc_initial_sum: Option<K>) -> Self {
         Self {
+            variant: PiCcsProofVariant::SplitNcV1,
             sumcheck_rounds,
             sc_initial_sum,
             sumcheck_challenges: Vec::new(),
+            sumcheck_rounds_nc: Vec::new(),
+            sc_initial_sum_nc: None,
+            sumcheck_challenges_nc: Vec::new(),
             challenges_public: Challenges {
                 alpha: Vec::new(),
                 beta_a: Vec::new(),
                 beta_r: Vec::new(),
+                beta_m: Vec::new(),
                 gamma: K::ZERO,
             },
             sumcheck_final: K::ZERO,
+            sumcheck_final_nc: K::ZERO,
             header_digest: Vec::new(),
             _extra: None,
         }
@@ -104,9 +126,6 @@ pub use verify::paper_exact_verify as pi_ccs_verify;
 
 /// Wrapper for simple case (k=1, no ME inputs)
 pub use prove::optimized_prove_simple as pi_ccs_prove_simple;
-
-// Route A: Split CCS prover for batched sum-check with Twist/Shout
-pub use prove::{finalize_ccs_after_batch, prepare_ccs_for_batch, CcsBatchContext};
 
 // Re-export the oracle for Route A integration
 pub use oracle::OptimizedOracle as CcsOracle;

@@ -359,21 +359,27 @@ fn extract_challenges_from_fold_run(
     ccs: &CcsStructure<NeoF>,
 ) -> Result<Vec<crate::circuit::witness::PiCcsChallenges>> {
     use crate::circuit::witness::PiCcsChallenges;
+    use neo_reductions::optimized_engine::PiCcsProofVariant;
 
     // Use the same dimension builder as the Π-CCS engines to recover
-    // (ell_n, ell) so we can split the sumcheck challenges.
-    let s_norm = ccs
-        .ensure_identity_first()
-        .map_err(|e| SpartanBridgeError::InvalidInput(format!("identity-first required: {e:?}")))?;
-
+    // (ell_n, ell, ell_m, ell_nc) so we can split sumcheck points.
     let dims =
-        neo_reductions::engines::utils::build_dims_and_policy(params, &s_norm).map_err(SpartanBridgeError::NeoError)?;
+        neo_reductions::engines::utils::build_dims_and_policy(params, ccs).map_err(SpartanBridgeError::NeoError)?;
     let ell_n = dims.ell_n;
     let ell = dims.ell;
+    let ell_m = dims.ell_m;
+    let ell_nc = dims.ell_nc;
 
     let mut out = Vec::with_capacity(fold_run.steps.len());
     for (step_idx, step) in fold_run.steps.iter().enumerate() {
         let proof = &step.fold.ccs_proof;
+
+        if proof.variant != PiCcsProofVariant::SplitNcV1 {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "FoldRun step {}: Spartan bridge currently requires SplitNcV1 Π-CCS proofs (got {:?})",
+                step_idx, proof.variant
+            )));
+        }
 
         if proof.sumcheck_rounds.len() != ell {
             return Err(SpartanBridgeError::InvalidInput(format!(
@@ -391,23 +397,47 @@ fn extract_challenges_from_fold_run(
                 proof.sumcheck_challenges.len()
             )));
         }
+        if proof.sumcheck_rounds_nc.len() != ell_nc {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "FoldRun step {}: expected {} NC sumcheck rounds, got {}",
+                step_idx,
+                ell_nc,
+                proof.sumcheck_rounds_nc.len()
+            )));
+        }
+        if proof.sumcheck_challenges_nc.len() != ell_nc {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "FoldRun step {}: expected {} NC sumcheck challenges, got {}",
+                step_idx,
+                ell_nc,
+                proof.sumcheck_challenges_nc.len()
+            )));
+        }
 
         let alpha = proof.challenges_public.alpha.clone();
         let beta_a = proof.challenges_public.beta_a.clone();
         let beta_r = proof.challenges_public.beta_r.clone();
+        let beta_m = proof.challenges_public.beta_m.clone();
         let gamma = proof.challenges_public.gamma;
 
         let sumcheck_challenges = proof.sumcheck_challenges.clone();
         let (r_prime_slice, alpha_prime_slice) = sumcheck_challenges.split_at(ell_n);
 
+        let sumcheck_challenges_nc = proof.sumcheck_challenges_nc.clone();
+        let (s_col_prime_slice, alpha_prime_nc_slice) = sumcheck_challenges_nc.split_at(ell_m);
+
         out.push(PiCcsChallenges {
             alpha,
             beta_a,
             beta_r,
+            beta_m,
             gamma,
             r_prime: r_prime_slice.to_vec(),
             alpha_prime: alpha_prime_slice.to_vec(),
             sumcheck_challenges,
+            s_col_prime: s_col_prime_slice.to_vec(),
+            alpha_prime_nc: alpha_prime_nc_slice.to_vec(),
+            sumcheck_challenges_nc,
         });
     }
 
@@ -436,6 +466,17 @@ fn enforce_sumcheck_degree_bounds(
             if round_poly.len() > d_sc + 1 {
                 return Err(SpartanBridgeError::InvalidInput(format!(
                     "Sumcheck round {} in step {} exceeds degree bound: len={} > d_sc+1={}",
+                    round_idx,
+                    step_idx,
+                    round_poly.len(),
+                    d_sc + 1,
+                )));
+            }
+        }
+        for (round_idx, round_poly) in proof.sumcheck_rounds_nc.iter().enumerate() {
+            if round_poly.len() > d_sc + 1 {
+                return Err(SpartanBridgeError::InvalidInput(format!(
+                    "NC sumcheck round {} in step {} exceeds degree bound: len={} > d_sc+1={}",
                     round_idx,
                     step_idx,
                     round_poly.len(),

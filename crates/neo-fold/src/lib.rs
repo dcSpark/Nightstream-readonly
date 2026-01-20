@@ -11,9 +11,6 @@ pub use neo_reductions::{
     pi_ccs_verify, sumcheck, CcsOracle, Challenges, PiCcsError, PiCcsProof,
 };
 
-// Route A: Split CCS prover for batched sum-check
-pub use neo_reductions::{finalize_ccs_after_batch, prepare_ccs_for_batch, CcsBatchContext};
-
 // Ergonomic per-step session API layered on top of the coordinator
 pub mod session;
 

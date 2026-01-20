@@ -249,8 +249,8 @@ where
         .checked_add(bus_region_len)
         .ok_or_else(|| PiCcsError::InvalidInput("shared-bus witness width overflow".into()))?;
     let base_ccs = cs
-        .build_square(m_min, bus_constraints)
-        .map_err(|e| PiCcsError::InvalidInput(format!("build_square failed: {e}")))?;
+        .build_rect(m_min, bus_constraints)
+        .map_err(|e| PiCcsError::InvalidInput(format!("build_rect failed: {e}")))?;
 
     Ok(SharedBusR1csPreprocessing {
         circuit,

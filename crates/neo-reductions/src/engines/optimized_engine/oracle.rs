@@ -21,6 +21,322 @@ use crate::sumcheck::RoundOracle;
 use super::common::Challenges;
 pub use super::sparse::SparseCache;
 
+/// NC-only oracle for the split-NC Π_CCS variant.
+///
+/// Variable order (rounds): first the `ell_m` column bits, then the `ell_d` Ajtai bits.
+///
+/// This oracle evaluates the NC polynomial:
+///   Q_nc(s, α) = eq(s, β_m) * eq(α, β_a) * Σ_i γ^{i+1} · N_i(Ẑ_i(α, s))
+/// where `N_i(·)` is the digit-range (norm-check) range polynomial.
+pub struct NcOracle<'a, F>
+where
+    F: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<F>,
+{
+    pub s: &'a CcsStructure<F>,
+    pub params: &'a neo_params::NeoParams,
+    pub mcs_witnesses: &'a [McsWitness<F>],
+    pub me_witnesses: &'a [Mat<F>],
+    pub ch: Challenges,
+
+    pub ell_d: usize,
+    pub ell_m: usize,
+    pub d_sc: usize,
+
+    pub round_idx: usize,
+    pub col_chals: Vec<K>,
+    pub ajtai_chals: Vec<K>,
+
+    // Streaming tables over the remaining column bits.
+    cur_len: usize,
+    eq_beta_m_tbl: Vec<K>,
+    // digits_tables[i][col_mask][rho] = Z_i[rho, col_mask] (with zero-padding).
+    digits_tables: Vec<Vec<[K; D]>>,
+    // weights[i][rho] = γ^{i+1} * χ_{β_a}(rho)
+    weights: Vec<[K; D]>,
+    // Cached t^2 values for the symmetric range polynomial.
+    range_t_sq: Vec<K>,
+}
+
+impl<'a, F> NcOracle<'a, F>
+where
+    F: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<F>,
+{
+    pub fn new(
+        s: &'a CcsStructure<F>,
+        params: &'a neo_params::NeoParams,
+        mcs_witnesses: &'a [McsWitness<F>],
+        me_witnesses: &'a [Mat<F>],
+        ch: Challenges,
+        ell_d: usize,
+        ell_m: usize,
+        d_sc: usize,
+    ) -> Self {
+        assert!(!mcs_witnesses.is_empty(), "need at least one witness for NC");
+        assert!(
+            ch.beta_m.len() == ell_m,
+            "NcOracle: beta_m length mismatch (expected {}, got {})",
+            ell_m,
+            ch.beta_m.len()
+        );
+        assert!(
+            ch.beta_a.len() == ell_d,
+            "NcOracle: beta_a length mismatch (expected {}, got {})",
+            ell_d,
+            ch.beta_a.len()
+        );
+
+        let m_pad = 1usize << ell_m;
+
+        // Column-domain χ_{β_m} table.
+        let eq_beta_m_tbl = chi_tail_weights(&ch.beta_m);
+        debug_assert_eq!(eq_beta_m_tbl.len(), m_pad, "chi(beta_m) length mismatch");
+
+        // Gather all Z witnesses in order: MCS first, then ME.
+        let mut all_witnesses: Vec<&Mat<F>> = Vec::with_capacity(mcs_witnesses.len() + me_witnesses.len());
+        for w in mcs_witnesses {
+            all_witnesses.push(&w.Z);
+        }
+        for z in me_witnesses {
+            all_witnesses.push(z);
+        }
+
+        // Precompute χ_{β_a}(rho) for rho=0..D-1.
+        let mut w_beta_a = [K::ZERO; D];
+        for rho in 0..D {
+            w_beta_a[rho] = eq_points_bool_mask(rho, &ch.beta_a);
+        }
+
+        // weights[i][rho] = γ^{i+1} * χ_{β_a}(rho)
+        let mut weights: Vec<[K; D]> = Vec::with_capacity(all_witnesses.len());
+        let mut g = ch.gamma; // γ^1
+        for _ in 0..all_witnesses.len() {
+            let mut wi = [K::ZERO; D];
+            for rho in 0..D {
+                wi[rho] = g * w_beta_a[rho];
+            }
+            weights.push(wi);
+            g *= ch.gamma;
+        }
+
+        // Column-domain digit tables.
+        let mut digits_tables: Vec<Vec<[K; D]>> = Vec::with_capacity(all_witnesses.len());
+        for Zi in all_witnesses {
+            if Zi.rows() != D || Zi.cols() != s.m {
+                panic!(
+                    "Z shape mismatch: expected {}×{}, got {}×{}",
+                    D,
+                    s.m,
+                    Zi.rows(),
+                    Zi.cols()
+                );
+            }
+            let mut tbl = vec![[K::ZERO; D]; m_pad];
+            let cap = core::cmp::min(s.m, m_pad);
+            for col in 0..cap {
+                for rho in 0..D {
+                    tbl[col][rho] = K::from(Zi[(rho, col)]);
+                }
+            }
+            digits_tables.push(tbl);
+        }
+
+        // Symmetric range polynomial cache.
+        let mut range_t_sq = Vec::new();
+        if params.b > 1 {
+            range_t_sq.reserve((params.b - 1) as usize);
+            for t in 1..(params.b as i64) {
+                let tt = F::from_i64(t);
+                range_t_sq.push(K::from(tt * tt));
+            }
+        }
+
+        Self {
+            s,
+            params,
+            mcs_witnesses,
+            me_witnesses,
+            ch,
+            ell_d,
+            ell_m,
+            d_sc,
+            round_idx: 0,
+            col_chals: Vec::with_capacity(ell_m),
+            ajtai_chals: Vec::with_capacity(ell_d),
+            cur_len: m_pad,
+            eq_beta_m_tbl,
+            digits_tables,
+            weights,
+            range_t_sq,
+        }
+    }
+
+    #[inline]
+    fn num_rounds_total(&self) -> usize {
+        self.ell_m + self.ell_d
+    }
+
+    #[inline]
+    fn fold_table_inplace(table: &mut Vec<K>, r: K) {
+        debug_assert!(table.len() >= 2 && table.len() % 2 == 0);
+        let half = table.len() / 2;
+        for i in 0..half {
+            let lo = table[2 * i];
+            let hi = table[2 * i + 1];
+            table[i] = lo + (hi - lo) * r;
+        }
+        table.truncate(half);
+    }
+
+    #[inline]
+    fn fold_digits_table_inplace(table: &mut Vec<[K; D]>, r: K) {
+        debug_assert!(table.len() >= 2 && table.len() % 2 == 0);
+        let half = table.len() / 2;
+        for i in 0..half {
+            let base = 2 * i;
+            for rho in 0..D {
+                let lo = table[base][rho];
+                let hi = table[base + 1][rho];
+                table[i][rho] = lo + (hi - lo) * r;
+            }
+        }
+        table.truncate(half);
+    }
+
+    fn evals_col_phase(&self, xs: &[K]) -> Vec<K> {
+        debug_assert!(self.cur_len >= 2 && self.cur_len % 2 == 0);
+        let tail_len = self.cur_len / 2;
+        let mut out = vec![K::ZERO; xs.len()];
+
+        for t in 0..tail_len {
+            let idx = 2 * t;
+            let e0 = self.eq_beta_m_tbl[idx];
+            let e1 = self.eq_beta_m_tbl[idx + 1] - e0;
+
+            for (x_idx, &x) in xs.iter().enumerate() {
+                let eq_beta_m_x = e0 + e1 * x;
+
+                let mut nc_sum = K::ZERO;
+                for (wit_idx, tbl) in self.digits_tables.iter().enumerate() {
+                    let lo = &tbl[idx];
+                    let hi = &tbl[idx + 1];
+                    let weights = &self.weights[wit_idx];
+
+                    let mut acc = K::ZERO;
+                    for rho in 0..D {
+                        let y0 = lo[rho];
+                        let y1 = hi[rho];
+                        let y = y0 + (y1 - y0) * x;
+                        acc += weights[rho] * range_product_cached(y, &self.range_t_sq);
+                    }
+                    nc_sum += acc;
+                }
+
+                out[x_idx] += eq_beta_m_x * nc_sum;
+            }
+        }
+
+        out
+    }
+
+    fn evals_ajtai_phase(&self, xs: &[K]) -> Vec<K> {
+        let j = self.round_idx - self.ell_m;
+        debug_assert!(j < self.ell_d, "NC Ajtai phase after all Ajtai bits");
+        debug_assert!(
+            self.cur_len == 1,
+            "NC Ajtai phase requires finalized column point (cur_len={})",
+            self.cur_len
+        );
+
+        let free_a = self.ell_d - j - 1;
+        let w_beta_tail = chi_tail_weights(&self.ch.beta_a[j + 1..self.ell_d]);
+        let head_stride = 1usize << (j + 1);
+        debug_assert_eq!(w_beta_tail.len(), 1usize << free_a);
+
+        // Prefix factor for eq(α, β_a).
+        let mut eq_beta_pref = K::ONE;
+        for i in 0..j {
+            eq_beta_pref *= eq_lin(self.ajtai_chals[i], self.ch.beta_a[i]);
+        }
+        let beta_j = self.ch.beta_a[j];
+
+        // eq(s', β_m) is the (single) entry after folding all column bits.
+        let eq_beta_m = self.eq_beta_m_tbl[0];
+
+        // Prefold digits by Ajtai prefix bits once per round.
+        let mut digits_pref: Vec<[K; D]> = Vec::with_capacity(self.digits_tables.len());
+        for tbl in self.digits_tables.iter() {
+            let mut d = tbl[0];
+            for b in 0..j {
+                fold_bit_inplace(&mut d, b, self.ajtai_chals[b]);
+            }
+            digits_pref.push(d);
+        }
+
+        let mut out = vec![K::ZERO; xs.len()];
+        for (x_idx, &x) in xs.iter().enumerate() {
+            let eq_beta = eq_beta_m * (eq_beta_pref * eq_lin(x, beta_j));
+
+            // Apply γ^{i+1} factors (witness order) explicitly.
+            let mut g = self.ch.gamma;
+            let mut weighted_sum = K::ZERO;
+            for digits in digits_pref.iter() {
+                let acc = ajtai_tail_weighted_range_prefolded(
+                    digits,
+                    x,
+                    j,
+                    head_stride,
+                    &w_beta_tail,
+                    &self.range_t_sq,
+                );
+                weighted_sum += g * acc;
+                g *= self.ch.gamma;
+            }
+
+            out[x_idx] = eq_beta * weighted_sum;
+        }
+
+        out
+    }
+}
+
+impl<'a, F> RoundOracle for NcOracle<'a, F>
+where
+    F: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<F>,
+{
+    fn num_rounds(&self) -> usize {
+        self.num_rounds_total()
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.d_sc
+    }
+
+    fn evals_at(&mut self, xs: &[K]) -> Vec<K> {
+        if self.round_idx < self.ell_m {
+            self.evals_col_phase(xs)
+        } else {
+            self.evals_ajtai_phase(xs)
+        }
+    }
+
+    fn fold(&mut self, r_i: K) {
+        if self.round_idx < self.ell_m {
+            self.col_chals.push(r_i);
+            Self::fold_table_inplace(&mut self.eq_beta_m_tbl, r_i);
+            for tbl in self.digits_tables.iter_mut() {
+                Self::fold_digits_table_inplace(tbl, r_i);
+            }
+            self.cur_len /= 2;
+        } else {
+            self.ajtai_chals.push(r_i);
+        }
+        self.round_idx += 1;
+    }
+}
+
 #[derive(Clone, Debug)]
 struct CompiledPolyTerm {
     coeff: K,
@@ -87,6 +403,7 @@ impl RowStreamState {
         ell_n: usize,
         mcs_witnesses: &[McsWitness<Ff>],
         me_witnesses: &[Mat<Ff>],
+        include_nc: bool,
         r_inputs: Option<&[K]>,
         sparse: &SparseCache<Ff>,
     ) -> Self
@@ -188,9 +505,9 @@ impl RowStreamState {
                 ch.beta_a.len()
             );
         }
-        let w_beta_a: Vec<K> = (0..D).map(|rho| eq_points_bool_mask(rho, &ch.beta_a)).collect();
-        let mut w_gamma_nc = vec![K::ZERO; k_total * D];
-        {
+        let w_gamma_nc = if include_nc {
+            let w_beta_a: Vec<K> = (0..D).map(|rho| eq_points_bool_mask(rho, &ch.beta_a)).collect();
+            let mut w_gamma_nc = vec![K::ZERO; k_total * D];
             let mut g = ch.gamma;
             for i in 0..k_total {
                 let base = i * D;
@@ -199,7 +516,10 @@ impl RowStreamState {
                 }
                 g *= ch.gamma;
             }
-        }
+            w_gamma_nc
+        } else {
+            Vec::new()
+        };
 
         // Build z1 = recomposition of Z_1 (first MCS witness).
         let mut z1: Vec<K> = vec![K::ZERO; s.m];
@@ -278,27 +598,34 @@ impl RowStreamState {
             f_var_tables.push(out);
         }
 
-        // NC tables: digits at each boolean row index.
-        let mut nc_tables: Vec<Vec<[K; D]>> = Vec::with_capacity(k_total);
-        for &Zi in &all_witnesses {
-            if Zi.rows() != D || Zi.cols() != s.m {
-                panic!(
-                    "Z shape mismatch: expected {}×{}, got {}×{}",
-                    D,
-                    s.m,
-                    Zi.rows(),
-                    Zi.cols()
-                );
-            }
-            let mut tbl = vec![[K::ZERO; D]; n_pad];
-            let cap = core::cmp::min(n_eff, n_pad);
-            for row in 0..cap {
-                for rho in 0..D {
-                    tbl[row][rho] = K::from(Zi[(rho, row)]);
+        // NC tables: digits at each boolean row index (legacy, only needed when NC is enabled).
+        let nc_tables = if include_nc {
+            let mut nc_tables: Vec<Vec<[K; D]>> = Vec::with_capacity(k_total);
+            for &Zi in &all_witnesses {
+                if Zi.rows() != D || Zi.cols() != s.m {
+                    panic!(
+                        "Z shape mismatch: expected {}×{}, got {}×{}",
+                        D,
+                        s.m,
+                        Zi.rows(),
+                        Zi.cols()
+                    );
                 }
+                let mut tbl = vec![[K::ZERO; D]; n_pad];
+                // Legacy NC table indexes witness columns by row-domain boolean index `row`.
+                // This is only sound under the identity-first square normal form (m == n).
+                let cap = core::cmp::min(core::cmp::min(n_eff, n_pad), s.m);
+                for row in 0..cap {
+                    for rho in 0..D {
+                        tbl[row][rho] = K::from(Zi[(rho, row)]);
+                    }
+                }
+                nc_tables.push(tbl);
             }
-            nc_tables.push(tbl);
-        }
+            nc_tables
+        } else {
+            Vec::new()
+        };
 
         // Eval table (optional): only when both (a) there are carried witnesses, and (b) r_inputs exist.
         let mut gamma_to_k = K::ONE;
@@ -388,7 +715,7 @@ impl RowStreamState {
         };
 
         let mut range_t_sq = Vec::new();
-        if b > 1 {
+        if include_nc && b > 1 {
             range_t_sq.reserve((b - 1) as usize);
             for t in 1..(b as i64) {
                 let tt = Ff::from_i64(t);
@@ -1533,8 +1860,6 @@ fn chi_tail_weights(bits: &[K]) -> Vec<K> {
 
 /// Precomputation for a fixed r' (row assignment) - eliminates redundant v_j recomputation
 struct RPrecomp {
-    /// Y_nc[i][ρ] = (Z_i · v_1)[ρ] for NC terms
-    y_nc: Vec<[K; D]>,
     /// Y_eval[i][j][ρ] = (Z_i · v_j)[ρ] for Eval terms  
     y_eval: Vec<Vec<[K; D]>>,
     /// F' = f(z_1 · v_j) - independent of α'
@@ -1616,9 +1941,11 @@ where
             ell_n,
             mcs_witnesses,
             me_witnesses,
+            false,
             r_inputs,
             sparse.as_ref(),
         );
+
         Self {
             s,
             params,
@@ -1684,27 +2011,23 @@ where
         // vjs_nz[j] = list of (col, vj[col]) pairs where vj[col] != 0.
         let mut vjs_nz: Vec<Vec<(usize, K)>> = Vec::with_capacity(t);
 
-        // j=0 is identity: v1[c] = χ_r[c] for c < min(m, n_eff).
-        let cap = core::cmp::min(self.s.m, n_eff);
-        let mut v1_nz = Vec::with_capacity(cap);
-        for c in 0..cap {
+        // Identity matrix: v[c] = χ_r[c] for c < min(m, n_eff).
+        let cap_id = core::cmp::min(self.s.m, n_eff);
+        let mut v_id_nz = Vec::with_capacity(cap_id);
+        for c in 0..cap_id {
             let v = chi_r[c];
             if v != K::ZERO {
-                v1_nz.push((c, v));
+                v_id_nz.push((c, v));
             }
         }
-        vjs_nz.push(v1_nz);
 
-        for j in 1..t {
-            // Identity sentinel: v_j = χ_r (same as v1).
-            if sparse.csc(j).is_none() {
-                vjs_nz.push(vjs_nz[0].clone());
+        for j in 0..t {
+            // Identity sentinel: v_j = χ_r.
+            let Some(csc) = sparse.csc(j) else {
+                vjs_nz.push(v_id_nz.clone());
                 continue;
-            }
+            };
 
-            let csc = sparse
-                .csc(j)
-                .unwrap_or_else(|| panic!("optimized oracle: missing CSC matrix for j={j}"));
             let mut nz = Vec::<(usize, K)>::new();
             for c in 0..csc.ncols {
                 let s = csc.col_ptr[c];
@@ -1740,8 +2063,7 @@ where
         }
         let f_prime = self.s.f.eval_in_ext::<K>(&m_vals);
 
-        // Precompute Y[i][j][ρ] = (Z_i · v_j)[ρ] for all instances and matrices
-        let mut y_nc = vec![[K::ZERO; D]; k_total];
+        // Precompute Y_eval[i][j][ρ] = (Z_i · v_j)[ρ] for all instances and matrices
         let mut y_eval = vec![vec![[K::ZERO; D]; t]; k_total];
 
         let all_witnesses: Vec<&Mat<F>> = self
@@ -1752,16 +2074,6 @@ where
             .collect();
 
         for (idx, Zi) in all_witnesses.iter().enumerate() {
-            // NC uses v_1 (j=0)
-            for rho in 0..D {
-                let mut acc = K::ZERO;
-                for &(c, v) in &vjs_nz[0] {
-                    acc += v.scale_base_k(K::from(Zi[(rho, c)]));
-                }
-                y_nc[idx][rho] = acc;
-            }
-
-            // Eval uses all v_j
             for j in 0..t {
                 for rho in 0..D {
                     let mut acc = K::ZERO;
@@ -1774,7 +2086,6 @@ where
         }
 
         RPrecomp {
-            y_nc,
             y_eval,
             f_prime,
             eq_beta_r,
@@ -1863,17 +2174,6 @@ where
         let prefix = &self.ajtai_chals[..j];
         let beta_j = self.ch.beta_a[j];
         let alpha_j = self.ch.alpha[j];
-        let range_t_sq = &self.row_stream.range_t_sq;
-
-        // Prefold all digits by the fixed Ajtai prefix bits once per round (independent of x).
-        // This removes redundant folding work across the (usually small) set of evaluation points `xs`.
-        let mut y_nc_pref = pre.y_nc.clone();
-        for digits in y_nc_pref.iter_mut() {
-            for b in 0..j {
-                fold_bit_inplace(digits, b, prefix[b]);
-            }
-        }
-
         // Flattened as [i_abs * t_mats + j_mat] to avoid nested Vec allocations.
         let mut y_eval_pref = Vec::<[K; D]>::with_capacity(k_total * t_mats);
         for i_abs in 0..k_total {
@@ -1886,7 +2186,6 @@ where
             }
         }
 
-        let gamma = self.ch.gamma;
         let has_inputs = self.r_inputs.is_some();
 
         let eval_at = |x: K| {
@@ -1901,26 +2200,8 @@ where
                     K::ZERO
                 };
 
-                // --- NC block: Σ_i γ^i · Σ_tail w_beta(tail) · N_i( ẏ_{(i,1)}(prefix, x, tail) )
-                let mut nc_sum = K::ZERO;
-                {
-                    let mut g = gamma;
-                    for i_abs in 0..k_total {
-                        let acc = ajtai_tail_weighted_range_prefolded(
-                            &y_nc_pref[i_abs],
-                            x,
-                            j,
-                            head_stride,
-                            &w_beta_tail,
-                            range_t_sq,
-                        );
-                        nc_sum += g * acc;
-                        g *= gamma;
-                    }
-                }
-
-                // Base: eq_beta * (F' + NC')
-                let mut out = eq_beta * (pre.f_prime + nc_sum);
+                // Base: eq_beta * F'
+                let mut out = eq_beta * pre.f_prime;
 
                 // --- Eval block: γ^k · eq_ar · Σ_{j_mat,i≥2} γ^{i-1} (γ^k)^{j_mat} · Σ_tail w_alpha(tail) · ẏ_{(i,j)}(...)
                 if k_total >= 2 && eq_ar_px != K::ZERO {
@@ -1956,6 +2237,7 @@ where
         &mut self,
         mcs_list: &[McsInstance<Cmt, F>],
         me_inputs: &[MeInstance<Cmt, F, K>],
+        s_col: &[K],
         fold_digest: [u8; 32],
         l: &L,
     ) -> Vec<MeInstance<Cmt, F, K>>
@@ -1994,6 +2276,8 @@ where
             self.ell_d
         );
 
+        let chi_s = if s_col.is_empty() { None } else { Some(chi_tail_weights(s_col)) };
+
         // Base-b recomposition cache for y_scalars.
         let base = K::from(F::from_u64(self.params.b as u64));
         let mut pow_cache = vec![K::ONE; D];
@@ -2025,6 +2309,20 @@ where
                 y_scalars.push(recompose(digits));
             }
 
+            let y_zcol = if let Some(chi_s) = chi_s.as_ref() {
+                debug_assert!(chi_s.len() >= self.s.m, "chi_s too short for CCS width");
+                let mut yz = neo_ccs::utils::mat_vec_mul_fk::<F, K>(
+                    wit.Z.as_slice(),
+                    wit.Z.rows(),
+                    wit.Z.cols(),
+                    &chi_s[..self.s.m],
+                );
+                yz.resize(d_pad, K::ZERO);
+                yz
+            } else {
+                Vec::new()
+            };
+
             out.push(MeInstance {
                 c_step_coords: vec![],
                 u_offset: 0,
@@ -2032,8 +2330,10 @@ where
                 c: inst.c.clone(),
                 X,
                 r: self.row_chals.clone(),
+                s_col: s_col.to_vec(),
                 y,
                 y_scalars,
+                y_zcol,
                 m_in: inst.m_in,
                 fold_digest,
             });
@@ -2054,6 +2354,21 @@ where
                 y_scalars.push(recompose(digits));
             }
 
+            let y_zcol = if let Some(chi_s) = chi_s.as_ref() {
+                debug_assert!(chi_s.len() >= self.s.m, "chi_s too short for CCS width");
+                let Zi = &self.me_witnesses[me_idx];
+                let mut yz = neo_ccs::utils::mat_vec_mul_fk::<F, K>(
+                    Zi.as_slice(),
+                    Zi.rows(),
+                    Zi.cols(),
+                    &chi_s[..self.s.m],
+                );
+                yz.resize(d_pad, K::ZERO);
+                yz
+            } else {
+                Vec::new()
+            };
+
             out.push(MeInstance {
                 c_step_coords: vec![],
                 u_offset: 0,
@@ -2061,8 +2376,10 @@ where
                 c: inp.c.clone(),
                 X: inp.X.clone(),
                 r: self.row_chals.clone(),
+                s_col: s_col.to_vec(),
                 y,
                 y_scalars,
+                y_zcol,
                 m_in: inp.m_in,
                 fold_digest,
             });

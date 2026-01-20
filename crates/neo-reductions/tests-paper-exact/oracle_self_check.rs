@@ -9,6 +9,43 @@ use neo_reductions::paper_exact_engine::oracle::PaperExactOracle;
 use neo_reductions::sumcheck::RoundOracle;
 use p3_field::PrimeCharacteristicRing;
 
+fn sum_q_fe_over_hypercube(
+    s: &CcsStructure<F>,
+    params: &NeoParams,
+    mcs_witnesses: &[McsWitness<F>],
+    me_witnesses: &[Mat<F>],
+    ch: &neo_reductions::Challenges,
+    ell_d: usize,
+    ell_n: usize,
+    r_inputs: Option<&[K]>,
+) -> K {
+    let d_sz = 1usize << ell_d;
+    let n_sz = 1usize << ell_n;
+    let mut total = K::ZERO;
+    for xa in 0..d_sz {
+        let alpha_bool: Vec<K> = (0..ell_d)
+            .map(|bit| if ((xa >> bit) & 1) == 1 { K::ONE } else { K::ZERO })
+            .collect();
+        for xr in 0..n_sz {
+            let r_bool: Vec<K> = (0..ell_n)
+                .map(|bit| if ((xr >> bit) & 1) == 1 { K::ONE } else { K::ZERO })
+                .collect();
+            let (q_at_bool, _) = refimpl::q_eval_at_ext_point_fe_paper_exact_with_inputs(
+                s,
+                params,
+                mcs_witnesses,
+                me_witnesses,
+                &alpha_bool,
+                &r_bool,
+                ch,
+                r_inputs,
+            );
+            total += q_at_bool;
+        }
+    }
+    total
+}
+
 fn tiny_ccs_id(n: usize, m: usize) -> CcsStructure<F> {
     assert_eq!(n, m, "use square tiny ccs");
     let m0 = Mat::identity(n);
@@ -79,6 +116,7 @@ fn round0_sum_matches_hypercube_sum_k1() {
         alpha: vec![K::from(F::from_u64(3)); ell_d],
         beta_a: vec![K::from(F::from_u64(5)); ell_d],
         beta_r: vec![K::from(F::from_u64(7)); ell_n],
+        beta_m: Vec::new(),
         gamma: K::from(F::from_u64(11)),
     };
 
@@ -92,8 +130,8 @@ fn round0_sum_matches_hypercube_sum_k1() {
     let g0 = oracle.evals_at(&[K::ZERO, K::ONE]);
     let lhs = g0[0] + g0[1];
 
-    // Right: literal ∑_{X∈{0,1}^{ell_d+ell_n}} Q(X)
-    let rhs = refimpl::sum_q_over_hypercube_paper_exact(&s, &params, &mcs_w, &me_w, &ch, ell_d, ell_n, None);
+    // Right: literal ∑_{X∈{0,1}^{ell_d+ell_n}} Q_fe(X)
+    let rhs = sum_q_fe_over_hypercube(&s, &params, &mcs_w, &me_w, &ch, ell_d, ell_n, None);
 
     assert_eq!(lhs, rhs, "round-0 sum must equal hypercube sum (k=1)");
 }
@@ -116,6 +154,7 @@ fn round0_sum_matches_hypercube_sum_k2_with_eval() {
         alpha: vec![K::from(F::from_u64(13)); ell_d],
         beta_a: vec![K::from(F::from_u64(17)); ell_d],
         beta_r: vec![K::from(F::from_u64(19)); ell_n],
+        beta_m: Vec::new(),
         gamma: K::from(F::from_u64(23)),
     };
 
@@ -139,7 +178,7 @@ fn round0_sum_matches_hypercube_sum_k2_with_eval() {
     let lhs = g0[0] + g0[1];
 
     // Right: brute-force hypercube sum with Eval block active (r_inputs provided)
-    let rhs = refimpl::sum_q_over_hypercube_paper_exact(&s, &params, &mcs_w, &me_w, &ch, ell_d, ell_n, Some(&r_inputs));
+    let rhs = sum_q_fe_over_hypercube(&s, &params, &mcs_w, &me_w, &ch, ell_d, ell_n, Some(&r_inputs));
 
     assert_eq!(lhs, rhs, "round-0 sum must equal hypercube sum (k=2 with Eval)");
 }
@@ -164,6 +203,7 @@ fn nc_sum_engine_matches_paper_nc_when_m1_not_identity() {
         alpha: vec![K::from(F::from_u64(3)); ell_d],
         beta_a: vec![K::from(F::from_u64(5)); ell_d],
         beta_r: vec![K::from(F::from_u64(7)); ell_n],
+        beta_m: Vec::new(),
         gamma: K::from(F::from_u64(11)),
     };
 
@@ -234,6 +274,7 @@ fn nc_sum_engine_vs_paper_drift_with_custom_m1_and_Z() {
         alpha: vec![K::from(F::from_u64(13)); ell_d],
         beta_a: vec![K::from(F::from_u64(17)); ell_d],
         beta_r: vec![K::from(F::from_u64(19)); ell_n],
+        beta_m: Vec::new(),
         gamma: K::from(F::from_u64(23)),
     };
 

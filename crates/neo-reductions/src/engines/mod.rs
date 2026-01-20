@@ -33,5 +33,4 @@ pub use crosscheck_engine::{CrossCheckEngine, CrosscheckCfg};
 #[cfg(feature = "paper-exact")]
 pub use paper_exact_engine::{build_me_outputs_paper_exact, claimed_initial_sum_from_inputs};
 
-// Route A: Split CCS prover for batched sum-check with Twist/Shout
-pub use optimized_engine::{finalize_ccs_after_batch, prepare_ccs_for_batch, CcsBatchContext, CcsOracle};
+pub use optimized_engine::CcsOracle;

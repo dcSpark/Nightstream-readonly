@@ -27,8 +27,6 @@ pub use engines::optimized_engine::{
     pi_ccs_prove, pi_ccs_prove_simple, pi_ccs_verify, CcsOracle, Challenges, PiCcsProof,
 };
 
-// Route A: Split CCS prover for batched sum-check with Twist/Shout
-pub use engines::{finalize_ccs_after_batch, prepare_ccs_for_batch, CcsBatchContext};
 pub use error::PiCcsError;
 
 // Re-export common utilities
