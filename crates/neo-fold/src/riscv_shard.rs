@@ -247,6 +247,12 @@ pub struct Rv32B1 {
     ram_init: HashMap<u64, u64>,
 }
 
+/// Default instruction cap for RV32B1 runs when `max_steps` is not specified.
+///
+/// The runner stops early if the guest halts (e.g. via `ecall`), so this is only a safety bound
+/// against non-halting guests.
+const DEFAULT_RV32B1_MAX_STEPS: usize = 1 << 20;
+
 impl Rv32B1 {
     /// Create a runner from ROM bytes (must be a valid RV32 program encoding).
     pub fn from_rom(program_base: u64, program_bytes: &[u8]) -> Self {
@@ -282,7 +288,8 @@ impl Rv32B1 {
 
     /// Limit the number of instructions executed from the decoded program.
     ///
-    /// This is primarily for tests/benchmarks that want a tiny trace.
+    /// This is primarily for tests/benchmarks that want a tiny trace, or for non-halting guests
+    /// where you want to prove only a prefix of execution.
     pub fn max_steps(mut self, max_steps: usize) -> Self {
         self.max_steps = Some(max_steps);
         self
@@ -363,6 +370,7 @@ impl Rv32B1 {
 
         let program = decode_program(&self.program_bytes)
             .map_err(|e| PiCcsError::InvalidInput(format!("decode_program failed: {e}")))?;
+        let using_default_max_steps = self.max_steps.is_none();
         let max_steps = match self.max_steps {
             Some(n) => {
                 if n == 0 {
@@ -370,7 +378,7 @@ impl Rv32B1 {
                 }
                 n
             }
-            None => program.len(),
+            None => DEFAULT_RV32B1_MAX_STEPS.max(program.len()),
         };
         let mut twist = neo_memory::riscv::lookups::RiscvMemory::with_program_in_twist(
             self.xlen,
@@ -462,6 +470,16 @@ impl Rv32B1 {
             &initial_mem,
             &cpu,
         )?;
+        if using_default_max_steps {
+            let aux = session.shared_bus_aux().ok_or_else(|| {
+                PiCcsError::InvalidInput("missing shared-bus aux (halt status unavailable)".into())
+            })?;
+            if !aux.did_halt {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "RV32 execution did not halt within max_steps={max_steps}; call .max_steps(...) to raise the limit or ensure the guest halts (e.g. via ecall)"
+                )));
+            }
+        }
 
         // Enforce that the *statement* initial memory matches chunk 0's public MemInit.
         let steps_public = session.steps_public();

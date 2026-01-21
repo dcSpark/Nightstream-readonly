@@ -43,6 +43,8 @@ pub enum ShardBuildError {
 pub struct ShardWitnessAux {
     /// Original (unpadded) VM trace length.
     pub original_len: usize,
+    /// Whether the VM halted before reaching `max_steps`.
+    pub did_halt: bool,
     pub max_steps: usize,
     pub chunk_size: usize,
     /// Deterministic ordering of Twist instances used by the builder (and by the shared CPU bus).
@@ -139,6 +141,7 @@ where
     let trace = neo_vm_trace::trace_program(vm, twist, shout, max_steps)
         .map_err(|e| ShardBuildError::VmError(e.to_string()))?;
     let original_len = trace.steps.len();
+    let did_halt = trace.did_halt();
     debug_assert!(
         original_len <= max_steps,
         "trace_program must not exceed max_steps (got {}, max_steps={})",
@@ -357,6 +360,7 @@ where
 
     let aux = ShardWitnessAux {
         original_len,
+        did_halt,
         max_steps,
         chunk_size,
         mem_ids,

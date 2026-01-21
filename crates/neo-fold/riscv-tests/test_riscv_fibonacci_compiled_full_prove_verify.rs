@@ -114,7 +114,6 @@ fn test_riscv_fibonacci_compiled_full_prove_verify() {
         .ram_bytes(0x800)
         .ram_init_u32(/*addr=*/ 0x104, n)
         .chunk_size(16)
-        .max_steps(512)
         .shout_auto_minimal()
         .output(/*output_addr=*/ 0x100, /*expected_output=*/ expected)
         .prove()
