@@ -60,8 +60,8 @@
 //! - Automatic detection of 16-bit vs 32-bit instructions
 //!
 //! ## System
-//! - ECALL, EBREAK
-//! - FENCE, FENCE.I
+//! - ECALL (Jolt-style markers), FENCE
+//! - EBREAK and FENCE.I are not supported
 //!
 //! # Example
 //!
@@ -100,6 +100,10 @@ pub const RAM_ID: TwistId = TwistId(0);
 
 /// Canonical Twist instance id for the program ROM (B1 instruction fetch).
 pub const PROG_ID: TwistId = TwistId(1);
+
+/// Jolt ECALL identifiers for marker/print syscalls.
+pub const JOLT_CYCLE_TRACK_ECALL_NUM: u32 = 0xC7C1E;
+pub const JOLT_PRINT_ECALL_NUM: u32 = 0x505249;
 
 pub use alu::{compute_op, lookup_entry};
 pub use bits::{interleave_bits, uninterleave_bits};

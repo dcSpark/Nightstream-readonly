@@ -1,7 +1,17 @@
 #![allow(non_snake_case)]
 
-use std::time::Instant;
+use std::{
+    fs,
+    io::{BufReader, BufWriter, Write},
+    path::{Path, PathBuf},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        OnceLock,
+    },
+    time::Instant,
+};
 
+use bincode::Options;
 use bellpepper::gadgets::boolean::{AllocatedBit, Boolean};
 use bellpepper_core::{
     Circuit, ConstraintSystem, Index, LinearCombination, SynthesisError, Variable,
@@ -18,9 +28,265 @@ use sha2::{Digest, Sha256};
 
 extern crate ff;
 
+const CIRCUIT_CACHE_FORMAT_VERSION: u32 = 2;
+const SHA256_CIRCUIT_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
+static CIRCUIT_CACHE_TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
+
+const SHA256_CIRCUIT_CACHE_KEY_SECTION_1_BEGIN: &[u8] =
+    b"\n// === SHA256_CIRCUIT_CACHE_KEY_SECTION_1_BEGIN ===\n";
+const SHA256_CIRCUIT_CACHE_KEY_SECTION_1_END: &[u8] =
+    b"\n// === SHA256_CIRCUIT_CACHE_KEY_SECTION_1_END ===\n";
+const SHA256_CIRCUIT_CACHE_KEY_SECTION_2_BEGIN: &[u8] =
+    b"\n// === SHA256_CIRCUIT_CACHE_KEY_SECTION_2_BEGIN ===\n";
+const SHA256_CIRCUIT_CACHE_KEY_SECTION_2_END: &[u8] =
+    b"\n// === SHA256_CIRCUIT_CACHE_KEY_SECTION_2_END ===\n";
+
+fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
+    haystack
+        .windows(needle.len())
+        .position(|window| window == needle)
+}
+
+fn find_marker_region<'a>(src: &'a [u8], begin: &[u8], end: &[u8]) -> Option<&'a [u8]> {
+    let begin_pos = find_subslice(src, begin)?;
+    let start = begin_pos + begin.len();
+    let end_pos = find_subslice(&src[start..], end)?;
+    Some(&src[start..start + end_pos])
+}
+
+fn sha256_circuit_cache_key() -> [u8; 32] {
+    static KEY: OnceLock<[u8; 32]> = OnceLock::new();
+    *KEY.get_or_init(|| {
+        let mut h = Sha256::new();
+        h.update(b"neo-fold/sha256-tests circuit cache");
+        h.update(&CIRCUIT_CACHE_FORMAT_VERSION.to_le_bytes());
+        h.update(env!("CARGO_PKG_VERSION").as_bytes());
+
+        let src = include_bytes!("test_single_step.rs");
+        if let (Some(section1), Some(section2)) = (
+            find_marker_region(
+                src,
+                SHA256_CIRCUIT_CACHE_KEY_SECTION_1_BEGIN,
+                SHA256_CIRCUIT_CACHE_KEY_SECTION_1_END,
+            ),
+            find_marker_region(
+                src,
+                SHA256_CIRCUIT_CACHE_KEY_SECTION_2_BEGIN,
+                SHA256_CIRCUIT_CACHE_KEY_SECTION_2_END,
+            ),
+        ) {
+            h.update(section1);
+            h.update(section2);
+        } else {
+            h.update(src);
+        }
+
+        h.update(include_bytes!(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../Cargo.lock"
+        )));
+
+        let digest = h.finalize();
+        let mut out = [0u8; 32];
+        out.copy_from_slice(&digest);
+        out
+    })
+}
+
+fn hex_lower(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut s = String::with_capacity(bytes.len() * 2);
+    for &b in bytes {
+        s.push(HEX[(b >> 4) as usize] as char);
+        s.push(HEX[(b & 0x0f) as usize] as char);
+    }
+    s
+}
+
+fn sha256_circuit_cache_dir() -> PathBuf {
+    if let Some(dir) = std::env::var_os("NEO_FOLD_SHA256_CIRCUIT_CACHE_DIR") {
+        PathBuf::from(dir)
+    } else {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("sha256-tests")
+            .join("circuit-cache")
+    }
+}
+
+fn sha256_circuit_cache_path(preimage_len_bytes: usize) -> PathBuf {
+    sha256_circuit_cache_dir()
+        .join(hex_lower(&sha256_circuit_cache_key()))
+        .join(format!("sha256_ccs_{}b.bin", preimage_len_bytes))
+}
+
+fn sha256_preimage_digest(preimage: &[u8]) -> [u8; 32] {
+    let digest = Sha256::digest(preimage);
+    let mut out = [0u8; 32];
+    out.copy_from_slice(&digest);
+    out
+}
+
+#[derive(serde::Deserialize)]
+struct Sha256CircuitDiskCache {
+    version: u32,
+    cache_key: [u8; 32],
+    preimage_len_bytes: u64,
+    preimage_digest: [u8; 32],
+    ccs: CcsStructure<F>,
+    witness: Vec<F>,
+}
+
+#[derive(serde::Serialize)]
+struct Sha256CircuitDiskCacheRef<'a> {
+    version: u32,
+    cache_key: [u8; 32],
+    preimage_len_bytes: u64,
+    preimage_digest: [u8; 32],
+    ccs: &'a CcsStructure<F>,
+    witness: &'a [F],
+}
+
+fn load_cached_sha256_circuit(
+    cache_path: &Path,
+    preimage_len_bytes: usize,
+) -> Option<(CcsStructure<F>, Vec<F>)> {
+    let file = fs::File::open(cache_path).ok()?;
+    let mut reader = BufReader::new(file);
+    let cache: Sha256CircuitDiskCache = bincode::options()
+        .with_fixint_encoding()
+        .with_limit(SHA256_CIRCUIT_CACHE_MAX_BYTES)
+        .deserialize_from(&mut reader)
+        .ok()?;
+
+    let expected_preimage_len_bytes = preimage_len_bytes as u64;
+    let expected_digest = sha256_preimage_digest(&sha256_preimage_for_len(preimage_len_bytes));
+
+    if cache.version != CIRCUIT_CACHE_FORMAT_VERSION
+        || cache.cache_key != sha256_circuit_cache_key()
+        || cache.preimage_len_bytes != expected_preimage_len_bytes
+        || cache.preimage_digest != expected_digest
+    {
+        return None;
+    }
+
+    if cache.witness.is_empty() || cache.witness[0] != F::ONE {
+        return None;
+    }
+    if cache.ccs.n == 0 || cache.ccs.m == 0 || cache.witness.len() > cache.ccs.m {
+        return None;
+    }
+
+    Some((cache.ccs, cache.witness))
+}
+
+fn store_sha256_circuit_cache(
+    cache_path: &Path,
+    preimage_len_bytes: usize,
+    ccs: &CcsStructure<F>,
+    witness: &[F],
+) {
+    if cache_path.exists() {
+        return;
+    }
+
+    let Some(dir) = cache_path.parent() else {
+        println!("SHA256 cache path has no parent dir: {cache_path:?}");
+        return;
+    };
+    if let Err(err) = fs::create_dir_all(dir) {
+        println!("Failed to create SHA256 cache dir {dir:?}: {err}");
+        return;
+    }
+
+    let tmp_id = CIRCUIT_CACHE_TMP_COUNTER.fetch_add(1, Ordering::Relaxed);
+    let tmp_path = cache_path.with_extension(format!("tmp.{}.{}", std::process::id(), tmp_id));
+
+    let file = match fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&tmp_path)
+    {
+        Ok(f) => f,
+        Err(err) => {
+            println!("Failed to create temp SHA256 cache file {tmp_path:?}: {err}");
+            return;
+        }
+    };
+
+    let mut writer = BufWriter::new(file);
+    let preimage_digest = sha256_preimage_digest(&sha256_preimage_for_len(preimage_len_bytes));
+    let cache = Sha256CircuitDiskCacheRef {
+        version: CIRCUIT_CACHE_FORMAT_VERSION,
+        cache_key: sha256_circuit_cache_key(),
+        preimage_len_bytes: preimage_len_bytes as u64,
+        preimage_digest,
+        ccs,
+        witness,
+    };
+
+    if let Err(err) = bincode::options()
+        .with_fixint_encoding()
+        .serialize_into(&mut writer, &cache)
+    {
+        println!("Failed to write SHA256 circuit cache {tmp_path:?}: {err}");
+        let _ = fs::remove_file(&tmp_path);
+        return;
+    }
+
+    if let Err(err) = writer.flush() {
+        println!("Failed to flush SHA256 circuit cache {tmp_path:?}: {err}");
+        let _ = fs::remove_file(&tmp_path);
+        return;
+    }
+    if let Err(err) = writer.get_ref().sync_all() {
+        println!("Failed to fsync SHA256 circuit cache {tmp_path:?}: {err}");
+        let _ = fs::remove_file(&tmp_path);
+        return;
+    }
+    drop(writer);
+
+    if let Err(err) = fs::rename(&tmp_path, cache_path) {
+        if cache_path.exists() {
+            let _ = fs::remove_file(&tmp_path);
+        } else {
+            println!("Failed to move cache file into place {cache_path:?}: {err}");
+            let _ = fs::remove_file(&tmp_path);
+            return;
+        }
+    }
+
+    println!("Wrote SHA256 circuit cache: {cache_path:?}");
+}
+
+fn cached_bellpepper_sha256_circuit(preimage_len_bytes: usize) -> (CcsStructure<F>, Vec<F>) {
+    let cache_path = sha256_circuit_cache_path(preimage_len_bytes);
+    if let Some((ccs, witness)) = load_cached_sha256_circuit(&cache_path, preimage_len_bytes) {
+        println!("Loaded SHA256 circuit cache for {preimage_len_bytes}B preimage");
+        println!("SHA256 CCS: n={}, m={}", ccs.n, witness.len());
+        return (ccs, witness);
+    }
+
+    println!("Cache miss for SHA256 circuit ({preimage_len_bytes}B); building...");
+    let build_start = Instant::now();
+    let (ccs, witness) = bellpepper_sha256_circuit(preimage_len_bytes);
+    println!(
+        "Built SHA256 circuit ({preimage_len_bytes}B) in {:?}",
+        build_start.elapsed()
+    );
+    store_sha256_circuit_cache(&cache_path, preimage_len_bytes, &ccs, &witness);
+    (ccs, witness)
+}
+
+// === SHA256_CIRCUIT_CACHE_KEY_SECTION_1_BEGIN ===
+
 /// Pad witness to match CCS dimensions (adds slack variables if n > m_original)
 fn pad_witness_to_m(mut z: Vec<F>, m_target: usize) -> Vec<F> {
-    // Pad with zeros to reach m_target
+    assert!(
+        z.len() <= m_target,
+        "witness longer than CCS m: {} > {}",
+        z.len(),
+        m_target
+    );
     z.resize(m_target, F::ZERO);
     z
 }
@@ -35,6 +301,15 @@ fn setup_ajtai_for_dims(m: usize) {
 fn fp_to_u64(x: &FpGoldilocks) -> u64 {
     let bytes = x.to_repr();
     u64::from_le_bytes(bytes.0[0..8].try_into().expect("repr is at least 8 bytes"))
+}
+
+fn sha256_preimage_for_len(preimage_len_bytes: usize) -> Vec<u8> {
+    let mut preimage = vec![0u8; preimage_len_bytes];
+    let pattern = b"abc";
+    for (i, byte) in preimage.iter_mut().enumerate() {
+        *byte = pattern[i % pattern.len()];
+    }
+    preimage
 }
 
 // Bellpepper's TestConstraintSystem is optimized for debuggability (names, hashing, storage),
@@ -166,12 +441,14 @@ impl ConstraintSystem<FpGoldilocks> for TripletConstraintSystem {
     }
 }
 
+// === SHA256_CIRCUIT_CACHE_KEY_SECTION_1_END ===
+
 #[test]
 fn test_sha256_circuit_is_satisfied() {
     use bellpepper_core::test_cs::TestConstraintSystem;
 
     let mut cs = TestConstraintSystem::<FpGoldilocks>::new();
-    let preimage = b"abc".to_vec();
+    let preimage = sha256_preimage_for_len(3);
     let circuit = Sha256Circuit {
         preimage: preimage.clone(),
     };
@@ -224,7 +501,7 @@ fn test_sha256_preimage_8kB() {
 }
 
 fn test_sha256_preimage_len_bytes(preimage_len_bytes: usize) {
-    let preimage = vec![0u8; preimage_len_bytes];
+    let preimage = sha256_preimage_for_len(preimage_len_bytes);
     let digest = Sha256::digest(&preimage);
     let digest_bits = bellpepper::gadgets::multipack::bytes_to_bits(digest.as_ref());
     let expected_inputs_fp =
@@ -234,7 +511,7 @@ fn test_sha256_preimage_len_bytes(preimage_len_bytes: usize) {
         .map(|x| F::from_u64(fp_to_u64(x)))
         .collect();
 
-    let (step_ccs, witness) = bellpepper_sha256_circuit(preimage_len_bytes);
+    let (step_ccs, witness) = cached_bellpepper_sha256_circuit(preimage_len_bytes);
 
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(step_ccs.n)
         .expect("goldilocks_auto_r1cs_ccs should find valid params");
@@ -302,6 +579,8 @@ fn test_sha256_preimage_len_bytes(preimage_len_bytes: usize) {
     }
 }
 
+// === SHA256_CIRCUIT_CACHE_KEY_SECTION_2_BEGIN ===
+
 #[derive(PrimeField)]
 #[PrimeFieldModulus = "18446744069414584321"]
 #[PrimeFieldGenerator = "7"]
@@ -349,8 +628,9 @@ fn bellpepper_sha256_circuit(
 ) -> (CcsStructure<F>, Vec<F>) {
     let mut cs = TripletConstraintSystem::new();
 
+    let preimage = sha256_preimage_for_len(preimage_len_bytes);
     let circuit = Sha256Circuit {
-        preimage: vec![0u8; preimage_len_bytes],
+        preimage,
     };
     circuit
         .synthesize(&mut cs)
@@ -412,3 +692,5 @@ fn bellpepper_sha256_circuit(
     let ccs = CcsStructure::new_sparse(matrices, f).expect("valid R1CS→CCS structure");
     (ccs, witness)
 }
+
+// === SHA256_CIRCUIT_CACHE_KEY_SECTION_2_END ===

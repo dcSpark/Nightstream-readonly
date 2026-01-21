@@ -1,0 +1,18 @@
+[package]
+name = "rv32-fibonacci"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[[bin]]
+name = "rv32_fibonacci"
+path = "src/main.rs"
+
+# Standalone guest project: do not inherit the repo workspace.
+[workspace]
+
+[profile.release]
+panic = "abort"
+
+[dependencies]
+nightstream-sdk = { path = "../../../../nightstream-sdk", default-features = false }

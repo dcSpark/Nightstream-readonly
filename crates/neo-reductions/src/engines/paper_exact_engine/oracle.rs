@@ -158,7 +158,7 @@ where
         };
 
         // ---------------------------
-        // F' := f( Ẽ(M_j z_1)(r') ) using z_1 from the first MCS instance
+        // FE-only: F' := f( Ẽ(M_j z_1)(r') ) using z_1 from the first MCS instance
         // ---------------------------
         let mut z1 = vec![K::ZERO; self.s.m];
         {
@@ -196,79 +196,6 @@ where
             m_vals[j] = y_eval;
         }
         let F_prime = self.s.f.eval_in_ext::<K>(&m_vals);
-
-        // ---------------------------------------
-        // v1 := M_1^T · χ_{r'}  (K^m), used for N_i'
-        // ---------------------------------------
-        let mut v1 = vec![K::ZERO; self.s.m];
-        for row in 0..n_sz {
-            let wr = if row < self.s.n { chi_r[row] } else { K::ZERO };
-            if wr == K::ZERO {
-                continue;
-            }
-            for c in 0..self.s.m {
-                v1[c] += K::from(Self::get_M(&self.s.matrices[0], row, c)) * wr;
-            }
-        }
-
-        // ---------------------------------------
-        // Σ γ^i · N_i' with Ajtai MLE at α′
-        // ---------------------------------------
-        let mut nc_sum = K::ZERO;
-        {
-            let mut g = self.ch.gamma; // γ^1
-                                       // MCS instances
-            for w in self.mcs_witnesses {
-                let mut y_digits = vec![K::ZERO; D];
-                for rho in 0..D {
-                    let mut acc = K::ZERO;
-                    for c in 0..self.s.m {
-                        acc += K::from(w.Z[(rho, c)]) * v1[c];
-                    }
-                    y_digits[rho] = acc;
-                }
-                let mut y_eval = K::ZERO;
-                for rho in 0..min(D, d_sz) {
-                    y_eval += y_digits[rho] * chi_a[rho];
-                }
-
-                // Range product ∏_{t=-(b-1)}^{b-1} (y_eval - t)
-                let lo = -((self.params.b as i64) - 1);
-                let hi = (self.params.b as i64) - 1;
-                let mut prod = K::ONE;
-                for t in lo..=hi {
-                    prod *= y_eval - K::from(F::from_i64(t));
-                }
-
-                nc_sum += g * prod;
-                g *= self.ch.gamma;
-            }
-            // ME witnesses
-            for Z in self.me_witnesses {
-                let mut y_digits = vec![K::ZERO; D];
-                for rho in 0..D {
-                    let mut acc = K::ZERO;
-                    for c in 0..self.s.m {
-                        acc += K::from(Z[(rho, c)]) * v1[c];
-                    }
-                    y_digits[rho] = acc;
-                }
-                let mut y_eval = K::ZERO;
-                for rho in 0..min(D, d_sz) {
-                    y_eval += y_digits[rho] * chi_a[rho];
-                }
-
-                let lo = -((self.params.b as i64) - 1);
-                let hi = (self.params.b as i64) - 1;
-                let mut prod = K::ONE;
-                for t in lo..=hi {
-                    prod *= y_eval - K::from(F::from_i64(t));
-                }
-
-                nc_sum += g * prod;
-                g *= self.ch.gamma;
-            }
-        }
 
         // ---------------------------------------
         // Eval block: compute Σ_{j=1,i=2}^{t,k} γ^{i+(j-1)k-1} · ẏ'_{(i,j)}(α′)
@@ -339,8 +266,8 @@ where
             eval_inner_sum = K::ZERO;
         }
 
-        // Assemble Q(α′, r′)
-        eq_beta * (F_prime + nc_sum) + eval_inner_sum
+        // Assemble FE-only Q_fe(α′, r′) = eq_beta * F' + Eval block.
+        eq_beta * F_prime + eval_inner_sum
     }
 
     /// Compute the univariate round polynomial values at given xs for a row-bit round

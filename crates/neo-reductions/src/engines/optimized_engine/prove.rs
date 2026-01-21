@@ -7,7 +7,7 @@
 #![allow(non_snake_case)]
 
 use crate::error::PiCcsError;
-use crate::optimized_engine::PiCcsProof;
+use crate::optimized_engine::{PiCcsProof, PiCcsProofVariant};
 use crate::sumcheck::RoundOracle;
 use neo_ajtai::Commitment as Cmt;
 use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
@@ -38,11 +38,12 @@ pub fn optimized_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
 ) -> Result<(Vec<MeInstance<Cmt, F, K>>, PiCcsProof), PiCcsError> {
     // Dims + transcript binding
     let dims = utils::build_dims_and_policy(params, s)?;
-    utils::bind_header_and_instances(tr, params, s, mcs_list, dims.ell, dims.d_sc, 0)?;
+    utils::bind_header_and_instances(tr, params, s, mcs_list, dims)?;
     utils::bind_me_inputs(tr, me_inputs)?;
 
     // Sample challenges
-    let ch = utils::sample_challenges(tr, dims.ell_d, dims.ell)?;
+    let mut ch = utils::sample_challenges(tr, dims.ell_d, dims.ell)?;
+    ch.beta_m = utils::sample_beta_m(tr, dims.ell_m)?;
 
     // Validate ME input r (if provided)
     for (idx, me) in me_inputs.iter().enumerate() {
@@ -104,10 +105,7 @@ pub fn optimized_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         }
     }
 
-    // Bind initial sum to transcript
-    tr.append_fields(b"sumcheck/initial_sum", &initial_sum.as_coeffs());
-
-    // Optimized oracle with cached sparse formats and factored algebra
+    // Optimized oracles with cached sparse formats and factored algebra
     let sparse = Arc::new(super::oracle::SparseCache::build(s));
     let mut oracle = super::oracle::OptimizedOracle::new_with_sparse(
         s,
@@ -121,6 +119,12 @@ pub fn optimized_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         me_inputs.first().map(|mi| mi.r.as_slice()),
         sparse,
     );
+
+    // ---------------------------------------------------------------------
+    // FE sumcheck (legacy/full in Phase 1; FE-only in Phase 2)
+    // ---------------------------------------------------------------------
+    tr.append_message(b"sumcheck/fe", b"");
+    tr.append_fields(b"sumcheck/initial_sum", &initial_sum.as_coeffs());
 
     let mut running_sum = initial_sum;
     let mut sumcheck_rounds: Vec<Vec<K>> = Vec::with_capacity(oracle.num_rounds());
@@ -182,14 +186,70 @@ pub fn optimized_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         sumcheck_rounds.push(coeffs);
     }
 
+    // ---------------------------------------------------------------------
+    // NC-only sumcheck (split-NC scaffolding; claimed sum is 0)
+    // ---------------------------------------------------------------------
+    let mut oracle_nc = super::oracle::NcOracle::new(
+        s,
+        params,
+        mcs_witnesses,
+        me_witnesses,
+        ch.clone(),
+        dims.ell_d,
+        dims.ell_m,
+        dims.d_sc,
+    );
+
+    tr.append_message(b"sumcheck/nc", b"");
+    let initial_sum_nc = K::ZERO;
+    tr.append_fields(b"sumcheck/initial_sum", &initial_sum_nc.as_coeffs());
+
+    let mut running_sum_nc = initial_sum_nc;
+    let mut sumcheck_rounds_nc: Vec<Vec<K>> = Vec::with_capacity(oracle_nc.num_rounds());
+    let mut sumcheck_chals_nc: Vec<K> = Vec::with_capacity(oracle_nc.num_rounds());
+
+    for _round_idx in 0..oracle_nc.num_rounds() {
+        let deg = oracle_nc.degree_bound();
+        let xs: Vec<K> = (0..=deg).map(|t| K::from(F::from_u64(t as u64))).collect();
+        let ys = oracle_nc.evals_at(&xs);
+
+        if ys[0] + ys[1] != running_sum_nc {
+            return Err(PiCcsError::SumcheckError(
+                "NC sumcheck invariant failed: p(0)+p(1) ≠ running_sum".into(),
+            ));
+        }
+
+        let coeffs = crate::sumcheck::interpolate_from_evals(&xs, &ys);
+        debug_assert_eq!(crate::sumcheck::poly_eval_k(&coeffs, K::ZERO), ys[0]);
+        debug_assert_eq!(crate::sumcheck::poly_eval_k(&coeffs, K::ONE), ys[1]);
+
+        for &c in &coeffs {
+            tr.append_fields(b"sumcheck/round/coeff", &c.as_coeffs());
+        }
+        let c0 = tr.challenge_field(b"sumcheck/challenge/0");
+        let c1 = tr.challenge_field(b"sumcheck/challenge/1");
+        let r_i = neo_math::from_complex(c0, c1);
+        sumcheck_chals_nc.push(r_i);
+
+        running_sum_nc = crate::sumcheck::poly_eval_k(&coeffs, r_i);
+        oracle_nc.fold(r_i);
+        sumcheck_rounds_nc.push(coeffs);
+    }
+
     // Build outputs at r′ using the oracle's r′-only precomputation (no dense scan).
     let fold_digest = tr.digest32();
-    let out_me = oracle.build_me_outputs_from_ajtai_precomp(mcs_list, me_inputs, fold_digest, log);
+    let (s_col, _alpha_nc) = sumcheck_chals_nc.split_at(dims.ell_m);
+    let out_me = oracle.build_me_outputs_from_ajtai_precomp(mcs_list, me_inputs, s_col, fold_digest, log);
 
     let mut proof = PiCcsProof::new(sumcheck_rounds, Some(initial_sum));
+    proof.variant = PiCcsProofVariant::SplitNcV1;
     proof.sumcheck_challenges = sumcheck_chals;
+    proof.sumcheck_rounds_nc = sumcheck_rounds_nc;
+    proof.sc_initial_sum_nc = Some(initial_sum_nc);
+    proof.sumcheck_challenges_nc = sumcheck_chals_nc;
     proof.challenges_public = ch;
     proof.sumcheck_final = running_sum;
+    proof.sumcheck_final_nc = running_sum_nc;
     proof.header_digest = fold_digest.to_vec();
 
     Ok((out_me, proof))
@@ -205,191 +265,4 @@ pub fn optimized_prove_simple<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     log: &L,
 ) -> Result<(Vec<MeInstance<Cmt, F, K>>, PiCcsProof), PiCcsError> {
     optimized_prove(tr, params, s, mcs_list, mcs_witnesses, &[], &[], log)
-}
-
-// ============================================================================
-// Route A: Split CCS prover for batched sum-check
-// ============================================================================
-
-/// Prepared CCS context for Route A batched sum-check.
-///
-/// Contains all setup data needed for the CCS oracle, allowing the caller
-/// to run time-rounds in a batched sum-check with Twist/Shout.
-pub struct CcsBatchContext<'a, F>
-where
-    F: p3_field::Field + p3_field::PrimeCharacteristicRing + Copy + Send + Sync,
-    K: From<F>,
-{
-    /// The CCS oracle (owns mutable state for folding)
-    pub oracle: super::oracle::OptimizedOracle<'a, F>,
-    /// Public challenges
-    pub challenges: super::common::Challenges,
-    /// Dimensions
-    pub ell_n: usize,
-    pub ell_d: usize,
-    pub d_sc: usize,
-    /// Initial sum (claimed sum for CCS)
-    pub initial_sum: K,
-}
-
-/// Prepare CCS for Route A batched sum-check.
-///
-/// This function performs CCS setup without running sum-check rounds:
-/// 1. Build dimensions and bind header
-/// 2. Sample challenges (α, β, γ)
-/// 3. Create the CCS oracle
-/// 4. Compute initial sum
-///
-/// The caller can then use `context.oracle` in a batched sum-check with Twist/Shout.
-/// After the batched sum-check completes, call `finalize_ccs_proof` to build ME outputs.
-///
-/// # Returns
-/// - `CcsBatchContext` containing the oracle and all data needed for finalization
-pub fn prepare_ccs_for_batch<'a>(
-    tr: &mut Poseidon2Transcript,
-    params: &'a NeoParams,
-    s: &'a CcsStructure<F>,
-    mcs_witnesses: &'a [McsWitness<F>],
-    me_inputs: &[MeInstance<Cmt, F, K>],
-    me_witnesses: &'a [neo_ccs::Mat<F>],
-) -> Result<CcsBatchContext<'a, F>, PiCcsError> {
-    // Dims + transcript binding
-    let dims = utils::build_dims_and_policy(params, s)?;
-
-    // Note: We skip bind_header_and_instances here as the caller may need to
-    // bind additional Twist/Shout commitments first. The caller is responsible
-    // for proper transcript binding order.
-
-    // Sample challenges
-    let ch = utils::sample_challenges(tr, dims.ell_d, dims.ell)?;
-
-    // Validate ME input r (if provided)
-    for (idx, me) in me_inputs.iter().enumerate() {
-        if me.r.len() != dims.ell_n {
-            return Err(PiCcsError::InvalidInput(format!(
-                "ME input r length mismatch at accumulator #{}: expected ell_n = {}, got {}",
-                idx,
-                dims.ell_n,
-                me.r.len()
-            )));
-        }
-    }
-
-    // Initial sum: use the public T computed from ME inputs and α
-    let initial_sum = crate::paper_exact_engine::claimed_initial_sum_from_inputs(s, &ch, me_inputs);
-
-    // Create the oracle
-    let sparse = Arc::new(super::oracle::SparseCache::build(s));
-    let oracle = super::oracle::OptimizedOracle::new_with_sparse(
-        s,
-        params,
-        mcs_witnesses,
-        me_witnesses,
-        ch.clone(),
-        dims.ell_d,
-        dims.ell_n,
-        dims.d_sc,
-        me_inputs.first().map(|mi| mi.r.as_slice()),
-        sparse,
-    );
-
-    Ok(CcsBatchContext {
-        oracle,
-        challenges: ch,
-        ell_n: dims.ell_n,
-        ell_d: dims.ell_d,
-        d_sc: dims.d_sc,
-        initial_sum,
-    })
-}
-
-/// Finalize CCS proof after batched sum-check.
-///
-/// This function completes the CCS proof after time-rounds have been executed
-/// via batched sum-check:
-/// 1. Run remaining Ajtai rounds (if not already done in batch)
-/// 2. Build ME outputs using the time-round challenges (r_prime)
-/// 3. Construct the proof structure
-///
-/// # Arguments
-/// - `tr`: Transcript (should be in same state as after batched sum-check)
-/// - `context`: The batch context from `prepare_ccs_for_batch`
-/// - `time_challenges`: Challenges from the batched sum-check (length = ell_n)
-/// - `time_rounds`: Round polynomials from the batched sum-check for CCS
-/// - `running_sum`: The running sum after time-rounds
-/// - Additional arguments for ME output construction
-pub fn finalize_ccs_after_batch<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
-    tr: &mut Poseidon2Transcript,
-    params: &NeoParams,
-    s: &CcsStructure<F>,
-    mcs_list: &[McsInstance<Cmt, F>],
-    mcs_witnesses: &[McsWitness<F>],
-    me_inputs: &[MeInstance<Cmt, F, K>],
-    me_witnesses: &[neo_ccs::Mat<F>],
-    mut context: CcsBatchContext<'_, F>,
-    time_challenges: &[K],
-    time_rounds: Vec<Vec<K>>,
-    running_sum: K,
-    log: &L,
-) -> Result<(Vec<MeInstance<Cmt, F, K>>, super::PiCcsProof), PiCcsError> {
-    // Validate time challenges length
-    if time_challenges.len() != context.ell_n {
-        return Err(PiCcsError::InvalidInput(format!(
-            "time_challenges length mismatch: expected {}, got {}",
-            context.ell_n,
-            time_challenges.len()
-        )));
-    }
-
-    // The oracle should already have time-rounds folded in.
-    // Now run remaining Ajtai rounds.
-    let mut sumcheck_rounds = time_rounds;
-    let mut sumcheck_chals: Vec<K> = time_challenges.to_vec();
-    let mut current_sum = running_sum;
-
-    // Continue with Ajtai rounds
-    for _round_idx in 0..context.ell_d {
-        let deg = context.oracle.degree_bound();
-        let xs: Vec<K> = (0..=deg).map(|t| K::from(F::from_u64(t as u64))).collect();
-        let ys = context.oracle.evals_at(&xs);
-
-        // Check invariant
-        if ys[0] + ys[1] != current_sum {
-            return Err(PiCcsError::ProtocolError(
-                "Ajtai round sumcheck invariant failed".into(),
-            ));
-        }
-
-        // Interpolate to coefficients
-        let coeffs = crate::sumcheck::interpolate_from_evals(&xs, &ys);
-
-        // Append to transcript and get challenge
-        for c in coeffs.iter() {
-            tr.append_fields(b"sumcheck/round", &c.as_coeffs());
-        }
-        let c0 = tr.challenge_field(b"sumcheck/challenge/0");
-        let c1 = tr.challenge_field(b"sumcheck/challenge/1");
-        let r_i = neo_math::from_complex(c0, c1);
-        sumcheck_chals.push(r_i);
-
-        // Fold oracle
-        current_sum = crate::sumcheck::poly_eval_k(&coeffs, r_i);
-        context.oracle.fold(r_i);
-        sumcheck_rounds.push(coeffs);
-    }
-
-    // Build ME outputs
-    let fold_digest = tr.digest32();
-    let _ = (params, s, mcs_witnesses, me_witnesses);
-    let out_me = context
-        .oracle
-        .build_me_outputs_from_ajtai_precomp(mcs_list, me_inputs, fold_digest, log);
-
-    let mut proof = super::PiCcsProof::new(sumcheck_rounds, Some(context.initial_sum));
-    proof.sumcheck_challenges = sumcheck_chals;
-    proof.challenges_public = context.challenges;
-    proof.sumcheck_final = current_sum;
-    proof.header_digest = fold_digest.to_vec();
-
-    Ok((out_me, proof))
 }

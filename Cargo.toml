@@ -8,6 +8,8 @@ members = [
   "crates/neo-ccs",
   "crates/neo-reductions",
   "crates/neo-fold",
+  "crates/nightstream-sdk",
+  "crates/nightstream-sdk-macros",
   "crates/neo-spartan-bridge",
   "crates/neo-vm-trace",
   "crates/neo-memory",

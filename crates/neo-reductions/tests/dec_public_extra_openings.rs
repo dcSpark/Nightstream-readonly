@@ -72,8 +72,10 @@ fn verify_dec_public_checks_all_y_and_y_scalars_entries() {
         c: c0.clone(),
         X: X0.clone(),
         r: r.clone(),
+        s_col: Vec::new(),
         y: y0.clone(),
         y_scalars: y_scalars0.clone(),
+        y_zcol: Vec::new(),
         m_in,
         fold_digest: [0u8; 32],
         c_step_coords: vec![],
@@ -84,8 +86,10 @@ fn verify_dec_public_checks_all_y_and_y_scalars_entries() {
         c: c1.clone(),
         X: X1.clone(),
         r: r.clone(),
+        s_col: Vec::new(),
         y: y1.clone(),
         y_scalars: y_scalars1.clone(),
+        y_zcol: Vec::new(),
         m_in,
         fold_digest: [0u8; 32],
         c_step_coords: vec![],
@@ -114,8 +118,10 @@ fn verify_dec_public_checks_all_y_and_y_scalars_entries() {
         c: c_parent.clone(),
         X: X_parent,
         r: r.clone(),
+        s_col: Vec::new(),
         y: y_parent.clone(),
         y_scalars: y_scalars_parent.clone(),
+        y_zcol: Vec::new(),
         m_in,
         fold_digest: [0u8; 32],
         c_step_coords: vec![],
@@ -169,3 +175,153 @@ fn verify_dec_public_checks_all_y_and_y_scalars_entries() {
     ));
 }
 
+#[test]
+fn verify_dec_public_checks_y_zcol_when_present() {
+    let params = NeoParams::goldilocks_127();
+    let ell_d = D.next_power_of_two().trailing_zeros() as usize;
+    let d_pad = 1usize << ell_d;
+
+    // Minimal CCS structure: only t matters for this test.
+    let s = CcsStructure::new(vec![Mat::identity(1)], neo_ccs::poly::SparsePoly::new(1, vec![])).unwrap();
+
+    let m_in = 1usize;
+    let r = vec![K::from(F::from_u64(3)), K::from(F::from_u64(5))];
+    let s_col = vec![K::from(F::from_u64(7))];
+    let t_eff = 1usize;
+
+    // Child y / scalars (any consistent values).
+    let mut y0 = vec![vec![K::ZERO; d_pad]; t_eff];
+    let mut y1 = vec![vec![K::ZERO; d_pad]; t_eff];
+    y0[0][0] = K::from(F::from_u64(11));
+    y1[0][0] = K::from(F::from_u64(13));
+
+    let y_scalars0: Vec<K> = y0.iter().map(|row| recompose_base_b_digits(&params, row)).collect();
+    let y_scalars1: Vec<K> = y1.iter().map(|row| recompose_base_b_digits(&params, row)).collect();
+
+    // Child y_zcol (any consistent values).
+    let mut y_zcol0 = vec![K::ZERO; d_pad];
+    let mut y_zcol1 = vec![K::ZERO; d_pad];
+    y_zcol0[0] = K::from(F::from_u64(17));
+    y_zcol1[0] = K::from(F::from_u64(19));
+
+    let mut X0 = Mat::zero(D, m_in, F::ZERO);
+    let mut X1 = Mat::zero(D, m_in, F::ZERO);
+    X0[(0, 0)] = F::from_u64(7);
+    X1[(0, 0)] = F::from_u64(9);
+
+    let c0 = Commitment::zeros(params.d as usize, 1);
+    let mut c1 = Commitment::zeros(params.d as usize, 1);
+    c1.data[0] = F::from_u64(23);
+
+    let child0 = MeInstance::<Commitment, F, K> {
+        c: c0.clone(),
+        X: X0.clone(),
+        r: r.clone(),
+        s_col: s_col.clone(),
+        y: y0.clone(),
+        y_scalars: y_scalars0.clone(),
+        y_zcol: y_zcol0.clone(),
+        m_in,
+        fold_digest: [0u8; 32],
+        c_step_coords: vec![],
+        u_offset: 0,
+        u_len: 0,
+    };
+    let child1 = MeInstance::<Commitment, F, K> {
+        c: c1.clone(),
+        X: X1.clone(),
+        r: r.clone(),
+        s_col: s_col.clone(),
+        y: y1.clone(),
+        y_scalars: y_scalars1.clone(),
+        y_zcol: y_zcol1.clone(),
+        m_in,
+        fold_digest: [0u8; 32],
+        c_step_coords: vec![],
+        u_offset: 0,
+        u_len: 0,
+    };
+
+    // Parent = child0 + b * child1.
+    let bF = F::from_u64(params.b as u64);
+    let bK = K::from(bF);
+
+    let mut y_parent = vec![vec![K::ZERO; d_pad]; t_eff];
+    let mut y_scalars_parent = vec![K::ZERO; t_eff];
+    for j in 0..t_eff {
+        for t in 0..d_pad {
+            y_parent[j][t] = child0.y[j][t] + bK * child1.y[j][t];
+        }
+        y_scalars_parent[j] = child0.y_scalars[j] + bK * child1.y_scalars[j];
+    }
+
+    let mut y_zcol_parent = vec![K::ZERO; d_pad];
+    for t in 0..d_pad {
+        y_zcol_parent[t] = child0.y_zcol[t] + bK * child1.y_zcol[t];
+    }
+
+    let mut X_parent = Mat::zero(D, m_in, F::ZERO);
+    X_parent[(0, 0)] = X0[(0, 0)] + bF * X1[(0, 0)];
+
+    let c_parent = add_commitments(&c0, &scale_commitment(&c1, bF));
+
+    let parent = MeInstance::<Commitment, F, K> {
+        c: c_parent.clone(),
+        X: X_parent,
+        r: r.clone(),
+        s_col: s_col.clone(),
+        y: y_parent.clone(),
+        y_scalars: y_scalars_parent.clone(),
+        y_zcol: y_zcol_parent.clone(),
+        m_in,
+        fold_digest: [0u8; 32],
+        c_step_coords: vec![],
+        u_offset: 0,
+        u_len: 0,
+    };
+
+    let combine_b_pows = |cs: &[Commitment], b: u32| {
+        let bF = F::from_u64(b as u64);
+        let mut acc = Commitment::zeros(cs[0].d, cs[0].kappa);
+        let mut pow = F::ONE;
+        for c in cs {
+            let term = scale_commitment(c, pow);
+            acc = add_commitments(&acc, &term);
+            pow *= bF;
+        }
+        acc
+    };
+
+    assert!(neo_reductions::api::verify_dec_public(
+        &s,
+        &params,
+        &parent,
+        &[child0.clone(), child1.clone()],
+        combine_b_pows,
+        ell_d
+    ));
+
+    // Tamper y_zcol and ensure the check fails.
+    let mut parent_bad = parent.clone();
+    parent_bad.y_zcol[0] += K::ONE;
+    assert!(!neo_reductions::api::verify_dec_public(
+        &s,
+        &params,
+        &parent_bad,
+        &[child0.clone(), child1.clone()],
+        combine_b_pows,
+        ell_d
+    ));
+
+    // Tamper a child's s_col and ensure the check fails.
+    let mut child1_bad = child1.clone();
+    child1_bad.s_col = vec![K::from(F::from_u64(9))];
+    assert!(!neo_reductions::api::verify_dec_public(
+        &s,
+        &params,
+        &parent,
+        &[child0, child1_bad],
+        combine_b_pows,
+        ell_d
+    ));
+}

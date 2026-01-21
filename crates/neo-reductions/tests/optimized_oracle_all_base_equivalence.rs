@@ -60,6 +60,7 @@ fn build_oracle(b: u32) -> OptimizedOracle<'static, F> {
         alpha: (0..ell_d).map(|i| K::from(F::from_u64((i as u64) + 1))).collect(),
         beta_a: (0..ell_d).map(|i| K::from(F::from_u64((i as u64) + 11))).collect(),
         beta_r: (0..ell_n).map(|i| K::from(F::from_u64((i as u64) + 21))).collect(),
+        beta_m: Vec::new(),
         gamma: K::from(F::from_u64(7)),
     };
 

@@ -927,6 +927,7 @@ version = "0.1.0"
 dependencies = [
  "bellpepper",
  "bellpepper-core",
+ "bincode",
  "criterion",
  "ff",
  "neo-ajtai",
@@ -1083,6 +1084,22 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.17",
+]
+
+[[package]]
+name = "nightstream-sdk"
+version = "0.1.0"
+dependencies = [
+ "nightstream-sdk-macros",
+]
+
+[[package]]
+name = "nightstream-sdk-macros"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.108",
 ]
 
 [[package]]

@@ -141,6 +141,13 @@ impl FoldRunCircuit {
         let pi_ccs_proof = &witness.pi_ccs_proofs[step_idx];
         let challenges = &self.instance.pi_ccs_challenges[step_idx];
 
+        if pi_ccs_proof.variant != neo_reductions::optimized_engine::PiCcsProofVariant::SplitNcV1 {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "FoldRunCircuit currently requires SplitNcV1 Π-CCS proofs (got {:?})",
+                pi_ccs_proof.variant
+            )));
+        }
+
         // 1a. Bind the public claimed initial sum T from ME inputs and challenges.
         let initial_sum_var = self.verify_initial_sum_binding(cs, step_idx, pi_ccs_proof, challenges, witness)?;
 
@@ -148,16 +155,27 @@ impl FoldRunCircuit {
         let sumcheck_final_var =
             self.verify_sumcheck_rounds(cs, step_idx, pi_ccs_proof, challenges, &initial_sum_var)?;
 
-        // Pre-allocate y-tables for Π-CCS outputs once so they can be shared
-        // between the terminal identity and RLC gadgets.
+        // Pre-allocate y-tables and y_zcol vectors for Π-CCS outputs once so they can be shared
+        // between terminal-identity, NC, and RLC gadgets.
         let mut ccs_out_y_vars: Vec<Vec<Vec<KNumVar>>> = Vec::with_capacity(step.ccs_out.len());
+        let mut ccs_out_y_zcol_vars: Vec<Vec<KNumVar>> = Vec::with_capacity(step.ccs_out.len());
         for (i, child) in step.ccs_out.iter().enumerate() {
             let y_table =
                 helpers::alloc_y_table_from_neo(cs, &child.y, &format!("step_{}_ccs_out_child_{}_y", step_idx, i))?;
             ccs_out_y_vars.push(y_table);
+
+            let mut yz_vars = Vec::with_capacity(child.y_zcol.len());
+            for (idx, &val) in child.y_zcol.iter().enumerate() {
+                yz_vars.push(helpers::alloc_k_from_neo(
+                    cs,
+                    val,
+                    &format!("step_{}_ccs_out_child_{}_y_zcol_{}", step_idx, i, idx),
+                )?);
+            }
+            ccs_out_y_zcol_vars.push(yz_vars);
         }
 
-        // 1c. Verify Π-CCS terminal identity: final running sum == RHS(α,β,γ,r',α', out_me, inputs).
+        // 1c. Verify Π-CCS FE terminal identity: final running sum == RHS_fe(α,β,γ,r',α', out_me, inputs.r).
         self.verify_terminal_identity(
             cs,
             step_idx,
@@ -169,8 +187,35 @@ impl FoldRunCircuit {
             &ccs_out_y_vars,
         )?;
 
+        // 1d. Verify Π-CCS NC sumcheck + NC terminal identity (split-NC variant).
+        let initial_sum_nc_var = helpers::k_zero(cs, &format!("step_{}_nc_initial_sum_zero", step_idx))?;
+        if let Some(sc_initial_nc) = pi_ccs_proof.sc_initial_sum_nc {
+            let sc_initial_nc_var = helpers::alloc_k_from_neo(
+                cs,
+                sc_initial_nc,
+                &format!("step_{}_sc_initial_sum_nc", step_idx),
+            )?;
+            helpers::enforce_k_eq(
+                cs,
+                &sc_initial_nc_var,
+                &initial_sum_nc_var,
+                &format!("step_{}_nc_initial_sum_matches_zero", step_idx),
+            );
+        }
+        let sumcheck_final_nc_var =
+            self.verify_sumcheck_rounds_nc(cs, step_idx, pi_ccs_proof, challenges, &initial_sum_nc_var)?;
+        self.verify_terminal_identity_nc(
+            cs,
+            step_idx,
+            step,
+            pi_ccs_proof,
+            challenges,
+            &sumcheck_final_nc_var,
+            &ccs_out_y_zcol_vars,
+        )?;
+
         // 2. Verify RLC equalities
-        self.verify_rlc(cs, step_idx, step, witness, &ccs_out_y_vars)?;
+        self.verify_rlc(cs, step_idx, step, witness, &ccs_out_y_vars, &ccs_out_y_zcol_vars)?;
 
         // 3. Verify DEC equalities
         self.verify_dec(cs, step_idx, step, witness)?;
@@ -261,6 +306,82 @@ impl FoldRunCircuit {
             &claimed_sum,
             &final_sum_expected,
             &format!("step_{}_final_sum_matches_scalar", step_idx),
+        );
+
+        Ok(claimed_sum)
+    }
+
+    /// Verify NC sumcheck rounds for a step (SplitNcV1 only).
+    fn verify_sumcheck_rounds_nc<CS: ConstraintSystem<CircuitF>>(
+        &self,
+        cs: &mut CS,
+        step_idx: usize,
+        proof: &neo_reductions::PiCcsProof,
+        challenges: &crate::circuit::witness::PiCcsChallenges,
+        initial_sum: &KNumVar,
+    ) -> Result<KNumVar> {
+        if proof.sumcheck_rounds_nc.len() != challenges.sumcheck_challenges_nc.len() {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "NC sumcheck rounds/challenges length mismatch at step {}: rounds={}, challenges={}",
+                step_idx,
+                proof.sumcheck_rounds_nc.len(),
+                challenges.sumcheck_challenges_nc.len()
+            )));
+        }
+
+        let mut claimed_sum = initial_sum.clone();
+        for (round_idx, round_poly) in proof.sumcheck_rounds_nc.iter().enumerate() {
+            let mut coeffs = Vec::new();
+            for (coeff_idx, coeff) in round_poly.iter().enumerate() {
+                let coeff_var = helpers::alloc_k_from_neo(
+                    cs,
+                    *coeff,
+                    &format!("step_{}_nc_round_{}_coeff_{}", step_idx, round_idx, coeff_idx),
+                )
+                .map_err(|e| SpartanBridgeError::SynthesisError(format!("{:?}", e)))?;
+                coeffs.push(coeff_var);
+            }
+
+            sumcheck_round_gadget(
+                cs,
+                &coeffs,
+                round_poly,
+                &claimed_sum,
+                self.delta,
+                &format!("step_{}_nc_round_{}", step_idx, round_idx),
+            )
+            .map_err(SpartanBridgeError::from)?;
+
+            let challenge = helpers::alloc_k_from_neo(
+                cs,
+                challenges.sumcheck_challenges_nc[round_idx],
+                &format!("step_{}_nc_round_{}_challenge", step_idx, round_idx),
+            )?;
+
+            let next_sum = sumcheck_eval_gadget(
+                cs,
+                &coeffs,
+                round_poly,
+                &challenge,
+                challenges.sumcheck_challenges_nc[round_idx],
+                self.delta,
+                &format!("step_{}_nc_round_{}_eval", step_idx, round_idx),
+            )
+            .map_err(SpartanBridgeError::from)?;
+
+            claimed_sum = next_sum;
+        }
+
+        let final_sum_expected = helpers::alloc_k_from_neo(
+            cs,
+            proof.sumcheck_final_nc,
+            &format!("step_{}_nc_final_sum", step_idx),
+        )?;
+        helpers::enforce_k_eq(
+            cs,
+            &claimed_sum,
+            &final_sum_expected,
+            &format!("step_{}_nc_final_sum_matches_scalar", step_idx),
         );
 
         Ok(claimed_sum)
@@ -1043,8 +1164,8 @@ impl FoldRunCircuit {
         Ok((F_prime_var, F_prime_native))
     }
 
-    /// Verify Π-CCS terminal identity for a step:
-    /// sumcheck_final == rhs_terminal_identity_paper_exact(α,β,γ,r',α', outputs, inputs.r).
+    /// Verify Π-CCS FE terminal identity for a step (SplitNcV1):
+    /// sumcheck_final == rhs_terminal_identity_fe_paper_exact(α,β,γ,r',α', outputs, inputs.r).
     fn verify_terminal_identity<CS: ConstraintSystem<CircuitF>>(
         &self,
         cs: &mut CS,
@@ -1056,7 +1177,7 @@ impl FoldRunCircuit {
         sumcheck_final: &KNumVar,
         out_y_vars: &[Vec<Vec<KNumVar>>],
     ) -> Result<()> {
-        use neo_math::{D, K as NeoK};
+        use neo_math::K as NeoK;
 
         // ME inputs for this step (needed only for r in eq((α',r'),(α,r))).
         let me_inputs = if step_idx == 0 {
@@ -1273,7 +1394,7 @@ impl FoldRunCircuit {
             // Use the shared y-table allocation for the first output.
             let first_out_y = &out_y_vars[0];
             let d_pad = first_out_y[0].len();
-            let d_ring = D.min(d_pad);
+            let d_ring = neo_math::D.min(d_pad);
 
             // Native y-table for the first output (for K hints).
             let first_out_y_vals = &out_me[0].y;
@@ -1393,94 +1514,7 @@ impl FoldRunCircuit {
             chi_alpha_prime_vals.push(w_val);
         }
 
-        // --- Σ γ^i · N_i' over outputs, in K ---
-        //
-        // N_i' = ∏_{t} ( ẏ'_{(i,1)}(α') - t ), with ẏ' evaluated at α' as MLE.
-        let mut nc_prime_sum = helpers::k_zero(cs, &format!("step_{}_N_prime_sum_init", step_idx))?;
-        let mut nc_prime_sum_native = NeoK::ZERO;
-
-        // g = γ^1
-        let mut g = gamma_var.clone();
-        let mut g_native = challenges.gamma;
-        for (i_idx, out_y) in out_y_vars.iter().enumerate() {
-            // ẏ'_{(i,1)}(α') uses j = 0 row.
-            if out_y.is_empty() {
-                return Err(SpartanBridgeError::InvalidInput(format!(
-                    "Terminal identity at step {}: empty y table for output {}",
-                    step_idx, i_idx
-                )));
-            }
-            let y1 = &out_y[0];
-            let limit = core::cmp::min(chi_alpha_prime.len(), y1.len());
-
-            let mut y_eval = helpers::k_zero(cs, &format!("step_{}_N_y_eval_i{}", step_idx, i_idx))?;
-            let mut y_eval_val = NeoK::ZERO;
-            for rho in 0..limit {
-                let y1_val = out_me[i_idx].y[0][rho];
-                let chi_val = chi_alpha_prime_vals[rho];
-                let (prod_var, prod_val) = helpers::k_mul_with_hint(
-                    cs,
-                    &y1[rho],
-                    y1_val,
-                    &chi_alpha_prime[rho],
-                    chi_val,
-                    self.delta,
-                    &format!("step_{}_N_y_eval_i{}_rho{}", step_idx, i_idx, rho),
-                )?;
-                y_eval_val += prod_val;
-                let hint = KNum::<CircuitF>::from_neo_k(y_eval_val);
-                y_eval = k_add_raw(
-                    cs,
-                    &y_eval,
-                    &prod_var,
-                    Some(hint),
-                    &format!("step_{}_N_y_eval_acc_i{}_rho{}", step_idx, i_idx, rho),
-                )
-                .map_err(SpartanBridgeError::BellpepperError)?;
-            }
-
-            let (Ni, Ni_native) = self.range_product(
-                cs,
-                step_idx,
-                &y_eval,
-                y_eval_val,
-                &format!("step_{}_N_range_i{}", step_idx, i_idx),
-            )?;
-
-            let (gNi, gNi_native) = helpers::k_mul_with_hint(
-                cs,
-                &g,
-                g_native,
-                &Ni,
-                Ni_native,
-                self.delta,
-                &format!("step_{}_N_weighted_i{}", step_idx, i_idx),
-            )?;
-
-            nc_prime_sum_native += gNi_native;
-            let nc_hint = KNum::<CircuitF>::from_neo_k(nc_prime_sum_native);
-            nc_prime_sum = k_add_raw(
-                cs,
-                &nc_prime_sum,
-                &gNi,
-                Some(nc_hint),
-                &format!("step_{}_N_acc_i{}", step_idx, i_idx),
-            )
-            .map_err(SpartanBridgeError::BellpepperError)?;
-
-            // g <- g * γ with hint
-            let (new_g, new_g_native) = helpers::k_mul_with_hint(
-                cs,
-                &g,
-                g_native,
-                &gamma_var,
-                challenges.gamma,
-                self.delta,
-                &format!("step_{}_N_gamma_step_i{}", step_idx, i_idx),
-            )?;
-            g = new_g;
-            g_native = new_g_native;
-        }
+        // SplitNcV1: NC is handled by a dedicated NC sumcheck over y_zcol, so the FE RHS excludes NC.
 
         // --- Eval' block in K ---
         //
@@ -1596,26 +1630,14 @@ impl FoldRunCircuit {
             }
         }
 
-        // Assemble RHS in K:
-        // v = eq((α',r'), β)·(F' + Σ γ^i N_i') + γ^k · eq((α',r'), (α,r)) · Eval'.
-        // F_plus_N = F' + Σ γ^i N'_i with native hint.
-        let F_plus_N_native = F_prime_native + nc_prime_sum_native;
-        let F_plus_N_hint = KNum::<CircuitF>::from_neo_k(F_plus_N_native);
-        let F_plus_N = k_add_raw(
-            cs,
-            &F_prime,
-            &nc_prime_sum,
-            Some(F_plus_N_hint),
-            &format!("step_{}_RHS_F_plus_N", step_idx),
-        )
-        .map_err(SpartanBridgeError::BellpepperError)?;
-
+        // Assemble RHS_fe in K:
+        // v_fe = eq((α',r'), β)·F' + γ^k · eq((α',r'), (α,r)) · Eval'.
         let (left, left_native) = helpers::k_mul_with_hint(
             cs,
             &eq_aprp_beta,
             eq_aprp_beta_native,
-            &F_plus_N,
-            F_plus_N_native,
+            &F_prime,
+            F_prime_native,
             self.delta,
             &format!("step_{}_RHS_left", step_idx),
         )?;
@@ -1664,6 +1686,348 @@ impl FoldRunCircuit {
         Ok(())
     }
 
+    /// Verify Π-CCS NC terminal identity for a step (SplitNcV1).
+    ///
+    /// sumcheck_final_nc == rhs_terminal_identity_nc_paper_exact(β_a,β_m,γ,s_col',α'_nc, outputs.y_zcol).
+    fn verify_terminal_identity_nc<CS: ConstraintSystem<CircuitF>>(
+        &self,
+        cs: &mut CS,
+        step_idx: usize,
+        step: &FoldStep,
+        _proof: &neo_reductions::PiCcsProof,
+        challenges: &crate::circuit::witness::PiCcsChallenges,
+        sumcheck_final_nc: &KNumVar,
+        out_y_zcol_vars: &[Vec<KNumVar>],
+    ) -> Result<()> {
+        use neo_math::K as NeoK;
+
+        let out_me = &step.ccs_out;
+        if out_me.is_empty() {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "NC terminal identity at step {}: empty outputs",
+                step_idx
+            )));
+        }
+        if out_y_zcol_vars.len() != out_me.len() {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "NC terminal identity at step {}: y_zcol vars/output length mismatch (vars={}, outputs={})",
+                step_idx,
+                out_y_zcol_vars.len(),
+                out_me.len()
+            )));
+        }
+
+        // Allocate α'_nc and s_col' and bind them to the split of sumcheck_challenges_nc.
+        let mut alpha_prime_vars = Vec::with_capacity(challenges.alpha_prime_nc.len());
+        for (i, &k) in challenges.alpha_prime_nc.iter().enumerate() {
+            alpha_prime_vars.push(helpers::alloc_k_from_neo(
+                cs,
+                k,
+                &format!("step_{}_alpha_prime_nc_{}", step_idx, i),
+            )?);
+        }
+
+        let mut s_col_prime_vars = Vec::with_capacity(challenges.s_col_prime.len());
+        for (i, &k) in challenges.s_col_prime.iter().enumerate() {
+            s_col_prime_vars.push(helpers::alloc_k_from_neo(
+                cs,
+                k,
+                &format!("step_{}_s_col_prime_{}", step_idx, i),
+            )?);
+        }
+
+        let total_chals = challenges.sumcheck_challenges_nc.len();
+        let cols = s_col_prime_vars.len();
+        let ajtai = alpha_prime_vars.len();
+        if total_chals != cols + ajtai {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "sumcheck_challenges_nc length mismatch at step {}: expected {} (cols + ajtai), got {}",
+                step_idx,
+                cols + ajtai,
+                total_chals
+            )));
+        }
+        // s_col' == prefix
+        for i in 0..cols {
+            let sc_val = helpers::alloc_k_from_neo(
+                cs,
+                challenges.sumcheck_challenges_nc[i],
+                &format!("step_{}_sc_nc_round_chal_col_{}", step_idx, i),
+            )?;
+            helpers::enforce_k_eq(
+                cs,
+                &s_col_prime_vars[i],
+                &sc_val,
+                &format!("step_{}_s_col_prime_matches_sc_nc_{}", step_idx, i),
+            );
+        }
+        // α'_nc == suffix
+        for j in 0..ajtai {
+            let idx = cols + j;
+            let sc_val = helpers::alloc_k_from_neo(
+                cs,
+                challenges.sumcheck_challenges_nc[idx],
+                &format!("step_{}_sc_nc_round_chal_ajtai_{}", step_idx, j),
+            )?;
+            helpers::enforce_k_eq(
+                cs,
+                &alpha_prime_vars[j],
+                &sc_val,
+                &format!("step_{}_alpha_prime_nc_matches_sc_nc_{}", step_idx, j),
+            );
+        }
+
+        // Allocate β_a and β_m.
+        let mut beta_a_vars = Vec::with_capacity(challenges.beta_a.len());
+        for (i, &k) in challenges.beta_a.iter().enumerate() {
+            beta_a_vars.push(helpers::alloc_k_from_neo(
+                cs,
+                k,
+                &format!("step_{}_beta_a_nc_{}", step_idx, i),
+            )?);
+        }
+        let mut beta_m_vars = Vec::with_capacity(challenges.beta_m.len());
+        for (i, &k) in challenges.beta_m.iter().enumerate() {
+            beta_m_vars.push(helpers::alloc_k_from_neo(
+                cs,
+                k,
+                &format!("step_{}_beta_m_{}", step_idx, i),
+            )?);
+        }
+
+        let (eq_alpha_prime_beta_a, eq_alpha_prime_beta_a_native) = self.eq_points(
+            cs,
+            step_idx,
+            &alpha_prime_vars,
+            &beta_a_vars,
+            &challenges.alpha_prime_nc,
+            &challenges.beta_a,
+            "eq_alpha_prime_nc_beta_a",
+        )?;
+
+        let (eq_s_col_beta_m, eq_s_col_beta_m_native) = self.eq_points(
+            cs,
+            step_idx,
+            &s_col_prime_vars,
+            &beta_m_vars,
+            &challenges.s_col_prime,
+            &challenges.beta_m,
+            "eq_s_col_beta_m",
+        )?;
+
+        let (eq_apsp_beta, eq_apsp_beta_native) = helpers::k_mul_with_hint(
+            cs,
+            &eq_alpha_prime_beta_a,
+            eq_alpha_prime_beta_a_native,
+            &eq_s_col_beta_m,
+            eq_s_col_beta_m_native,
+            self.delta,
+            &format!("step_{}_eq_apsp_beta", step_idx),
+        )?;
+
+        // χ_{α'_nc} table in K for Ajtai domain.
+        let d_sz = 1usize << challenges.alpha_prime_nc.len();
+        let mut chi_alpha_prime: Vec<KNumVar> = Vec::with_capacity(d_sz);
+        let mut chi_alpha_prime_vals: Vec<NeoK> = Vec::with_capacity(d_sz);
+        for rho in 0..d_sz {
+            let mut w_val = NeoK::ONE;
+            let w_hint = KNum::<CircuitF>::from_neo_k(w_val);
+            let mut w_var = alloc_k(
+                cs,
+                Some(w_hint),
+                &format!("step_{}_chi_alpha_prime_nc_{}_init", step_idx, rho),
+            )
+            .map_err(SpartanBridgeError::BellpepperError)?;
+
+            for (bit, (a_var, &a_val)) in alpha_prime_vars
+                .iter()
+                .zip(challenges.alpha_prime_nc.iter())
+                .enumerate()
+            {
+                let bit_is_one = ((rho >> bit) & 1) == 1;
+                let (factor_var, factor_val) = if bit_is_one {
+                    (a_var.clone(), a_val)
+                } else {
+                    let factor_val = NeoK::ONE - a_val;
+                    let factor_hint = KNum::<CircuitF>::from_neo_k(factor_val);
+                    let factor_var = alloc_k(
+                        cs,
+                        Some(factor_hint),
+                        &format!("step_{}_chi_alpha_prime_nc_{}_bit{}_factor", step_idx, rho, bit),
+                    )
+                    .map_err(SpartanBridgeError::BellpepperError)?;
+
+                    let one_hint = KNum::<CircuitF>::from_neo_k(NeoK::ONE);
+                    let one_var = alloc_k(
+                        cs,
+                        Some(one_hint),
+                        &format!("step_{}_chi_alpha_prime_nc_{}_bit{}_one", step_idx, rho, bit),
+                    )
+                    .map_err(SpartanBridgeError::BellpepperError)?;
+
+                    let sum_val = factor_val + a_val;
+                    let sum_hint = KNum::<CircuitF>::from_neo_k(sum_val);
+                    let sum_var = k_add_raw(
+                        cs,
+                        &factor_var,
+                        a_var,
+                        Some(sum_hint),
+                        &format!("step_{}_chi_alpha_prime_nc_{}_bit{}_sum", step_idx, rho, bit),
+                    )
+                    .map_err(SpartanBridgeError::BellpepperError)?;
+                    helpers::enforce_k_eq(
+                        cs,
+                        &sum_var,
+                        &one_var,
+                        &format!("step_{}_chi_alpha_prime_nc_{}_bit{}_one_minus", step_idx, rho, bit),
+                    );
+                    (factor_var, factor_val)
+                };
+
+                let (new_w_var, new_w_val) = helpers::k_mul_with_hint(
+                    cs,
+                    &w_var,
+                    w_val,
+                    &factor_var,
+                    factor_val,
+                    self.delta,
+                    &format!("step_{}_chi_alpha_prime_nc_{}_bit{}", step_idx, rho, bit),
+                )?;
+                w_var = new_w_var;
+                w_val = new_w_val;
+            }
+
+            chi_alpha_prime.push(w_var);
+            chi_alpha_prime_vals.push(w_val);
+        }
+
+        // Enforce output s_col == s_col'.
+        for (i_idx, out) in out_me.iter().enumerate() {
+            if out.s_col.len() != challenges.s_col_prime.len() {
+                return Err(SpartanBridgeError::InvalidInput(format!(
+                    "NC terminal identity at step {}: out[{}].s_col.len() != s_col_prime.len()",
+                    step_idx, i_idx
+                )));
+            }
+            for j in 0..out.s_col.len() {
+                let out_s = helpers::alloc_k_from_neo(
+                    cs,
+                    out.s_col[j],
+                    &format!("step_{}_out_{}_s_col_{}", step_idx, i_idx, j),
+                )?;
+                helpers::enforce_k_eq(
+                    cs,
+                    &out_s,
+                    &s_col_prime_vars[j],
+                    &format!("step_{}_out_{}_s_col_matches_prime_{}", step_idx, i_idx, j),
+                );
+            }
+        }
+
+        // Σ γ^i · N_i over outputs, where N_i = range_product(⟨y_zcol_i, χ_{α'_nc}⟩).
+        let gamma_val = challenges.gamma;
+        let gamma_var = helpers::alloc_k_from_neo(cs, gamma_val, &format!("step_{}_gamma_nc", step_idx))?;
+
+        let mut nc_sum = helpers::k_zero(cs, &format!("step_{}_nc_sum_init", step_idx))?;
+        let mut nc_sum_native = NeoK::ZERO;
+
+        let mut g = gamma_var.clone();
+        let mut g_native = gamma_val;
+        for (i_idx, out) in out_me.iter().enumerate() {
+            let y = &out_y_zcol_vars[i_idx];
+            let y_vals = &out.y_zcol;
+            let limit = core::cmp::min(chi_alpha_prime.len(), core::cmp::min(y.len(), y_vals.len()));
+            if limit == 0 {
+                return Err(SpartanBridgeError::InvalidInput(format!(
+                    "NC terminal identity at step {}: out[{}] y_zcol is empty",
+                    step_idx, i_idx
+                )));
+            }
+
+            let mut y_eval = helpers::k_zero(cs, &format!("step_{}_nc_y_eval_i{}", step_idx, i_idx))?;
+            let mut y_eval_val = NeoK::ZERO;
+            for rho in 0..limit {
+                let (prod_var, prod_val) = helpers::k_mul_with_hint(
+                    cs,
+                    &y[rho],
+                    y_vals[rho],
+                    &chi_alpha_prime[rho],
+                    chi_alpha_prime_vals[rho],
+                    self.delta,
+                    &format!("step_{}_nc_y_eval_i{}_rho{}", step_idx, i_idx, rho),
+                )?;
+                y_eval_val += prod_val;
+                let hint = KNum::<CircuitF>::from_neo_k(y_eval_val);
+                y_eval = k_add_raw(
+                    cs,
+                    &y_eval,
+                    &prod_var,
+                    Some(hint),
+                    &format!("step_{}_nc_y_eval_acc_i{}_rho{}", step_idx, i_idx, rho),
+                )
+                .map_err(SpartanBridgeError::BellpepperError)?;
+            }
+
+            let (Ni, Ni_native) =
+                self.range_product(cs, step_idx, &y_eval, y_eval_val, &format!("step_{}_nc_range_i{}", step_idx, i_idx))?;
+
+            let (gNi, gNi_native) = helpers::k_mul_with_hint(
+                cs,
+                &g,
+                g_native,
+                &Ni,
+                Ni_native,
+                self.delta,
+                &format!("step_{}_nc_weighted_i{}", step_idx, i_idx),
+            )?;
+
+            nc_sum_native += gNi_native;
+            let nc_hint = KNum::<CircuitF>::from_neo_k(nc_sum_native);
+            nc_sum = k_add_raw(
+                cs,
+                &nc_sum,
+                &gNi,
+                Some(nc_hint),
+                &format!("step_{}_nc_acc_i{}", step_idx, i_idx),
+            )
+            .map_err(SpartanBridgeError::BellpepperError)?;
+
+            let (new_g, new_g_native) = helpers::k_mul_with_hint(
+                cs,
+                &g,
+                g_native,
+                &gamma_var,
+                gamma_val,
+                self.delta,
+                &format!("step_{}_nc_gamma_step_i{}", step_idx, i_idx),
+            )?;
+            g = new_g;
+            g_native = new_g_native;
+        }
+
+        let (rhs, rhs_native) = helpers::k_mul_with_hint(
+            cs,
+            &eq_apsp_beta,
+            eq_apsp_beta_native,
+            &nc_sum,
+            nc_sum_native,
+            self.delta,
+            &format!("step_{}_nc_rhs", step_idx),
+        )?;
+
+        helpers::enforce_k_eq(
+            cs,
+            sumcheck_final_nc,
+            &rhs,
+            &format!("step_{}_nc_final_sum_matches_rhs", step_idx),
+        );
+
+        // Silence unused native hint (kept for symmetry with FE terminal identity).
+        let _ = rhs_native;
+
+        Ok(())
+    }
+
     /// Verify RLC equalities for a step
     ///
     /// Enforces the public RLC relations used in `rlc_public`:
@@ -1677,6 +2041,7 @@ impl FoldRunCircuit {
         step: &FoldStep,
         _witness: &FoldRunWitness,
         children_y_vars: &[Vec<Vec<KNumVar>>],
+        children_y_zcol_vars: &[Vec<KNumVar>],
     ) -> Result<()> {
         let parent = &step.rlc_parent;
         let children = &step.ccs_out;
@@ -1813,12 +2178,49 @@ impl FoldRunCircuit {
                 children.len()
             )));
         }
+        if children_y_zcol_vars.len() != children.len() {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "RLC at step {}: children_y_zcol_vars/children length mismatch (vars={}, children={})",
+                step_idx,
+                children_y_zcol_vars.len(),
+                children.len()
+            )));
+        }
         for (i, child) in children.iter().enumerate() {
             if child.y.len() != t {
                 return Err(SpartanBridgeError::InvalidInput(format!(
                     "RLC y length mismatch at step {}, child {}",
                     step_idx, i
                 )));
+            }
+        }
+
+        // Enforce s_col preservation: parent.s_col == child.s_col for all inputs (when present).
+        let s_col_len = parent.s_col.len();
+        for (i, child) in children.iter().enumerate() {
+            if child.s_col.len() != s_col_len {
+                return Err(SpartanBridgeError::InvalidInput(format!(
+                    "RLC s_col length mismatch at step {}, child {}",
+                    step_idx, i
+                )));
+            }
+            for idx in 0..s_col_len {
+                let parent_s = helpers::alloc_k_from_neo(
+                    cs,
+                    parent.s_col[idx],
+                    &format!("step_{}_rlc_parent_s_col_{}_{}", step_idx, i, idx),
+                )?;
+                let child_s = helpers::alloc_k_from_neo(
+                    cs,
+                    child.s_col[idx],
+                    &format!("step_{}_rlc_child_{}_s_col_{}", step_idx, i, idx),
+                )?;
+                helpers::enforce_k_eq(
+                    cs,
+                    &parent_s,
+                    &child_s,
+                    &format!("step_{}_rlc_s_col_eq_child_{}_idx_{}", step_idx, i, idx),
+                );
             }
         }
 
@@ -1868,6 +2270,90 @@ impl FoldRunCircuit {
                     |lc| lc + parent_y_vars[j][r_idx].c1,
                 );
             }
+        }
+
+        // Enforce y_zcol_parent = Σ_i ρ_i · y_zcol_i (first D digits), when present.
+        let want_nc_channel = !(parent.s_col.is_empty() && parent.y_zcol.is_empty());
+        if want_nc_channel {
+            if parent.y_zcol.len() != d_pad {
+                return Err(SpartanBridgeError::InvalidInput(format!(
+                    "RLC at step {}: parent y_zcol length mismatch (got {}, expected {})",
+                    step_idx,
+                    parent.y_zcol.len(),
+                    d_pad
+                )));
+            }
+            for (i, child) in children.iter().enumerate() {
+                if child.y_zcol.len() != d_pad {
+                    return Err(SpartanBridgeError::InvalidInput(format!(
+                        "RLC at step {}: child {} y_zcol length mismatch (got {}, expected {})",
+                        step_idx,
+                        i,
+                        child.y_zcol.len(),
+                        d_pad
+                    )));
+                }
+                if children_y_zcol_vars[i].len() != d_pad {
+                    return Err(SpartanBridgeError::InvalidInput(format!(
+                        "RLC at step {}: child {} y_zcol vars length mismatch (got {}, expected {})",
+                        step_idx,
+                        i,
+                        children_y_zcol_vars[i].len(),
+                        d_pad
+                    )));
+                }
+            }
+
+            let mut parent_yz_vars = Vec::with_capacity(d_ring);
+            for idx in 0..d_ring {
+                parent_yz_vars.push(helpers::alloc_k_from_neo(
+                    cs,
+                    parent.y_zcol[idx],
+                    &format!("step_{}_rlc_parent_y_zcol_{}", step_idx, idx),
+                )?);
+            }
+
+            for r_idx in 0..d_ring {
+                cs.enforce(
+                    || format!("step_{}_rlc_y_zcol_c0_r{}", step_idx, r_idx),
+                    |lc| {
+                        let mut res = lc;
+                        for (i, rho) in rhos.iter().enumerate() {
+                            for k in 0..d_ring {
+                                let coeff = helpers::neo_f_to_circuit(&rho[(r_idx, k)]);
+                                if coeff != CircuitF::from(0u64) {
+                                    res = res + (coeff, children_y_zcol_vars[i][k].c0);
+                                }
+                            }
+                        }
+                        res
+                    },
+                    |lc| lc + CS::one(),
+                    |lc| lc + parent_yz_vars[r_idx].c0,
+                );
+                cs.enforce(
+                    || format!("step_{}_rlc_y_zcol_c1_r{}", step_idx, r_idx),
+                    |lc| {
+                        let mut res = lc;
+                        for (i, rho) in rhos.iter().enumerate() {
+                            for k in 0..d_ring {
+                                let coeff = helpers::neo_f_to_circuit(&rho[(r_idx, k)]);
+                                if coeff != CircuitF::from(0u64) {
+                                    res = res + (coeff, children_y_zcol_vars[i][k].c1);
+                                }
+                            }
+                        }
+                        res
+                    },
+                    |lc| lc + CS::one(),
+                    |lc| lc + parent_yz_vars[r_idx].c1,
+                );
+            }
+        } else if !children_y_zcol_vars.iter().all(|v| v.is_empty()) {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "RLC at step {}: unexpected y_zcol channel on child",
+                step_idx
+            )));
         }
 
         Ok(())
@@ -1975,6 +2461,46 @@ impl FoldRunCircuit {
             }
         }
 
+        // Optional NC channel: parent.s_col == child.s_col (when present), and reject partial presence.
+        let want_nc_channel = !(parent.s_col.is_empty() && parent.y_zcol.is_empty());
+        if want_nc_channel {
+            let s_len = parent.s_col.len();
+            for (i, child) in children.iter().enumerate() {
+                if child.s_col.len() != s_len {
+                    return Err(SpartanBridgeError::InvalidInput(format!(
+                        "DEC s_col length mismatch at step {}, child {}",
+                        step_idx, i
+                    )));
+                }
+                for idx in 0..s_len {
+                    let parent_s = helpers::alloc_k_from_neo(
+                        cs,
+                        parent.s_col[idx],
+                        &format!("step_{}_dec_parent_s_col_{}_{}", step_idx, i, idx),
+                    )?;
+                    let child_s = helpers::alloc_k_from_neo(
+                        cs,
+                        child.s_col[idx],
+                        &format!("step_{}_dec_child_{}_s_col_{}", step_idx, i, idx),
+                    )?;
+                    helpers::enforce_k_eq(
+                        cs,
+                        &parent_s,
+                        &child_s,
+                        &format!("step_{}_dec_s_col_eq_child_{}_idx_{}", step_idx, i, idx),
+                    );
+                }
+            }
+        } else if children
+            .iter()
+            .any(|ch| !(ch.s_col.is_empty() && ch.y_zcol.is_empty()))
+        {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "DEC at step {}: unexpected y_zcol channel on child",
+                step_idx
+            )));
+        }
+
         // y_parent[j] = Σ b^i · y_(i,j)
         let t = parent.y.len();
         if t == 0 {
@@ -2049,6 +2575,80 @@ impl FoldRunCircuit {
             }
         }
 
+        // y_zcol_parent = Σ b^i · y_zcol_i (when present).
+        if want_nc_channel {
+            if parent.y_zcol.len() != d_pad {
+                return Err(SpartanBridgeError::InvalidInput(format!(
+                    "DEC at step {}: parent y_zcol length mismatch (got {}, expected {})",
+                    step_idx,
+                    parent.y_zcol.len(),
+                    d_pad
+                )));
+            }
+
+            let mut parent_yz_vars = Vec::with_capacity(d_pad);
+            for idx in 0..d_pad {
+                parent_yz_vars.push(helpers::alloc_k_from_neo(
+                    cs,
+                    parent.y_zcol[idx],
+                    &format!("step_{}_dec_parent_y_zcol_{}", step_idx, idx),
+                )?);
+            }
+
+            let mut child_yz_vars: Vec<Vec<KNumVar>> = Vec::with_capacity(children.len());
+            for (i, child) in children.iter().enumerate() {
+                if child.y_zcol.len() != d_pad {
+                    return Err(SpartanBridgeError::InvalidInput(format!(
+                        "DEC at step {}: child {} y_zcol length mismatch (got {}, expected {})",
+                        step_idx,
+                        i,
+                        child.y_zcol.len(),
+                        d_pad
+                    )));
+                }
+                let mut vars = Vec::with_capacity(d_pad);
+                for (idx, &val) in child.y_zcol.iter().enumerate() {
+                    vars.push(helpers::alloc_k_from_neo(
+                        cs,
+                        val,
+                        &format!("step_{}_dec_child_{}_y_zcol_{}", step_idx, i, idx),
+                    )?);
+                }
+                child_yz_vars.push(vars);
+            }
+
+            for r_idx in 0..d_pad {
+                cs.enforce(
+                    || format!("step_{}_dec_y_zcol_c0_r{}", step_idx, r_idx),
+                    |lc| {
+                        let mut res = lc;
+                        let mut pow = CircuitF::from(1u64);
+                        for child_vars in child_yz_vars.iter() {
+                            res = res + (pow, child_vars[r_idx].c0);
+                            pow *= CircuitF::from(self.base_b as u64);
+                        }
+                        res
+                    },
+                    |lc| lc + CS::one(),
+                    |lc| lc + parent_yz_vars[r_idx].c0,
+                );
+                cs.enforce(
+                    || format!("step_{}_dec_y_zcol_c1_r{}", step_idx, r_idx),
+                    |lc| {
+                        let mut res = lc;
+                        let mut pow = CircuitF::from(1u64);
+                        for child_vars in child_yz_vars.iter() {
+                            res = res + (pow, child_vars[r_idx].c1);
+                            pow *= CircuitF::from(self.base_b as u64);
+                        }
+                        res
+                    },
+                    |lc| lc + CS::one(),
+                    |lc| lc + parent_yz_vars[r_idx].c1,
+                );
+            }
+        }
+
         Ok(())
     }
 
@@ -2110,6 +2710,21 @@ impl FoldRunCircuit {
                 helpers::enforce_k_eq(cs, &pub_r, &wit_r, &format!("acc_final_r_eq_{}_{}", idx, j));
             }
 
+            // Enforce s_col equality (NC channel binding).
+            if pub_me.s_col.len() != wit_me.s_col.len() {
+                return Err(SpartanBridgeError::InvalidInput(format!(
+                    "Final accumulator s_col length mismatch at index {}",
+                    idx
+                )));
+            }
+            for j in 0..pub_me.s_col.len() {
+                let pub_s =
+                    helpers::alloc_k_from_neo(cs, pub_me.s_col[j], &format!("acc_final_pub_{}_s_col_{}", idx, j))?;
+                let wit_s =
+                    helpers::alloc_k_from_neo(cs, wit_me.s_col[j], &format!("acc_final_wit_{}_s_col_{}", idx, j))?;
+                helpers::enforce_k_eq(cs, &pub_s, &wit_s, &format!("acc_final_s_col_eq_{}_{}", idx, j));
+            }
+
             // Enforce y equality
             if pub_me.y.len() != wit_me.y.len() {
                 return Err(SpartanBridgeError::InvalidInput(format!(
@@ -2136,6 +2751,27 @@ impl FoldRunCircuit {
                         &format!("acc_final_y_eq_{}_{}_{}", idx, j, r_idx),
                     );
                 }
+            }
+
+            // Enforce y_zcol equality (when present).
+            if pub_me.y_zcol.len() != wit_me.y_zcol.len() {
+                return Err(SpartanBridgeError::InvalidInput(format!(
+                    "Final accumulator y_zcol length mismatch at index {}",
+                    idx
+                )));
+            }
+            for r_idx in 0..pub_me.y_zcol.len() {
+                let pub_yz = helpers::alloc_k_from_neo(
+                    cs,
+                    pub_me.y_zcol[r_idx],
+                    &format!("acc_final_pub_{}_y_zcol_{}", idx, r_idx),
+                )?;
+                let wit_yz = helpers::alloc_k_from_neo(
+                    cs,
+                    wit_me.y_zcol[r_idx],
+                    &format!("acc_final_wit_{}_y_zcol_{}", idx, r_idx),
+                )?;
+                helpers::enforce_k_eq(cs, &pub_yz, &wit_yz, &format!("acc_final_y_zcol_eq_{}_{}", idx, r_idx));
             }
         }
 

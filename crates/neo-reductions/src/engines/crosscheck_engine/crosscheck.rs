@@ -7,6 +7,7 @@
 #![allow(non_snake_case)]
 
 use crate::engines::optimized_engine::PiCcsProof;
+use crate::optimized_engine::PiCcsProofVariant;
 use crate::engines::PiCcsEngine;
 use crate::error::PiCcsError;
 use neo_ajtai::Commitment as Cmt;
@@ -77,10 +78,16 @@ where
     //    This avoids tiny transcript replays from drifting and ensures that
     //    the r we embed into outputs matches the one used to build them.
     let dims = crate::engines::utils::build_dims_and_policy(params, s)?;
+    if proof.variant != PiCcsProofVariant::SplitNcV1 {
+        return Err(PiCcsError::ProtocolError(
+            "crosscheck engine expects SplitNcV1 proofs".into(),
+        ));
+    }
+    assert_eq!(proof.sumcheck_challenges.len(), dims.ell, "sumcheck_challenges length mismatch");
     assert_eq!(
-        proof.sumcheck_challenges.len(),
-        dims.ell_n + dims.ell_d,
-        "sumcheck_challenges length mismatch"
+        proof.sumcheck_challenges_nc.len(),
+        dims.ell_nc,
+        "sumcheck_challenges_nc length mismatch"
     );
     let (r_prime, alpha_prime) = proof.sumcheck_challenges.split_at(dims.ell_n);
 
@@ -204,7 +211,7 @@ where
         if detailed_log {
             log_terminal_optimized_header();
         }
-        let rhs_opt = crate::paper_exact_engine::rhs_terminal_identity_paper_exact(
+        let rhs_opt = crate::paper_exact_engine::rhs_terminal_identity_fe_paper_exact(
             s,
             params,
             &proof.challenges_public,
@@ -222,7 +229,7 @@ where
         }
 
         let r_inputs = me_inputs.get(0).map(|mi| mi.r.as_slice());
-        let (lhs_exact, _rhs_unused) = crate::engines::paper_exact_engine::q_eval_at_ext_point_paper_exact_with_inputs(
+        let (lhs_exact, _rhs_unused) = crate::engines::paper_exact_engine::q_eval_at_ext_point_fe_paper_exact_with_inputs(
             s,
             params,
             mcs_witnesses,
@@ -252,6 +259,7 @@ where
             .try_into()
             .unwrap_or([0u8; 32]);
 
+        let (s_col, _alpha_nc) = proof.sumcheck_challenges_nc.split_at(dims.ell_m);
         let out_me_ref = crate::engines::paper_exact_engine::build_me_outputs_paper_exact(
             s,
             params,
@@ -260,6 +268,7 @@ where
             me_inputs,
             me_witnesses,
             r_prime,
+            s_col,
             dims.ell_d,
             fold_digest,
             log,

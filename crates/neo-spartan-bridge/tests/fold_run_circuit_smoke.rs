@@ -10,6 +10,7 @@ use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::session::{me_from_z_balanced, Accumulator, FoldingSession, ProveInput};
 use neo_fold::shard::{BatchedTimeProof, MemSidecarProof, StepProof};
 use neo_fold::shard::{FoldStep, ShardProof as FoldRun};
+use neo_fold::shard::StepLinkingConfig;
 use neo_math::{D, F, K};
 use neo_params::NeoParams;
 use neo_reductions::engines::utils as reductions_utils;
@@ -46,8 +47,10 @@ fn dummy_me_instance() -> MeInstance<Cmt, F, K> {
         c,
         X,
         r,
+        s_col: vec![],
         y,
         y_scalars,
+        y_zcol: vec![K::ZERO; D],
         m_in: 1,
         fold_digest: [0u8; 32],
     }
@@ -55,16 +58,22 @@ fn dummy_me_instance() -> MeInstance<Cmt, F, K> {
 
 fn dummy_pi_ccs_proof_zero() -> PiCcsProof {
     PiCcsProof {
+        variant: neo_reductions::optimized_engine::PiCcsProofVariant::SplitNcV1,
         sumcheck_rounds: Vec::new(),
         sc_initial_sum: Some(K::ZERO),
         sumcheck_challenges: Vec::new(),
+        sumcheck_rounds_nc: Vec::new(),
+        sc_initial_sum_nc: Some(K::ZERO),
+        sumcheck_challenges_nc: Vec::new(),
         challenges_public: neo_reductions::Challenges {
             alpha: Vec::new(),
             beta_a: Vec::new(),
             beta_r: Vec::new(),
+            beta_m: Vec::new(),
             gamma: K::ZERO,
         },
         sumcheck_final: K::ZERO,
+        sumcheck_final_nc: K::ZERO,
         header_digest: Vec::new(),
         _extra: None,
     }
@@ -75,10 +84,14 @@ fn dummy_pi_ccs_challenges_zero() -> PiCcsChallenges {
         alpha: Vec::new(),
         beta_a: Vec::new(),
         beta_r: Vec::new(),
+        beta_m: Vec::new(),
         gamma: K::ZERO,
         r_prime: Vec::new(),
         alpha_prime: Vec::new(),
         sumcheck_challenges: Vec::new(),
+        s_col_prime: Vec::new(),
+        alpha_prime_nc: Vec::new(),
+        sumcheck_challenges_nc: Vec::new(),
     }
 }
 
@@ -324,7 +337,8 @@ fn fold_run_circuit_optimized_nontrivial_satisfied() {
 
     // Sanity: the native paper-exact verifier should accept this run.
     let mcss_public = session.mcss_public();
-    session.unsafe_allow_unlinked_steps();
+    // Link x[2] across steps: it's constant (=1) in this fixture.
+    session.set_step_linking(StepLinkingConfig::new(vec![(2, 2)]));
     let ok = session
         .verify(&ccs, &mcss_public, &run)
         .expect("verify should run");

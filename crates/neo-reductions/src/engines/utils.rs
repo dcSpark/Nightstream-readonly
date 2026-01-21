@@ -19,11 +19,23 @@ use p3_symmetric::Permutation;
 pub struct Dims {
     pub ell_d: usize,
     pub ell_n: usize,
+    pub ell_m: usize,
     pub ell: usize,
+    pub ell_nc: usize,
+    pub ell_max: usize,
     pub d_sc: usize,
 }
 
 pub use crate::optimized_engine::Challenges;
+
+#[inline]
+fn degree_bound_nc(params: &NeoParams) -> usize {
+    // `range_product` has degree (2b-1) in `y` for the symmetric range [-(b-1), ..., (b-1)].
+    // Multiplying by an `eq_lin` factor in the current sumcheck variable adds +1.
+    //
+    // So the per-round univariate degree bound for the NC polynomial is ≤ 2b.
+    core::cmp::max(2, 2 * (params.b as usize))
+}
 
 /// Build dimensions and validate extension field security policy
 pub fn build_dims_and_policy(params: &NeoParams, s: &CcsStructure<F>) -> Result<Dims, PiCcsError> {
@@ -37,15 +49,17 @@ pub fn build_dims_and_policy(params: &NeoParams, s: &CcsStructure<F>) -> Result<
     let n_pad = s.n.next_power_of_two().max(2);
     let ell_n = n_pad.trailing_zeros() as usize;
 
-    let ell = ell_d + ell_n;
+    let m_pad = s.m.next_power_of_two().max(2);
+    let ell_m = m_pad.trailing_zeros() as usize;
 
-    let d_sc = core::cmp::max(
-        s.max_degree() as usize + 1,
-        core::cmp::max(2, 2 * (params.b as usize) + 2),
-    );
+    let ell = ell_d + ell_n;
+    let ell_nc = ell_d + ell_m;
+    let ell_max = core::cmp::max(ell, ell_nc);
+
+    let d_sc = core::cmp::max(s.max_degree() as usize + 1, degree_bound_nc(params));
 
     let ext = params
-        .extension_check(ell as u32, d_sc as u32)
+        .extension_check(ell_max as u32, d_sc as u32)
         .map_err(|e| PiCcsError::ExtensionPolicyFailed(e.to_string()))?;
 
     if ext.slack_bits < 0 {
@@ -58,7 +72,10 @@ pub fn build_dims_and_policy(params: &NeoParams, s: &CcsStructure<F>) -> Result<
     Ok(Dims {
         ell_d,
         ell_n,
+        ell_m,
         ell,
+        ell_nc,
+        ell_max,
         d_sc,
     })
 }
@@ -69,12 +86,10 @@ pub fn bind_header_and_instances(
     params: &NeoParams,
     s: &CcsStructure<F>,
     mcs_list: &[McsInstance<Cmt, F>],
-    ell: usize,
-    d_sc: usize,
-    _slack_bits: i32,
+    dims: Dims,
 ) -> Result<(), PiCcsError> {
     let digest = digest_ccs_matrices(s);
-    bind_header_and_instances_with_digest(tr, params, s, mcs_list, ell, d_sc, &digest)
+    bind_header_and_instances_with_digest(tr, params, s, mcs_list, dims, &digest)
 }
 
 /// Bind CCS header and MCS instances to transcript, using a precomputed CCS matrix digest.
@@ -85,17 +100,17 @@ pub fn bind_header_and_instances_with_digest(
     params: &NeoParams,
     s: &CcsStructure<F>,
     mcs_list: &[McsInstance<Cmt, F>],
-    ell: usize,
-    d_sc: usize,
+    dims: Dims,
     mat_digest: &[Goldilocks],
 ) -> Result<(), PiCcsError> {
     tr.append_message(tr_labels::PI_CCS, b"");
 
     let ext = params
-        .extension_check(ell as u32, d_sc as u32)
+        .extension_check(dims.ell_max as u32, dims.d_sc as u32)
         .map_err(|e| PiCcsError::ExtensionPolicyFailed(e.to_string()))?;
 
     tr.append_message(b"neo/ccs/header/v1", b"");
+    tr.append_message(b"neo/pi_ccs/variant/v1", b"SplitNcV1");
 
     tr.append_u64s(
         b"ccs/header",
@@ -103,15 +118,27 @@ pub fn bind_header_and_instances_with_digest(
             64,
             ext.s_supported as u64,
             params.lambda as u64,
-            ell as u64,
-            d_sc as u64,
+            dims.ell as u64,
+            dims.ell_nc as u64,
+            dims.ell_max as u64,
+            dims.d_sc as u64,
             ext.slack_bits.unsigned_abs() as u64,
         ],
     );
     tr.append_message(b"ccs/slack_sign", &[if ext.slack_bits >= 0 { 1 } else { 0 }]);
 
     tr.append_message(b"neo/ccs/instances", b"");
-    tr.append_u64s(b"dims", &[s.n as u64, s.m as u64, s.t() as u64]);
+    tr.append_u64s(
+        b"dims/v2",
+        &[
+            s.n as u64,
+            s.m as u64,
+            s.t() as u64,
+            dims.ell_d as u64,
+            dims.ell_n as u64,
+            dims.ell_m as u64,
+        ],
+    );
 
     if mat_digest.len() != 4 {
         return Err(PiCcsError::InvalidInput(format!(
@@ -207,8 +234,23 @@ pub fn sample_challenges(tr: &mut Poseidon2Transcript, ell_d: usize, ell: usize)
         alpha,
         beta_a: beta_a.to_vec(),
         beta_r: beta_r.to_vec(),
+        beta_m: Vec::new(),
         gamma,
     })
+}
+
+/// Sample the column-domain β_m ∈ K^{log m} for the split-NC variant.
+pub fn sample_beta_m(tr: &mut Poseidon2Transcript, ell_m: usize) -> Result<Vec<K>, PiCcsError> {
+    tr.append_message(b"neo/ccs/chals/nc_beta_m/v1", b"");
+
+    let beta_m: Vec<K> = (0..ell_m)
+        .map(|_| {
+            let c = tr.challenge_fields(b"chal/k", 2);
+            neo_math::from_complex(c[0], c[1])
+        })
+        .collect();
+
+    Ok(beta_m)
 }
 
 pub fn digest_ccs_matrices<F: Field + PrimeField64>(s: &CcsStructure<F>) -> Vec<Goldilocks> {

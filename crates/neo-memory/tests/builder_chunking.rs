@@ -127,10 +127,11 @@ impl CpuArithmetization<Goldilocks, ()> for DummyCpuArith {
 #[test]
 fn build_shard_witness_shared_cpu_bus_sets_init_policy_per_step() {
     let mut mem_layouts = HashMap::new();
-    mem_layouts.insert(0u32, PlainMemLayout { k: 2, d: 1, n_side: 2 });
+    mem_layouts.insert(0u32, PlainMemLayout { k: 2, d: 1, n_side: 2 , lanes: 1});
 
     let lut_tables: HashMap<u32, neo_memory::plain::LutTable<Goldilocks>> = HashMap::new();
     let lut_table_specs: HashMap<u32, neo_memory::witness::LutTableSpec> = HashMap::new();
+    let lut_lanes: HashMap<u32, usize> = HashMap::new();
     let initial_mem: HashMap<(u32, u64), Goldilocks> = HashMap::new();
 
     let bundles = build_shard_witness_shared_cpu_bus::<_, (), neo_math::K, _, _, _>(
@@ -142,12 +143,13 @@ fn build_shard_witness_shared_cpu_bus_sets_init_policy_per_step() {
         &mem_layouts,
         &lut_tables,
         &lut_table_specs,
+        &lut_lanes,
         &initial_mem,
         &DummyCpuArith::default(),
     )
     .expect("build_shard_witness_shared_cpu_bus should succeed");
 
-    assert_eq!(bundles.len(), 16, "builder pads to max_steps under fixed-length semantics");
+    assert_eq!(bundles.len(), 4, "builder should return only executed chunks");
     for bundle in &bundles {
         assert_eq!(bundle.mem_instances.len(), 1);
         assert_eq!(bundle.mem_instances[0].0.steps, 1);
@@ -159,7 +161,6 @@ fn build_shard_witness_shared_cpu_bus_sets_init_policy_per_step() {
     let inst1 = &bundles[1].mem_instances[0].0;
     let inst2 = &bundles[2].mem_instances[0].0;
     let inst3 = &bundles[3].mem_instances[0].0;
-    let inst4 = &bundles[4].mem_instances[0].0;
     let inst_last = &bundles.last().expect("non-empty").mem_instances[0].0;
 
     assert!(matches!(inst0.init, MemInit::Zero));
@@ -172,20 +173,17 @@ fn build_shard_witness_shared_cpu_bus_sets_init_policy_per_step() {
         inst3.init,
         MemInit::Sparse(vec![(0u64, Goldilocks::from_u64(9)), (1u64, Goldilocks::from_u64(7))])
     );
-    assert_eq!(
-        inst4.init,
-        MemInit::Sparse(vec![(0u64, Goldilocks::from_u64(9)), (1u64, Goldilocks::from_u64(7))])
-    );
-    assert_eq!(inst_last.init, inst4.init);
+    assert_eq!(inst_last.init, inst3.init);
 }
 
 #[test]
 fn build_shard_witness_shared_cpu_bus_supports_chunk_size_gt_one() {
     let mut mem_layouts = HashMap::new();
-    mem_layouts.insert(0u32, PlainMemLayout { k: 2, d: 1, n_side: 2 });
+    mem_layouts.insert(0u32, PlainMemLayout { k: 2, d: 1, n_side: 2 , lanes: 1});
 
     let lut_tables: HashMap<u32, neo_memory::plain::LutTable<Goldilocks>> = HashMap::new();
     let lut_table_specs: HashMap<u32, neo_memory::witness::LutTableSpec> = HashMap::new();
+    let lut_lanes: HashMap<u32, usize> = HashMap::new();
     let initial_mem: HashMap<(u32, u64), Goldilocks> = HashMap::new();
 
     let bundles = build_shard_witness_shared_cpu_bus::<_, (), neo_math::K, _, _, _>(
@@ -197,12 +195,13 @@ fn build_shard_witness_shared_cpu_bus_supports_chunk_size_gt_one() {
         &mem_layouts,
         &lut_tables,
         &lut_table_specs,
+        &lut_lanes,
         &initial_mem,
         &DummyCpuArith::default(),
     )
     .expect("chunk_size>1 should be supported");
 
-    assert_eq!(bundles.len(), 8, "builder pads to max_steps under fixed-length semantics");
+    assert_eq!(bundles.len(), 2, "builder should return only executed chunks");
     for bundle in &bundles {
         assert_eq!(bundle.mem_instances.len(), 1);
         assert_eq!(bundle.mem_instances[0].0.steps, 2);
@@ -210,7 +209,6 @@ fn build_shard_witness_shared_cpu_bus_supports_chunk_size_gt_one() {
 
     let inst0 = &bundles[0].mem_instances[0].0;
     let inst1 = &bundles[1].mem_instances[0].0;
-    let inst2 = &bundles[2].mem_instances[0].0;
     let inst_last = &bundles.last().expect("non-empty").mem_instances[0].0;
 
     assert!(matches!(inst0.init, MemInit::Zero));
@@ -218,9 +216,5 @@ fn build_shard_witness_shared_cpu_bus_supports_chunk_size_gt_one() {
         inst1.init,
         MemInit::Sparse(vec![(0u64, Goldilocks::from_u64(5)), (1u64, Goldilocks::from_u64(7))])
     );
-    assert_eq!(
-        inst2.init,
-        MemInit::Sparse(vec![(0u64, Goldilocks::from_u64(9)), (1u64, Goldilocks::from_u64(7))])
-    );
-    assert_eq!(inst_last.init, inst2.init);
+    assert_eq!(inst_last.init, inst1.init);
 }

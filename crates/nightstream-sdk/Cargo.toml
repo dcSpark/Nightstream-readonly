@@ -1,0 +1,18 @@
+[package]
+name = "nightstream-sdk"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "MIT"
+description = "Guest-side SDK for Nightstream proving VMs"
+
+[features]
+default = ["std"]
+std = []
+alloc = []
+
+[dependencies]
+nightstream-sdk-macros = { path = "../nightstream-sdk-macros" }
+
+[lints]
+workspace = true

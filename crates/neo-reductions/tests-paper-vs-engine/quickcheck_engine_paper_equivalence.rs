@@ -89,6 +89,7 @@ fn generate_challenges(ell_d: usize, ell_n: usize, seed: u64) -> neo_reductions:
         alpha,
         beta_a,
         beta_r,
+        beta_m: Vec::new(),
         gamma,
     }
 }

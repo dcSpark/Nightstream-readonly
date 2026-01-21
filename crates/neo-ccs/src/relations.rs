@@ -1,5 +1,7 @@
 use p3_field::Field;
 
+use neo_math::D;
+
 use crate::{
     error::{CcsError, RelationError},
     matrix::{Mat, MatRef},
@@ -238,11 +240,21 @@ pub struct MeInstance<C, F, K> {
     pub X: Mat<F>,
     /// r ∈ K^{log n}
     pub r: Vec<K>,
+    /// s_col ∈ K^{log m}: column-domain point used for the digit-range (NC) check.
+    ///
+    /// Legacy (square/identity-first) pipelines may leave this empty.
+    #[serde(default)]
+    pub s_col: Vec<K>,
     /// y_j ∈ K^{d} for j=0..t-1 (stored as a vector-of-vectors length t, each len d).
     pub y: Vec<Vec<K>>,
     /// **SECURITY**: Y_j(r) = ⟨(M_j z), χ_r⟩ ∈ K scalars for CCS terminal verification
     /// These are the CORRECT values needed for sum-check terminal check, not sums of y vector components
     pub y_scalars: Vec<K>,
+    /// y_zcol := Z · χ_{s_col} ∈ K^{d} (digit rows, typically padded to 2^{ell_d}).
+    ///
+    /// Legacy (square/identity-first) pipelines may leave this empty.
+    #[serde(default)]
+    pub y_zcol: Vec<K>,
     /// m_in
     pub m_in: usize,
     /// **SECURITY**: Transcript-derived digest binding this ME to the folding proof
@@ -337,6 +349,50 @@ where
             expected: ell,
             got: inst.r.len(),
         });
+    }
+
+    // Optional NC channel: y_zcol == Z · χ_{s_col} (column-domain).
+    //
+    // This is only checked when both `s_col` and `y_zcol` are present, so legacy callers
+    // can omit these fields without failing consistency checks.
+    if !(inst.s_col.is_empty() && inst.y_zcol.is_empty()) {
+        if inst.s_col.is_empty() || inst.y_zcol.is_empty() {
+            return Err(CcsError::Relation("incomplete NC channel: expected both s_col and y_zcol".into()));
+        }
+
+        // Column-domain length is derived from CCS width `m` (not `n`).
+        let m_pad = s.m.next_power_of_two().max(2);
+        let ell_m = m_pad.trailing_zeros() as usize;
+        if inst.s_col.len() != ell_m {
+            return Err(CcsError::Len {
+                context: "s_col (column extension point)",
+                expected: ell_m,
+                got: inst.s_col.len(),
+            });
+        }
+
+        // Ajtai padding length for digit rows (matches `1 << ell_d` used by Π_CCS dims).
+        let d_pad = D.next_power_of_two();
+        let ell_d = d_pad.trailing_zeros() as usize;
+        let d_pad = 1usize << ell_d;
+        if inst.y_zcol.len() != d_pad {
+            return Err(CcsError::Len {
+                context: "y_zcol (padded digit rows)",
+                expected: d_pad,
+                got: inst.y_zcol.len(),
+            });
+        }
+
+        // Compute y_zcol = Z · χ_{s_col}.
+        let chi_s = crate::utils::tensor_point::<K>(&inst.s_col);
+        // Consume only the first `m` entries (outside-of-range are implicitly zero).
+        use crate::utils::mat_vec_mul_fk;
+        let mut y_star = mat_vec_mul_fk::<F, K>(wit.Z.as_slice(), wit.Z.rows(), wit.Z.cols(), &chi_s[..s.m]);
+        y_star.resize(d_pad, K::ZERO);
+
+        if y_star.as_slice() != inst.y_zcol.as_slice() {
+            return Err(CcsError::Relation("y_zcol != Z · χ_{s_col}".into()));
+        }
     }
     let rb = tensor_point::<K>(&inst.r); // K^n
 

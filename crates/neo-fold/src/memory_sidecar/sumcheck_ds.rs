@@ -56,7 +56,11 @@ pub fn run_batched_sumcheck_prover_ds<'a>(
 ) -> Result<(Vec<K>, Vec<BatchedClaimResult>), PiCcsError> {
     sc_start(tr, domain, inst_idx);
     let out =
-        run_batched_sumcheck_prover(tr, claims).map_err(|e| PiCcsError::SumcheckError(format!("{domain:?}: {e}")))?;
+        run_batched_sumcheck_prover(tr, claims).map_err(|e| {
+            PiCcsError::SumcheckError(format!(
+                "{domain:?} (inst_idx={inst_idx}): {e}"
+            ))
+        })?;
     sc_end(tr, domain, inst_idx);
     Ok(out)
 }

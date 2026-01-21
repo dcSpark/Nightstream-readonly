@@ -7,7 +7,7 @@
 #![allow(non_snake_case)]
 
 use crate::error::PiCcsError;
-use crate::optimized_engine::PiCcsProof;
+use crate::optimized_engine::{PiCcsProof, PiCcsProofVariant};
 use crate::sumcheck::RoundOracle;
 use neo_ajtai::Commitment as Cmt;
 use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
@@ -35,11 +35,12 @@ pub fn paper_exact_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
 ) -> Result<(Vec<MeInstance<Cmt, F, K>>, PiCcsProof), PiCcsError> {
     // Dims + transcript binding
     let dims = crate::engines::utils::build_dims_and_policy(params, s)?;
-    crate::engines::utils::bind_header_and_instances(tr, params, s, mcs_list, dims.ell, dims.d_sc, 0)?;
+    crate::engines::utils::bind_header_and_instances(tr, params, s, mcs_list, dims)?;
     crate::engines::utils::bind_me_inputs(tr, me_inputs)?;
 
     // Sample challenges
-    let ch = crate::engines::utils::sample_challenges(tr, dims.ell_d, dims.ell)?;
+    let mut ch = crate::engines::utils::sample_challenges(tr, dims.ell_d, dims.ell)?;
+    ch.beta_m = crate::engines::utils::sample_beta_m(tr, dims.ell_m)?;
 
     // Validate ME input r (if provided)
     for (idx, me) in me_inputs.iter().enumerate() {
@@ -101,7 +102,10 @@ pub fn paper_exact_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         }
     }
 
-    // Bind initial sum to transcript
+    // ---------------------------------------------------------------------
+    // FE sumcheck (legacy/full in Phase 1; FE-only in Phase 2)
+    // ---------------------------------------------------------------------
+    tr.append_message(b"sumcheck/fe", b"");
     tr.append_fields(b"sumcheck/initial_sum", &initial_sum.as_coeffs());
 
     // Paper-exact oracle to evaluate true per-round polynomials
@@ -177,9 +181,60 @@ pub fn paper_exact_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         sumcheck_rounds.push(coeffs);
     }
 
+    // ---------------------------------------------------------------------
+    // NC-only sumcheck (split-NC scaffolding; claimed sum is 0)
+    // ---------------------------------------------------------------------
+    let mut oracle_nc = crate::optimized_engine::oracle::NcOracle::new(
+        s,
+        params,
+        mcs_witnesses,
+        me_witnesses,
+        ch.clone(),
+        dims.ell_d,
+        dims.ell_m,
+        dims.d_sc,
+    );
+
+    tr.append_message(b"sumcheck/nc", b"");
+    let initial_sum_nc = K::ZERO;
+    tr.append_fields(b"sumcheck/initial_sum", &initial_sum_nc.as_coeffs());
+
+    let mut running_sum_nc = initial_sum_nc;
+    let mut sumcheck_rounds_nc: Vec<Vec<K>> = Vec::with_capacity(oracle_nc.num_rounds());
+    let mut sumcheck_chals_nc: Vec<K> = Vec::with_capacity(oracle_nc.num_rounds());
+
+    for _round_idx in 0..oracle_nc.num_rounds() {
+        let deg = oracle_nc.degree_bound();
+        let xs: Vec<K> = (0..=deg).map(|t| K::from(F::from_u64(t as u64))).collect();
+        let ys = oracle_nc.evals_at(&xs);
+
+        if ys[0] + ys[1] != running_sum_nc {
+            return Err(PiCcsError::SumcheckError(
+                "NC sumcheck invariant failed: p(0)+p(1) ≠ running_sum".into(),
+            ));
+        }
+
+        let coeffs = crate::sumcheck::interpolate_from_evals(&xs, &ys);
+        debug_assert_eq!(crate::sumcheck::poly_eval_k(&coeffs, K::ZERO), ys[0]);
+        debug_assert_eq!(crate::sumcheck::poly_eval_k(&coeffs, K::ONE), ys[1]);
+
+        for &c in &coeffs {
+            tr.append_fields(b"sumcheck/round/coeff", &c.as_coeffs());
+        }
+        let c0 = tr.challenge_field(b"sumcheck/challenge/0");
+        let c1 = tr.challenge_field(b"sumcheck/challenge/1");
+        let r_i = neo_math::from_complex(c0, c1);
+        sumcheck_chals_nc.push(r_i);
+
+        running_sum_nc = crate::sumcheck::poly_eval_k(&coeffs, r_i);
+        oracle_nc.fold(r_i);
+        sumcheck_rounds_nc.push(coeffs);
+    }
+
     // Build outputs literally at r′ using paper-exact helper
     let fold_digest = tr.digest32();
     let (r_prime, _alpha_prime) = sumcheck_chals.split_at(dims.ell_n);
+    let (s_col, _alpha_nc) = sumcheck_chals_nc.split_at(dims.ell_m);
     let out_me = crate::paper_exact_engine::build_me_outputs_paper_exact(
         s,
         params,
@@ -188,15 +243,21 @@ pub fn paper_exact_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         me_inputs,
         me_witnesses,
         r_prime,
+        s_col,
         dims.ell_d,
         fold_digest,
         log,
     );
 
     let mut proof = PiCcsProof::new(sumcheck_rounds, Some(initial_sum));
+    proof.variant = PiCcsProofVariant::SplitNcV1;
     proof.sumcheck_challenges = sumcheck_chals;
+    proof.sumcheck_rounds_nc = sumcheck_rounds_nc;
+    proof.sc_initial_sum_nc = Some(initial_sum_nc);
+    proof.sumcheck_challenges_nc = sumcheck_chals_nc;
     proof.challenges_public = ch;
     proof.sumcheck_final = running_sum;
+    proof.sumcheck_final_nc = running_sum_nc;
     proof.header_digest = fold_digest.to_vec();
 
     Ok((out_me, proof))

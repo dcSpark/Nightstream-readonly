@@ -120,8 +120,10 @@ fn me_consistency_rejects_tamper() {
         c: c.clone(),
         X: X.clone(),
         r: r.clone(),
+        s_col: vec![],
         y: vec![y0.clone()],
         y_scalars: vec![K::ZERO],
+        y_zcol: vec![],
         m_in,
         fold_digest: [0u8; 32],
     };

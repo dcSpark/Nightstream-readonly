@@ -60,8 +60,10 @@ fn append_bus_openings_matches_manual_for_chunk_size_2() {
             K::from(F::from_u64(7)),
             K::from(F::from_u64(11)),
         ],
+        s_col: vec![],
         y: vec![vec![K::ZERO; y_pad]],
         y_scalars: vec![K::ZERO],
+        y_zcol: vec![],
         m_in,
         fold_digest: [0u8; 32],
         c_step_coords: vec![],
@@ -103,4 +105,3 @@ fn append_bus_openings_matches_manual_for_chunk_size_2() {
         assert_eq!(me.y_scalars[j_idx], expect_scalar, "col_id={col_id}");
     }
 }
-

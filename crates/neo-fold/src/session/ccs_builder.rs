@@ -13,8 +13,9 @@ pub struct R1csRow<F> {
 ///
 /// This builder:
 /// - lets callers add R1CS constraints without manually managing matrices, and
-/// - can emit a **square** identity-first CCS (n=m) with a reserved all-zero tail row region
-///   for shared-CPU-bus constraint injection.
+/// - can emit either:
+///   - a rectangular CCS (n×m) with a reserved all-zero tail row region for shared-CPU-bus injection, or
+///   - a square CCS (n=m) for compatibility with legacy normal forms.
 #[derive(Clone, Debug)]
 pub struct CcsBuilder<F> {
     m_in: usize,
@@ -120,6 +121,57 @@ where
         if cpu_rows > n.saturating_sub(reserved_trailing_rows) {
             return Err(format!(
                 "CcsBuilder: too many CPU constraints ({cpu_rows}) for n=m={n} with reserved_trailing_rows={reserved_trailing_rows}"
+            ));
+        }
+
+        let mut a = Mat::zero(n, m, F::ZERO);
+        let mut b = Mat::zero(n, m, F::ZERO);
+        let mut c = Mat::zero(n, m, F::ZERO);
+
+        for (row, r) in self.rows.iter().enumerate() {
+            for &(col, coeff) in &r.a_terms {
+                if col >= m {
+                    return Err(format!("CcsBuilder: A term col {col} out of range (m={m})"));
+                }
+                a[(row, col)] = a[(row, col)] + coeff;
+            }
+            for &(col, coeff) in &r.b_terms {
+                if col >= m {
+                    return Err(format!("CcsBuilder: B term col {col} out of range (m={m})"));
+                }
+                b[(row, col)] = b[(row, col)] + coeff;
+            }
+            for &(col, coeff) in &r.c_terms {
+                if col >= m {
+                    return Err(format!("CcsBuilder: C term col {col} out of range (m={m})"));
+                }
+                c[(row, col)] = c[(row, col)] + coeff;
+            }
+        }
+
+        Ok(r1cs_to_ccs(a, b, c))
+    }
+
+    /// Build a (potentially rectangular) CCS with:
+    /// - witness width `m = m_min`, and
+    /// - constraint rows `n = cpu_rows + reserved_trailing_rows`.
+    ///
+    /// The last `reserved_trailing_rows` are left all-zero in A/B/C to support shared-bus
+    /// constraint injection via `extend_ccs_with_shared_cpu_bus_constraints`.
+    pub fn build_rect(self, m_min: usize, reserved_trailing_rows: usize) -> Result<CcsStructure<F>, String> {
+        let cpu_rows = self.rows.len();
+        if cpu_rows == 0 {
+            return Err("CcsBuilder: no constraints added".into());
+        }
+        let n = cpu_rows
+            .checked_add(reserved_trailing_rows)
+            .ok_or_else(|| "CcsBuilder: cpu_rows + reserved_trailing_rows overflow".to_string())?;
+        let m = m_min;
+
+        if self.m_in > m {
+            return Err(format!(
+                "CcsBuilder: m_in({}) exceeds CCS width m({m})",
+                self.m_in
             ));
         }
 

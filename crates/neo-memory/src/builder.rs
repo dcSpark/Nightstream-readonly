@@ -1,8 +1,8 @@
 use crate::mem_init::mem_init_from_state_map;
-use crate::plain::{build_plain_mem_traces, LutTable, PlainMemLayout};
+use crate::plain::{LutTable, PlainMemLayout};
 use crate::witness::{LutInstance, LutTableSpec, LutWitness, MemInstance, MemWitness, StepWitnessBundle};
 use neo_vm_trace::VmTrace;
-use neo_vm_trace::StepTrace;
+use neo_vm_trace::TwistOpKind;
 
 use neo_ccs::relations::{McsInstance, McsWitness};
 use p3_field::PrimeCharacteristicRing;
@@ -43,6 +43,8 @@ pub enum ShardBuildError {
 pub struct ShardWitnessAux {
     /// Original (unpadded) VM trace length.
     pub original_len: usize,
+    /// Whether the VM halted before reaching `max_steps`.
+    pub did_halt: bool,
     pub max_steps: usize,
     pub chunk_size: usize,
     /// Deterministic ordering of Twist instances used by the builder (and by the shared CPU bus).
@@ -78,6 +80,7 @@ pub fn build_shard_witness_shared_cpu_bus<V, Cmt, K, A, Tw, Sh>(
     mem_layouts: &HashMap<u32, PlainMemLayout>,
     lut_tables: &HashMap<u32, LutTable<Goldilocks>>,
     lut_table_specs: &HashMap<u32, LutTableSpec>,
+    lut_lanes: &HashMap<u32, usize>,
     initial_mem: &HashMap<(u32, u64), Goldilocks>,
     cpu_arith: &A,
 ) -> Result<Vec<StepWitnessBundle<Cmt, Goldilocks, K>>, ShardBuildError>
@@ -96,6 +99,7 @@ where
         mem_layouts,
         lut_tables,
         lut_table_specs,
+        lut_lanes,
         initial_mem,
         cpu_arith,
     )?;
@@ -113,6 +117,7 @@ pub fn build_shard_witness_shared_cpu_bus_with_aux<V, Cmt, K, A, Tw, Sh>(
     mem_layouts: &HashMap<u32, PlainMemLayout>,
     lut_tables: &HashMap<u32, LutTable<Goldilocks>>,
     lut_table_specs: &HashMap<u32, LutTableSpec>,
+    lut_lanes: &HashMap<u32, usize>,
     initial_mem: &HashMap<(u32, u64), Goldilocks>,
     cpu_arith: &A,
 ) -> Result<(Vec<StepWitnessBundle<Cmt, Goldilocks, K>>, ShardWitnessAux), ShardBuildError>
@@ -126,66 +131,23 @@ where
         return Err(ShardBuildError::InvalidChunkSize("chunk_size must be >= 1".into()));
     }
 
-    // 1) Run VM and collect full trace for this shard (then pad to fixed length).
-    let mut trace = neo_vm_trace::trace_program(vm, twist, shout, max_steps)
+    // 1) Run VM and collect the executed trace for this shard (up to `max_steps`).
+    //
+    // NOTE: We intentionally do **not** pad out to `max_steps` here. Padding is handled at the
+    // per-chunk level by the CPU arithmetization via `is_active`, so the last chunk may be partial.
+    //
+    // This keeps the proof size proportional to the executed trace length instead of the caller's
+    // safety bound.
+    let trace = neo_vm_trace::trace_program(vm, twist, shout, max_steps)
         .map_err(|e| ShardBuildError::VmError(e.to_string()))?;
     let original_len = trace.steps.len();
+    let did_halt = trace.did_halt();
     debug_assert!(
         original_len <= max_steps,
         "trace_program must not exceed max_steps (got {}, max_steps={})",
         original_len,
         max_steps
     );
-
-    // L1-style fixed-row execution: pad to exactly `max_steps` by repeating the final architectural
-    // state with no Twist/Shout events. (Per-row padding is expressed via `is_active` in the CPU CCS.)
-    if original_len < max_steps {
-        if let Some(last) = trace.steps.last() {
-            let pc = last.pc_after;
-            let regs = last.regs_after.clone();
-            let start = original_len;
-            trace.steps.reserve(max_steps - start);
-            for t in start..max_steps {
-                trace.steps.push(StepTrace {
-                    cycle: t as u64,
-                    pc_before: pc,
-                    pc_after: pc,
-                    opcode: 0,
-                    regs_before: regs.clone(),
-                    regs_after: regs.clone(),
-                    twist_events: Vec::new(),
-                    shout_events: Vec::new(),
-                    halted: true,
-                });
-            }
-        }
-    }
-    if original_len > 0 && original_len < max_steps {
-        debug_assert_eq!(
-            trace.steps.len(),
-            max_steps,
-            "internal error: expected builder padding to reach max_steps"
-        );
-        for (t, step) in trace.steps.iter().enumerate().skip(original_len) {
-            debug_assert!(
-                step.twist_events.is_empty(),
-                "padded step {t} must have no twist events"
-            );
-            debug_assert!(
-                step.shout_events.is_empty(),
-                "padded step {t} must have no shout events"
-            );
-            debug_assert!(step.halted, "padded step {t} must be halted");
-            debug_assert_eq!(
-                step.pc_before, step.pc_after,
-                "padded step {t} must keep pc constant"
-            );
-            debug_assert_eq!(
-                step.regs_before, step.regs_after,
-                "padded step {t} must keep regs constant"
-            );
-        }
-    }
 
     // Shared-bus mode does not support "silent dropping" of trace events: if the trace contains
     // Twist/Shout events, the corresponding instance metadata must be provided so the prover
@@ -218,9 +180,6 @@ where
 
     let steps_len = trace.steps.len();
     let chunks_len = steps_len.div_ceil(chunk_size);
-
-    // 2) Build plain traces over [0..T).
-    let plain_mem = build_plain_mem_traces::<Goldilocks>(&trace, mem_layouts, initial_mem);
 
     // Deterministic ordering (required for the shared-bus column schema).
     let mut mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
@@ -307,6 +266,7 @@ where
                 d: layout.d,
                 n_side: layout.n_side,
                 steps: chunk_size,
+                lanes: layout.lanes.max(1),
                 ell,
                 init,
                 _phantom: PhantomData,
@@ -315,25 +275,28 @@ where
             mem_instances.push((inst, wit));
 
             // Advance state across this chunk for the next chunk's init.
-            let plain = plain_mem.get(&mem_id).ok_or_else(|| {
-                ShardBuildError::MissingLayout(format!("missing PlainMemTrace for twist_id {}", mem_id))
-            })?;
             for t in chunk_start..chunk_end {
-                if plain.has_write[t] != Goldilocks::ONE {
-                    continue;
-                }
-                let addr = plain.write_addr[t];
-                let Ok(addr_usize) = usize::try_from(addr) else {
-                    continue;
-                };
-                if addr_usize >= layout.k {
-                    continue;
-                }
-                let new_val = plain.write_val[t];
-                if new_val == Goldilocks::ZERO {
-                    state.remove(&addr);
-                } else {
-                    state.insert(addr, new_val);
+                let step = trace
+                    .steps
+                    .get(t)
+                    .ok_or_else(|| ShardBuildError::VmError(format!("missing trace step t={t}")))?;
+                for ev in &step.twist_events {
+                    if ev.twist_id.0 != mem_id || ev.kind != TwistOpKind::Write {
+                        continue;
+                    }
+                    let addr = ev.addr;
+                    let Ok(addr_usize) = usize::try_from(addr) else {
+                        continue;
+                    };
+                    if addr_usize >= layout.k {
+                        continue;
+                    }
+                    let new_val = Goldilocks::from_u64(ev.value);
+                    if new_val == Goldilocks::ZERO {
+                        state.remove(&addr);
+                    } else {
+                        state.insert(addr, new_val);
+                    }
                 }
             }
         }
@@ -368,12 +331,14 @@ where
                 (table.k, table.d, table.n_side, ell, table.content.clone())
             };
 
+            let lanes = lut_lanes.get(&table_id).copied().unwrap_or(1).max(1);
             let inst = LutInstance::<Cmt, Goldilocks> {
                 comms: Vec::new(),
                 k,
                 d,
                 n_side,
                 steps: chunk_size,
+                lanes,
                 ell,
                 table_spec,
                 table,
@@ -395,6 +360,7 @@ where
 
     let aux = ShardWitnessAux {
         original_len,
+        did_halt,
         max_steps,
         chunk_size,
         mem_ids,

@@ -84,22 +84,24 @@ pub fn decode_instruction(instr: u32) -> Result<RiscvInstruction, String> {
                 0b111 => RiscvOpcode::And,  // ANDI
                 0b001 => {
                     // SLLI
+                    if funct7 != 0b0000000 {
+                        return Err(format!("Invalid SLLI funct7={:#x}", funct7));
+                    }
                     RiscvOpcode::Sll
                 }
                 0b101 => {
                     // SRLI or SRAI
-                    let shamt_funct = (instr >> 26) & 0x3F;
-                    if shamt_funct == 0b010000 {
-                        RiscvOpcode::Sra
-                    } else {
-                        RiscvOpcode::Srl
+                    match funct7 {
+                        0b0000000 => RiscvOpcode::Srl,
+                        0b0100000 => RiscvOpcode::Sra,
+                        _ => return Err(format!("Invalid SRLI/SRAI funct7={:#x}", funct7)),
                     }
                 }
                 _ => return Err(format!("Unknown I-type OP-IMM: funct3={:#x}", funct3)),
             };
             // For shifts, extract shamt properly
             let imm = if funct3 == 0b001 || funct3 == 0b101 {
-                (instr >> 20) & 0x3F // shamt for shifts
+                (instr >> 20) & 0x1F // shamt for shifts (RV32)
             } else {
                 imm as u32
             };
@@ -179,29 +181,23 @@ pub fn decode_instruction(instr: u32) -> Result<RiscvInstruction, String> {
             Ok(RiscvInstruction::Auipc { rd, imm })
         }
 
-        // SYSTEM (1110011) - ECALL, EBREAK
+        // SYSTEM (1110011) - ECALL (Jolt-style trap; no EBREAK support)
         0b1110011 => {
-            let imm = (instr >> 20) & 0xFFF;
-            match imm {
-                // Note: We use Halt for ECALL in our simplified model.
-                // Real RISC-V would trap to the OS/hypervisor.
-                // Our step() function checks if a0==0 for ECALL and halts,
-                // otherwise continues. For testing, we use Halt to unconditionally halt.
-                0 => Ok(RiscvInstruction::Halt), // ECALL -> Halt for our test programs
-                1 => Ok(RiscvInstruction::Ebreak),
-                _ => Err(format!("Unknown SYSTEM instruction: imm={:#x}", imm)),
+            if instr == 0x0000_0073 {
+                Ok(RiscvInstruction::Halt) // ECALL (trap/terminate in this VM)
+            } else {
+                Err(format!("Unsupported SYSTEM instruction: instr={:#x}", instr))
             }
         }
 
-        // MISC-MEM (0001111) - FENCE, FENCE.I
+        // MISC-MEM (0001111) - FENCE (FENCE.I unsupported to match Jolt tracer)
         0b0001111 => {
-            if funct3 == 0b001 {
-                Ok(RiscvInstruction::FenceI)
-            } else {
-                let pred = ((instr >> 24) & 0xF) as u8;
-                let succ = ((instr >> 20) & 0xF) as u8;
-                Ok(RiscvInstruction::Fence { pred, succ })
+            if funct3 != 0b000 {
+                return Err(format!("Unsupported MISC-MEM instruction: funct3={:#x}", funct3));
             }
+            let pred = ((instr >> 24) & 0xF) as u8;
+            let succ = ((instr >> 20) & 0xF) as u8;
+            Ok(RiscvInstruction::Fence { pred, succ })
         }
 
         // OP-32 (0111011) - RV64 W-suffix R-type operations

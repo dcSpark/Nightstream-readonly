@@ -97,6 +97,7 @@ fn paper_exact_dec_reconstruction_and_checks_hold() {
         &[],
         &[],
         &r,
+        &[],
         ell_d,
         [0; 32],
         &l,
@@ -120,7 +121,7 @@ fn paper_exact_dec_reconstruction_and_checks_hold() {
             m_in: 1,
         };
         let outi =
-            refimpl::build_me_outputs_paper_exact(&s, &params, &[insti], &[wi], &[], &[], &r, ell_d, [0; 32], &l);
+            refimpl::build_me_outputs_paper_exact(&s, &params, &[insti], &[wi], &[], &[], &r, &[], ell_d, [0; 32], &l);
         assert!(
             mat_eq(&children[i].X, &outi[0].X),
             "DEC child X_i must match literal projection for i={}",
@@ -183,6 +184,7 @@ fn paper_exact_dec_k1_identity() {
         &[],
         &[],
         &r,
+        &[],
         ell_d,
         [0; 32],
         &l,
@@ -240,6 +242,7 @@ fn paper_exact_dec_wrong_split_detected() {
         &[],
         &[],
         &r,
+        &[],
         ell_d,
         [0; 32],
         &l,
@@ -313,6 +316,7 @@ fn paper_exact_dec_rlc_roundtrip() {
         &[],
         &[],
         &r,
+        &[],
         ell_d,
         [0; 32],
         &l,

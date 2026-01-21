@@ -33,12 +33,16 @@ pub use paper_exact::{
     q_at_point_paper_exact,
     q_eval_at_ext_point_paper_exact,
     q_eval_at_ext_point_paper_exact_with_inputs,
+    q_eval_at_ext_point_fe_paper_exact,
+    q_eval_at_ext_point_fe_paper_exact_with_inputs,
 
     // Utilities
     recomposed_z_from_Z,
 
     // Terminal identity (verifier RHS)
     rhs_terminal_identity_paper_exact,
+    rhs_terminal_identity_fe_paper_exact,
+    rhs_terminal_identity_nc_paper_exact,
 
     // Paper-exact RLC/DEC
     rlc_reduction_paper_exact,

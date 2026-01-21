@@ -43,6 +43,7 @@ fn lut_inst() -> LutInstance<(), F> {
         d: 1,
         n_side: 2,
         steps: 1,
+        lanes: 1,
         ell: 1,
         table_spec: None,
         table: vec![F::ZERO, F::ONE],
@@ -57,6 +58,7 @@ fn mem_inst() -> MemInstance<(), F> {
         d: 1,
         n_side: 2,
         steps: 1,
+        lanes: 1,
         ell: 1,
         init: MemInit::Zero,
         _phantom: PhantomData,
@@ -76,12 +78,12 @@ fn shared_cpu_bus_injection_supports_independent_instances() {
     let shout_cpu = vec![
         ShoutCpuBinding {
             has_lookup: 1,
-            addr: 2,
+            addr: Some(2),
             val: 3,
         },
         ShoutCpuBinding {
             has_lookup: 4,
-            addr: 5,
+            addr: Some(5),
             val: 6,
         },
     ];
@@ -113,7 +115,11 @@ fn shared_cpu_bus_injection_supports_independent_instances() {
 
     // Bus tail layout (chunk_size==1): [shout0, shout1, twist0, twist1] in canonical order.
     let ell_addr = 1usize;
-    let bus_cols_total = lut_insts.len() * (ell_addr + 2) + mem_insts.len() * (2 * ell_addr + 5);
+    let bus_cols_total = lut_insts.len() * (ell_addr + 2)
+        + mem_insts
+            .iter()
+            .map(|m| m.lanes.max(1) * (2 * ell_addr + 5))
+            .sum::<usize>();
     let bus_base = ccs.m - bus_cols_total;
 
     let mut z = vec![F::ZERO; ccs.m];

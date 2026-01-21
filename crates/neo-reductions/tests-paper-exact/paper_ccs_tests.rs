@@ -204,6 +204,7 @@ fn paper_exact_rhs_matches_direct_eval_k1() {
         alpha: vec![rand_k(); 6],
         beta_a: vec![rand_k(); 6],
         beta_r: vec![rand_k(); 1],
+        beta_m: Vec::new(),
         gamma: rand_k(),
     };
     let alpha_p = vec![K::from(F::from_u64(5)); 6];
@@ -217,6 +218,7 @@ fn paper_exact_rhs_matches_direct_eval_k1() {
         &[],
         &[],
         &r_p,
+        &[],
         6,
         [0u8; 32],
         &l,
@@ -259,8 +261,10 @@ fn paper_exact_rhs_matches_direct_eval_with_eval_block() {
         c: l.commit(&me_z),
         X: l.project_x(&me_z, 0),
         r: me_r.clone(),
+        s_col: vec![],
         y: vec![vec![K::ZERO; D]],
         y_scalars: vec![K::ZERO],
+        y_zcol: vec![],
         m_in: 0,
         fold_digest: [0u8; 32],
     };
@@ -269,6 +273,7 @@ fn paper_exact_rhs_matches_direct_eval_with_eval_block() {
         alpha: vec![K::from(F::from_u64(11)); 6],
         beta_a: vec![K::from(F::from_u64(13)); 6],
         beta_r: vec![K::from(F::from_u64(15)); 1],
+        beta_m: Vec::new(),
         gamma: K::from(F::from_u64(17)),
     };
     let alpha_p = vec![K::from(F::from_u64(19)); 6];
@@ -282,6 +287,7 @@ fn paper_exact_rhs_matches_direct_eval_with_eval_block() {
         &[me_in.clone()],
         &[me_z.clone()],
         &r_p,
+        &[],
         6,
         [0u8; 32],
         &l,
@@ -323,8 +329,10 @@ fn paper_exact_k2_end_to_end_fold_identity() {
         c: l.commit(&me_z),
         X: l.project_x(&me_z, 0),
         r: me_r.clone(),
+        s_col: vec![],
         y: vec![vec![K::ZERO; D]],
         y_scalars: vec![K::ZERO],
+        y_zcol: vec![],
         m_in: 0,
         fold_digest: [0u8; 32],
     };
@@ -333,6 +341,7 @@ fn paper_exact_k2_end_to_end_fold_identity() {
         alpha: vec![K::from(F::from_u64(29)); 6],
         beta_a: vec![K::from(F::from_u64(31)); 6],
         beta_r: vec![K::from(F::from_u64(37)); 1],
+        beta_m: Vec::new(),
         gamma: K::from(F::from_u64(41)),
     };
     let alpha_p = vec![K::from(F::from_u64(43)); 6];
@@ -346,6 +355,7 @@ fn paper_exact_k2_end_to_end_fold_identity() {
         &[me_in.clone()],
         &[me_z.clone()],
         &r_p,
+        &[],
         6,
         [0u8; 32],
         &l,
@@ -384,8 +394,10 @@ fn paper_exact_k2_invalid_outputs_break_identity() {
         c: l.commit(&me_z),
         X: l.project_x(&me_z, 0),
         r: me_r.clone(),
+        s_col: vec![],
         y: vec![vec![K::ZERO; D]],
         y_scalars: vec![K::ZERO],
+        y_zcol: vec![],
         m_in: 0,
         fold_digest: [0u8; 32],
     };
@@ -394,6 +406,7 @@ fn paper_exact_k2_invalid_outputs_break_identity() {
         alpha: vec![K::from(F::from_u64(53)); 6],
         beta_a: vec![K::from(F::from_u64(57)); 6],
         beta_r: vec![K::from(F::from_u64(59)); 1],
+        beta_m: Vec::new(),
         gamma: K::from(F::from_u64(61)),
     };
     let alpha_p = vec![K::from(F::from_u64(67)); 6];
@@ -407,6 +420,7 @@ fn paper_exact_k2_invalid_outputs_break_identity() {
         &[me_in.clone()],
         &[me_z.clone()],
         &r_p,
+        &[],
         6,
         [0u8; 32],
         &l,
@@ -454,6 +468,7 @@ fn paper_exact_k2_ivc_two_steps() {
         &[],
         &[],
         &r0,
+        &[],
         6,
         [0u8; 32],
         &l,
@@ -475,6 +490,7 @@ fn paper_exact_k2_ivc_two_steps() {
         alpha: vec![K::from(F::from_u64(79)); 6],
         beta_a: vec![K::from(F::from_u64(83)); 6],
         beta_r: vec![K::from(F::from_u64(89)); 1],
+        beta_m: Vec::new(),
         gamma: K::from(F::from_u64(97)),
     };
     let alpha_p = vec![K::from(F::from_u64(101)); 6];
@@ -488,6 +504,7 @@ fn paper_exact_k2_ivc_two_steps() {
         &[me_input.clone()],
         &[z_step0.clone()],
         &r_p,
+        &[],
         6,
         [0u8; 32],
         &l,
@@ -537,8 +554,10 @@ fn paper_exact_k2_mismatched_mcs_and_outputs() {
         c: l.commit(&me_z),
         X: l.project_x(&me_z, 0),
         r: me_r.clone(),
+        s_col: vec![],
         y: vec![vec![K::ZERO; D]],
         y_scalars: vec![K::ZERO],
+        y_zcol: vec![],
         m_in: 0,
         fold_digest: [0u8; 32],
     };
@@ -549,6 +568,7 @@ fn paper_exact_k2_mismatched_mcs_and_outputs() {
         alpha: vec![K::from(F::from_u64(29)); 6],
         beta_a: vec![K::from(F::from_u64(31)); 6],
         beta_r: vec![K::from(F::from_u64(37)); 1],
+        beta_m: Vec::new(),
         gamma: K::from(F::from_u64(41)),
     };
 
@@ -560,6 +580,7 @@ fn paper_exact_k2_mismatched_mcs_and_outputs() {
         &[me_in.clone()],
         &[me_z.clone()],
         &r_p,
+        &[],
         6,
         [0u8; 32],
         &l,
@@ -595,6 +616,7 @@ fn paper_exact_boolean_corner_matches_extension_eval() {
         alpha: alpha_vec.clone(),
         beta_a: vec![K::from(F::from_u64(5)); ell_d_full],
         beta_r: vec![K::from(F::from_u64(11)); 1],
+        beta_m: Vec::new(),
         gamma: K::from(F::from_u64(13)),
     };
 
@@ -667,6 +689,7 @@ fn paper_exact_outputs_equal_literal_definition() {
         &[],
         &[],
         &r_p,
+        &[],
         /*ell_d=*/ 1,
         [0u8; 32],
         &l,
@@ -679,6 +702,7 @@ fn paper_exact_outputs_equal_literal_definition() {
         &[],
         &[],
         &r_p,
+        &[],
         ell_d_full,
         [0u8; 32],
         &l,
@@ -756,6 +780,7 @@ fn paper_exact_f_term_matches_mle_and_yprime_recomposition() {
         &[],
         &[],
         &r_p,
+        &[],
         ell_d_full,
         [0; 32],
         &l,
@@ -819,6 +844,7 @@ fn paper_exact_gamma_zero_kills_nc_and_eval() {
         alpha: vec![K::from(F::from_u64(2)); 1],
         beta_a: vec![K::from(F::from_u64(3)); 1],
         beta_r: vec![K::from(F::from_u64(5)); 1],
+        beta_m: Vec::new(),
         gamma: K::ZERO,
     };
     let alpha_p = vec![K::from(F::from_u64(7)); 1];
@@ -835,7 +861,7 @@ fn paper_exact_gamma_zero_kills_nc_and_eval() {
     };
     let ell_d_full = D.next_power_of_two().trailing_zeros() as usize;
     let out =
-        refimpl::build_me_outputs_paper_exact(&s, &params, &[inst], &[w0], &[], &[], &r_p, ell_d_full, [0; 32], &l);
+        refimpl::build_me_outputs_paper_exact(&s, &params, &[inst], &[w0], &[], &[], &r_p, &[], ell_d_full, [0; 32], &l);
     let b_k = K::from(F::from_u64(params.b as u64));
     let mut pow = vec![K::ONE; D];
     for i in 1..D {
@@ -878,7 +904,7 @@ fn paper_exact_ajtai_padding_is_zero() {
 
     let ell_d_base = (D.next_power_of_two().trailing_zeros() as usize) + 1;
     let out =
-        refimpl::build_me_outputs_paper_exact(&s, &params, &[inst], &[w], &[], &[], &r_p, ell_d_base, [0; 32], &l);
+        refimpl::build_me_outputs_paper_exact(&s, &params, &[inst], &[w], &[], &[], &r_p, &[], ell_d_base, [0; 32], &l);
 
     let want = 1usize << ell_d_base;
     for j in 0..s.t() {
