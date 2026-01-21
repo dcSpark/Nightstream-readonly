@@ -7,6 +7,7 @@
 
 use neo_ccs::{CcsMatrix, CcsStructure, Mat};
 use p3_field::{Field, PrimeCharacteristicRing};
+#[cfg(not(target_arch = "wasm32"))]
 use rayon::prelude::*;
 
 /// Compressed Sparse Column format (column-major iteration).
@@ -83,11 +84,41 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CscMat<Ff> {
         let (nrows, ncols) = (a.rows(), a.cols());
 
         // Count nnz per column and collect (row, col, val) triplets in one pass.
-        let (col_counts, triplets): (Vec<usize>, Vec<(usize, usize, Ff)>) = (0..nrows)
-            .into_par_iter()
-            .fold(
-                || (vec![0usize; ncols], Vec::<(usize, usize, Ff)>::new()),
-                |(mut col_counts, mut triplets), r| {
+        let (col_counts, triplets): (Vec<usize>, Vec<(usize, usize, Ff)>) = {
+            #[cfg(not(target_arch = "wasm32"))]
+            {
+                (0..nrows)
+                    .into_par_iter()
+                    .fold(
+                        || (vec![0usize; ncols], Vec::<(usize, usize, Ff)>::new()),
+                        |(mut col_counts, mut triplets), r| {
+                            let row = a.row(r);
+                            for (c, &v) in row.iter().enumerate() {
+                                if v != Ff::ZERO {
+                                    col_counts[c] += 1;
+                                    triplets.push((r, c, v));
+                                }
+                            }
+                            (col_counts, triplets)
+                        },
+                    )
+                    .reduce(
+                        || (vec![0usize; ncols], Vec::<(usize, usize, Ff)>::new()),
+                        |(mut a_counts, mut a_trips), (b_counts, mut b_trips)| {
+                            for c in 0..ncols {
+                                a_counts[c] += b_counts[c];
+                            }
+                            a_trips.reserve(b_trips.len());
+                            a_trips.append(&mut b_trips);
+                            (a_counts, a_trips)
+                        },
+                    )
+            }
+            #[cfg(target_arch = "wasm32")]
+            {
+                let mut col_counts = vec![0usize; ncols];
+                let mut triplets = Vec::<(usize, usize, Ff)>::new();
+                for r in 0..nrows {
                     let row = a.row(r);
                     for (c, &v) in row.iter().enumerate() {
                         if v != Ff::ZERO {
@@ -95,20 +126,10 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CscMat<Ff> {
                             triplets.push((r, c, v));
                         }
                     }
-                    (col_counts, triplets)
-                },
-            )
-            .reduce(
-                || (vec![0usize; ncols], Vec::<(usize, usize, Ff)>::new()),
-                |(mut a_counts, mut a_trips), (b_counts, mut b_trips)| {
-                    for c in 0..ncols {
-                        a_counts[c] += b_counts[c];
-                    }
-                    a_trips.reserve(b_trips.len());
-                    a_trips.append(&mut b_trips);
-                    (a_counts, a_trips)
-                },
-            );
+                }
+                (col_counts, triplets)
+            }
+        };
 
         let mut col_ptr = Vec::with_capacity(ncols + 1);
         col_ptr.push(0);

@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>neo-fold wasm demo</title>
+    <link rel="icon" href="data:," />
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="container">
+      <header>
+        <h1>neo-fold wasm demo</h1>
+        <p>
+          Paste or load a circuit JSON (TestExport schema) and run prove+verify in the browser.
+        </p>
+      </header>
+
+      <section class="panel">
+        <div class="row">
+          <button id="load-toy" type="button">Load toy circuit</button>
+          <button id="load-toy-folding" type="button">Load toy folding circuit (8 steps)</button>
+          <button id="load-poseidon2" type="button">Load Poseidon2 IC (batch 1)</button>
+          <label class="file">
+            <span>Load JSON file</span>
+            <input id="file-input" type="file" accept=".json,application/json" />
+          </label>
+          <button id="run" type="button">Prove + Verify</button>
+        </div>
+      </section>
+
+      <section class="panel">
+        <label for="circuit-json">Circuit JSON</label>
+        <textarea id="circuit-json" spellcheck="false"></textarea>
+      </section>
+
+      <section class="panel">
+        <div class="row">
+          <button id="clear-log" type="button">Clear output</button>
+        </div>
+        <pre id="log" class="log"></pre>
+      </section>
+    </main>
+
+    <script type="module" src="./main.js"></script>
+  </body>
+</html>

@@ -1219,6 +1219,81 @@ where
         self.fold_and_prove_with_transcript(&mut tr, s)
     }
 
+    /// Fold and prove with per-step proving timings (milliseconds).
+    ///
+    /// Returns `(run, step_prove_ms)` where `step_prove_ms[i]` is the time spent proving
+    /// fold step `i` inside the shard prover.
+    pub fn fold_and_prove_with_step_timings(
+        &mut self,
+        s: &CcsStructure<F>,
+    ) -> Result<(FoldRun, Vec<f64>), PiCcsError> {
+        let mut tr = Poseidon2Transcript::new(b"neo.fold/session");
+        self.fold_and_prove_with_transcript_and_step_timings(&mut tr, s)
+    }
+
+    /// Fold and prove with a caller-provided transcript, returning per-step proving timings.
+    pub fn fold_and_prove_with_transcript_and_step_timings(
+        &mut self,
+        tr: &mut Poseidon2Transcript,
+        s: &CcsStructure<F>,
+    ) -> Result<(FoldRun, Vec<f64>), PiCcsError> {
+        self.ensure_prover_ctx_for_ccs(s)?;
+
+        // Temporarily take the prover ctx to avoid borrow conflicts while we may mutate `self`.
+        let cache = self.prover_ctx.take().expect("prover ctx must be set");
+        let ctx = cache.ctx.clone();
+
+        let result = (|| {
+            // Shared CPU bus: compute the prepared CCS shape (copy-outs) for accumulator validation.
+            let s_prepared = self.prepared_ccs_for_accumulator(s)?;
+            self.ensure_accumulator_matches_ccs(s_prepared)?;
+
+            // Determine canonical m_in from steps and ensure they all match (needed for RLC).
+            let m_in_steps = self.steps.first().map(|step| step.mcs.0.m_in).unwrap_or(0);
+            if !self.steps.iter().all(|step| step.mcs.0.m_in == m_in_steps) {
+                return Err(PiCcsError::InvalidInput("all steps must share the same m_in".into()));
+            }
+
+            // Validate or default the accumulator: None → k=1 simple case (no ME inputs).
+            let (seed_me, seed_me_wit): (&[MeInstance<Cmt, F, K>], &[Mat<F>]) = match &self.acc0 {
+                Some(acc) => {
+                    acc.check(&self.params, s_prepared)?;
+                    // Also ensure accumulator m_in matches steps' m_in to avoid X-mixing shape issues.
+                    let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
+                    if acc_m_in != m_in_steps {
+                        return Err(PiCcsError::InvalidInput(
+                            "initial Accumulator.m_in must match steps' m_in".into(),
+                        ));
+                    }
+                    (&acc.me, &acc.witnesses)
+                }
+                None => (&[], &[]), // k=1
+            };
+
+            // If PP is reloadable (seeded), unload it before memory-heavy oracle/sumcheck work.
+            // This keeps peak RSS low on constrained runtimes (e.g. WASM).
+            if has_seed_for_dims(D, s.m) {
+                let _ = unload_global_pp_for_dims(D, s.m);
+            }
+
+            shard::fold_shard_prove_with_context_and_step_timings(
+                self.mode.clone(),
+                tr,
+                &self.params,
+                s,
+                &self.steps,
+                seed_me,
+                seed_me_wit,
+                &self.l,
+                self.mixers,
+                &ctx,
+            )
+        })();
+
+        self.prover_ctx = Some(cache);
+        result
+    }
+
     /// Convenience: fold, prove, and verify using the internally collected steps.
     ///
     /// This returns the proof run if verification succeeds.

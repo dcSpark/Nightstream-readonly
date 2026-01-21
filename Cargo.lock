@@ -582,9 +582,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi",
  "wasip2",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -930,6 +932,8 @@ dependencies = [
  "bincode",
  "criterion",
  "ff",
+ "getrandom 0.3.4",
+ "js-sys",
  "neo-ajtai",
  "neo-ccs",
  "neo-math",
@@ -962,7 +966,6 @@ dependencies = [
  "proptest",
  "rand 0.9.2",
  "rand_chacha",
- "rayon",
  "serde",
  "subtle",
  "thiserror 2.0.17",

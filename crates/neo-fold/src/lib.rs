@@ -14,6 +14,9 @@ pub use neo_reductions::{
 // Ergonomic per-step session API layered on top of the coordinator
 pub mod session;
 
+// Runner for the `TestExport` JSON schema (shared by tests and wasm)
+pub mod test_export;
+
 // Memory sidecar helpers (Route A integration plumbing)
 pub mod memory_sidecar;
 
