@@ -13,6 +13,7 @@ use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
 use neo_math::{D, Fq, K, KExtensions};
 use p3_field::{Field, PrimeCharacteristicRing};
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -214,55 +215,8 @@ where
 
         // `tail_len` starts at m_pad/2 and halves each column round; parallelize only when big enough.
         const PAR_THRESHOLD: usize = 1 << 13;
-        if tail_len >= PAR_THRESHOLD {
-            let (out, _scratch_nc, _scratch_eq) = (0..tail_len)
-                .into_par_iter()
-                .fold(
-                    || (vec![K::ZERO; xs_len], vec![K::ZERO; xs_len], vec![K::ZERO; xs_len]),
-                    |(mut out, mut nc_sum_by_x, mut eq_beta_m_x), t| {
-                        nc_sum_by_x.fill(K::ZERO);
-
-                        let idx = 2 * t;
-                        let e0 = self.eq_beta_m_tbl[idx];
-                        let e1 = self.eq_beta_m_tbl[idx + 1] - e0;
-
-                        for (x_idx, &x) in xs.iter().enumerate() {
-                            eq_beta_m_x[x_idx] = e0 + e1 * x;
-                        }
-
-                        for (wit_idx, tbl) in self.digits_tables.iter().enumerate() {
-                            let lo = &tbl[idx];
-                            let hi = &tbl[idx + 1];
-                            let weights = &self.weights[wit_idx];
-
-                            for rho in 0..D {
-                                let y0 = lo[rho];
-                                let dy = hi[rho] - y0;
-                                let w = weights[rho];
-                                for (x_idx, &x) in xs.iter().enumerate() {
-                                    let y = y0 + dy * x;
-                                    nc_sum_by_x[x_idx] += w * range_product_cached(y, &self.range_t_sq);
-                                }
-                            }
-                        }
-
-                        for x_idx in 0..xs_len {
-                            out[x_idx] += eq_beta_m_x[x_idx] * nc_sum_by_x[x_idx];
-                        }
-                        (out, nc_sum_by_x, eq_beta_m_x)
-                    },
-                )
-                .reduce(
-                    || (vec![K::ZERO; xs_len], vec![K::ZERO; xs_len], vec![K::ZERO; xs_len]),
-                    |(mut out_a, nc_a, eq_a), (out_b, _nc_b, _eq_b)| {
-                        for i in 0..xs_len {
-                            out_a[i] += out_b[i];
-                        }
-                        (out_a, nc_a, eq_a)
-                    },
-                );
-            out
-        } else {
+        let evals_col_phase_seq = |tail_len: usize, xs: &[K]| -> Vec<K> {
+            let xs_len = xs.len();
             let mut out = vec![K::ZERO; xs_len];
             let mut nc_sum_by_x = vec![K::ZERO; xs_len];
             let mut eq_beta_m_x = vec![K::ZERO; xs_len];
@@ -300,6 +254,65 @@ where
             }
 
             out
+        };
+
+        if tail_len >= PAR_THRESHOLD {
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+            {
+                let (out, _scratch_nc, _scratch_eq) = (0..tail_len)
+                    .into_par_iter()
+                    .fold(
+                        || (vec![K::ZERO; xs_len], vec![K::ZERO; xs_len], vec![K::ZERO; xs_len]),
+                        |(mut out, mut nc_sum_by_x, mut eq_beta_m_x), t| {
+                            nc_sum_by_x.fill(K::ZERO);
+
+                            let idx = 2 * t;
+                            let e0 = self.eq_beta_m_tbl[idx];
+                            let e1 = self.eq_beta_m_tbl[idx + 1] - e0;
+
+                            for (x_idx, &x) in xs.iter().enumerate() {
+                                eq_beta_m_x[x_idx] = e0 + e1 * x;
+                            }
+
+                            for (wit_idx, tbl) in self.digits_tables.iter().enumerate() {
+                                let lo = &tbl[idx];
+                                let hi = &tbl[idx + 1];
+                                let weights = &self.weights[wit_idx];
+
+                                for rho in 0..D {
+                                    let y0 = lo[rho];
+                                    let dy = hi[rho] - y0;
+                                    let w = weights[rho];
+                                    for (x_idx, &x) in xs.iter().enumerate() {
+                                        let y = y0 + dy * x;
+                                        nc_sum_by_x[x_idx] += w * range_product_cached(y, &self.range_t_sq);
+                                    }
+                                }
+                            }
+
+                            for x_idx in 0..xs_len {
+                                out[x_idx] += eq_beta_m_x[x_idx] * nc_sum_by_x[x_idx];
+                            }
+                            (out, nc_sum_by_x, eq_beta_m_x)
+                        },
+                    )
+                    .reduce(
+                        || (vec![K::ZERO; xs_len], vec![K::ZERO; xs_len], vec![K::ZERO; xs_len]),
+                        |(mut out_a, nc_a, eq_a), (out_b, _nc_b, _eq_b)| {
+                            for i in 0..xs_len {
+                                out_a[i] += out_b[i];
+                            }
+                            (out_a, nc_a, eq_a)
+                        },
+                    );
+                out
+            }
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            {
+                evals_col_phase_seq(tail_len, xs)
+            }
+        } else {
+            evals_col_phase_seq(tail_len, xs)
         }
     }
 
@@ -930,123 +943,7 @@ impl RowStreamState {
         let deg_max = core::cmp::max(4, f_max_term_deg + 1);
 
         const PAR_THRESHOLD: usize = 1 << 14;
-        let coeffs = if tail_len >= PAR_THRESHOLD {
-            (0..tail_len)
-                .into_par_iter()
-                .fold(
-                    || {
-                        (
-                            vec![Fq::ZERO; deg_max + 1],
-                            vec![Fq::ZERO; deg_max + 1],
-                            vec![Fq::ZERO; deg_max + 1],
-                        )
-                    },
-                    |(mut coeffs, mut inner, mut term_poly), t| {
-                        let idx = 2 * t;
-                        // eq_beta_r(X) = e0 + e1·X
-                        let e0 = self.eq_beta_r_tbl[idx].real();
-                        let e1 = self.eq_beta_r_tbl[idx + 1].real() - e0;
-
-                        // inner(X) = f_prime(X) + nc_total(X)
-                        inner.fill(Fq::ZERO);
-
-                        // f_prime(X): expand sparse polynomial with affine substitutions.
-                        for term in &self.f_terms {
-                            term_poly.fill(Fq::ZERO);
-                            term_poly[0] = term.coeff.real();
-                            for &(var_pos, exp) in &term.vars {
-                                if exp == 0 {
-                                    continue;
-                                }
-                                let tbl = &self.f_var_tables[var_pos];
-                                // v(X) = a + b·X
-                                let a = tbl[idx].real();
-                                let b = tbl[idx + 1].real() - a;
-                                for _ in 0..exp {
-                                    Self::poly_mul_affine_inplace_base(&mut term_poly, a, b);
-                                }
-                            }
-                            for i in 0..=deg_max {
-                                inner[i] += term_poly[i];
-                            }
-                        }
-
-                        // NC: degree-3 in X before multiplying by eq_beta_r(X).
-                        //
-                        // Accumulate into locals to avoid repeated loads/stores to `inner[*]` in the hot rho loop.
-                        let mut nc0 = Fq::ZERO;
-                        let mut nc1 = Fq::ZERO;
-                        let mut nc2 = Fq::ZERO;
-                        let mut nc3 = Fq::ZERO;
-                        for w_i in 0..self.nc_tables.len() {
-                            let lo = &self.nc_tables[w_i][idx];
-                            let hi = &self.nc_tables[w_i][idx + 1];
-                            let base = w_i * D;
-                            for rho in 0..D {
-                                let wg = self.w_gamma_nc[base + rho].real();
-
-                                // y(X) = a + b·X
-                                let a = lo[rho].real();
-                                let b = hi[rho].real() - a;
-
-                                // For b=2, N(y) = y(y^2-1) = y^3 - y.
-                                // (a + bX)^3 - (a + bX)
-                                let a2 = a * a;
-                                let a3 = a2 * a;
-                                let b2 = b * b;
-                                let b3 = b2 * b;
-
-                                let t0 = a3 - a;
-                                let t1 = (a2 * b) * three - b;
-                                let t2 = (a * b2) * three;
-                                let t3 = b3;
-
-                                nc0 += wg * t0;
-                                nc1 += wg * t1;
-                                nc2 += wg * t2;
-                                nc3 += wg * t3;
-                            }
-                        }
-                        inner[0] += nc0;
-                        inner[1] += nc1;
-                        inner[2] += nc2;
-                        inner[3] += nc3;
-
-                        // coeffs += eq_beta_r(X) * inner(X)
-                        coeffs[0] += e0 * inner[0];
-                        for d in 1..=deg_max {
-                            coeffs[d] += (e0 * inner[d]) + (e1 * inner[d - 1]);
-                        }
-
-                        // Eval: eq_r_inputs(X) * gamma_to_k * eval_tbl(X) (quadratic).
-                        if let (Some(eq_tbl), Some(eval_tbl)) =
-                            (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref())
-                        {
-                            let r0 = eq_tbl[idx].real();
-                            let r1 = eq_tbl[idx + 1].real() - r0;
-                            let v0 = eval_tbl[idx].real();
-                            let v1 = eval_tbl[idx + 1].real() - v0;
-
-                            let g = self.gamma_to_k.real();
-                            coeffs[0] += g * (r0 * v0);
-                            coeffs[1] += g * (r0 * v1 + r1 * v0);
-                            coeffs[2] += g * (r1 * v1);
-                        }
-
-                        (coeffs, inner, term_poly)
-                    },
-                )
-                .map(|(coeffs, _, _)| coeffs)
-                .reduce(
-                    || vec![Fq::ZERO; deg_max + 1],
-                    |mut a, b| {
-                        for i in 0..=deg_max {
-                            a[i] += b[i];
-                        }
-                        a
-                    },
-                )
-        } else {
+        let coeffs_seq = |tail_len: usize| -> Vec<Fq> {
             let mut coeffs = vec![Fq::ZERO; deg_max + 1];
             let mut inner = vec![Fq::ZERO; deg_max + 1];
             let mut term_poly = vec![Fq::ZERO; deg_max + 1];
@@ -1137,6 +1034,133 @@ impl RowStreamState {
             coeffs
         };
 
+        let coeffs = if tail_len >= PAR_THRESHOLD {
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+            {
+                (0..tail_len)
+                    .into_par_iter()
+                    .fold(
+                        || {
+                            (
+                                vec![Fq::ZERO; deg_max + 1],
+                                vec![Fq::ZERO; deg_max + 1],
+                                vec![Fq::ZERO; deg_max + 1],
+                            )
+                        },
+                        |(mut coeffs, mut inner, mut term_poly), t| {
+                            let idx = 2 * t;
+                            // eq_beta_r(X) = e0 + e1·X
+                            let e0 = self.eq_beta_r_tbl[idx].real();
+                            let e1 = self.eq_beta_r_tbl[idx + 1].real() - e0;
+
+                            // inner(X) = f_prime(X) + nc_total(X)
+                            inner.fill(Fq::ZERO);
+
+                            // f_prime(X): expand sparse polynomial with affine substitutions.
+                            for term in &self.f_terms {
+                                term_poly.fill(Fq::ZERO);
+                                term_poly[0] = term.coeff.real();
+                                for &(var_pos, exp) in &term.vars {
+                                    if exp == 0 {
+                                        continue;
+                                    }
+                                    let tbl = &self.f_var_tables[var_pos];
+                                    // v(X) = a + b·X
+                                    let a = tbl[idx].real();
+                                    let b = tbl[idx + 1].real() - a;
+                                    for _ in 0..exp {
+                                        Self::poly_mul_affine_inplace_base(&mut term_poly, a, b);
+                                    }
+                                }
+                                for i in 0..=deg_max {
+                                    inner[i] += term_poly[i];
+                                }
+                            }
+
+                            // NC: degree-3 in X before multiplying by eq_beta_r(X).
+                            //
+                            // Accumulate into locals to avoid repeated loads/stores to `inner[*]` in the hot rho loop.
+                            let mut nc0 = Fq::ZERO;
+                            let mut nc1 = Fq::ZERO;
+                            let mut nc2 = Fq::ZERO;
+                            let mut nc3 = Fq::ZERO;
+                            for w_i in 0..self.nc_tables.len() {
+                                let lo = &self.nc_tables[w_i][idx];
+                                let hi = &self.nc_tables[w_i][idx + 1];
+                                let base = w_i * D;
+                                for rho in 0..D {
+                                    let wg = self.w_gamma_nc[base + rho].real();
+
+                                    // y(X) = a + b·X
+                                    let a = lo[rho].real();
+                                    let b = hi[rho].real() - a;
+
+                                    // For b=2, N(y) = y(y^2-1) = y^3 - y.
+                                    // (a + bX)^3 - (a + bX)
+                                    let a2 = a * a;
+                                    let a3 = a2 * a;
+                                    let b2 = b * b;
+                                    let b3 = b2 * b;
+
+                                    let t0 = a3 - a;
+                                    let t1 = (a2 * b) * three - b;
+                                    let t2 = (a * b2) * three;
+                                    let t3 = b3;
+
+                                    nc0 += wg * t0;
+                                    nc1 += wg * t1;
+                                    nc2 += wg * t2;
+                                    nc3 += wg * t3;
+                                }
+                            }
+                            inner[0] += nc0;
+                            inner[1] += nc1;
+                            inner[2] += nc2;
+                            inner[3] += nc3;
+
+                            // coeffs += eq_beta_r(X) * inner(X)
+                            coeffs[0] += e0 * inner[0];
+                            for d in 1..=deg_max {
+                                coeffs[d] += (e0 * inner[d]) + (e1 * inner[d - 1]);
+                            }
+
+                            // Eval: eq_r_inputs(X) * gamma_to_k * eval_tbl(X) (quadratic).
+                            if let (Some(eq_tbl), Some(eval_tbl)) =
+                                (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref())
+                            {
+                                let r0 = eq_tbl[idx].real();
+                                let r1 = eq_tbl[idx + 1].real() - r0;
+                                let v0 = eval_tbl[idx].real();
+                                let v1 = eval_tbl[idx + 1].real() - v0;
+
+                                let g = self.gamma_to_k.real();
+                                coeffs[0] += g * (r0 * v0);
+                                coeffs[1] += g * (r0 * v1 + r1 * v0);
+                                coeffs[2] += g * (r1 * v1);
+                            }
+
+                            (coeffs, inner, term_poly)
+                        },
+                    )
+                    .map(|(coeffs, _, _)| coeffs)
+                    .reduce(
+                        || vec![Fq::ZERO; deg_max + 1],
+                        |mut a, b| {
+                            for i in 0..=deg_max {
+                                a[i] += b[i];
+                            }
+                            a
+                        },
+                    )
+            }
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            {
+                coeffs_seq(tail_len)
+            }
+        } else {
+            coeffs_seq(tail_len)
+        };
+
         xs_base
             .iter()
             .map(|&x| K::from(Self::poly_eval_base(&coeffs, x)))
@@ -1160,150 +1184,7 @@ impl RowStreamState {
         let deg_max = core::cmp::max(6, f_max_term_deg + 1);
 
         const PAR_THRESHOLD: usize = 1 << 14;
-        let coeffs = if tail_len >= PAR_THRESHOLD {
-            (0..tail_len)
-                .into_par_iter()
-                .fold(
-                    || {
-                        (
-                            vec![Fq::ZERO; deg_max + 1],
-                            vec![Fq::ZERO; deg_max + 1],
-                            vec![Fq::ZERO; deg_max + 1],
-                        )
-                    },
-                    |(mut coeffs, mut inner, mut term_poly), t| {
-                        let idx = 2 * t;
-                        // eq_beta_r(X) = e0 + e1·X
-                        let e0 = self.eq_beta_r_tbl[idx].real();
-                        let e1 = self.eq_beta_r_tbl[idx + 1].real() - e0;
-
-                        // inner(X) = f_prime(X) + nc_total(X)
-                        inner.fill(Fq::ZERO);
-
-                        // f_prime(X): expand sparse polynomial with affine substitutions.
-                        for term in &self.f_terms {
-                            term_poly.fill(Fq::ZERO);
-                            term_poly[0] = term.coeff.real();
-                            for &(var_pos, exp) in &term.vars {
-                                if exp == 0 {
-                                    continue;
-                                }
-                                let tbl = &self.f_var_tables[var_pos];
-                                // v(X) = a + b·X
-                                let a = tbl[idx].real();
-                                let b = tbl[idx + 1].real() - a;
-                                for _ in 0..exp {
-                                    Self::poly_mul_affine_inplace_base(&mut term_poly, a, b);
-                                }
-                            }
-                            for i in 0..=deg_max {
-                                inner[i] += term_poly[i];
-                            }
-                        }
-
-                        // NC: degree-5 in X before multiplying by eq_beta_r(X).
-                        //
-                        // Accumulate into locals to avoid repeated loads/stores to `inner[*]` in the hot rho loop.
-                        let mut nc0 = Fq::ZERO;
-                        let mut nc1 = Fq::ZERO;
-                        let mut nc2 = Fq::ZERO;
-                        let mut nc3 = Fq::ZERO;
-                        let mut nc4 = Fq::ZERO;
-                        let mut nc5 = Fq::ZERO;
-                        for w_i in 0..self.nc_tables.len() {
-                            let lo = &self.nc_tables[w_i][idx];
-                            let hi = &self.nc_tables[w_i][idx + 1];
-                            let base = w_i * D;
-
-                            for rho in 0..D {
-                                let wg = self.w_gamma_nc[base + rho].real();
-
-                                // y(X) = a + b·X
-                                let a = lo[rho].real();
-                                let b = hi[rho].real() - a;
-
-                                // Expand N(a + bX) = (a+bX)^5 - 5(a+bX)^3 + 4(a+bX).
-                                //
-                                // Coeffs:
-                                // X^0: a^5 - 5a^3 + 4a
-                                // X^1: b(5a^4 - 15a^2 + 4)
-                                // X^2: b^2(10a^3 - 15a)
-                                // X^3: b^3(10a^2 - 5)
-                                // X^4: 5ab^4
-                                // X^5: b^5
-                                let a2 = a * a;
-                                let a3 = a2 * a;
-                                let a4 = a2 * a2;
-                                let a5 = a4 * a;
-
-                                let b2 = b * b;
-                                let b3 = b2 * b;
-                                let b4 = b2 * b2;
-                                let b5 = b4 * b;
-
-                                let t0 = a5 - a3 * five + a * four;
-                                let p1 = a4 * five - a2 * fifteen + four;
-                                let t1 = b * p1;
-
-                                let p2 = a3 * ten - a * fifteen;
-                                let t2 = b2 * p2;
-
-                                let p3 = a2 * ten - five;
-                                let t3 = b3 * p3;
-
-                                let t4 = b4 * (a * five);
-                                let t5 = b5;
-
-                                nc0 += wg * t0;
-                                nc1 += wg * t1;
-                                nc2 += wg * t2;
-                                nc3 += wg * t3;
-                                nc4 += wg * t4;
-                                nc5 += wg * t5;
-                            }
-                        }
-                        inner[0] += nc0;
-                        inner[1] += nc1;
-                        inner[2] += nc2;
-                        inner[3] += nc3;
-                        inner[4] += nc4;
-                        inner[5] += nc5;
-
-                        // coeffs += eq_beta_r(X) * inner(X)
-                        coeffs[0] += e0 * inner[0];
-                        for d in 1..=deg_max {
-                            coeffs[d] += (e0 * inner[d]) + (e1 * inner[d - 1]);
-                        }
-
-                        // Eval: eq_r_inputs(X) * gamma_to_k * eval_tbl(X) (quadratic).
-                        if let (Some(eq_tbl), Some(eval_tbl)) =
-                            (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref())
-                        {
-                            let r0 = eq_tbl[idx].real();
-                            let r1 = eq_tbl[idx + 1].real() - r0;
-                            let v0 = eval_tbl[idx].real();
-                            let v1 = eval_tbl[idx + 1].real() - v0;
-
-                            let g = self.gamma_to_k.real();
-                            coeffs[0] += g * (r0 * v0);
-                            coeffs[1] += g * (r0 * v1 + r1 * v0);
-                            coeffs[2] += g * (r1 * v1);
-                        }
-
-                        (coeffs, inner, term_poly)
-                    },
-                )
-                .map(|(coeffs, _, _)| coeffs)
-                .reduce(
-                    || vec![Fq::ZERO; deg_max + 1],
-                    |mut a, b| {
-                        for i in 0..=deg_max {
-                            a[i] += b[i];
-                        }
-                        a
-                    },
-                )
-        } else {
+        let coeffs_seq = |tail_len: usize| -> Vec<Fq> {
             let mut coeffs = vec![Fq::ZERO; deg_max + 1];
             let mut inner = vec![Fq::ZERO; deg_max + 1];
             let mut term_poly = vec![Fq::ZERO; deg_max + 1];
@@ -1412,6 +1293,160 @@ impl RowStreamState {
             }
 
             coeffs
+        };
+
+        let coeffs = if tail_len >= PAR_THRESHOLD {
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+            {
+                (0..tail_len)
+                    .into_par_iter()
+                    .fold(
+                        || {
+                            (
+                                vec![Fq::ZERO; deg_max + 1],
+                                vec![Fq::ZERO; deg_max + 1],
+                                vec![Fq::ZERO; deg_max + 1],
+                            )
+                        },
+                        |(mut coeffs, mut inner, mut term_poly), t| {
+                            let idx = 2 * t;
+                            // eq_beta_r(X) = e0 + e1·X
+                            let e0 = self.eq_beta_r_tbl[idx].real();
+                            let e1 = self.eq_beta_r_tbl[idx + 1].real() - e0;
+
+                            // inner(X) = f_prime(X) + nc_total(X)
+                            inner.fill(Fq::ZERO);
+
+                            // f_prime(X): expand sparse polynomial with affine substitutions.
+                            for term in &self.f_terms {
+                                term_poly.fill(Fq::ZERO);
+                                term_poly[0] = term.coeff.real();
+                                for &(var_pos, exp) in &term.vars {
+                                    if exp == 0 {
+                                        continue;
+                                    }
+                                    let tbl = &self.f_var_tables[var_pos];
+                                    // v(X) = a + b·X
+                                    let a = tbl[idx].real();
+                                    let b = tbl[idx + 1].real() - a;
+                                    for _ in 0..exp {
+                                        Self::poly_mul_affine_inplace_base(&mut term_poly, a, b);
+                                    }
+                                }
+                                for i in 0..=deg_max {
+                                    inner[i] += term_poly[i];
+                                }
+                            }
+
+                            // NC: degree-5 in X before multiplying by eq_beta_r(X).
+                            //
+                            // Accumulate into locals to avoid repeated loads/stores to `inner[*]` in the hot rho loop.
+                            let mut nc0 = Fq::ZERO;
+                            let mut nc1 = Fq::ZERO;
+                            let mut nc2 = Fq::ZERO;
+                            let mut nc3 = Fq::ZERO;
+                            let mut nc4 = Fq::ZERO;
+                            let mut nc5 = Fq::ZERO;
+                            for w_i in 0..self.nc_tables.len() {
+                                let lo = &self.nc_tables[w_i][idx];
+                                let hi = &self.nc_tables[w_i][idx + 1];
+                                let base = w_i * D;
+
+                                for rho in 0..D {
+                                    let wg = self.w_gamma_nc[base + rho].real();
+
+                                    // y(X) = a + b·X
+                                    let a = lo[rho].real();
+                                    let b = hi[rho].real() - a;
+
+                                    // Expand N(a + bX) = (a+bX)^5 - 5(a+bX)^3 + 4(a+bX).
+                                    //
+                                    // Coeffs:
+                                    // X^0: a^5 - 5a^3 + 4a
+                                    // X^1: b(5a^4 - 15a^2 + 4)
+                                    // X^2: b^2(10a^3 - 15a)
+                                    // X^3: b^3(10a^2 - 5)
+                                    // X^4: 5ab^4
+                                    // X^5: b^5
+                                    let a2 = a * a;
+                                    let a3 = a2 * a;
+                                    let a4 = a2 * a2;
+                                    let a5 = a4 * a;
+
+                                    let b2 = b * b;
+                                    let b3 = b2 * b;
+                                    let b4 = b2 * b2;
+                                    let b5 = b4 * b;
+
+                                    let t0 = a5 - a3 * five + a * four;
+                                    let p1 = a4 * five - a2 * fifteen + four;
+                                    let t1 = b * p1;
+
+                                    let p2 = a3 * ten - a * fifteen;
+                                    let t2 = b2 * p2;
+
+                                    let p3 = a2 * ten - five;
+                                    let t3 = b3 * p3;
+
+                                    let t4 = b4 * (a * five);
+                                    let t5 = b5;
+
+                                    nc0 += wg * t0;
+                                    nc1 += wg * t1;
+                                    nc2 += wg * t2;
+                                    nc3 += wg * t3;
+                                    nc4 += wg * t4;
+                                    nc5 += wg * t5;
+                                }
+                            }
+                            inner[0] += nc0;
+                            inner[1] += nc1;
+                            inner[2] += nc2;
+                            inner[3] += nc3;
+                            inner[4] += nc4;
+                            inner[5] += nc5;
+
+                            // coeffs += eq_beta_r(X) * inner(X)
+                            coeffs[0] += e0 * inner[0];
+                            for d in 1..=deg_max {
+                                coeffs[d] += (e0 * inner[d]) + (e1 * inner[d - 1]);
+                            }
+
+                            // Eval: eq_r_inputs(X) * gamma_to_k * eval_tbl(X) (quadratic).
+                            if let (Some(eq_tbl), Some(eval_tbl)) =
+                                (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref())
+                            {
+                                let r0 = eq_tbl[idx].real();
+                                let r1 = eq_tbl[idx + 1].real() - r0;
+                                let v0 = eval_tbl[idx].real();
+                                let v1 = eval_tbl[idx + 1].real() - v0;
+
+                                let g = self.gamma_to_k.real();
+                                coeffs[0] += g * (r0 * v0);
+                                coeffs[1] += g * (r0 * v1 + r1 * v0);
+                                coeffs[2] += g * (r1 * v1);
+                            }
+
+                            (coeffs, inner, term_poly)
+                        },
+                    )
+                    .map(|(coeffs, _, _)| coeffs)
+                    .reduce(
+                        || vec![Fq::ZERO; deg_max + 1],
+                        |mut a, b| {
+                            for i in 0..=deg_max {
+                                a[i] += b[i];
+                            }
+                            a
+                        },
+                    )
+            }
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            {
+                coeffs_seq(tail_len)
+            }
+        } else {
+            coeffs_seq(tail_len)
         };
 
         xs_base
@@ -1589,17 +1624,144 @@ impl RowStreamState {
             // NC contributes degree 6 after multiplying by eq_beta_r(X).
             let deg_max = core::cmp::max(6, f_max_term_deg + 1);
 
-            let coeffs = (0..tail_len)
-                .into_par_iter()
-                .fold(
-                    || {
-                        (
-                            vec![K::ZERO; deg_max + 1],
-                            vec![K::ZERO; deg_max + 1],
-                            vec![K::ZERO; deg_max + 1],
+            let coeffs = {
+                #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+                {
+                    (0..tail_len)
+                        .into_par_iter()
+                        .fold(
+                            || {
+                                (
+                                    vec![K::ZERO; deg_max + 1],
+                                    vec![K::ZERO; deg_max + 1],
+                                    vec![K::ZERO; deg_max + 1],
+                                )
+                            },
+                            |(mut coeffs, mut inner, mut term_poly), t| {
+                                // eq_beta_r(X) = e0 + e1·X
+                                let e0 = self.eq_beta_r_tbl[2 * t];
+                                let e1 = self.eq_beta_r_tbl[2 * t + 1] - e0;
+
+                                // inner(X) = f_prime(X) + nc_total(X)
+                                inner.fill(K::ZERO);
+
+                                // f_prime(X): expand sparse polynomial with affine substitutions.
+                                for term in &self.f_terms {
+                                    term_poly.fill(K::ZERO);
+                                    term_poly[0] = term.coeff;
+                                    for &(var_pos, exp) in &term.vars {
+                                        if exp == 0 {
+                                            continue;
+                                        }
+                                        let tbl = &self.f_var_tables[var_pos];
+                                        // v(X) = a + b·X
+                                        let a = tbl[2 * t];
+                                        let b = tbl[2 * t + 1] - a;
+                                        for _ in 0..exp {
+                                            Self::poly_mul_affine_inplace(&mut term_poly, a, b);
+                                        }
+                                    }
+                                    for i in 0..=deg_max {
+                                        inner[i] += term_poly[i];
+                                    }
+                                }
+
+                                // NC: degree-5 in X before multiplying by eq_beta_r(X).
+                                for w_i in 0..self.nc_tables.len() {
+                                    let lo = &self.nc_tables[w_i][2 * t];
+                                    let hi = &self.nc_tables[w_i][2 * t + 1];
+                                    let base = w_i * D;
+
+                                    for rho in 0..D {
+                                        let wg = self.w_gamma_nc[base + rho];
+
+                                        // y(X) = a + b·X
+                                        let a = lo[rho];
+                                        let b = hi[rho] - a;
+
+                                        // Expand N(a + bX) = (a+bX)^5 - 5(a+bX)^3 + 4(a+bX).
+                                        //
+                                        // Coeffs:
+                                        // X^0: a^5 - 5a^3 + 4a
+                                        // X^1: b(5a^4 - 15a^2 + 4)
+                                        // X^2: b^2(10a^3 - 15a)
+                                        // X^3: b^3(10a^2 - 5)
+                                        // X^4: 5ab^4
+                                        // X^5: b^5
+                                        let a2 = a * a;
+                                        let a3 = a2 * a;
+                                        let a4 = a2 * a2;
+                                        let a5 = a4 * a;
+
+                                        let b2 = b * b;
+                                        let b3 = b2 * b;
+                                        let b4 = b2 * b2;
+                                        let b5 = b4 * b;
+
+                                        let t0 = a5 - a3.scale_base_k(five) + a.scale_base_k(four);
+                                        let p1 = a4.scale_base_k(five) - a2.scale_base_k(fifteen) + four;
+                                        let t1 = b * p1;
+
+                                        let p2 = a3.scale_base_k(ten) - a.scale_base_k(fifteen);
+                                        let t2 = b2 * p2;
+
+                                        let p3 = a2.scale_base_k(ten) - five;
+                                        let t3 = b3 * p3;
+
+                                        let t4 = b4 * a.scale_base_k(five);
+                                        let t5 = b5;
+
+                                        inner[0] += wg * t0;
+                                        inner[1] += wg * t1;
+                                        inner[2] += wg * t2;
+                                        inner[3] += wg * t3;
+                                        inner[4] += wg * t4;
+                                        inner[5] += wg * t5;
+                                    }
+                                }
+
+                                // coeffs += eq_beta_r(X) * inner(X)
+                                coeffs[0] += e0 * inner[0];
+                                for d in 1..=deg_max {
+                                    coeffs[d] += (e0 * inner[d]) + (e1 * inner[d - 1]);
+                                }
+
+                                // Eval: eq_r_inputs(X) * gamma_to_k * eval_tbl(X) (quadratic).
+                                if let (Some(eq_tbl), Some(eval_tbl)) =
+                                    (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref())
+                                {
+                                    let r0 = eq_tbl[2 * t];
+                                    let r1 = eq_tbl[2 * t + 1] - r0;
+                                    let v0 = eval_tbl[2 * t];
+                                    let v1 = eval_tbl[2 * t + 1] - v0;
+
+                                    let g = self.gamma_to_k;
+                                    coeffs[0] += g * (r0 * v0);
+                                    coeffs[1] += g * (r0 * v1 + r1 * v0);
+                                    coeffs[2] += g * (r1 * v1);
+                                }
+
+                                (coeffs, inner, term_poly)
+                            },
                         )
-                    },
-                    |(mut coeffs, mut inner, mut term_poly), t| {
+                        .map(|(coeffs, _, _)| coeffs)
+                        .reduce(
+                            || vec![K::ZERO; deg_max + 1],
+                            |mut a, b| {
+                                for i in 0..=deg_max {
+                                    a[i] += b[i];
+                                }
+                                a
+                            },
+                        )
+                }
+                #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+                {
+                    let mut coeffs = vec![K::ZERO; deg_max + 1];
+                    let mut inner = vec![K::ZERO; deg_max + 1];
+                    let mut term_poly = vec![K::ZERO; deg_max + 1];
+
+                    for t in 0..tail_len {
                         // eq_beta_r(X) = e0 + e1·X
                         let e0 = self.eq_beta_r_tbl[2 * t];
                         let e1 = self.eq_beta_r_tbl[2 * t + 1] - e0;
@@ -1702,20 +1864,11 @@ impl RowStreamState {
                             coeffs[1] += g * (r0 * v1 + r1 * v0);
                             coeffs[2] += g * (r1 * v1);
                         }
+                    }
 
-                        (coeffs, inner, term_poly)
-                    },
-                )
-                .map(|(coeffs, _, _)| coeffs)
-                .reduce(
-                    || vec![K::ZERO; deg_max + 1],
-                    |mut a, b| {
-                        for i in 0..=deg_max {
-                            a[i] += b[i];
-                        }
-                        a
-                    },
-                );
+                    coeffs
+                }
+            };
 
             return if xs_are_base {
                 xs.iter()

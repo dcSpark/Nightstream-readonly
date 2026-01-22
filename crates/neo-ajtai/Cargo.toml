@@ -13,6 +13,7 @@ default = []
 testing = []
 # Enable verbose logging for debugging (OFF by default for security - CWE-532)
 neo-logs = []
+wasm-threads = ["neo-ccs/wasm-threads"]
 
 [dependencies]
 # Workspace deps
@@ -24,13 +25,18 @@ rand_chacha = "0.9"
 serde = { version = "1.0", features = ["derive"] }
 thiserror = "2"
 subtle = "2.6"
-rayon = { workspace = true }
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 
 # Plonky3 (field + small dense matrix)
 p3-field = "0.4.1"
 p3-goldilocks = { version = "0.4.1", default-features = false }
 p3-matrix = "0.4.1"
+
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rayon = { workspace = true }
 
 [dev-dependencies]
 proptest = "1.7"

@@ -3,6 +3,7 @@ use crate::types::{Commitment, PP};
 use neo_ccs::Mat;
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_goldilocks::Goldilocks as Fq;
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 use rayon::prelude::*;
 use rand::{CryptoRng, RngCore};
 use rand_chacha::ChaCha8Rng;
@@ -200,15 +201,30 @@ pub fn setup_par<R: RngCore + CryptoRng>(rng: &mut R, d: usize, kappa: usize, m:
 
         // Fill the row in place in parallel. This avoids extra copies of multi-GB buffers.
         let mut row = vec![RqEl::zero(); m];
-        row.par_chunks_mut(chunk_size)
-            .enumerate()
-            .for_each(|(chunk_idx, chunk)| {
+        #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+        {
+            row.par_chunks_mut(chunk_size)
+                .enumerate()
+                .for_each(|(chunk_idx, chunk)| {
+                    let mut chunk_rng = ChaCha8Rng::from_seed(chunk_seeds[chunk_idx]);
+                    for el in chunk.iter_mut() {
+                        let coeffs: [Fq; D] =
+                            core::array::from_fn(|_| sample_uniform_fq(&mut chunk_rng));
+                        *el = cf_unmap(coeffs);
+                    }
+                });
+        }
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+        {
+            for (chunk_idx, chunk) in row.chunks_mut(chunk_size).enumerate() {
                 let mut chunk_rng = ChaCha8Rng::from_seed(chunk_seeds[chunk_idx]);
                 for el in chunk.iter_mut() {
-                    let coeffs: [Fq; D] = core::array::from_fn(|_| sample_uniform_fq(&mut chunk_rng));
+                    let coeffs: [Fq; D] =
+                        core::array::from_fn(|_| sample_uniform_fq(&mut chunk_rng));
                     *el = cf_unmap(coeffs);
                 }
-            });
+            }
+        }
 
         rows.push(row);
     }
@@ -297,32 +313,58 @@ pub fn commit_row_major_seeded(seed: [u8; 32], d: usize, kappa: usize, m: usize,
 
     for i in 0..kappa {
         let chunk_seeds = &chunk_seeds_by_row[i];
-        let acc = (0..chunk_seeds.len())
-            .into_par_iter()
-            .fold(Acc::new, |mut st, chunk_idx| {
-                let start = chunk_idx * chunk_size;
-                let end = core::cmp::min(m, start + chunk_size);
-                let mut rng = ChaCha8Rng::from_seed(chunk_seeds[chunk_idx]);
-                let mut nxt = [Fq::ZERO; D];
-                for col_idx in start..end {
-                    let a_ij = sample_uniform_rq(&mut rng);
-                    let mut rot_col = cf(a_ij);
-                    for t in 0..d {
-                        let mask = z_rows[t][col_idx];
-                        acc_mul_add_inplace(&mut st.acc, &rot_col, mask);
-                        rot_step(&rot_col, &mut nxt);
-                        core::mem::swap(&mut rot_col, &mut nxt);
+        let acc = {
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+            {
+                (0..chunk_seeds.len())
+                    .into_par_iter()
+                    .fold(Acc::new, |mut st, chunk_idx| {
+                        let start = chunk_idx * chunk_size;
+                        let end = core::cmp::min(m, start + chunk_size);
+                        let mut rng = ChaCha8Rng::from_seed(chunk_seeds[chunk_idx]);
+                        let mut nxt = [Fq::ZERO; D];
+                        for col_idx in start..end {
+                            let a_ij = sample_uniform_rq(&mut rng);
+                            let mut rot_col = cf(a_ij);
+                            for t in 0..d {
+                                let mask = z_rows[t][col_idx];
+                                acc_mul_add_inplace(&mut st.acc, &rot_col, mask);
+                                rot_step(&rot_col, &mut nxt);
+                                core::mem::swap(&mut rot_col, &mut nxt);
+                            }
+                        }
+                        st
+                    })
+                    .reduce_with(|mut a, b| {
+                        for r in 0..d {
+                            a.acc[r] += b.acc[r];
+                        }
+                        a
+                    })
+                    .unwrap_or_else(Acc::new)
+            }
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            {
+                let mut st = Acc::new();
+                for chunk_idx in 0..chunk_seeds.len() {
+                    let start = chunk_idx * chunk_size;
+                    let end = core::cmp::min(m, start + chunk_size);
+                    let mut rng = ChaCha8Rng::from_seed(chunk_seeds[chunk_idx]);
+                    let mut nxt = [Fq::ZERO; D];
+                    for col_idx in start..end {
+                        let a_ij = sample_uniform_rq(&mut rng);
+                        let mut rot_col = cf(a_ij);
+                        for t in 0..d {
+                            let mask = z_rows[t][col_idx];
+                            acc_mul_add_inplace(&mut st.acc, &rot_col, mask);
+                            rot_step(&rot_col, &mut nxt);
+                            core::mem::swap(&mut rot_col, &mut nxt);
+                        }
                     }
                 }
                 st
-            })
-            .reduce_with(|mut a, b| {
-                for r in 0..d {
-                    a.acc[r] += b.acc[r];
-                }
-                a
-            })
-            .unwrap_or_else(Acc::new);
+            }
+        };
 
         C.col_mut(i).copy_from_slice(&acc.acc);
     }
@@ -642,14 +684,39 @@ pub fn commit_precomp_ct(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
         let row = &pp.m_rows[i];
         debug_assert_eq!(row.len(), m);
 
-        let acc = row
-            .par_iter()
-            .zip(Z.par_chunks_exact(d))
-            .fold(
-                Acc::new,
-                |mut st, (&a_ij, z_col)| {
+        let acc = {
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+            {
+                row.par_iter()
+                    .zip(Z.par_chunks_exact(d))
+                    .fold(
+                        Acc::new,
+                        |mut st, (&a_ij, z_col)| {
+                            precompute_rot_columns(a_ij, &mut st.cols);
+                            // Constant schedule: always loop over all t
+                            for t in 0..d {
+                                let mask = z_col[t];
+                                let col_t = &st.cols[t];
+                                for r in 0..d {
+                                    st.acc[r] += col_t[r] * mask;
+                                }
+                            }
+                            st
+                        },
+                    )
+                    .reduce_with(|mut a, b| {
+                        for r in 0..d {
+                            a.acc[r] += b.acc[r];
+                        }
+                        a
+                    })
+                    .unwrap_or_else(Acc::new)
+            }
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            {
+                let mut st = Acc::new();
+                for (&a_ij, z_col) in row.iter().zip(Z.chunks_exact(d)) {
                     precompute_rot_columns(a_ij, &mut st.cols);
-                    // Constant schedule: always loop over all t
                     for t in 0..d {
                         let mask = z_col[t];
                         let col_t = &st.cols[t];
@@ -657,16 +724,10 @@ pub fn commit_precomp_ct(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
                             st.acc[r] += col_t[r] * mask;
                         }
                     }
-                    st
-                },
-            )
-            .reduce_with(|mut a, b| {
-                for r in 0..d {
-                    a.acc[r] += b.acc[r];
                 }
-                a
-            })
-            .unwrap_or_else(Acc::new);
+                st
+            }
+        };
 
         C.col_mut(i).copy_from_slice(&acc.acc);
     }
@@ -712,12 +773,37 @@ fn commit_precomp_ct_row_major(pp: &PP<RqEl>, Z: &Mat<Fq>) -> Commitment {
         let row = &pp.m_rows[i];
         debug_assert_eq!(row.len(), m);
 
-        let acc = row
-            .par_iter()
-            .enumerate()
-            .fold(
-                Acc::new,
-                |mut st, (j, &a_ij)| {
+        let acc = {
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+            {
+                row.par_iter()
+                    .enumerate()
+                    .fold(
+                        Acc::new,
+                        |mut st, (j, &a_ij)| {
+                            precompute_rot_columns(a_ij, &mut st.cols);
+                            for t in 0..d {
+                                let mask = z_rows[t][j];
+                                let col_t = &st.cols[t];
+                                for r in 0..d {
+                                    st.acc[r] += col_t[r] * mask;
+                                }
+                            }
+                            st
+                        },
+                    )
+                    .reduce_with(|mut a, b| {
+                        for r in 0..d {
+                            a.acc[r] += b.acc[r];
+                        }
+                        a
+                    })
+                    .unwrap_or_else(Acc::new)
+            }
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            {
+                let mut st = Acc::new();
+                for (j, &a_ij) in row.iter().enumerate() {
                     precompute_rot_columns(a_ij, &mut st.cols);
                     for t in 0..d {
                         let mask = z_rows[t][j];
@@ -726,16 +812,10 @@ fn commit_precomp_ct_row_major(pp: &PP<RqEl>, Z: &Mat<Fq>) -> Commitment {
                             st.acc[r] += col_t[r] * mask;
                         }
                     }
-                    st
-                },
-            )
-            .reduce_with(|mut a, b| {
-                for r in 0..d {
-                    a.acc[r] += b.acc[r];
                 }
-                a
-            })
-            .unwrap_or_else(Acc::new);
+                st
+            }
+        };
 
         C.col_mut(i).copy_from_slice(&acc.acc);
     }

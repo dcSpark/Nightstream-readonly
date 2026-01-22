@@ -13,6 +13,7 @@ use neo_ccs::{CcsMatrix, CcsStructure, Mat, McsWitness, MeInstance};
 use neo_math::{D, K};
 use neo_params::NeoParams;
 use p3_field::{Field, PrimeCharacteristicRing};
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 use rayon::prelude::*;
 
 /// Challenges sampled in Step 1 of the protocol
@@ -1351,68 +1352,76 @@ where
     };
 
     // Build children (parallel over digits).
-    let children: Vec<MeInstance<Cmt, Ff, K>> = (0..k)
-        .into_par_iter()
-        .map(|i| {
-            let Zi = &Z_split[i];
-            let Xi = project_x(Zi);
+    let build_child = |i: usize| {
+        let Zi = &Z_split[i];
+        let Xi = project_x(Zi);
 
-            let mut y_i: Vec<Vec<K>> = Vec::with_capacity(t_mats);
-            let mut y_scalars_i: Vec<K> = Vec::with_capacity(t_mats);
+        let mut y_i: Vec<Vec<K>> = Vec::with_capacity(t_mats);
+        let mut y_scalars_i: Vec<K> = Vec::with_capacity(t_mats);
 
-            for j in 0..t_mats {
-                // y_(i,j) = Z_i · v_j ∈ K^d (then pad to 2^{ℓ_d})
-                let vj = &vjs[j];
-                let mut yij_pad = vec![K::ZERO; d_pad];
+        for j in 0..t_mats {
+            // y_(i,j) = Z_i · v_j ∈ K^d (then pad to 2^{ℓ_d})
+            let vj = &vjs[j];
+            let mut yij_pad = vec![K::ZERO; d_pad];
 
-                for rho in 0..d {
-                    let mut acc = K::ZERO;
-                    for c in 0..s.m {
-                        acc += K::from(get_F(Zi, rho, c)) * vj[c];
-                    }
-                    yij_pad[rho] = acc;
+            for rho in 0..d {
+                let mut acc = K::ZERO;
+                for c in 0..s.m {
+                    acc += K::from(get_F(Zi, rho, c)) * vj[c];
                 }
-
-                // y_scalars: base-b recomposition of first D digits of yij.
-                let mut sc = K::ZERO;
-                for rho in 0..D {
-                    sc += yij_pad[rho] * pow_b_k[rho];
-                }
-
-                y_i.push(yij_pad);
-                y_scalars_i.push(sc);
+                yij_pad[rho] = acc;
             }
 
-            let y_zcol = if chi_s.is_empty() {
-                Vec::new()
-            } else {
-                let mut yz_pad = vec![K::ZERO; d_pad];
-                for rho in 0..d {
-                    let mut acc = K::ZERO;
-                    for c in 0..s.m {
-                        acc += K::from(get_F(Zi, rho, c)) * chi_s[c];
-                    }
-                    yz_pad[rho] = acc;
-                }
-                yz_pad
-            };
-
-            MeInstance::<Cmt, Ff, K> {
-                c_step_coords: vec![],
-                u_offset: 0,
-                u_len: 0,
-                c: parent_c.clone(), // caller patches with L(Z_i)
-                X: Xi,
-                r: parent_r.clone(),
-                s_col: parent.s_col.clone(),
-                y: y_i,
-                y_scalars: y_scalars_i,
-                y_zcol,
-                m_in,
-                fold_digest,
+            // y_scalars: base-b recomposition of first D digits of yij.
+            let mut sc = K::ZERO;
+            for rho in 0..D {
+                sc += yij_pad[rho] * pow_b_k[rho];
             }
-        })
-        .collect();
+
+            y_i.push(yij_pad);
+            y_scalars_i.push(sc);
+        }
+
+        let y_zcol = if chi_s.is_empty() {
+            Vec::new()
+        } else {
+            let mut yz_pad = vec![K::ZERO; d_pad];
+            for rho in 0..d {
+                let mut acc = K::ZERO;
+                for c in 0..s.m {
+                    acc += K::from(get_F(Zi, rho, c)) * chi_s[c];
+                }
+                yz_pad[rho] = acc;
+            }
+            yz_pad
+        };
+
+        MeInstance::<Cmt, Ff, K> {
+            c_step_coords: vec![],
+            u_offset: 0,
+            u_len: 0,
+            c: parent_c.clone(), // caller patches with L(Z_i)
+            X: Xi,
+            r: parent_r.clone(),
+            s_col: parent.s_col.clone(),
+            y: y_i,
+            y_scalars: y_scalars_i,
+            y_zcol,
+            m_in,
+            fold_digest,
+        }
+    };
+
+    let children: Vec<MeInstance<Cmt, Ff, K>> = {
+        #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+        {
+            (0..k).into_par_iter().map(build_child).collect()
+        }
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+        {
+            (0..k).map(build_child).collect()
+        }
+    };
 
     // Verify: y_j ?= Σ b^i · y_(i,j)
     let mut ok_y = true;

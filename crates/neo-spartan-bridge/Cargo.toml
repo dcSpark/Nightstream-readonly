@@ -16,6 +16,7 @@ debug-logs = ["neo-reductions/debug-logs"]
 experimental-engine = []
 # Unsafe gadgets that use cs.get() (TestConstraintSystem only)
 unsafe-gadgets = []
+wasm-threads = ["spartan2/wasm-threads"]
 
 [dependencies]
 # Neo dependencies

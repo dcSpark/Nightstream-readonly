@@ -20,7 +20,6 @@ neo-vm-trace = { path = "../neo-vm-trace" }
 p3-field = { workspace = true }
 p3-matrix = { workspace = true }
 p3-goldilocks = { workspace = true }
-rayon = { workspace = true }
 rand_chacha = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
@@ -30,11 +29,20 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 # Profiling
 pprof = { version = "0.13", features = ["flamegraph", "protobuf"], optional = true }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["wasm_js"] }
+js-sys = "0.3"
+rayon = { workspace = true }
+
 [features]
 default = ["paper-exact"]
 profile-flame = ["pprof"]
 paper-exact = ["neo-reductions/paper-exact"]
 debug-logs = ["neo-reductions/debug-logs", "neo-memory/debug-logs"]
+wasm-threads = ["neo-reductions/wasm-threads", "neo-ajtai/wasm-threads", "neo-ccs/wasm-threads"]
 
 [dev-dependencies]
 bincode = { workspace = true }
