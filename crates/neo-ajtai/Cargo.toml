@@ -13,6 +13,7 @@ default = []
 testing = []
 # Enable verbose logging for debugging (OFF by default for security - CWE-532)
 neo-logs = []
+wasm-threads = ["neo-ccs/wasm-threads"]
 
 [dependencies]
 # Workspace deps
@@ -32,6 +33,9 @@ p3-goldilocks = { version = "0.4.1", default-features = false }
 p3-matrix = "0.4.1"
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
 rayon = { workspace = true }
 
 [dev-dependencies]

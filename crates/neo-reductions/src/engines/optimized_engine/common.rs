@@ -13,7 +13,7 @@ use neo_ccs::{CcsMatrix, CcsStructure, Mat, McsWitness, MeInstance};
 use neo_math::{D, K};
 use neo_params::NeoParams;
 use p3_field::{Field, PrimeCharacteristicRing};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 use rayon::prelude::*;
 
 /// Challenges sampled in Step 1 of the protocol
@@ -1413,11 +1413,11 @@ where
     };
 
     let children: Vec<MeInstance<Cmt, Ff, K>> = {
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
         {
             (0..k).into_par_iter().map(build_child).collect()
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
         {
             (0..k).map(build_child).collect()
         }

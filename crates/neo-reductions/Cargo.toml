@@ -24,6 +24,7 @@ neo-logs = []
 prove-diagnostics = ["serde", "serde_json", "flate2", "hex", "chrono"]
 # Enable CBOR format for diagnostics (smaller but less readable)
 prove-diagnostics-cbor = ["prove-diagnostics", "serde_cbor"]
+wasm-threads = ["neo-ajtai/wasm-threads", "neo-ccs/wasm-threads"]
 
 [dependencies]
 neo-math = { path = "../neo-math" }
@@ -54,6 +55,9 @@ serde_cbor = { version = "0.11", optional = true }
 chrono = { workspace = true, optional = true }
 
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+rayon = { workspace = true }
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
 rayon = { workspace = true }
 
 [dev-dependencies]

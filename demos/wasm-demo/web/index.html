@@ -14,6 +14,26 @@
         <p>
           Paste or load a circuit JSON (TestExport schema) and run prove+verify in the browser.
         </p>
+        <div class="row status-row">
+          <span id="status-bundle" class="badge">Bundle: …</span>
+          <span id="status-coi" class="badge">crossOriginIsolated: …</span>
+          <span id="status-threads" class="badge">Threads: …</span>
+          <button id="info-btn" class="badge badge-button" type="button">Info</button>
+        </div>
+        <div id="info-panel" class="panel info-panel" hidden>
+          <div class="row info-row">
+            <div class="info-title">Thread verification (paste into DevTools Console)</div>
+            <button id="copy-thread-check" type="button">Copy</button>
+          </div>
+          <textarea
+            id="thread-check-command"
+            class="code"
+            readonly
+            rows="2"
+            spellcheck="false"
+          ></textarea>
+          <div id="copy-status" class="muted"></div>
+        </div>
       </header>
 
       <section class="panel">

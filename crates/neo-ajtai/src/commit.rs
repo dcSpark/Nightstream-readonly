@@ -3,7 +3,7 @@ use crate::types::{Commitment, PP};
 use neo_ccs::Mat;
 use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_goldilocks::Goldilocks as Fq;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 use rayon::prelude::*;
 use rand::{CryptoRng, RngCore};
 use rand_chacha::ChaCha8Rng;
@@ -201,7 +201,7 @@ pub fn setup_par<R: RngCore + CryptoRng>(rng: &mut R, d: usize, kappa: usize, m:
 
         // Fill the row in place in parallel. This avoids extra copies of multi-GB buffers.
         let mut row = vec![RqEl::zero(); m];
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
         {
             row.par_chunks_mut(chunk_size)
                 .enumerate()
@@ -214,7 +214,7 @@ pub fn setup_par<R: RngCore + CryptoRng>(rng: &mut R, d: usize, kappa: usize, m:
                     }
                 });
         }
-        #[cfg(target_arch = "wasm32")]
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
         {
             for (chunk_idx, chunk) in row.chunks_mut(chunk_size).enumerate() {
                 let mut chunk_rng = ChaCha8Rng::from_seed(chunk_seeds[chunk_idx]);
@@ -314,7 +314,7 @@ pub fn commit_row_major_seeded(seed: [u8; 32], d: usize, kappa: usize, m: usize,
     for i in 0..kappa {
         let chunk_seeds = &chunk_seeds_by_row[i];
         let acc = {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             {
                 (0..chunk_seeds.len())
                     .into_par_iter()
@@ -343,7 +343,7 @@ pub fn commit_row_major_seeded(seed: [u8; 32], d: usize, kappa: usize, m: usize,
                     })
                     .unwrap_or_else(Acc::new)
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
             {
                 let mut st = Acc::new();
                 for chunk_idx in 0..chunk_seeds.len() {
@@ -685,7 +685,7 @@ pub fn commit_precomp_ct(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
         debug_assert_eq!(row.len(), m);
 
         let acc = {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             {
                 row.par_iter()
                     .zip(Z.par_chunks_exact(d))
@@ -712,7 +712,7 @@ pub fn commit_precomp_ct(pp: &PP<RqEl>, Z: &[Fq]) -> Commitment {
                     })
                     .unwrap_or_else(Acc::new)
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
             {
                 let mut st = Acc::new();
                 for (&a_ij, z_col) in row.iter().zip(Z.chunks_exact(d)) {
@@ -774,7 +774,7 @@ fn commit_precomp_ct_row_major(pp: &PP<RqEl>, Z: &Mat<Fq>) -> Commitment {
         debug_assert_eq!(row.len(), m);
 
         let acc = {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             {
                 row.par_iter()
                     .enumerate()
@@ -800,7 +800,7 @@ fn commit_precomp_ct_row_major(pp: &PP<RqEl>, Z: &Mat<Fq>) -> Commitment {
                     })
                     .unwrap_or_else(Acc::new)
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
             {
                 let mut st = Acc::new();
                 for (j, &a_ij) in row.iter().enumerate() {

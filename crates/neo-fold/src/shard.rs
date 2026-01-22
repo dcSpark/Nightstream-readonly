@@ -41,7 +41,7 @@ use neo_transcript::{Poseidon2Transcript, Transcript};
 use p3_field::{Field, PackedValue, PrimeCharacteristicRing, PrimeField64};
 use rand_chacha::rand_core::SeedableRng;
 use rand_chacha::ChaCha8Rng;
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 use rayon::prelude::*;
 use std::borrow::Cow;
 use std::sync::Arc;
@@ -568,7 +568,7 @@ where
             }
         }
 
-        #[cfg(not(target_arch = "wasm32"))]
+        #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
         fn add_inplace(&mut self, rhs: &Acc, k_dec: usize, kappa: usize, t: usize) {
             for (dst, src) in self.commit.iter_mut().zip(rhs.commit.iter()) {
                 for r in 0..D {
@@ -850,7 +850,7 @@ where
             };
 
             let acc = {
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
                 {
                     (0..m)
                         .into_par_iter()
@@ -868,7 +868,7 @@ where
                             },
                         )
                 }
-                #[cfg(target_arch = "wasm32")]
+                #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
                 {
                     let mut st = Acc::new(k_dec, kappa, t_mats);
                     for col in 0..m {
@@ -1078,7 +1078,7 @@ where
             };
 
             let acc = {
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
                 {
                     (0..num_chunks)
                         .into_par_iter()
@@ -1096,7 +1096,7 @@ where
                             },
                         )
                 }
-                #[cfg(target_arch = "wasm32")]
+                #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
                 {
                     let mut st = Acc::new(k_dec, kappa, t_mats);
                     for chunk_idx in 0..num_chunks {
@@ -1442,7 +1442,7 @@ where
         let (Z_split, digit_nonzero) = ccs::split_b_matrix_k_with_nonzero_flags(Z_mix, k_dec, params.b)?;
         let zero_c = Cmt::zeros(rlc_parent.c.d, rlc_parent.c.kappa);
         let child_cs: Vec<Cmt> = {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             {
                 Z_split
                     .par_iter()
@@ -1450,7 +1450,7 @@ where
                     .map(|(idx, Zi)| if digit_nonzero[idx] { l.commit(Zi) } else { zero_c.clone() })
                     .collect()
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
             {
                 Z_split
                     .iter()

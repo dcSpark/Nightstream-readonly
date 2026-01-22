@@ -13,7 +13,7 @@ use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
 use neo_math::{D, Fq, K, KExtensions};
 use p3_field::{Field, PrimeCharacteristicRing};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 use rayon::prelude::*;
 use std::sync::Arc;
 
@@ -257,7 +257,7 @@ where
         };
 
         if tail_len >= PAR_THRESHOLD {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             {
                 let (out, _scratch_nc, _scratch_eq) = (0..tail_len)
                     .into_par_iter()
@@ -307,7 +307,7 @@ where
                     );
                 out
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
             {
                 evals_col_phase_seq(tail_len, xs)
             }
@@ -1035,7 +1035,7 @@ impl RowStreamState {
         };
 
         let coeffs = if tail_len >= PAR_THRESHOLD {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             {
                 (0..tail_len)
                     .into_par_iter()
@@ -1153,7 +1153,7 @@ impl RowStreamState {
                         },
                     )
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
             {
                 coeffs_seq(tail_len)
             }
@@ -1296,7 +1296,7 @@ impl RowStreamState {
         };
 
         let coeffs = if tail_len >= PAR_THRESHOLD {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             {
                 (0..tail_len)
                     .into_par_iter()
@@ -1441,7 +1441,7 @@ impl RowStreamState {
                         },
                     )
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
             {
                 coeffs_seq(tail_len)
             }
@@ -1625,7 +1625,7 @@ impl RowStreamState {
             let deg_max = core::cmp::max(6, f_max_term_deg + 1);
 
             let coeffs = {
-                #[cfg(not(target_arch = "wasm32"))]
+                #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
                 {
                     (0..tail_len)
                         .into_par_iter()
@@ -1755,7 +1755,7 @@ impl RowStreamState {
                             },
                         )
                 }
-                #[cfg(target_arch = "wasm32")]
+                #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
                 {
                     let mut coeffs = vec![K::ZERO; deg_max + 1];
                     let mut inner = vec![K::ZERO; deg_max + 1];

@@ -38,6 +38,10 @@ neo-logs = []
 # Enable testing features (including unsafe direct sum operations)
 testing = []
 spartan2-compat = ["spartan2", "neo-math/spartan2-compat"]
+wasm-threads = []
+
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+rayon = { workspace = true }
 
 [dev-dependencies]
 criterion = { workspace = true }

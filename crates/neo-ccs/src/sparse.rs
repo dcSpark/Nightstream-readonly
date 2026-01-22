@@ -10,7 +10,7 @@
 
 use crate::matrix::Mat;
 use p3_field::{Field, PrimeCharacteristicRing};
-#[cfg(not(target_arch = "wasm32"))]
+#[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 use rayon::prelude::*;
 
 /// Compressed Sparse Column (CSC) format for sparse matrices.
@@ -95,7 +95,7 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CscMat<Ff> {
         let (nrows, ncols) = (a.rows(), a.cols());
 
         let (col_counts, triplets): (Vec<usize>, Vec<(usize, usize, Ff)>) = {
-            #[cfg(not(target_arch = "wasm32"))]
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             {
                 (0..nrows)
                     .into_par_iter()
@@ -124,7 +124,7 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CscMat<Ff> {
                         },
                     )
             }
-            #[cfg(target_arch = "wasm32")]
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
             {
                 let mut col_counts = vec![0usize; ncols];
                 let mut triplets = Vec::<(usize, usize, Ff)>::new();

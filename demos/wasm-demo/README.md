@@ -13,11 +13,15 @@ The current wasm binding is intentionally minimal: it exposes a single entry poi
 - wasm export: `prove_verify_test_export_json(json: string)`
 - Rust runner: `neo_fold::test_export::run_test_export(&TestExport)`
 
-If you want more control from JS (different modes, proving without verifying, exporting proof bytes,
-incremental “streaming” step addition, etc.), the approach is to add more `wasm-bindgen` exports in
-`demos/wasm-demo/wasm/src/lib.rs` that wrap lower-level `neo-fold` APIs (e.g. `neo_fold::session::FoldingSession`).
-Most Rust types can stay internal/opaque behind a JS class, and we can expose only the knobs/results
-you care about.
+For more control, the demo also exports a stateful API:
+
+- `new NeoFoldSession(circuitJson)`
+- `session.add_step_witness_json(stepWitnessJson)`
+- `proof = session.fold_and_prove()`
+- `ok = session.verify(proof)`
+
+This keeps proofs as an opaque JS handle (`NeoFoldProof`) and exposes structured summaries/timings.
+See `demos/wasm-demo/wasm/src/lib.rs`.
 
 ## Quick start
 
@@ -34,6 +38,43 @@ you care about.
 ```
 
 Open `http://127.0.0.1:8000`.
+
+## wasm threads (Rayon + SharedArrayBuffer)
+
+Threaded wasm requires:
+
+- A cross-origin isolated page (COOP/COEP) so the browser enables `SharedArrayBuffer`
+- `wasm32` atomics + a stdlib built with atomics, so the build uses nightly + `-Z build-std`
+
+To build a threaded wasm bundle (atomics enabled) into `demos/wasm-demo/web/pkg_threads/`:
+
+```bash
+./demos/wasm-demo/build_wasm.sh --threads
+```
+
+If this is your first time building threads, install the prerequisites:
+
+```bash
+rustup toolchain install nightly
+rustup target add wasm32-unknown-unknown --toolchain nightly
+rustup component add rust-src --toolchain nightly
+```
+
+(You can override the toolchain with `WASM_THREADS_TOOLCHAIN=nightly-YYYY-MM-DD`.)
+
+Serve it with COOP/COEP headers (required for `SharedArrayBuffer`):
+
+```bash
+./demos/wasm-demo/serve.sh --threads
+```
+
+Then open `http://127.0.0.1:8000`.
+
+The page will automatically use the threaded bundle when supported (cross-origin isolated).
+You can override:
+
+- Force single-thread: `?threads=0`
+- Force threads: `?threads=1`
 
 To force a rebuild before serving:
 
@@ -68,3 +109,5 @@ To enable it:
 2) Set `Build and deployment` → `Source` to `GitHub Actions`
 
 After that, pushes to `main` (or manual `workflow_dispatch`) will publish the demo site.
+
+Note: GitHub Pages does not allow configuring COOP/COEP headers, so the `?threads=1` mode will not work there.

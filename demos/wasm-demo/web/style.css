@@ -51,6 +51,80 @@ header p {
   line-height: 1.4;
 }
 
+.status-row {
+  margin-top: 12px;
+}
+
+.badge {
+  display: inline-flex;
+  align-items: center;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 4px 10px;
+  font-size: 12px;
+  color: var(--muted);
+  user-select: none;
+}
+
+.badge-button {
+  cursor: pointer;
+  background: transparent;
+}
+
+.badge-button:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+
+.badge.ok {
+  border-color: #16a34a;
+  color: #16a34a;
+}
+
+.badge.warn {
+  border-color: #f59e0b;
+  color: #f59e0b;
+}
+
+.badge.bad {
+  border-color: #dc2626;
+  color: #dc2626;
+}
+
+.info-panel {
+  margin-top: 12px;
+}
+
+.info-row {
+  justify-content: space-between;
+}
+
+.info-title {
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.code {
+  margin-top: 10px;
+  width: 100%;
+  resize: none;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  background: rgba(0, 0, 0, 0.12);
+  color: var(--text);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+    "Courier New", monospace;
+  font-size: 12px;
+  line-height: 1.4;
+}
+
+.muted {
+  margin-top: 8px;
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .panel {
   border: 1px solid var(--border);
   background: var(--panel);
@@ -129,4 +203,3 @@ textarea {
   font-size: 12px;
   line-height: 1.4;
 }
-
