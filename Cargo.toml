@@ -45,7 +45,8 @@ anyhow = "1.0"
 bincode = "1.3"
 
 # Spartan2 and circuit dependencies
-spartan2 = { path = "external/Spartan2", default-features = false, features = ["p3_backend"] }
+# Pinned to a specific commit for reproducibility.
+spartan2 = { git = "https://github.com/nicarq/Spartan2.git", rev = "8dc993b15def74029f86ea24b89ad7946504c80b", default-features = false, features = ["p3_backend"] }
 bellpepper-core = { version = "0.4" }
 ff = { version = "0.13" }
 
