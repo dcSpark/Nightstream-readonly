@@ -8,6 +8,12 @@
   --accent: #7aa2ff;
 }
 
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
 @media (prefers-color-scheme: light) {
   :root {
     --bg: #f6f7fb;
