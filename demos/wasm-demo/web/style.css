@@ -51,6 +51,15 @@ header p {
   line-height: 1.4;
 }
 
+header a {
+  color: var(--accent);
+  text-decoration: none;
+}
+
+header a:hover {
+  text-decoration: underline;
+}
+
 .status-row {
   margin-top: 12px;
 }

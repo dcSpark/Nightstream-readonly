@@ -1,4 +1,4 @@
-# wasm-demo
+# neo-fold wasm demo
 
 Minimal browser demo that runs `neo-fold` prove+verify inside `wasm32-unknown-unknown`.
 

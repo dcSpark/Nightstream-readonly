@@ -3,16 +3,34 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>neo-fold wasm demo</title>
+    <title>Nightstream wasm demo</title>
     <link rel="icon" href="data:," />
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
     <main class="container">
       <header>
-        <h1>neo-fold wasm demo</h1>
+        <h1>Nightstream wasm demo</h1>
         <p>
-          Paste or load a circuit JSON (TestExport schema) and run prove+verify in the browser.
+          Lattice-based folding (neo-fold) with Twist/Shout memory, running in the browser via
+          WebAssembly.
+        </p>
+        <p>
+          Paste or load a circuit JSON (R1CS matrices + per-step witness) and run folding
+          prove+verify.
+          <a
+            href="https://github.com/nicarq/nightstream/blob/main/README.md"
+            target="_blank"
+            rel="noopener noreferrer"
+            >Learn more</a
+          >
+          ·
+          <a
+            href="https://github.com/LFDT-Nightstream/Nightstream/"
+            target="_blank"
+            rel="noopener noreferrer"
+            >GitHub repo</a
+          >.
         </p>
 	        <div class="row status-row">
 	          <span id="status-bundle" class="badge">Bundle: …</span>
