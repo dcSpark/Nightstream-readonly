@@ -14,12 +14,13 @@
         <p>
           Paste or load a circuit JSON (TestExport schema) and run prove+verify in the browser.
         </p>
-        <div class="row status-row">
-          <span id="status-bundle" class="badge">Bundle: …</span>
-          <span id="status-coi" class="badge">crossOriginIsolated: …</span>
-          <span id="status-threads" class="badge">Threads: …</span>
-          <button id="info-btn" class="badge badge-button" type="button">Info</button>
-        </div>
+	        <div class="row status-row">
+	          <span id="status-bundle" class="badge">Bundle: …</span>
+	          <span id="status-coi" class="badge">crossOriginIsolated: …</span>
+	          <span id="status-threads" class="badge">Threads: …</span>
+	          <button id="commit-btn" class="badge badge-button" type="button">Commit: …</button>
+	          <button id="info-btn" class="badge badge-button" type="button">Info</button>
+	        </div>
         <div id="info-panel" class="panel info-panel" hidden>
           <div class="row info-row">
             <div class="info-title">Thread verification (paste into DevTools Console)</div>
@@ -45,6 +46,13 @@
             <span>Load JSON file</span>
             <input id="file-input" type="file" accept=".json,application/json" />
           </label>
+          <label class="checkbox">
+            <input id="compress-spartan" type="checkbox" />
+            <span>Compress with Spartan2 (experimental)</span>
+          </label>
+          <button id="download-spartan" type="button" disabled>
+            Download Spartan SNARK
+          </button>
           <button id="run" type="button">Prove + Verify</button>
         </div>
       </section>

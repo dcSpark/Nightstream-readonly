@@ -121,4 +121,56 @@ else
     --out-name "${OUT_NAME}"
 fi
 
+python3 - "${OUT_DIR}" "${DEMO_DIR}/../.." "${THREADS}" <<'PY'
+import datetime
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+out_dir = Path(sys.argv[1])
+repo_root = Path(sys.argv[2]).resolve()
+threads = sys.argv[3] == "1"
+
+info = {
+    "bundle": "pkg_threads" if threads else "pkg",
+    "build_time_utc": datetime.datetime.now(datetime.timezone.utc)
+    .replace(microsecond=0)
+    .isoformat()
+    .replace("+00:00", "Z"),
+}
+
+def git(args):
+    return (
+        subprocess.check_output(["git", "-C", str(repo_root), *args], stderr=subprocess.DEVNULL)
+        .decode("utf-8")
+        .strip()
+    )
+
+try:
+    info["git_commit"] = git(["rev-parse", "HEAD"])
+    info["git_commit_short"] = git(["rev-parse", "--short=12", "HEAD"])
+    dirty_tracked = (
+        subprocess.call(
+            ["git", "-C", str(repo_root), "diff", "--quiet", "--exit-code"],
+            stderr=subprocess.DEVNULL,
+        )
+        != 0
+        or subprocess.call(
+            ["git", "-C", str(repo_root), "diff", "--cached", "--quiet", "--exit-code"],
+            stderr=subprocess.DEVNULL,
+        )
+        != 0
+    )
+    info["git_dirty"] = dirty_tracked
+except Exception:
+    info["git_commit"] = None
+    info["git_commit_short"] = None
+    info["git_dirty"] = None
+
+out = out_dir / "build_info.json"
+out.write_text(json.dumps(info, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+print(f"Wrote build info: {out}")
+PY
+
 echo "Wrote wasm bundle to: ${OUT_DIR}"

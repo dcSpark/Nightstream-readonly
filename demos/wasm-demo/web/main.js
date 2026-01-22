@@ -3,11 +3,22 @@ const jsonEl = document.getElementById("circuit-json");
 const statusBundleEl = document.getElementById("status-bundle");
 const statusCoiEl = document.getElementById("status-coi");
 const statusThreadsEl = document.getElementById("status-threads");
+const commitBtnEl = document.getElementById("commit-btn");
 const infoBtnEl = document.getElementById("info-btn");
 const infoPanelEl = document.getElementById("info-panel");
 const threadCheckCommandEl = document.getElementById("thread-check-command");
 const copyThreadCheckEl = document.getElementById("copy-thread-check");
 const copyStatusEl = document.getElementById("copy-status");
+const compressSpartanEl = document.getElementById("compress-spartan");
+const downloadSpartanEl = document.getElementById("download-spartan");
+
+let lastSpartanProofBytes = null;
+let lastSpartanProofFilename = null;
+let proverWorker = null;
+let activeWasmBundle = null; // "pkg" | "pkg_threads"
+let activeWasmThreads = 0;
+let runId = 0;
+let runInProgress = false;
 
 const urlParams = new URLSearchParams(window.location.search);
 const threadsParam = urlParams.get("threads"); // "1" | "0" | null
@@ -46,6 +57,52 @@ function setBadge(el, text, kind) {
 function setText(el, text) {
   if (!el) return;
   el.textContent = text;
+}
+
+async function loadBuildInfo(bundle) {
+  if (!commitBtnEl) return;
+  setBadge(commitBtnEl, "Commit: loading…", "warn");
+  commitBtnEl.disabled = true;
+
+  try {
+    const url =
+      bundle === "pkg_threads"
+        ? "./pkg_threads/build_info.json"
+        : bundle === "pkg"
+          ? "./pkg/build_info.json"
+          : "./build_info.json";
+
+    const resp = await fetch(url, { cache: "no-store" });
+    if (!resp.ok) throw new Error(`${url}: HTTP ${resp.status}`);
+    const info = await resp.json();
+
+    const commit = typeof info?.git_commit === "string" ? info.git_commit : "";
+    const commitShort =
+      typeof info?.git_commit_short === "string" && info.git_commit_short.length > 0
+        ? info.git_commit_short
+        : commit
+          ? commit.slice(0, 12)
+          : "";
+    const dirty = info?.git_dirty === true;
+    const builtAt = typeof info?.build_time_utc === "string" ? info.build_time_utc : "";
+
+    if (!commitShort) {
+      setBadge(commitBtnEl, "Commit: unknown", "warn");
+      return;
+    }
+
+    setBadge(commitBtnEl, `Commit: ${commitShort}${dirty ? "*" : ""}`);
+    commitBtnEl.disabled = false;
+    commitBtnEl.dataset.commit = commit || commitShort;
+
+    const tipParts = [];
+    tipParts.push(commit || commitShort);
+    if (dirty) tipParts.push("dirty working tree");
+    if (builtAt) tipParts.push(`built: ${builtAt}`);
+    commitBtnEl.title = tipParts.join("\n");
+  } catch (e) {
+    setBadge(commitBtnEl, "Commit: unavailable", "warn");
+  }
 }
 
 async function loadWasmModule() {
@@ -138,6 +195,30 @@ function setButtonsEnabled(enabled) {
   document.getElementById("load-poseidon2").disabled = !enabled;
   document.getElementById("run").disabled = !enabled;
   document.getElementById("file-input").disabled = !enabled;
+  if (compressSpartanEl) compressSpartanEl.disabled = !enabled;
+  if (downloadSpartanEl) downloadSpartanEl.disabled = !enabled || !lastSpartanProofBytes;
+}
+
+function downloadBytes(filename, bytes) {
+  const blob = new Blob([bytes], { type: "application/octet-stream" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  setTimeout(() => URL.revokeObjectURL(url), 0);
+}
+
+function ensureProverWorker() {
+  if (proverWorker) return proverWorker;
+  proverWorker = new Worker(new URL("./prover_worker.js", import.meta.url), { type: "module" });
+  proverWorker.addEventListener("error", (e) => {
+    log(`Worker error: ${e?.message ?? String(e)}`);
+    console.error(e);
+  });
+  return proverWorker;
 }
 
 async function loadToy() {
@@ -168,93 +249,89 @@ async function run() {
   const json = jsonEl.value;
   // Keep each run's output self-contained.
   logEl.textContent = "";
+  lastSpartanProofBytes = null;
+  lastSpartanProofFilename = null;
+  if (downloadSpartanEl) downloadSpartanEl.disabled = true;
   if (!json.trim()) {
     log("No JSON provided.");
     return;
   }
 
+  if (runInProgress) {
+    log("Run already in progress.");
+    return;
+  }
+  runInProgress = true;
+
+  const doSpartan = Boolean(compressSpartanEl?.checked);
+
   setButtonsEnabled(false);
   try {
-    log("Running prove+verify…");
-    log(`Input JSON size: ${fmtBytes(json.length)}`);
-    const parsed = tryParseTestExport(json);
-    if (parsed) {
-      log(
-        `Input export: constraints=${parsed.num_constraints} variables=${parsed.num_variables} steps=${parsed.witness?.length ?? "?"}`,
-      );
+    const worker = ensureProverWorker();
+    const id = ++runId;
+    const result = await new Promise((resolve, reject) => {
+      const onMessage = (ev) => {
+        const msg = ev.data;
+        if (!msg || msg.id !== id) return;
+
+        if (msg.type === "log") {
+          log(msg.line);
+          return;
+        }
+        if (msg.type === "done") {
+          if (msg.spartan?.bytes && msg.spartan?.filename) {
+            lastSpartanProofBytes = new Uint8Array(msg.spartan.bytes);
+            lastSpartanProofFilename = msg.spartan.filename;
+          }
+          cleanup();
+          resolve(msg);
+          return;
+        }
+        if (msg.type === "error") {
+          cleanup();
+          reject(new Error(msg.error ?? "Unknown worker error"));
+          return;
+        }
+      };
+
+      const onError = (ev) => {
+        cleanup();
+        reject(new Error(ev?.message ?? "Worker error"));
+      };
+
+      const onMessageError = () => {
+        cleanup();
+        reject(new Error("Worker message error"));
+      };
+
+      const cleanup = () => {
+        worker.removeEventListener("message", onMessage);
+        worker.removeEventListener("error", onError);
+        worker.removeEventListener("messageerror", onMessageError);
+      };
+
+      worker.addEventListener("message", onMessage);
+      worker.addEventListener("error", onError);
+      worker.addEventListener("messageerror", onMessageError);
+      worker.postMessage({
+        type: "run",
+        id,
+        json,
+        doSpartan,
+        bundle: activeWasmBundle ?? "pkg",
+        threads: activeWasmThreads,
+      });
+    });
+
+    if (result?.spartan?.bytes && downloadSpartanEl) {
+      downloadSpartanEl.disabled = false;
     }
-
-    const start = performance.now();
-    const result = window.__neo_fold_wasm.prove_verify_test_export_json(json);
-    const ms = performance.now() - start;
-
-    log(`OK: verify_ok=${result.verify_ok} steps=${result.steps} (total ${fmtMs(ms)})`);
-
-    if (result.params) {
-      const p = result.params;
-      log(
-        `Params: b=${p.b} d=${p.d} kappa=${p.kappa} k_rho=${p.k_rho} T=${p.T} s=${p.s} lambda=${p.lambda}`,
-      );
-    }
-
-    if (result.circuit) {
-      const c = result.circuit;
-      log(
-        `Circuit (R1CS): constraints=${c.r1cs_constraints} variables=${c.r1cs_variables} padded_n=${c.r1cs_padded_n} A_nnz=${c.r1cs_a_nnz} B_nnz=${c.r1cs_b_nnz} C_nnz=${c.r1cs_c_nnz}`,
-      );
-      log(
-        `Witness: steps=${c.witness_steps} fields_total=${c.witness_fields_total} fields_min=${c.witness_fields_min} fields_max=${c.witness_fields_max} nonzero=${c.witness_nonzero_fields_total} (${(c.witness_nonzero_ratio * 100).toFixed(2)}%)`,
-      );
-      log(
-        `Circuit (CCS): n=${c.ccs_n} m=${c.ccs_m} t=${c.ccs_t} max_degree=${c.ccs_max_degree} poly_terms=${c.ccs_poly_terms} nnz_total=${c.ccs_matrix_nnz_total}`,
-      );
-      if (Array.isArray(c.ccs_matrix_nnz) && c.ccs_matrix_nnz.length > 0) {
-        log(`CCS matrices nnz: [${c.ccs_matrix_nnz.join(", ")}]`);
-      }
-    }
-
-    if (result.timings_ms) {
-      const t = result.timings_ms;
-      log(
-        `Timings: ajtai=${fmtMs(t.ajtai_setup)} build_ccs=${fmtMs(t.build_ccs)} prepare_witness=${fmtMs(t.prepare_witness)} session_init=${fmtMs(t.session_init)}`,
-      );
-      log(
-        `Timings: add_steps_total=${fmtMs(t.add_steps_total)} (avg=${fmtMs(t.add_step_avg)} min=${fmtMs(t.add_step_min)} max=${fmtMs(t.add_step_max)}) prove=${fmtMs(t.fold_and_prove)} verify=${fmtMs(t.verify)} total=${fmtMs(t.total)}`,
-      );
-      if (Array.isArray(t.fold_steps) && t.fold_steps.length > 0) {
-        log(`Folding prove per-step: ${fmtMsList(t.fold_steps)}`);
-        log(
-          `Folding prove per-step stats: avg=${fmtMs(t.fold_step_avg)} min=${fmtMs(t.fold_step_min)} max=${fmtMs(t.fold_step_max)}`,
-        );
-      }
-    }
-
-    if (result.proof_estimate) {
-      const pe = result.proof_estimate;
-      log(
-        `Proof estimate: proof_steps=${pe.proof_steps} final_acc_len=${pe.final_accumulator_len}`,
-      );
-      log(
-        `Proof estimate: commitments fold_lane=${pe.fold_lane_commitments} mem_cpu_val=${pe.mem_cpu_val_claim_commitments} val_lane=${pe.val_lane_commitments} total=${pe.total_commitments}`,
-      );
-      log(
-        `Proof estimate: commitment_bytes=${pe.commitment_bytes} (d=${pe.commitment_d} kappa=${pe.commitment_kappa}) estimated_commitment_bytes=${fmtBytes(pe.estimated_commitment_bytes)}`,
-      );
-    }
-
-    if (result.folding) {
-      const f = result.folding;
-      log(`Folding k_in per step: ${fmtList(f.k_in)}`);
-      log(`Folding accumulator len after step: ${fmtList(f.acc_len_after)}`);
-    }
-
-    log("Raw result:");
-    log(safeStringify(result));
   } catch (e) {
     log(`ERROR: ${e}`);
     console.error(e);
   } finally {
     setButtonsEnabled(true);
+    runInProgress = false;
   }
 }
 
@@ -262,7 +339,11 @@ async function main() {
   setButtonsEnabled(false);
   log("Loading wasm...");
   try {
-    setBadge(statusBundleEl, `Bundle: ${preferThreads ? "auto (prefers threads)" : "pkg"} (${threadsHint})`, preferThreads ? "warn" : undefined);
+    setBadge(
+      statusBundleEl,
+      `Bundle: ${preferThreads ? "auto (prefers threads)" : "pkg"} (${threadsHint})`,
+      preferThreads ? "warn" : undefined,
+    );
     setBadge(
       statusCoiEl,
       `crossOriginIsolated: ${String(self.crossOriginIsolated === true)}`,
@@ -294,6 +375,8 @@ async function main() {
     wasm.init_panic_hook();
 
     setBadge(statusBundleEl, `Bundle: ${bundle} (${threadsHint})`);
+    await loadBuildInfo(bundle);
+    activeWasmBundle = bundle;
 
     if (bundle === "pkg_threads") {
       if (typeof wasm.init_thread_pool !== "function") {
@@ -304,6 +387,7 @@ async function main() {
         setBadge(statusThreadsEl, "Threads: disabled (no SharedArrayBuffer)", "bad");
       } else {
         const n = Math.max(1, navigator.hardwareConcurrency ?? 4);
+        activeWasmThreads = n;
         log(`Initializing wasm thread pool (${n} threads)...`);
         setBadge(statusThreadsEl, `Threads: initializing (${n})…`, "warn");
         await wasm.init_thread_pool(n);
@@ -361,9 +445,34 @@ async function main() {
     });
   }
 
+  if (commitBtnEl) {
+    commitBtnEl.addEventListener("click", async () => {
+      const commit = commitBtnEl.dataset.commit;
+      if (!commit) return;
+      try {
+        await copyToClipboard(commit);
+        log(`Copied commit to clipboard: ${commit}`);
+      } catch (e) {
+        log(`Copy failed: ${String(e)}`);
+      }
+    });
+  }
+
   document.getElementById("clear-log").addEventListener("click", () => {
     logEl.textContent = "";
   });
+  if (downloadSpartanEl) {
+    downloadSpartanEl.addEventListener("click", () => {
+      if (!lastSpartanProofBytes || !lastSpartanProofFilename) {
+        log("No Spartan SNARK available to download (run with Spartan enabled first).");
+        return;
+      }
+      downloadBytes(lastSpartanProofFilename, lastSpartanProofBytes);
+      log(
+        `Downloaded Spartan SNARK: ${lastSpartanProofFilename} (${fmtBytes(lastSpartanProofBytes.length)})`,
+      );
+    });
+  }
   document.getElementById("load-toy").addEventListener("click", async () => {
     try {
       await loadToy();

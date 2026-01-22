@@ -167,6 +167,20 @@ button:hover {
   display: inline-block;
 }
 
+.checkbox {
+  display: inline-flex;
+  gap: 10px;
+  align-items: center;
+  border: 1px dashed var(--border);
+  padding: 10px 12px;
+  border-radius: 10px;
+  color: var(--muted);
+}
+
+.checkbox input {
+  margin: 0;
+}
+
 label {
   display: block;
   margin: 0 0 8px 0;

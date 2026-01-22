@@ -672,6 +672,13 @@ where
         &self.params
     }
 
+    /// Returns the configured initial accumulator, if any.
+    ///
+    /// When this is `None`, the session is using the "simple" flow (k=1, no ME inputs).
+    pub fn initial_accumulator(&self) -> Option<&Accumulator> {
+        self.acc0.as_ref()
+    }
+
     /// Access the underlying committer used by this session.
     pub fn committer(&self) -> &L {
         &self.l

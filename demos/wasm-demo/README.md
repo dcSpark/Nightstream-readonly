@@ -17,11 +17,27 @@ For more control, the demo also exports a stateful API:
 
 - `new NeoFoldSession(circuitJson)`
 - `session.add_step_witness_json(stepWitnessJson)`
+- `session.add_steps_from_test_export_json(testExportJson)`
 - `proof = session.fold_and_prove()`
 - `ok = session.verify(proof)`
+- `spartan = session.spartan_prove(proof)` (optional)
+- `ok = session.spartan_verify(spartan)` (optional)
 
 This keeps proofs as an opaque JS handle (`NeoFoldProof`) and exposes structured summaries/timings.
 See `demos/wasm-demo/wasm/src/lib.rs`.
+
+## Spartan2 “compression” (experimental)
+
+The UI includes an optional checkbox to compress the folding proof into a Spartan2 proof
+(Goldilocks + Merkle-MLE backend) and verify it in the browser.
+
+This is WIP and currently intended for demo/profiling only (expect higher wasm size + longer runs).
+
+When enabled, the UI lets you download the Spartan2 SNARK bytes (without bundling the VK).
+
+## UI responsiveness
+
+Proving/verifying runs in a Web Worker so the UI stays responsive while proofs are generated.
 
 ## Quick start
 

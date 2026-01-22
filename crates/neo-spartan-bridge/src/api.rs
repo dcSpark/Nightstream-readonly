@@ -33,6 +33,63 @@ pub struct SpartanProof {
     pub instance: FoldRunInstance,
 }
 
+impl SpartanProof {
+    /// Return the verifier key (vk) size in bytes.
+    ///
+    /// Note: `proof_data` currently encodes `(vk, snark)` via bincode.
+    pub fn vk_bytes_len(&self) -> Result<usize> {
+        type E = GoldilocksP3MerkleMleEngine;
+        type SNARK = R1CSSNARK<E>;
+        type VK = spartan2::spartan::SpartanVerifierKey<E>;
+        let (vk, _snark): (VK, SNARK) = bincode::deserialize(&self.proof_data).map_err(|e| {
+            SpartanBridgeError::InvalidInput(format!(
+                "SpartanProof.proof_data deserialization (vk, snark) failed: {e}"
+            ))
+        })?;
+        let bytes = bincode::serialized_size(&vk).map_err(|e| {
+            SpartanBridgeError::InvalidInput(format!("Spartan vk bincode::serialized_size failed: {e}"))
+        })?;
+        Ok(bytes as usize)
+    }
+
+    /// Return the SNARK proof size in bytes (without bundling `vk`).
+    ///
+    /// Note: `proof_data` currently encodes `(vk, snark)` via bincode.
+    pub fn snark_bytes_len(&self) -> Result<usize> {
+        type E = GoldilocksP3MerkleMleEngine;
+        type SNARK = R1CSSNARK<E>;
+        type VK = spartan2::spartan::SpartanVerifierKey<E>;
+        let (_vk, snark): (VK, SNARK) = bincode::deserialize(&self.proof_data).map_err(|e| {
+            SpartanBridgeError::InvalidInput(format!(
+                "SpartanProof.proof_data deserialization (vk, snark) failed: {e}"
+            ))
+        })?;
+        let bytes = bincode::serialized_size(&snark).map_err(|e| {
+            SpartanBridgeError::InvalidInput(format!(
+                "Spartan snark bincode::serialized_size failed: {e}"
+            ))
+        })?;
+        Ok(bytes as usize)
+    }
+
+    /// Return SNARK proof bytes only (without bundling `vk`).
+    ///
+    /// Note: This is intended for smaller downloads; verification still needs `vk`.
+    pub fn snark_bytes(&self) -> Result<Vec<u8>> {
+        type E = GoldilocksP3MerkleMleEngine;
+        type SNARK = R1CSSNARK<E>;
+        type VK = spartan2::spartan::SpartanVerifierKey<E>;
+        let (_vk, snark): (VK, SNARK) = bincode::deserialize(&self.proof_data).map_err(|e| {
+            SpartanBridgeError::InvalidInput(format!(
+                "SpartanProof.proof_data deserialization (vk, snark) failed: {e}"
+            ))
+        })?;
+        bincode::serialize(&snark).map_err(|e| {
+            SpartanBridgeError::InvalidInput(format!("Spartan snark bincode::serialize failed: {e}"))
+        })
+    }
+}
+
 /// Generate a Spartan proof for a FoldRun.
 ///
 /// This:

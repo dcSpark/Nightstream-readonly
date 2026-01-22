@@ -1957,7 +1957,6 @@ checksum = "67b1b7a3b5fe4f1376887184045fcf45c69e92af734b7aaddc05fb777b6fbd03"
 [[package]]
 name = "spartan2"
 version = "0.4.0"
-source = "git+https://github.com/nicarq/Spartan2.git?rev=b244f5c891718235efc7b2b9814b6725010d5e71#b244f5c891718235efc7b2b9814b6725010d5e71"
 dependencies = [
  "bellpepper",
  "bellpepper-core",
@@ -1972,6 +1971,7 @@ dependencies = [
  "group",
  "halo2curves",
  "itertools 0.14.0",
+ "js-sys",
  "num-bigint 0.4.6",
  "num-integer",
  "num-traits",

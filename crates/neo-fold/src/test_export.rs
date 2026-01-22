@@ -384,6 +384,16 @@ impl TestExportSession {
         self.step_ccs.as_ref()
     }
 
+    /// Access the session's Neo parameters.
+    pub fn params(&self) -> &NeoParams {
+        self.session.params()
+    }
+
+    /// Access the configured initial accumulator, if any.
+    pub fn initial_accumulator(&self) -> Option<&crate::session::Accumulator> {
+        self.session.initial_accumulator()
+    }
+
     pub fn setup_timings_ms(&self) -> &TestExportSessionSetupTimingsMs {
         &self.setup_timings_ms
     }
