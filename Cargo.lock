@@ -957,6 +957,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "neo-fold-ffi"
+version = "0.1.0"
+dependencies = [
+ "neo-fold",
+ "neo-spartan-bridge",
+ "serde_json",
+]
+
+[[package]]
 name = "neo-math"
 version = "0.1.0"
 dependencies = [

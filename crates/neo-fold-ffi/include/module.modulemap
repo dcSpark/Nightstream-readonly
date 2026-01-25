@@ -1,0 +1,5 @@
+module NeoFoldFFI {
+  header "neo_fold_ffi.h"
+  export *
+}
+

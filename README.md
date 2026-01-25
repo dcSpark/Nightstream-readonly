@@ -46,6 +46,25 @@ cargo test -p neo-fold full_folding_integration --release -- --nocapture
 cargo test --workspace --release
 ```
 
+### WASM Demo (Browser)
+
+See `demos/wasm-demo/README.md` for the full walkthrough. Quick build+serve:
+
+```bash
+./demos/wasm-demo/build_wasm.sh
+./demos/wasm-demo/serve.sh
+```
+
+### iOS Native (XCFramework)
+
+Build a native iOS static library packaged as an XCFramework (for Swift/Xcode integration):
+
+```bash
+./scripts/build_ios_xcframework.sh
+```
+
+See `docs/ios-native.md` for Xcode/Swift integration details.
+
 ### Focused Test Runs
 
 ```bash

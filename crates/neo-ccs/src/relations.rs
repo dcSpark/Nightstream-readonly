@@ -245,7 +245,12 @@ pub struct MeInstance<C, F, K> {
     /// Legacy (square/identity-first) pipelines may leave this empty.
     #[serde(default)]
     pub s_col: Vec<K>,
-    /// y_j ∈ K^{d} for j=0..t-1 (stored as a vector-of-vectors length t, each len d).
+    /// y_j digit rows for j=0..t-1.
+    ///
+    /// Callers may store either:
+    /// - the unpadded length `d` (= `Z.rows()`), or
+    /// - the Ajtai-padded length `2^{ell_d}` (typically `D.next_power_of_two()`),
+    ///   in which case the tail must be all zeros.
     pub y: Vec<Vec<K>>,
     /// **SECURITY**: Y_j(r) = ⟨(M_j z), χ_r⟩ ∈ K scalars for CCS terminal verification
     /// These are the CORRECT values needed for sum-check terminal check, not sums of y vector components
@@ -405,6 +410,9 @@ where
         });
     }
 
+    // Ajtai padding length for digit rows (matches `1 << ell_d` used by Π_CCS dims).
+    let d_pad = D.next_power_of_two();
+
     for (j, mj) in s.matrices.iter().enumerate() {
         // v = M_j^T r^b (consume only the first n rows of χ_r)
         let mut v_k_m = vec![K::ZERO; s.m];
@@ -412,7 +420,26 @@ where
         // y*_j = Z v_k_m
         let z_ref = MatRef::from_mat(&wit.Z);
         let y_star = mat_vec_mul_fk::<F, K>(z_ref.data, z_ref.rows, z_ref.cols, &v_k_m);
-        if y_star != inst.y[j] {
+        let yj = &inst.y[j];
+        let d = y_star.len();
+        if yj.len() < d {
+            return Err(CcsError::Len {
+                context: "y[j] (digit row)",
+                expected: d,
+                got: yj.len(),
+            });
+        }
+        if yj.len() != d && yj.len() != d_pad {
+            return Err(CcsError::Len {
+                context: "y[j] (digit row)",
+                expected: d_pad,
+                got: yj.len(),
+            });
+        }
+        if y_star.as_slice() != &yj[..d] {
+            return Err(CcsError::Relation("y_j != Z M_j^T r^b".into()));
+        }
+        if yj[d..].iter().any(|&x| x != K::ZERO) {
             return Err(CcsError::Relation("y_j != Z M_j^T r^b".into()));
         }
     }
