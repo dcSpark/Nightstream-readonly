@@ -1301,7 +1301,8 @@ fn bind_rlc_inputs(
         RlcLane::Val => b"val",
     };
 
-    tr.append_message(b"fold/rlc_inputs/v1", lane_scope);
+    // v2: binds NC-channel fields (s_col, y_zcol) so RLC challenges depend on the full instance.
+    tr.append_message(b"fold/rlc_inputs/v2", lane_scope);
     tr.append_u64s(b"step_idx", &[step_idx as u64]);
     tr.append_u64s(b"me_count", &[me_inputs.len() as u64]);
 
@@ -1312,6 +1313,16 @@ fn bind_rlc_inputs(
 
         for limb in &me.r {
             tr.append_fields(b"r_limb", &limb.as_coeffs());
+        }
+
+        tr.append_u64s(b"s_col_len", &[me.s_col.len() as u64]);
+        for sc in &me.s_col {
+            tr.append_fields(b"s_col_elem", &sc.as_coeffs());
+        }
+
+        tr.append_u64s(b"y_zcol_len", &[me.y_zcol.len() as u64]);
+        for yz in &me.y_zcol {
+            tr.append_fields(b"y_zcol_elem", &yz.as_coeffs());
         }
 
         tr.append_fields(b"X", me.X.as_slice());
@@ -1358,11 +1369,38 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
+    if me_inputs.is_empty() {
+        let prefix = match lane {
+            RlcLane::Main => "",
+            RlcLane::Val => "val-lane ",
+        };
+        return Err(PiCcsError::InvalidInput(format!(
+            "step {}: {prefix}RLC input batch is empty",
+            step_idx
+        )));
+    }
+    if wit_inputs.len() != me_inputs.len() {
+        let prefix = match lane {
+            RlcLane::Main => "",
+            RlcLane::Val => "val-lane ",
+        };
+        return Err(PiCcsError::InvalidInput(format!(
+            "step {}: {prefix}RLC witness count mismatch (me_inputs.len()={}, wit_inputs.len()={})",
+            step_idx,
+            me_inputs.len(),
+            wit_inputs.len()
+        )));
+    }
+
     bind_rlc_inputs(tr, lane, step_idx, me_inputs)?;
     let rlc_rhos = ccs::sample_rot_rhos_n(tr, params, ring, me_inputs.len())?;
     let (mut rlc_parent, Z_mix) = if me_inputs.len() == 1 {
-        assert_eq!(rlc_rhos.len(), 1, "Π_RLC(k=1): |rhos| must equal |inputs|");
-        assert_eq!(wit_inputs.len(), 1, "Π_RLC(k=1): |wits| must equal |inputs|");
+        if rlc_rhos.len() != 1 {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: Π_RLC(k=1): |rhos| must equal |inputs|",
+                step_idx
+            )));
+        }
         let inp = &me_inputs[0];
 
         // Match `neo_reductions::api::rlc_with_commit` semantics for k=1 without cloning Z.
@@ -1371,7 +1409,25 @@ where
 
         // Recompute y_scalars from digits (canonical).
         let t = inp.y.len();
-        assert!(t >= s.t(), "Π_RLC(k=1): ME y.len() must be >= s.t()");
+        if t < s.t() {
+            return Err(PiCcsError::InvalidInput(format!(
+                "step {}: Π_RLC(k=1): ME y.len() must be >= s.t() (got {}, s.t()={})",
+                step_idx,
+                t,
+                s.t()
+            )));
+        }
+        for (j, row) in inp.y.iter().enumerate() {
+            if row.len() < D {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "step {}: Π_RLC(k=1): ME y[{}].len()={} must be >= D={}",
+                    step_idx,
+                    j,
+                    row.len(),
+                    D
+                )));
+            }
+        }
         let bK = K::from(F::from_u64(params.b as u64));
         let mut y_scalars = Vec::with_capacity(t);
         for j in 0..t {
@@ -1412,7 +1468,7 @@ where
             &wit_owned,
             ell_d,
             mixers.mix_rhos_commits,
-        );
+        )?;
         (out, Cow::Owned(Z_mix))
     };
 
@@ -1563,7 +1619,37 @@ where
         RlcLane::Main => "",
         RlcLane::Val => "val-lane ",
     };
-    if parent_pub.X.as_slice() != rlc_parent.X.as_slice() {
+    if parent_pub.m_in != rlc_parent.m_in {
+        return Err(PiCcsError::ProtocolError(format!(
+            "step {}: {prefix}RLC m_in mismatch (public={}, proof={})",
+            step_idx, parent_pub.m_in, rlc_parent.m_in
+        )));
+    }
+    if parent_pub.fold_digest != rlc_parent.fold_digest {
+        return Err(PiCcsError::ProtocolError(format!(
+            "step {}: {prefix}RLC fold_digest mismatch",
+            step_idx
+        )));
+    }
+    if parent_pub.c_step_coords != rlc_parent.c_step_coords {
+        return Err(PiCcsError::ProtocolError(format!(
+            "step {}: {prefix}RLC c_step_coords mismatch",
+            step_idx
+        )));
+    }
+    if parent_pub.u_offset != rlc_parent.u_offset {
+        return Err(PiCcsError::ProtocolError(format!(
+            "step {}: {prefix}RLC u_offset mismatch",
+            step_idx
+        )));
+    }
+    if parent_pub.u_len != rlc_parent.u_len {
+        return Err(PiCcsError::ProtocolError(format!(
+            "step {}: {prefix}RLC u_len mismatch",
+            step_idx
+        )));
+    }
+    if parent_pub.X != rlc_parent.X {
         return Err(PiCcsError::ProtocolError(format!(
             "step {}: {prefix}RLC X mismatch",
             step_idx
@@ -1604,6 +1690,33 @@ where
             "step {}: {prefix}RLC y_zcol mismatch",
             step_idx
         )));
+    }
+
+    if rlc_parent.X.rows() != D || rlc_parent.X.cols() != rlc_parent.m_in {
+        return Err(PiCcsError::ProtocolError(format!(
+            "step {}: {prefix}RLC parent X shape {}x{} does not match m_in={}",
+            step_idx,
+            rlc_parent.X.rows(),
+            rlc_parent.X.cols(),
+            rlc_parent.m_in
+        )));
+    }
+    if !dec_children.is_empty() {
+        validate_me_batch_invariants(dec_children, "verify step dec children")?;
+        for (child_idx, child) in dec_children.iter().enumerate() {
+            if child.m_in != rlc_parent.m_in {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: {prefix}DEC child[{child_idx}] has m_in={}, expected {}",
+                    step_idx, child.m_in, rlc_parent.m_in
+                )));
+            }
+            if child.fold_digest != rlc_parent.fold_digest {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: {prefix}DEC child[{child_idx}] fold_digest mismatch",
+                    step_idx
+                )));
+            }
+        }
     }
 
     if !ccs::verify_dec_public(s, params, rlc_parent, dec_children, mixers.combine_b_pows, ell_d) {
@@ -1974,6 +2087,7 @@ fn fold_shard_prove_impl<L, MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepWitnessBundle<Cmt, F, K>],
+    step_idx_offset: usize,
     acc_init: &[MeInstance<Cmt, F, K>],
     acc_wit_init: &[Mat<F>],
     l: &L,
@@ -2017,6 +2131,14 @@ where
     let k_dec = params.k_rho as usize;
     let ring = ccs::RotRing::goldilocks();
 
+    if acc_init.len() != acc_wit_init.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "acc_init.len()={} != acc_wit_init.len()={}",
+            acc_init.len(),
+            acc_wit_init.len()
+        )));
+    }
+
     // Initialize accumulator
     let mut accumulator = acc_init.to_vec();
     let mut accumulator_wit = acc_wit_init.to_vec();
@@ -2031,6 +2153,9 @@ where
     }
 
     for (idx, step) in steps.iter().enumerate() {
+        let step_idx = step_idx_offset
+            .checked_add(idx)
+            .ok_or_else(|| PiCcsError::InvalidInput("step index overflow".into()))?;
         let step_start = time_now();
         crate::memory_sidecar::memory::absorb_step_memory_witness(tr, step);
 
@@ -2077,7 +2202,7 @@ where
                 )));
             }
 
-            tr.append_message(b"shard/output_binding_start", &(idx as u64).to_le_bytes());
+            tr.append_message(b"shard/output_binding_start", &(step_idx as u64).to_le_bytes());
             tr.append_u64s(b"output_binding/mem_idx", &[cfg.mem_idx as u64]);
             tr.append_u64s(b"output_binding/num_bits", &[cfg.num_bits as u64]);
 
@@ -2125,23 +2250,25 @@ where
         //
         // Keep the optimized oracle concrete so we can build outputs from its Ajtai precompute.
         let mut ccs_oracle: CcsOracleDispatch<'_> = match mode.clone() {
-            FoldingMode::Optimized => CcsOracleDispatch::Optimized(
-                neo_reductions::engines::optimized_engine::oracle::OptimizedOracle::new_with_sparse(
-                    &s,
-                    params,
-                    core::slice::from_ref(mcs_wit),
-                    &accumulator_wit,
-                    ch.clone(),
-                    ell_d,
-                    ell_n,
-                    d_sc,
-                    accumulator.first().map(|mi| mi.r.as_slice()),
-                    ccs_sparse_cache
-                        .as_ref()
-                        .expect("SparseCache required for optimized mode")
-                        .clone(),
-                ),
-            ),
+            FoldingMode::Optimized => {
+                let sparse = ccs_sparse_cache.as_ref().ok_or_else(|| {
+                    PiCcsError::ProtocolError("missing SparseCache for optimized mode".into())
+                })?;
+                CcsOracleDispatch::Optimized(
+                    neo_reductions::engines::optimized_engine::oracle::OptimizedOracle::new_with_sparse(
+                        &s,
+                        params,
+                        core::slice::from_ref(mcs_wit),
+                        &accumulator_wit,
+                        ch.clone(),
+                        ell_d,
+                        ell_n,
+                        d_sc,
+                        accumulator.first().map(|mi| mi.r.as_slice()),
+                        sparse.clone(),
+                    ),
+                )
+            }
             #[cfg(feature = "paper-exact")]
             FoldingMode::PaperExact => CcsOracleDispatch::PaperExact(
                 neo_reductions::engines::paper_exact_engine::oracle::PaperExactOracle::new(
@@ -2157,23 +2284,25 @@ where
                 ),
             ),
             #[cfg(feature = "paper-exact")]
-            FoldingMode::OptimizedWithCrosscheck(_) => CcsOracleDispatch::Optimized(
-                neo_reductions::engines::optimized_engine::oracle::OptimizedOracle::new_with_sparse(
-                    &s,
-                    params,
-                    core::slice::from_ref(mcs_wit),
-                    &accumulator_wit,
-                    ch.clone(),
-                    ell_d,
-                    ell_n,
-                    d_sc,
-                    accumulator.first().map(|mi| mi.r.as_slice()),
-                    ccs_sparse_cache
-                        .as_ref()
-                        .expect("SparseCache required for optimized mode")
-                        .clone(),
-                ),
-            ),
+            FoldingMode::OptimizedWithCrosscheck(_) => {
+                let sparse = ccs_sparse_cache.as_ref().ok_or_else(|| {
+                    PiCcsError::ProtocolError("missing SparseCache for optimized mode".into())
+                })?;
+                CcsOracleDispatch::Optimized(
+                    neo_reductions::engines::optimized_engine::oracle::OptimizedOracle::new_with_sparse(
+                        &s,
+                        params,
+                        core::slice::from_ref(mcs_wit),
+                        &accumulator_wit,
+                        ch.clone(),
+                        ell_d,
+                        ell_n,
+                        d_sc,
+                        accumulator.first().map(|mi| mi.r.as_slice()),
+                        sparse.clone(),
+                    ),
+                )
+            }
         };
 
         let shout_pre = crate::memory_sidecar::memory::prove_shout_addr_pre_time(
@@ -2183,7 +2312,7 @@ where
             Some(&cpu_bus),
             ell_n,
             &r_cycle,
-            idx,
+            step_idx,
         )?;
         let twist_pre = crate::memory_sidecar::memory::prove_twist_addr_pre_time(
             tr,
@@ -2240,7 +2369,7 @@ where
             proof: batched_time,
         } = crate::memory_sidecar::route_a_time::prove_route_a_batched_time(
             tr,
-            idx,
+            step_idx,
             ell_n,
             d_sc,
             ccs_initial_sum,
@@ -2266,7 +2395,7 @@ where
 
         let mut ccs_ajtai = RoundOraclePrefix::new(&mut ccs_oracle, ell_d);
         let (ajtai_rounds, ajtai_chals) =
-            run_sumcheck_prover_ds(tr, b"ccs/ajtai", idx, &mut ccs_ajtai, ajtai_initial_sum)?;
+            run_sumcheck_prover_ds(tr, b"ccs/ajtai", step_idx, &mut ccs_ajtai, ajtai_initial_sum)?;
         let mut running_sum = ajtai_initial_sum;
         for (round_poly, &r_i) in ajtai_rounds.iter().zip(ajtai_chals.iter()) {
             running_sum = poly_eval_k(round_poly, r_i);
@@ -2288,7 +2417,7 @@ where
             d_sc,
         );
         let (sumcheck_rounds_nc, sumcheck_chals_nc) =
-            run_sumcheck_prover_ds(tr, b"ccs/nc", idx, &mut ccs_nc_oracle, K::ZERO)?;
+            run_sumcheck_prover_ds(tr, b"ccs/nc", step_idx, &mut ccs_nc_oracle, K::ZERO)?;
         let mut running_sum_nc = K::ZERO;
         for (round_poly, &r_i) in sumcheck_rounds_nc.iter().zip(sumcheck_chals_nc.iter()) {
             running_sum_nc = poly_eval_k(round_poly, r_i);
@@ -2376,7 +2505,7 @@ where
         if let FoldingMode::OptimizedWithCrosscheck(cfg) = &mode {
             crosscheck_route_a_ccs_step(
                 cfg,
-                idx,
+                step_idx,
                 params,
                 &s,
                 &cpu_bus,
@@ -2416,7 +2545,7 @@ where
             &twist_pre,
             &r_time,
             mcs_inst.m_in,
-            idx,
+            step_idx,
         )?;
         prev_twist_decoded = Some(twist_pre.into_iter().map(|p| p.decoded).collect());
 
@@ -2440,7 +2569,7 @@ where
             &ring,
             ell_d,
             k_dec,
-            idx,
+            step_idx,
             &ccs_out,
             &outs_Z,
             want_main_wits,
@@ -2461,7 +2590,7 @@ where
         } else {
             validate_me_batch_invariants(&mem_proof.cpu_me_claims_val, "prove step memory val outputs")?;
 
-            tr.append_message(b"fold/val_lane_start", &(idx as u64).to_le_bytes());
+            tr.append_message(b"fold/val_lane_start", &(step_idx as u64).to_le_bytes());
             let mut val_wit_refs: Vec<&Mat<F>> = Vec::with_capacity(mem_proof.cpu_me_claims_val.len());
             val_wit_refs.push(&mcs_wit.Z);
             if let Some(prev) = prev_step {
@@ -2502,7 +2631,7 @@ where
                 &ring,
                 ell_d,
                 k_dec,
-                idx,
+                step_idx,
                 &mem_proof.cpu_me_claims_val,
                 &val_wit_refs2,
                 collect_val_lane_wits,
@@ -2533,7 +2662,7 @@ where
             val_fold,
         });
 
-        tr.append_message(b"fold/step_done", &(idx as u64).to_le_bytes());
+        tr.append_message(b"fold/step_done", &(step_idx as u64).to_le_bytes());
         if let Some(out) = step_prove_ms_out.as_deref_mut() {
             out.push(elapsed_ms(step_start));
         }
@@ -2572,6 +2701,7 @@ where
         params,
         s_me,
         steps,
+        0,
         acc_init,
         acc_wit_init,
         l,
@@ -2607,6 +2737,7 @@ where
         params,
         s_me,
         steps,
+        0,
         acc_init,
         acc_wit_init,
         l,
@@ -2643,6 +2774,7 @@ where
         params,
         s_me,
         steps,
+        0,
         acc_init,
         acc_wit_init,
         l,
@@ -2679,6 +2811,7 @@ where
         params,
         s_me,
         steps,
+        0,
         acc_init,
         acc_wit_init,
         l,
@@ -2716,6 +2849,7 @@ where
         params,
         s_me,
         steps,
+        0,
         acc_init,
         acc_wit_init,
         l,
@@ -2750,6 +2884,69 @@ where
         params,
         s_me,
         steps,
+        0,
+        acc_init,
+        acc_wit_init,
+        l,
+        mixers,
+        None,
+        None,
+        None,
+    )?;
+    let outputs = proof.compute_fold_outputs(acc_init);
+    if outputs.obligations.main.len() != final_main_wits.len() {
+        return Err(PiCcsError::ProtocolError(format!(
+            "final main witness count mismatch (have {}, need {})",
+            final_main_wits.len(),
+            outputs.obligations.main.len()
+        )));
+    }
+    if outputs.obligations.val.len() != val_lane_wits.len() {
+        return Err(PiCcsError::ProtocolError(format!(
+            "val-lane witness count mismatch (have {}, need {})",
+            val_lane_wits.len(),
+            outputs.obligations.val.len()
+        )));
+    }
+    Ok((
+        proof,
+        outputs,
+        ShardFoldWitnesses {
+            final_main_wits,
+            val_lane_wits,
+        },
+    ))
+}
+
+/// Same as `fold_shard_prove_with_witnesses`, but offsets the per-step transcript index by `step_idx_offset`.
+///
+/// This is useful for "continuation" style proving across multiple calls while preserving a globally
+/// increasing step index for transcript domain separation.
+pub fn fold_shard_prove_with_witnesses_with_step_offset<L, MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepWitnessBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_wit_init: &[Mat<F>],
+    l: &L,
+    mixers: CommitMixers<MR, MB>,
+    step_idx_offset: usize,
+) -> Result<(ShardProof, ShardFoldOutputs<Cmt, F, K>, ShardFoldWitnesses<F>), PiCcsError>
+where
+    L: SModuleHomomorphism<F, Cmt> + Sync,
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    let (proof, final_main_wits, val_lane_wits) = fold_shard_prove_impl(
+        true,
+        mode,
+        tr,
+        params,
+        s_me,
+        steps,
+        step_idx_offset,
         acc_init,
         acc_wit_init,
         l,
@@ -2793,6 +2990,7 @@ fn fold_shard_verify_impl<MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepInstanceBundle<Cmt, F, K>],
+    step_idx_offset: usize,
     acc_init: &[MeInstance<Cmt, F, K>],
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
@@ -2852,6 +3050,9 @@ where
         .unwrap_or_else(|| utils::digest_ccs_matrices_with_sparse_cache(s, ccs_sparse_cache.as_deref()));
 
     for (idx, (step, step_proof)) in steps.iter().zip(proof.steps.iter()).enumerate() {
+        let step_idx = step_idx_offset
+            .checked_add(idx)
+            .ok_or_else(|| PiCcsError::InvalidInput("step index overflow".into()))?;
         absorb_step_memory(tr, step);
 
         let include_ob = ob_cfg.is_some() && (idx + 1 == steps.len());
@@ -2890,7 +3091,7 @@ where
                 )));
             }
 
-            tr.append_message(b"shard/output_binding_start", &(idx as u64).to_le_bytes());
+            tr.append_message(b"shard/output_binding_start", &(step_idx as u64).to_le_bytes());
             tr.append_u64s(b"output_binding/mem_idx", &[cfg.mem_idx as u64]);
             tr.append_u64s(b"output_binding/num_bits", &[cfg.num_bits as u64]);
 
@@ -2958,12 +3159,13 @@ where
         let r_cycle: Vec<K> =
             ts::sample_ext_point(tr, b"route_a/r_cycle", b"route_a/cycle/0", b"route_a/cycle/1", ell_n);
 
-        let shout_pre = crate::memory_sidecar::memory::verify_shout_addr_pre_time(tr, step, &step_proof.mem, idx)?;
+        let shout_pre =
+            crate::memory_sidecar::memory::verify_shout_addr_pre_time(tr, step, &step_proof.mem, step_idx)?;
         let twist_pre = crate::memory_sidecar::memory::verify_twist_addr_pre_time(tr, step, &step_proof.mem)?;
         let crate::memory_sidecar::route_a_time::RouteABatchedTimeVerifyOutput { r_time, final_values } =
             crate::memory_sidecar::route_a_time::verify_route_a_batched_time(
                 tr,
-                idx,
+                step_idx,
                 ell_n,
                 d_sc,
                 claimed_initial,
@@ -3099,7 +3301,7 @@ where
         // Finish CCS Ajtai rounds alone (continuing transcript state after batched rounds).
         let ajtai_rounds = &step_proof.fold.ccs_proof.sumcheck_rounds[ell_n..];
         let (ajtai_chals, running_sum, ok) =
-            verify_sumcheck_rounds_ds(tr, b"ccs/ajtai", idx, d_sc, final_values[0], ajtai_rounds);
+            verify_sumcheck_rounds_ds(tr, b"ccs/ajtai", step_idx, d_sc, final_values[0], ajtai_rounds);
         if !ok {
             return Err(PiCcsError::SumcheckError("Π_CCS Ajtai rounds invalid".into()));
         }
@@ -3189,7 +3391,7 @@ where
         let (nc_chals, running_sum_nc, ok_nc) = verify_sumcheck_rounds_ds(
             tr,
             b"ccs/nc",
-            idx,
+            step_idx,
             d_sc,
             K::ZERO,
             &step_proof.fold.ccs_proof.sumcheck_rounds_nc,
@@ -3255,6 +3457,21 @@ where
         if observed_digest != step_proof.fold.ccs_proof.header_digest.as_slice() {
             return Err(PiCcsError::ProtocolError("Π_CCS header digest mismatch".into()));
         }
+        let expected_digest: [u8; 32] = step_proof
+            .fold
+            .ccs_proof
+            .header_digest
+            .as_slice()
+            .try_into()
+            .map_err(|_| PiCcsError::ProtocolError("Π_CCS header digest must be 32 bytes".into()))?;
+        for (out_idx, out) in step_proof.fold.ccs_out.iter().enumerate() {
+            if out.fold_digest != expected_digest {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: Π_CCS output[{out_idx}] fold_digest mismatch",
+                    idx
+                )));
+            }
+        }
 
         // Verify mem proofs (shared CPU bus only).
         let prev_step = (idx > 0).then(|| &steps[idx - 1]);
@@ -3272,7 +3489,7 @@ where
             &step_proof.mem,
             &shout_pre,
             &twist_pre,
-            idx,
+            step_idx,
         )?;
 
         let expected_consumed = if include_ob {
@@ -3364,7 +3581,7 @@ where
             &ring,
             ell_d,
             mixers,
-            idx,
+            step_idx,
             &step_proof.fold.ccs_out,
             &step_proof.fold.rlc_rhos,
             &step_proof.fold.rlc_parent,
@@ -3392,7 +3609,7 @@ where
                 )));
             }
             (false, Some(val_fold)) => {
-                tr.append_message(b"fold/val_lane_start", &(idx as u64).to_le_bytes());
+                tr.append_message(b"fold/val_lane_start", &(step_idx as u64).to_le_bytes());
                 verify_rlc_dec_lane(
                     RlcLane::Val,
                     tr,
@@ -3401,7 +3618,7 @@ where
                     &ring,
                     ell_d,
                     mixers,
-                    idx,
+                    step_idx,
                     &step_proof.mem.cpu_me_claims_val,
                     &val_fold.rlc_rhos,
                     &val_fold.rlc_parent,
@@ -3412,7 +3629,7 @@ where
             }
         }
 
-        tr.append_message(b"fold/step_done", &(idx as u64).to_le_bytes());
+        tr.append_message(b"fold/step_done", &(step_idx as u64).to_le_bytes());
     }
 
     Ok(ShardFoldOutputs {
@@ -3437,7 +3654,38 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    fold_shard_verify_impl(mode, tr, params, s_me, steps, acc_init, proof, mixers, None, None)
+    fold_shard_verify_impl(mode, tr, params, s_me, steps, 0, acc_init, proof, mixers, None, None)
+}
+
+/// Same as `fold_shard_verify`, but offsets the per-step transcript index by `step_idx_offset`.
+pub fn fold_shard_verify_with_step_offset<MR, MB>(
+    mode: FoldingMode,
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s_me: &CcsStructure<F>,
+    steps: &[StepInstanceBundle<Cmt, F, K>],
+    acc_init: &[MeInstance<Cmt, F, K>],
+    proof: &ShardProof,
+    mixers: CommitMixers<MR, MB>,
+    step_idx_offset: usize,
+) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
+where
+    MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
+    MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
+{
+    fold_shard_verify_impl(
+        mode,
+        tr,
+        params,
+        s_me,
+        steps,
+        step_idx_offset,
+        acc_init,
+        proof,
+        mixers,
+        None,
+        None,
+    )
 }
 
 pub fn fold_shard_verify_with_step_linking<MR, MB>(
@@ -3480,6 +3728,7 @@ where
         params,
         s_me,
         steps,
+        0,
         acc_init,
         proof,
         mixers,
@@ -3509,6 +3758,7 @@ where
         params,
         s_me,
         steps,
+        0,
         acc_init,
         proof,
         mixers,
@@ -3559,6 +3809,7 @@ where
         params,
         s_me,
         steps,
+        0,
         acc_init,
         proof,
         mixers,

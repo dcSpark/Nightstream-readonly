@@ -1,0 +1,26 @@
+[package]
+name = "neo-fold-ffi"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = "Apache-2.0"
+publish = false
+description = "C-ABI wrapper for neo-fold (iOS/Swift integration)"
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["staticlib", "rlib"]
+
+[dependencies]
+neo-fold = { path = "../neo-fold" }
+neo-spartan-bridge = { path = "../neo-spartan-bridge", optional = true }
+serde_json = { workspace = true }
+
+[features]
+default = []
+spartan = ["dep:neo-spartan-bridge"]
+debug-logs = ["neo-fold/debug-logs"]
+spartan-debug-logs = ["spartan", "neo-spartan-bridge/debug-logs"]

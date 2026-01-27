@@ -137,23 +137,54 @@ pub fn rlc_with_commit<Comb>(
     Zs: &[Mat<F>],
     ell_d: usize,
     mix_commits: Comb,
-) -> (MeInstance<Cmt, F, K>, Mat<F>)
+) -> Result<(MeInstance<Cmt, F, K>, Mat<F>), PiCcsError>
 where
     Comb: Fn(&[Mat<F>], &[Cmt]) -> Cmt,
 {
     use crate::engines::pi_rlc_dec::{OptimizedRlcDec, RlcDecOps};
+
+    if me_inputs.is_empty() {
+        return Err(PiCcsError::InvalidInput("rlc_with_commit: empty inputs".into()));
+    }
+    if rhos.len() != me_inputs.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "rlc_with_commit: |rhos| mismatch (expected {}, got {})",
+            me_inputs.len(),
+            rhos.len()
+        )));
+    }
+    if Zs.len() != me_inputs.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "rlc_with_commit: |Zs| mismatch (expected {}, got {})",
+            me_inputs.len(),
+            Zs.len()
+        )));
+    }
 
     // Fast path: with a single ME claim there is nothing to mix, so Π_RLC can be the identity.
     //
     // We still sample/store `rhos` at the shard layer for transcript binding, but skipping the
     // S-action here avoids an extremely expensive D×D by D×m witness multiplication.
     if me_inputs.len() == 1 {
-        assert_eq!(rhos.len(), 1, "Π_RLC(k=1): |rhos| must equal |inputs|");
-        assert_eq!(Zs.len(), 1, "Π_RLC(k=1): |Zs| must equal |inputs|");
-
         let inp = &me_inputs[0];
         let t = inp.y.len();
-        assert!(t >= s.t(), "Π_RLC(k=1): ME y.len() must be >= s.t()");
+        if t < s.t() {
+            return Err(PiCcsError::InvalidInput(format!(
+                "rlc_with_commit(k=1): ME y.len() must be >= s.t() (got {}, s.t()={})",
+                t,
+                s.t()
+            )));
+        }
+        for (j, row) in inp.y.iter().enumerate() {
+            if row.len() < D {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "rlc_with_commit(k=1): ME y[{}].len()={} must be >= D={}",
+                    j,
+                    row.len(),
+                    D
+                )));
+            }
+        }
 
         let inputs_c = vec![inp.c.clone()];
         let c = mix_commits(rhos, &inputs_c);
@@ -185,10 +216,10 @@ where
             m_in: inp.m_in,
             fold_digest: inp.fold_digest,
         };
-        return (out, Zs[0].clone());
+        return Ok((out, Zs[0].clone()));
     }
 
-    match mode {
+    let (out, Z_mix) = match mode {
         FoldingMode::Optimized => OptimizedRlcDec::rlc_with_commit(s, params, rhos, me_inputs, Zs, ell_d, mix_commits),
         #[cfg(feature = "paper-exact")]
         FoldingMode::PaperExact => {
@@ -209,7 +240,8 @@ where
             // In practice, RLC/DEC are simple algebraic operations, so we just use optimized
             OptimizedRlcDec::rlc_with_commit(s, params, rhos, me_inputs, Zs, ell_d, mix_commits)
         }
-    }
+    };
+    Ok((out, Z_mix))
 }
 
 /// DEC: given parent and a provided split Z = Σ b^i · Z_i, build children with correct
@@ -365,6 +397,34 @@ where
                 s.t()
             )));
         }
+        if rhos[0].rows() != D || rhos[0].cols() != D {
+            return Err(PiCcsError::InvalidInput(format!(
+                "rlc_public(k=1): ρ has shape {}x{}, expected {}x{}",
+                rhos[0].rows(),
+                rhos[0].cols(),
+                D,
+                D
+            )));
+        }
+        if inp.X.rows() != D || inp.X.cols() != inp.m_in {
+            return Err(PiCcsError::InvalidInput(format!(
+                "rlc_public(k=1): X has shape {}x{}, expected {}x{}",
+                inp.X.rows(),
+                inp.X.cols(),
+                D,
+                inp.m_in
+            )));
+        }
+        for (j, row) in inp.y.iter().enumerate() {
+            if row.len() < D {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "rlc_public(k=1): y[{}].len()={} must be >= D={}",
+                    j,
+                    row.len(),
+                    D
+                )));
+            }
+        }
 
         let inputs_c = vec![inp.c.clone()];
         let c = mix_rhos_commits(rhos, &inputs_c);
@@ -399,7 +459,9 @@ where
     }
     let d = D;
     let m_in = inputs[0].m_in;
-    let d_pad = 1usize << ell_d;
+    let d_pad = 1usize
+        .checked_shl(ell_d as u32)
+        .ok_or_else(|| PiCcsError::InvalidInput("rlc_public: 2^ell_d overflow".into()))?;
     let t = inputs[0].y.len();
     if t < s.t() {
         return Err(PiCcsError::InvalidInput(format!(
@@ -408,6 +470,17 @@ where
             s.t()
         )));
     }
+    for (idx, rho) in rhos.iter().enumerate() {
+        if rho.rows() != D || rho.cols() != D {
+            return Err(PiCcsError::InvalidInput(format!(
+                "rlc_public: ρ[{idx}] has shape {}x{}, expected {}x{}",
+                rho.rows(),
+                rho.cols(),
+                D,
+                D
+            )));
+        }
+    }
     for (idx, inst) in inputs.iter().enumerate() {
         if inst.m_in != m_in {
             return Err(PiCcsError::InvalidInput(format!(
@@ -415,11 +488,30 @@ where
                 inst.m_in
             )));
         }
+        if inst.X.rows() != D || inst.X.cols() != m_in {
+            return Err(PiCcsError::InvalidInput(format!(
+                "rlc_public: X shape mismatch at input {idx} (got {}x{}, expected {}x{})",
+                inst.X.rows(),
+                inst.X.cols(),
+                D,
+                m_in
+            )));
+        }
         if inst.y.len() != t {
             return Err(PiCcsError::InvalidInput(format!(
                 "rlc_public: y.len mismatch at input {idx} (expected {t}, got {})",
                 inst.y.len()
             )));
+        }
+        for (j, row) in inst.y.iter().enumerate() {
+            if row.len() < D || row.len() > d_pad {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "rlc_public: y[{j}].len()={} at input {idx}, expected in [{}, {}]",
+                    row.len(),
+                    D,
+                    d_pad
+                )));
+            }
         }
     }
 
@@ -546,6 +638,38 @@ where
         eprintln!("verify_dec_public failed: no children");
         return false;
     }
+    if parent.X.rows() != D || parent.X.cols() != parent.m_in {
+        eprintln!(
+            "verify_dec_public failed: parent X has shape {}x{}, expected {}x{}",
+            parent.X.rows(),
+            parent.X.cols(),
+            D,
+            parent.m_in
+        );
+        return false;
+    }
+    for (idx, ch) in children.iter().enumerate() {
+        if ch.m_in != parent.m_in {
+            eprintln!(
+                "verify_dec_public failed: child m_in mismatch (child {} has {}, expected {})",
+                idx,
+                ch.m_in,
+                parent.m_in
+            );
+            return false;
+        }
+        if ch.X.rows() != D || ch.X.cols() != parent.m_in {
+            eprintln!(
+                "verify_dec_public failed: child X shape mismatch (child {} has {}x{}, expected {}x{})",
+                idx,
+                ch.X.rows(),
+                ch.X.cols(),
+                D,
+                parent.m_in
+            );
+            return false;
+        }
+    }
     if !children.iter().all(|ch| ch.r == parent.r) {
         eprintln!("verify_dec_public failed: r mismatch");
         return false;
@@ -625,7 +749,10 @@ where
     }
 
     // y_j
-    let d_pad = 1usize << ell_d;
+    let Some(d_pad) = 1usize.checked_shl(ell_d as u32) else {
+        eprintln!("verify_dec_public failed: 2^ell_d overflow");
+        return false;
+    };
     let bK = K::from(F::from_u64(params.b as u64));
 
     if want_nc_channel {

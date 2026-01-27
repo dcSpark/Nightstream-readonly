@@ -12,8 +12,8 @@ use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::{CcsMatrix, CcsStructure, CscMat, Mat, SparsePoly, Term};
 use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::shard::{
-    fold_shard_prove_with_witnesses, fold_shard_verify, fold_shard_verify_with_step_linking, CommitMixers,
-    StepLinkingConfig,
+    fold_shard_prove_with_witnesses, fold_shard_prove_with_witnesses_with_step_offset, fold_shard_verify,
+    fold_shard_verify_with_step_offset, fold_shard_verify_with_step_linking, CommitMixers, StepLinkingConfig,
 };
 use neo_math::ring::{cf_inv, Rq as RqEl};
 use neo_math::{D, F, K};
@@ -494,7 +494,7 @@ fn shard_continuation_extend_and_fold() {
     let mut tr_p = Poseidon2Transcript::new(b"neo.fold/shard_continuation");
 
     let prove_prefix_start = Instant::now();
-    let (proof0, out0, wits0) = fold_shard_prove_with_witnesses(
+    let (proof0, out0, wits0) = fold_shard_prove_with_witnesses_with_step_offset(
         FoldingMode::Optimized,
         &mut tr_p,
         &params,
@@ -504,6 +504,7 @@ fn shard_continuation_extend_and_fold() {
         &[],
         &l,
         mixers,
+        0,
     )
     .expect("prove prefix");
     let prove_prefix_duration = prove_prefix_start.elapsed();
@@ -517,7 +518,7 @@ fn shard_continuation_extend_and_fold() {
     println!("  Accumulator size after prefix: {} MeInstance(s)", acc1.len());
 
     let prove_extend_start = Instant::now();
-    let (proof1, out1, _wits1) = fold_shard_prove_with_witnesses(
+    let (proof1, out1, _wits1) = fold_shard_prove_with_witnesses_with_step_offset(
         FoldingMode::Optimized,
         &mut tr_p,
         &params,
@@ -527,6 +528,7 @@ fn shard_continuation_extend_and_fold() {
         &acc1_wit,
         &l,
         mixers,
+        1,
     )
     .expect("prove extension");
     let prove_extend_duration = prove_extend_start.elapsed();
@@ -608,7 +610,7 @@ fn shard_continuation_extend_and_fold() {
     );
 
     let verify_prefix_start = Instant::now();
-    let out0_v = fold_shard_verify(
+    let out0_v = fold_shard_verify_with_step_offset(
         FoldingMode::Optimized,
         &mut tr_v,
         &params,
@@ -617,6 +619,7 @@ fn shard_continuation_extend_and_fold() {
         &[],
         &proof0,
         mixers,
+        0,
     )
     .expect("verify prefix");
     let verify_prefix_duration = verify_prefix_start.elapsed();
@@ -624,8 +627,37 @@ fn shard_continuation_extend_and_fold() {
     assert_eq!(out0_v.obligations.main, out0.obligations.main, "prefix obligations mismatch");
     assert!(out0_v.obligations.val.is_empty());
 
+    // Sanity check: verifying step 1 with the wrong step offset must fail.
+    let mut tr_v_wrong = Poseidon2Transcript::new(b"neo.fold/shard_continuation");
+    let out0_v_wrong = fold_shard_verify_with_step_offset(
+        FoldingMode::Optimized,
+        &mut tr_v_wrong,
+        &params,
+        &ccs,
+        core::slice::from_ref(&step0_pub),
+        &[],
+        &proof0,
+        mixers,
+        0,
+    )
+    .expect("verify prefix (wrong-offset transcript)");
+    assert!(
+        fold_shard_verify(
+            FoldingMode::Optimized,
+            &mut tr_v_wrong,
+            &params,
+            &ccs,
+            core::slice::from_ref(&step1_pub),
+            &out0_v_wrong.obligations.main,
+            &proof1,
+            mixers,
+        )
+        .is_err(),
+        "verifying step 1 with step_idx_offset=0 must fail"
+    );
+
     let verify_extend_start = Instant::now();
-    let out1_v = fold_shard_verify(
+    let out1_v = fold_shard_verify_with_step_offset(
         FoldingMode::Optimized,
         &mut tr_v,
         &params,
@@ -634,6 +666,7 @@ fn shard_continuation_extend_and_fold() {
         &out0_v.obligations.main,
         &proof1,
         mixers,
+        1,
     )
     .expect("verify extension");
     let verify_extend_duration = verify_extend_start.elapsed();

@@ -2,6 +2,8 @@
 
 Minimal browser demo that runs `neo-fold` prove+verify inside `wasm32-unknown-unknown`.
 
+If you want a native iOS build (Swift/Xcode) alongside wasm, see `docs/ios-native.md`.
+
 This demo expects a circuit in the same JSON schema as `crates/neo-fold/poseidon2-tests/*.json`
 (`TestExport`: R1CS A/B/C sparse matrices + per-step witnesses).
 
@@ -127,3 +129,23 @@ To enable it:
 After that, pushes to `main` (or manual `workflow_dispatch`) will publish the demo site.
 
 Note: GitHub Pages does not allow configuring COOP/COEP headers, so the `?threads=1` mode will not work there.
+
+## Deploy (Cloudflare Workers)
+
+Cloudflare Workers supports serving static assets with custom headers. This repo includes a
+Wrangler config at `demos/wasm-demo/wrangler.toml` that serves `demos/wasm-demo/web/` and sets
+COOP/COEP headers so `?threads=1` can work (when the threads bundle is built).
+
+Deploy with Wrangler:
+
+```bash
+cd demos/wasm-demo
+npx wrangler@latest deploy
+```
+
+`wrangler deploy` runs `./build_wasm.sh` (configured in `wrangler.toml`), so your deploy environment
+needs Rust (`wasm32-unknown-unknown`) + `wasm-pack`. You can also run `./demos/wasm-demo/build_wasm.sh`
+manually ahead of time.
+
+In the Cloudflare dashboard (Workers → Create → Import a repository), point the import at the
+`demos/wasm-demo` subdirectory so it finds `wrangler.toml`.
