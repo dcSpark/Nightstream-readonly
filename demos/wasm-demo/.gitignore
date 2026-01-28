@@ -1,3 +1,2 @@
-/web/pkg/
 /wasm/target/
 /wasm/Cargo.lock
