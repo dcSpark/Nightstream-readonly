@@ -1,4 +1,4 @@
-use neo_ccs::{r1cs_to_ccs, CcsStructure, Mat};
+use neo_ccs::{CcsMatrix, CcsStructure, CscMat, SparsePoly, Term};
 use p3_field::{Field, PrimeCharacteristicRing};
 
 /// A single R1CS row: A(z) * B(z) = C(z), where each side is a sparse linear form.
@@ -13,9 +13,7 @@ pub struct R1csRow<F> {
 ///
 /// This builder:
 /// - lets callers add R1CS constraints without manually managing matrices, and
-/// - can emit either:
-///   - a rectangular CCS (n×m) with a reserved all-zero tail row region for shared-CPU-bus injection, or
-///   - a square CCS (n=m) for compatibility with legacy normal forms.
+/// - emits a CCS (n×m) with an optional reserved all-zero tail row region for shared-CPU-bus injection.
 #[derive(Clone, Debug)]
 pub struct CcsBuilder<F> {
     m_in: usize,
@@ -25,7 +23,7 @@ pub struct CcsBuilder<F> {
 
 impl<F> CcsBuilder<F>
 where
-    F: Field + PrimeCharacteristicRing + Copy,
+    F: Field + PrimeCharacteristicRing + Copy + Send + Sync,
 {
     pub fn new(m_in: usize, const_one_col: usize) -> Result<Self, String> {
         if m_in == 0 {
@@ -100,58 +98,6 @@ where
         self
     }
 
-    /// Build a **square** CCS with `m = n = max(m_min, cpu_rows + reserved_trailing_rows)`.
-    ///
-    /// The last `reserved_trailing_rows` are left all-zero in A/B/C to support shared-bus
-    /// constraint injection via `extend_ccs_with_shared_cpu_bus_constraints`.
-    pub fn build_square(self, m_min: usize, reserved_trailing_rows: usize) -> Result<CcsStructure<F>, String> {
-        let cpu_rows = self.rows.len();
-        if cpu_rows == 0 {
-            return Err("CcsBuilder: no constraints added".into());
-        }
-        let m = m_min.max(cpu_rows.saturating_add(reserved_trailing_rows));
-        let n = m;
-
-        if self.m_in > m {
-            return Err(format!(
-                "CcsBuilder: m_in({}) exceeds CCS width m({m})",
-                self.m_in
-            ));
-        }
-        if cpu_rows > n.saturating_sub(reserved_trailing_rows) {
-            return Err(format!(
-                "CcsBuilder: too many CPU constraints ({cpu_rows}) for n=m={n} with reserved_trailing_rows={reserved_trailing_rows}"
-            ));
-        }
-
-        let mut a = Mat::zero(n, m, F::ZERO);
-        let mut b = Mat::zero(n, m, F::ZERO);
-        let mut c = Mat::zero(n, m, F::ZERO);
-
-        for (row, r) in self.rows.iter().enumerate() {
-            for &(col, coeff) in &r.a_terms {
-                if col >= m {
-                    return Err(format!("CcsBuilder: A term col {col} out of range (m={m})"));
-                }
-                a[(row, col)] = a[(row, col)] + coeff;
-            }
-            for &(col, coeff) in &r.b_terms {
-                if col >= m {
-                    return Err(format!("CcsBuilder: B term col {col} out of range (m={m})"));
-                }
-                b[(row, col)] = b[(row, col)] + coeff;
-            }
-            for &(col, coeff) in &r.c_terms {
-                if col >= m {
-                    return Err(format!("CcsBuilder: C term col {col} out of range (m={m})"));
-                }
-                c[(row, col)] = c[(row, col)] + coeff;
-            }
-        }
-
-        Ok(r1cs_to_ccs(a, b, c))
-    }
-
     /// Build a (potentially rectangular) CCS with:
     /// - witness width `m = m_min`, and
     /// - constraint rows `n = cpu_rows + reserved_trailing_rows`.
@@ -175,31 +121,68 @@ where
             ));
         }
 
-        let mut a = Mat::zero(n, m, F::ZERO);
-        let mut b = Mat::zero(n, m, F::ZERO);
-        let mut c = Mat::zero(n, m, F::ZERO);
+        let mut a_trips: Vec<(usize, usize, F)> = Vec::new();
+        let mut b_trips: Vec<(usize, usize, F)> = Vec::new();
+        let mut c_trips: Vec<(usize, usize, F)> = Vec::new();
 
         for (row, r) in self.rows.iter().enumerate() {
             for &(col, coeff) in &r.a_terms {
                 if col >= m {
                     return Err(format!("CcsBuilder: A term col {col} out of range (m={m})"));
                 }
-                a[(row, col)] = a[(row, col)] + coeff;
+                a_trips.push((row, col, coeff));
             }
             for &(col, coeff) in &r.b_terms {
                 if col >= m {
                     return Err(format!("CcsBuilder: B term col {col} out of range (m={m})"));
                 }
-                b[(row, col)] = b[(row, col)] + coeff;
+                b_trips.push((row, col, coeff));
             }
             for &(col, coeff) in &r.c_terms {
                 if col >= m {
                     return Err(format!("CcsBuilder: C term col {col} out of range (m={m})"));
                 }
-                c[(row, col)] = c[(row, col)] + coeff;
+                c_trips.push((row, col, coeff));
             }
         }
 
-        Ok(r1cs_to_ccs(a, b, c))
+        // Base polynomial f(X1,X2,X3) = X1 * X2 - X3
+        let f_base = SparsePoly::new(
+            3,
+            vec![
+                Term {
+                    coeff: F::ONE,
+                    exps: vec![1, 1, 0],
+                },
+                Term {
+                    coeff: -F::ONE,
+                    exps: vec![0, 0, 1],
+                },
+            ],
+        );
+
+        // Match `neo_ccs::r1cs_to_ccs` behavior: insert identity-first only when square.
+        let (matrices, f) = if n == m {
+            (
+                vec![
+                    CcsMatrix::Identity { n },
+                    CcsMatrix::Csc(CscMat::from_triplets(a_trips, n, m)),
+                    CcsMatrix::Csc(CscMat::from_triplets(b_trips, n, m)),
+                    CcsMatrix::Csc(CscMat::from_triplets(c_trips, n, m)),
+                ],
+                f_base.insert_var_at_front(),
+            )
+        } else {
+            (
+                vec![
+                    CcsMatrix::Csc(CscMat::from_triplets(a_trips, n, m)),
+                    CcsMatrix::Csc(CscMat::from_triplets(b_trips, n, m)),
+                    CcsMatrix::Csc(CscMat::from_triplets(c_trips, n, m)),
+                ],
+                f_base,
+            )
+        };
+
+        CcsStructure::new_sparse(matrices, f).map_err(|e| format!("CcsBuilder: invalid CCS: {e:?}"))
     }
 }

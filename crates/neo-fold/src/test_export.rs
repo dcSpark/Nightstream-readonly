@@ -13,7 +13,7 @@ use crate::pi_ccs::FoldingMode;
 use crate::session::{FoldingSession, NeoStep, StepArtifacts, StepSpec};
 use crate::shard::StepLinkingConfig;
 use neo_ajtai::{set_global_pp, setup as ajtai_setup, AjtaiSModule};
-use neo_ccs::{r1cs_to_ccs, CcsMatrix, CcsStructure, Mat};
+use neo_ccs::{CcsMatrix, CcsStructure, CscMat, SparsePoly, Term};
 use neo_math::{D, F};
 use neo_params::NeoParams;
 use p3_field::PrimeCharacteristicRing;
@@ -192,14 +192,6 @@ fn elapsed_ms(start: TimePoint) -> f64 {
     }
 }
 
-fn sparse_to_dense_mat(sparse: &SparseMatrix, rows: usize, cols: usize) -> Mat<F> {
-    let mut data = vec![F::ZERO; rows * cols];
-    for &(row, col, val) in &sparse.entries {
-        data[row * cols + col] = F::from_u64(val);
-    }
-    Mat::from_row_major(rows, cols, data)
-}
-
 fn build_step_ccs(
     num_constraints: usize,
     num_variables: usize,
@@ -207,19 +199,38 @@ fn build_step_ccs(
     matrix_b: &SparseMatrix,
     matrix_c: &SparseMatrix,
 ) -> CcsStructure<F> {
-    let n = num_constraints;
-    let m = num_variables;
+    // Pad exported R1CS to square n×n (needed for Ajtai/NC identity-first semantics).
+    let n = num_constraints.max(num_variables);
 
-    let n = n.max(m);
+    let to_triplets = |m: &SparseMatrix| -> Vec<(usize, usize, F)> {
+        m.entries
+            .iter()
+            .map(|&(r, c, v)| (r, c, F::from_u64(v)))
+            .collect()
+    };
 
-    let a = sparse_to_dense_mat(matrix_a, n, n);
-    let b = sparse_to_dense_mat(matrix_b, n, n);
-    let c = sparse_to_dense_mat(matrix_c, n, n);
-    let s0 = r1cs_to_ccs(a, b, c);
+    let a = CcsMatrix::Csc(CscMat::from_triplets(to_triplets(matrix_a), n, n));
+    let b = CcsMatrix::Csc(CscMat::from_triplets(to_triplets(matrix_b), n, n));
+    let c = CcsMatrix::Csc(CscMat::from_triplets(to_triplets(matrix_c), n, n));
 
-    // ensure_identity_first_owned will now work since n == m_padded
-    s0.ensure_identity_first_owned()
-        .expect("ensure_identity_first_owned should succeed")
+    // R1CS → CCS embedding with identity-first form: M_0 = I_n, M_1=A, M_2=B, M_3=C.
+    let f_base = SparsePoly::new(
+        3,
+        vec![
+            Term {
+                coeff: F::ONE,
+                exps: vec![1, 1, 0],
+            }, // X1 * X2
+            Term {
+                coeff: -F::ONE,
+                exps: vec![0, 0, 1],
+            }, // -X3
+        ],
+    );
+    let f = f_base.insert_var_at_front();
+
+    CcsStructure::new_sparse(vec![CcsMatrix::Identity { n }, a, b, c], f)
+        .expect("valid R1CS→CCS structure")
 }
 
 fn pad_witness_to_m(mut z: Vec<F>, m_target: usize) -> Vec<F> {
