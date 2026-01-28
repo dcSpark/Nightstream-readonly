@@ -2,6 +2,62 @@ let wasm = null;
 let wasmBundle = null; // "pkg" | "pkg_threads"
 let wasmThreads = 0;
 
+// Minimal Wasm module that requires the threads proposal (shared memory + atomic instruction).
+// Generated from:
+// (module (memory 1 1 shared) (func i32.const 0 i32.atomic.load drop))
+const WASM_THREADS_VALIDATE_BYTES = new Uint8Array([
+  0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 5, 4, 1, 3,
+  1, 1, 10, 11, 1, 9, 0, 65, 0, 254, 16, 2, 0, 26, 11,
+]);
+
+function supportsWasmThreadsRuntime() {
+  if (typeof WebAssembly !== "object" || typeof WebAssembly.Memory !== "function") return false;
+  if (typeof WebAssembly.validate !== "function") return false;
+  if (self.crossOriginIsolated !== true) return false;
+  if (typeof SharedArrayBuffer !== "function") return false;
+  if (typeof Atomics !== "object") return false;
+
+  if (typeof MessageChannel !== "undefined") {
+    try {
+      new MessageChannel().port1.postMessage(new SharedArrayBuffer(1));
+    } catch {
+      return false;
+    }
+  }
+
+  try {
+    if (!WebAssembly.validate(WASM_THREADS_VALIDATE_BYTES)) return false;
+  } catch {
+    return false;
+  }
+
+  try {
+    const mem = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
+    return mem.buffer instanceof SharedArrayBuffer;
+  } catch {
+    return false;
+  }
+}
+
+function chooseThreadCount(requested) {
+  const n =
+    typeof requested === "number" && Number.isFinite(requested) && requested > 0
+      ? requested
+      : navigator.hardwareConcurrency ?? 4;
+  return Math.min(Math.max(1, n), 8);
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  const ms = Math.max(0, timeoutMs ?? 0);
+  if (ms === 0) return promise;
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms} ms`)), ms);
+    }),
+  ]);
+}
+
 function fmtMs(ms) {
   if (typeof ms !== "number" || !Number.isFinite(ms)) return String(ms);
   return `${ms.toFixed(1)} ms`;
@@ -54,27 +110,72 @@ function log(id, line) {
   emit(id, { type: "log", line: String(line) });
 }
 
-async function ensureWasm({ bundle, threads }) {
+async function ensureWasm({ id, bundle, threads }) {
   if (wasm && wasmBundle === bundle && wasmThreads === threads) return;
 
-  wasmBundle = bundle;
-  wasmThreads = threads ?? 0;
+  const supportsThreads = supportsWasmThreadsRuntime();
 
-  const entry =
-    bundle === "pkg_threads" ? "./pkg_threads/neo_fold_demo.js" : "./pkg/neo_fold_demo.js";
+  let selectedBundle = bundle === "pkg_threads" ? "pkg_threads" : "pkg";
+  let selectedThreads = threads ?? 0;
 
-  wasm = await import(entry);
-  await wasm.default();
-  wasm.init_panic_hook();
-
-  if (bundle === "pkg_threads" && typeof wasm.init_thread_pool === "function") {
-    const n = Math.max(1, wasmThreads || (navigator.hardwareConcurrency ?? 4));
-    await wasm.init_thread_pool(n);
+  if (selectedBundle === "pkg_threads" && !supportsThreads) {
+    log(id, "Threads requested, but wasm threads are not available in this worker.");
+    log(id, "Falling back to single-thread bundle.");
+    selectedBundle = "pkg";
+    selectedThreads = 0;
   }
+
+  if (selectedBundle === "pkg_threads") {
+    selectedThreads = chooseThreadCount(selectedThreads);
+  } else {
+    selectedThreads = 0;
+  }
+
+  if (wasm && wasmBundle === selectedBundle && wasmThreads === selectedThreads) return;
+
+  async function loadBundleOrThrow(which) {
+    const entry =
+      which === "pkg_threads" ? "./pkg_threads/neo_fold_demo.js" : "./pkg/neo_fold_demo.js";
+    const mod = await import(entry);
+    await mod.default();
+    mod.init_panic_hook();
+    return mod;
+  }
+
+  try {
+    wasm = await loadBundleOrThrow(selectedBundle);
+  } catch (e) {
+    if (selectedBundle === "pkg_threads") {
+      log(id, "Failed to load threads bundle; falling back to single-thread.");
+      log(id, `Load error: ${String(e)}`);
+      selectedBundle = "pkg";
+      selectedThreads = 0;
+      wasm = await loadBundleOrThrow("pkg");
+    } else {
+      throw e;
+    }
+  }
+
+  if (selectedBundle === "pkg_threads" && typeof wasm.init_thread_pool === "function") {
+    const n = selectedThreads;
+    log(id, `Initializing wasm thread pool (${n} threads)...`);
+    try {
+      await withTimeout(wasm.init_thread_pool(n), 8000, "init_thread_pool");
+      log(id, "Wasm thread pool ready.");
+    } catch (e) {
+      log(id, `Threads init failed; falling back to single-thread. Error: ${String(e)}`);
+      selectedBundle = "pkg";
+      selectedThreads = 0;
+      wasm = await loadBundleOrThrow("pkg");
+    }
+  }
+
+  wasmBundle = selectedBundle;
+  wasmThreads = selectedThreads;
 }
 
 async function runProveVerify({ id, json, doSpartan, bundle, threads }) {
-  await ensureWasm({ bundle, threads });
+  await ensureWasm({ id, bundle, threads });
 
   log(id, "Running prove+verify…");
   log(id, `Input JSON size: ${fmtBytes(json.length)}`);
@@ -287,4 +388,3 @@ self.addEventListener("message", async (ev) => {
     emit(id, { type: "error", error: String(e) });
   }
 });
-

@@ -99,30 +99,90 @@ out_name = sys.argv[2]
 paths_no_bundler = list(
     out_dir.glob("snippets/wasm-bindgen-rayon-*/src/workerHelpers.no-bundler.js")
 )
-if paths_no_bundler:
-    print("Found wasm-bindgen-rayon no-bundler helper; no patch needed.")
-    raise SystemExit(0)
-
-paths = list(out_dir.glob("snippets/wasm-bindgen-rayon-*/src/workerHelpers.js"))
-if not paths:
-    raise SystemExit(
-        "ERROR: wasm-bindgen-rayon workerHelpers snippet not found; cannot patch for web."
-    )
+paths_default = list(out_dir.glob("snippets/wasm-bindgen-rayon-*/src/workerHelpers.js"))
+if not paths_no_bundler and not paths_default:
+    raise SystemExit("ERROR: wasm-bindgen-rayon workerHelpers snippet not found; cannot patch.")
 
 target = f"../../../{out_name}.js"
-patched = 0
-for p in paths:
-    txt = p.read_text(encoding="utf-8")
-    new = txt.replace("import('../../..')", f"import('{target}')")
-    if new != txt:
-        p.write_text(new, encoding="utf-8")
-        patched += 1
+patched_import = 0
+already_import = 0
+patched_error = 0
+already_error = 0
+failed = []
 
-if patched == 0:
-    raise SystemExit(
-        "ERROR: workerHelpers.js found but no replacements made; threads may hang at init."
+def patch_error_handler(txt, needle):
+    if "wasm_bindgen_worker_error" in txt:
+        return txt, False, True
+    patched = txt.replace(
+        needle,
+        needle.replace(
+            ");\n});\n",
+            ");\n}).catch((e) => {\n  console.error(e);\n  postMessage({ type: 'wasm_bindgen_worker_error', error: String(e) });\n  close();\n});\n",
+        ),
     )
-print(f"Patched {patched} workerHelpers.js file(s) for plain web module loading.")
+    if patched == txt:
+        return txt, False, False
+    return patched, True, False
+
+for p in paths_default:
+    original = p.read_text(encoding="utf-8")
+    txt = original
+
+    # 1) Fix module resolution for plain (non-bundler) `--target web` usage.
+    if "import('../../..')" in txt:
+        txt = txt.replace("import('../../..')", f"import('{target}')")
+        patched_import += 1
+    elif f"import('{target}')" in txt:
+        already_import += 1
+    else:
+        failed.append(
+            f"{p}: unexpected main-module import (expected import('../../..') or import('{target}'))"
+        )
+
+    # 2) Avoid unhandled promise rejections if the worker crashes during start (Safari reports these).
+    txt2, did_patch, did_already = patch_error_handler(
+        txt, "  pkg.wbg_rayon_start_worker(receiver);\n});\n"
+    )
+    txt = txt2
+    if did_patch:
+        patched_error += 1
+    elif did_already:
+        already_error += 1
+    else:
+        failed.append(f"{p}: could not patch error handler (pattern not found)")
+
+    if txt != original:
+        p.write_text(txt, encoding="utf-8")
+
+for p in paths_no_bundler:
+    original = p.read_text(encoding="utf-8")
+    txt = original
+
+    # Bundlerless helper already resolves the main JS entrypoint dynamically (no import patch needed),
+    # but we still add a catch handler to avoid Safari's "Unhandled Promise Rejection" noise.
+    txt2, did_patch, did_already = patch_error_handler(
+        txt, "  pkg.wbg_rayon_start_worker(data.receiver);\n});\n"
+    )
+    txt = txt2
+    if did_patch:
+        patched_error += 1
+    elif did_already:
+        already_error += 1
+    else:
+        failed.append(f"{p}: could not patch error handler (pattern not found)")
+
+    if txt != original:
+        p.write_text(txt, encoding="utf-8")
+
+if failed:
+    raise SystemExit(
+        "ERROR: failed to patch wasm-bindgen-rayon workerHelpers:\n- " + "\n- ".join(failed)
+    )
+
+print(
+    f"Patched wasm-bindgen-rayon helpers: import={patched_import} (already {already_import}), "
+    f"error_handler={patched_error} (already {already_error})."
+)
 PY
 else
   wasm-pack build "${WASM_DIR}" \

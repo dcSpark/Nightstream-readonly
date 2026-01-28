@@ -89,7 +89,7 @@ rustup component add rust-src --toolchain nightly
 Serve it with COOP/COEP headers (required for `SharedArrayBuffer`):
 
 ```bash
-./demos/wasm-demo/serve.sh --threads
+./demos/wasm-demo/serve.sh
 ```
 
 Then open `http://127.0.0.1:8000`.
