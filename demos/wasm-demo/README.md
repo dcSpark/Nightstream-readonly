@@ -43,10 +43,16 @@ Proving/verifying runs in a Web Worker so the UI stays responsive while proofs a
 
 ## Quick start
 
-1) Build the wasm bundle (writes into `demos/wasm-demo/web/pkg/`):
+1) Build the wasm bundle (default: threads, writes into `demos/wasm-demo/web/pkg_threads/`):
 
 ```bash
 ./demos/wasm-demo/build_wasm.sh
+```
+
+To build a single-thread bundle (writes into `demos/wasm-demo/web/pkg/`):
+
+```bash
+./demos/wasm-demo/build_wasm.sh --no-threads
 ```
 
 2) Serve the static demo:
@@ -67,7 +73,7 @@ Threaded wasm requires:
 To build a threaded wasm bundle (atomics enabled) into `demos/wasm-demo/web/pkg_threads/`:
 
 ```bash
-./demos/wasm-demo/build_wasm.sh --threads
+./demos/wasm-demo/build_wasm.sh
 ```
 
 If this is your first time building threads, install the prerequisites:
@@ -101,7 +107,7 @@ To force a rebuild before serving:
 ```
 
 If the page shows a `404` for `pkg/neo_fold_demo.js`, the wasm bundle hasn’t been built yet.
-Run `./demos/wasm-demo/build_wasm.sh` (or re-run `serve.sh`, which now auto-builds when missing).
+Run `./demos/wasm-demo/build_wasm.sh --no-threads` (or re-run `serve.sh`, which now auto-builds when missing).
 
 ## Using a real circuit export
 
@@ -129,6 +135,7 @@ To enable it:
 After that, pushes to `main` (or manual `workflow_dispatch`) will publish the demo site.
 
 Note: GitHub Pages does not allow configuring COOP/COEP headers, so the `?threads=1` mode will not work there.
+The Pages workflow builds the single-thread wasm bundle (`./demos/wasm-demo/build_wasm.sh --no-threads`).
 
 ## Deploy (Cloudflare Workers)
 
@@ -144,8 +151,9 @@ npx wrangler@latest deploy
 ```
 
 `wrangler deploy` runs `./build_wasm.sh` (configured in `wrangler.toml`), so your deploy environment
-needs Rust (`wasm32-unknown-unknown`) + `wasm-pack`. You can also run `./demos/wasm-demo/build_wasm.sh`
-manually ahead of time.
+needs Rust (`wasm32-unknown-unknown`) + `wasm-pack`. By default this builds the threaded bundle,
+so you also need a nightly toolchain + `rust-src` (see above). You can also run
+`./demos/wasm-demo/build_wasm.sh` manually ahead of time.
 
 In the Cloudflare dashboard (Workers → Create → Import a repository), point the import at the
 `demos/wasm-demo` subdirectory so it finds `wrangler.toml`.
