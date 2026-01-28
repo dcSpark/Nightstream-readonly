@@ -36,7 +36,7 @@ if [[ "${FORCE_REFRESH}" == "1" ]]; then
   if [[ "${THREADS}" == "1" ]]; then
     "${DEMO_DIR}/build_wasm.sh" --threads
   else
-    "${DEMO_DIR}/build_wasm.sh"
+    "${DEMO_DIR}/build_wasm.sh" --no-threads
   fi
 else
   if [[ "${THREADS}" == "1" ]]; then
@@ -49,7 +49,7 @@ else
     if [[ ! -f "${DEMO_DIR}/web/pkg/neo_fold_demo.js" ]]; then
       echo "Missing demos/wasm-demo/web/pkg/neo_fold_demo.js"
       echo "Building wasm bundle..."
-      "${DEMO_DIR}/build_wasm.sh"
+      "${DEMO_DIR}/build_wasm.sh" --no-threads
     fi
   fi
 fi

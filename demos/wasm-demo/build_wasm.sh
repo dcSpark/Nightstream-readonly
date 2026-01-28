@@ -7,17 +7,19 @@ WEB_DIR="${DEMO_DIR}/web"
 
 usage() {
   cat <<'EOF'
-Usage: ./demos/wasm-demo/build_wasm.sh [--threads]
+Usage: ./demos/wasm-demo/build_wasm.sh [--no-threads]
 
 Options:
-  --threads  Build a wasm-threads (SharedArrayBuffer) bundle into demos/wasm-demo/web/pkg_threads/.
+  --no-threads  Build a single-thread wasm bundle into demos/wasm-demo/web/pkg/.
+  --threads     Build a wasm-threads (SharedArrayBuffer) bundle into demos/wasm-demo/web/pkg_threads/ (default).
 EOF
 }
 
-THREADS=0
+THREADS=1
 for arg in "$@"; do
   case "${arg}" in
     --threads) THREADS=1 ;;
+    --no-threads) THREADS=0 ;;
     -h|--help)
       usage
       exit 0

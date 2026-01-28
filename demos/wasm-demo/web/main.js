@@ -115,7 +115,7 @@ async function loadWasmModule() {
   } catch (e) {
     // Threads bundle might not be built. Fall back to single-thread.
     log("Threads supported, but failed to load threads bundle; falling back to single-thread.");
-    log(`Build threads bundle with: ./demos/wasm-demo/build_wasm.sh --threads`);
+    log("Build threads bundle with: ./demos/wasm-demo/build_wasm.sh");
     log(`Load error: ${String(e)}`);
     return { wasm: await import(WASM_SINGLE), bundle: "pkg" };
   }
@@ -410,7 +410,7 @@ async function main() {
   } catch (e) {
     log("Failed to load wasm bundle.");
     log(
-      `Did you run ./demos/wasm-demo/build_wasm.sh${preferThreads ? " --threads" : ""} ?`,
+      `Did you run ./demos/wasm-demo/build_wasm.sh${preferThreads ? "" : " --no-threads"} ?`,
     );
     log(String(e));
     console.error(e);
