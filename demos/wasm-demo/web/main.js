@@ -27,11 +27,37 @@ const threadsForcedOn = threadsParam === "1";
 const threadsForcedOff = threadsParam === "0";
 const nthreadsRequested = nthreadsParam ? Number.parseInt(nthreadsParam, 10) : null;
 
+// Minimal Wasm module that requires the threads proposal (shared memory + atomic instruction).
+// Generated from:
+// (module (memory 1 1 shared) (func i32.const 0 i32.atomic.load drop))
+const WASM_THREADS_VALIDATE_BYTES = new Uint8Array([
+  0, 97, 115, 109, 1, 0, 0, 0, 1, 4, 1, 96, 0, 0, 3, 2, 1, 0, 5, 4, 1, 3,
+  1, 1, 10, 11, 1, 9, 0, 65, 0, 254, 16, 2, 0, 26, 11,
+]);
+
 function supportsWasmThreadsRuntime() {
   if (typeof WebAssembly !== "object" || typeof WebAssembly.Memory !== "function") return false;
+  if (typeof WebAssembly.validate !== "function") return false;
   if (self.crossOriginIsolated !== true) return false;
   if (typeof SharedArrayBuffer !== "function") return false;
   if (typeof Atomics !== "object") return false;
+
+  // Firefox requires SABs to be transferable via MessageChannel for wasm threads.
+  // Safari/Chrome tolerate this check (it just throws if unsupported).
+  if (typeof MessageChannel !== "undefined") {
+    try {
+      new MessageChannel().port1.postMessage(new SharedArrayBuffer(1));
+    } catch {
+      return false;
+    }
+  }
+
+  try {
+    if (!WebAssembly.validate(WASM_THREADS_VALIDATE_BYTES)) return false;
+  } catch {
+    return false;
+  }
+
   try {
     const mem = new WebAssembly.Memory({ initial: 1, maximum: 1, shared: true });
     return mem.buffer instanceof SharedArrayBuffer;
@@ -48,6 +74,11 @@ const threadsHint =
 
 const WASM_SINGLE = "./pkg/neo_fold_demo.js";
 const WASM_THREADS = "./pkg_threads/neo_fold_demo.js";
+
+function defaultThreadCount() {
+  const hc = navigator.hardwareConcurrency ?? 4;
+  return Math.min(Math.max(1, hc), 4);
+}
 
 function setBadge(el, text, kind) {
   if (!el) return;
@@ -354,7 +385,7 @@ async function main() {
 
     if (threadsForcedOn && !supportsThreadsRuntime) {
       log("Threads requested (?threads=1) but not supported in this context.");
-      log("Need: crossOriginIsolated + SharedArrayBuffer (COOP/COEP headers).");
+      log("Need: crossOriginIsolated + SharedArrayBuffer + wasm threads support.");
       setBadge(statusThreadsEl, "Threads: requested but unavailable", "bad");
     } else if (threadsForcedOff) {
       setBadge(statusThreadsEl, "Threads: disabled (?threads=0)", "warn");
@@ -385,20 +416,17 @@ async function main() {
         log("ERROR: threads bundle loaded, but wasm-threads exports are missing.");
         setBadge(statusThreadsEl, "Threads: error (missing init_thread_pool)", "bad");
       } else if (!supportsThreadsRuntime) {
-        log("ERROR: threads bundle loaded, but SharedArrayBuffer is not available.");
-        setBadge(statusThreadsEl, "Threads: disabled (no SharedArrayBuffer)", "bad");
+        log("ERROR: threads bundle loaded, but wasm threads are not available.");
+        log("Need: crossOriginIsolated + SharedArrayBuffer + wasm threads support.");
+        setBadge(statusThreadsEl, "Threads: disabled (no wasm threads)", "bad");
       } else {
-        const hw = Math.max(1, navigator.hardwareConcurrency ?? 4);
-        const defaultThreads = Math.min(hw, 4);
+        const defaultThreads = defaultThreadCount();
         const n =
           typeof nthreadsRequested === "number" && Number.isFinite(nthreadsRequested) && nthreadsRequested > 0
             ? nthreadsRequested
             : defaultThreads;
         activeWasmThreads = n;
-        log(`Initializing wasm thread pool (${n} threads)...`);
-        setBadge(statusThreadsEl, `Threads: initializing (${n})…`, "warn");
-        await wasm.init_thread_pool(n);
-        log("Wasm thread pool ready.");
+        log(`Threads available; prover worker will use ${n} threads.`);
         setBadge(statusThreadsEl, `Threads: enabled (${n})`, "ok");
       }
     } else {
