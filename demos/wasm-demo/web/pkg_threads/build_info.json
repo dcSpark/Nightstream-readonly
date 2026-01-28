@@ -1,7 +1,7 @@
 {
-  "build_time_utc": "2026-01-28T18:53:08Z",
+  "build_time_utc": "2026-01-28T19:40:58Z",
   "bundle": "pkg_threads",
-  "git_commit": "b99090f5474c87dfc4578d4c8d8a6c45dd1a5f23",
-  "git_commit_short": "b99090f5474c",
+  "git_commit": "ab1a1c6b353f120f5b4de7736725ef8d54db9693",
+  "git_commit_short": "ab1a1c6b353f",
   "git_dirty": true
 }

@@ -22,8 +22,10 @@ let runInProgress = false;
 
 const urlParams = new URLSearchParams(window.location.search);
 const threadsParam = urlParams.get("threads"); // "1" | "0" | null
+const nthreadsParam = urlParams.get("nthreads"); // integer string | null
 const threadsForcedOn = threadsParam === "1";
 const threadsForcedOff = threadsParam === "0";
+const nthreadsRequested = nthreadsParam ? Number.parseInt(nthreadsParam, 10) : null;
 
 function supportsWasmThreadsRuntime() {
   if (typeof WebAssembly !== "object" || typeof WebAssembly.Memory !== "function") return false;
@@ -386,7 +388,12 @@ async function main() {
         log("ERROR: threads bundle loaded, but SharedArrayBuffer is not available.");
         setBadge(statusThreadsEl, "Threads: disabled (no SharedArrayBuffer)", "bad");
       } else {
-        const n = Math.max(1, navigator.hardwareConcurrency ?? 4);
+        const hw = Math.max(1, navigator.hardwareConcurrency ?? 4);
+        const defaultThreads = Math.min(hw, 4);
+        const n =
+          typeof nthreadsRequested === "number" && Number.isFinite(nthreadsRequested) && nthreadsRequested > 0
+            ? nthreadsRequested
+            : defaultThreads;
         activeWasmThreads = n;
         log(`Initializing wasm thread pool (${n} threads)...`);
         setBadge(statusThreadsEl, `Threads: initializing (${n})…`, "warn");

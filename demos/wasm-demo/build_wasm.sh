@@ -87,18 +87,27 @@ if [[ "${THREADS}" == "1" ]]; then
     -Z build-std=std,panic_abort \
     -Z build-std-features=panic_immediate_abort
 
-  # wasm-bindgen-rayon currently emits a Worker helper that does `import('../../..')`,
-  # which relies on bundler-style directory resolution. Patch it to import the actual
-  # JS entrypoint so it works when served as plain browser modules.
+  # wasm-bindgen-rayon has two modes:
+  # - "no-bundler" (preferred for this demo): emits workerHelpers.no-bundler.js (no patch needed)
+  # - default: emits workerHelpers.js which does `import('../../..')` and needs patching for plain web modules
   python3 - "${OUT_DIR}" "${OUT_NAME}" <<'PY'
 import sys
 from pathlib import Path
 
 out_dir = Path(sys.argv[1])
 out_name = sys.argv[2]
+paths_no_bundler = list(
+    out_dir.glob("snippets/wasm-bindgen-rayon-*/src/workerHelpers.no-bundler.js")
+)
+if paths_no_bundler:
+    print("Found wasm-bindgen-rayon no-bundler helper; no patch needed.")
+    raise SystemExit(0)
+
 paths = list(out_dir.glob("snippets/wasm-bindgen-rayon-*/src/workerHelpers.js"))
 if not paths:
-    raise SystemExit("ERROR: wasm-bindgen-rayon workerHelpers.js not found; cannot patch for web.")
+    raise SystemExit(
+        "ERROR: wasm-bindgen-rayon workerHelpers snippet not found; cannot patch for web."
+    )
 
 target = f"../../../{out_name}.js"
 patched = 0

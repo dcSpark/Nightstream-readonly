@@ -99,6 +99,7 @@ You can override:
 
 - Force single-thread: `?threads=0`
 - Force threads: `?threads=1`
+- Set thread count (optional): `?threads=1&nthreads=4`
 
 To force a rebuild before serving:
 

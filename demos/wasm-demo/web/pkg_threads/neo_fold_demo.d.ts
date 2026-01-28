@@ -104,6 +104,7 @@ export class wbg_rayon_PoolBuilder {
     free(): void;
     [Symbol.dispose](): void;
     build(): void;
+    mainJS(): string;
     numThreads(): number;
     receiver(): number;
 }
@@ -142,6 +143,7 @@ export interface InitOutput {
     readonly spartancompressedproof_vk_bytes_len: (a: number) => [number, number, number];
     readonly __wbg_wbg_rayon_poolbuilder_free: (a: number, b: number) => void;
     readonly wbg_rayon_poolbuilder_build: (a: number) => void;
+    readonly wbg_rayon_poolbuilder_mainJS: (a: number) => any;
     readonly wbg_rayon_poolbuilder_numThreads: (a: number) => number;
     readonly wbg_rayon_poolbuilder_receiver: (a: number) => number;
     readonly wbg_rayon_start_worker: (a: number) => void;
