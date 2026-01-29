@@ -1,6 +1,6 @@
-use neo_ccs::matrix::Mat;
 use neo_ccs::poly::{SparsePoly, Term};
 use neo_ccs::relations::CcsStructure;
+use neo_ccs::sparse::{CcsMatrix, CscMat};
 use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as F;
 
@@ -80,36 +80,38 @@ pub(super) fn build_identity_first_r1cs_ccs(
         ));
     }
 
-    let mut a_data = vec![F::ZERO; n * m];
-    let mut b_data = vec![F::ZERO; n * m];
-    let mut c_data = vec![F::ZERO; n * m];
+    // NOTE: This circuit can have very large `m`. Do not materialize dense `n×m` matrices:
+    // on wasm32 this can panic with "capacity overflow", and on native it is extremely slow.
+    let mut a_trips: Vec<(usize, usize, F)> = Vec::new();
+    let mut b_trips: Vec<(usize, usize, F)> = Vec::new();
+    let mut c_trips: Vec<(usize, usize, F)> = Vec::new();
 
     for (row, c) in constraints.iter().enumerate() {
         if c.negate_condition {
-            a_data[row * m + const_one_col] = F::ONE;
-            a_data[row * m + c.condition_col] += -F::ONE;
+            a_trips.push((row, const_one_col, F::ONE));
+            a_trips.push((row, c.condition_col, -F::ONE));
             for &col in &c.additional_condition_cols {
-                a_data[row * m + col] += -F::ONE;
+                a_trips.push((row, col, -F::ONE));
             }
         } else {
-            a_data[row * m + c.condition_col] += F::ONE;
+            a_trips.push((row, c.condition_col, F::ONE));
             for &col in &c.additional_condition_cols {
-                a_data[row * m + col] += F::ONE;
+                a_trips.push((row, col, F::ONE));
             }
         }
 
         for &(col, coeff) in &c.b_terms {
-            b_data[row * m + col] += coeff;
+            b_trips.push((row, col, coeff));
         }
         for &(col, coeff) in &c.c_terms {
-            c_data[row * m + col] += coeff;
+            c_trips.push((row, col, coeff));
         }
     }
 
-    let i_n = Mat::identity(n);
-    let a = Mat::from_row_major(n, m, a_data);
-    let b = Mat::from_row_major(n, m, b_data);
-    let c = Mat::from_row_major(n, m, c_data);
+    let i_n = CcsMatrix::Identity { n };
+    let a = CcsMatrix::Csc(CscMat::from_triplets(a_trips, n, m));
+    let b = CcsMatrix::Csc(CscMat::from_triplets(b_trips, n, m));
+    let c = CcsMatrix::Csc(CscMat::from_triplets(c_trips, n, m));
 
     let f = SparsePoly::new(
         4,
@@ -125,6 +127,7 @@ pub(super) fn build_identity_first_r1cs_ccs(
         ],
     );
 
-    CcsStructure::new(vec![i_n, a, b, c], f).map_err(|e| format!("RV32 B1 CCS: invalid structure: {e:?}"))
+    CcsStructure::new_sparse(vec![i_n, a, b, c], f)
+        .map_err(|e| format!("RV32 B1 CCS: invalid structure: {e:?}"))
 }
 

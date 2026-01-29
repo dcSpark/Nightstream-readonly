@@ -18,6 +18,10 @@ body {
   color: var(--text);
 }
 
+[hidden] {
+  display: none !important;
+}
+
 a {
   color: var(--accent);
   text-decoration: none;
@@ -265,6 +269,31 @@ pre {
   gap: var(--space-2);
 }
 
+/* RV32 input helpers */
+
+.riscv-input-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--space-2);
+  align-items: end;
+}
+
+.riscv-input-grid .select {
+  min-width: 0;
+}
+
+.mini-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mini-label {
+  font-size: 11px;
+  color: var(--muted-2);
+  letter-spacing: 0.02em;
+}
+
 .btn {
   appearance: none;
   border: 1px solid var(--border-subtle);
@@ -396,10 +425,28 @@ pre {
   font-size: var(--fs-body);
 }
 
+select.select {
+  cursor: pointer;
+}
+
+input.select {
+  cursor: text;
+}
+
 .select:hover {
   border-color: var(--border);
 }
 
+.select:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+}
+
+.select:disabled:hover {
+  border-color: var(--border-subtle);
+}
+
+.select:focus,
 .select:focus-visible {
   outline: none;
   box-shadow: var(--focus-ring);

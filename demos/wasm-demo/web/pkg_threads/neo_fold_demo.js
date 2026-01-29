@@ -284,23 +284,15 @@ export class SpartanCompressedProof {
         return ret[0] >>> 0;
     }
     /**
-     * Total bytes if you bundled `(vk, snark)` together.
+     * Size of the combined artifact (vk + snark), matching `SpartanProof::proof_data`.
+     *
+     * This is optional in the UI; when present it can be used to estimate vk size as
+     * `(vk+snark) - snark`.
      * @returns {number}
      */
     vk_and_snark_bytes_len() {
         const ret = wasm.spartancompressedproof_vk_and_snark_bytes_len(this.__wbg_ptr);
         return ret >>> 0;
-    }
-    /**
-     * Verifier key size (useful for understanding total proof package size).
-     * @returns {number}
-     */
-    vk_bytes_len() {
-        const ret = wasm.spartancompressedproof_vk_bytes_len(this.__wbg_ptr);
-        if (ret[2]) {
-            throw takeFromExternrefTable0(ret[1]);
-        }
-        return ret[0] >>> 0;
     }
 }
 if (Symbol.dispose) SpartanCompressedProof.prototype[Symbol.dispose] = SpartanCompressedProof.prototype.free;
@@ -325,6 +317,31 @@ export function init_panic_hook() {
 export function init_thread_pool(num_threads) {
     const ret = wasm.init_thread_pool(num_threads);
     return ret;
+}
+
+/**
+ * Prove+verify the RV32 Fibonacci program under the B1 shared-bus step circuit.
+ *
+ * Expected guest semantics:
+ * - reads `n` from RAM[0x104] (u32)
+ * - writes `fib(n)` to RAM[0x100] (u32)
+ * - halts via `ecall` (treated as `Halt` in this VM)
+ * @param {string} asm
+ * @param {number} n
+ * @param {number} ram_bytes
+ * @param {number} chunk_size
+ * @param {number} max_steps
+ * @param {boolean} do_spartan
+ * @returns {any}
+ */
+export function prove_verify_rv32_b1_fibonacci_asm(asm, n, ram_bytes, chunk_size, max_steps, do_spartan) {
+    const ptr0 = passStringToWasm0(asm, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+    const len0 = WASM_VECTOR_LEN;
+    const ret = wasm.prove_verify_rv32_b1_fibonacci_asm(ptr0, len0, n, ram_bytes, chunk_size, max_steps, do_spartan);
+    if (ret[2]) {
+        throw takeFromExternrefTable0(ret[1]);
+    }
+    return takeFromExternrefTable0(ret[0]);
 }
 
 /**
@@ -439,6 +456,9 @@ function __wbg_get_imports(memory) {
                 wasm.__wbindgen_free(deferred0_0, deferred0_1, 1);
             }
         },
+        __wbg_getRandomValues_ea728b1d79dae146: function() { return handleError(function (arg0) {
+            globalThis.crypto.getRandomValues(arg0);
+        }, arguments); },
         __wbg_instanceof_Window_ed49b2db8df90359: function(arg0) {
             let result;
             try {
@@ -447,6 +467,10 @@ function __wbg_get_imports(memory) {
                 result = false;
             }
             const ret = result;
+            return ret;
+        },
+        __wbg_length_32ed9a279acd054c: function(arg0) {
+            const ret = arg0.length;
             return ret;
         },
         __wbg_new_361308b2356cecd0: function() {
@@ -465,9 +489,16 @@ function __wbg_get_imports(memory) {
             const ret = new Function(getStringFromWasm0(arg0, arg1));
             return ret;
         },
+        __wbg_new_with_length_a2c39cbe88fd8ff1: function(arg0) {
+            const ret = new Uint8Array(arg0 >>> 0);
+            return ret;
+        },
         __wbg_now_a3af9a2f4bbaa4d1: function() {
             const ret = Date.now();
             return ret;
+        },
+        __wbg_prototypesetcall_bdcdcc5842e4d77d: function(arg0, arg1, arg2) {
+            Uint8Array.prototype.set.call(getArrayU8FromWasm0(arg0, arg1), arg2);
         },
         __wbg_set_3f1d0b984ed272ed: function(arg0, arg1, arg2) {
             arg0[arg1] = arg2;
@@ -506,6 +537,10 @@ function __wbg_get_imports(memory) {
             const ret = typeof window === 'undefined' ? null : window;
             return isLikeNone(ret) ? 0 : addToExternrefTable0(ret);
         },
+        __wbg_subarray_a96e1fef17ed23cb: function(arg0, arg1, arg2) {
+            const ret = arg0.subarray(arg1 >>> 0, arg2 >>> 0);
+            return ret;
+        },
         __wbindgen_cast_0000000000000001: function(arg0) {
             // Cast intrinsic for `F64 -> Externref`.
             const ret = arg0;
@@ -530,7 +565,7 @@ function __wbg_get_imports(memory) {
             table.set(offset + 2, true);
             table.set(offset + 3, false);
         },
-        memory: memory || new WebAssembly.Memory({initial:19,maximum:16384,shared:true}),
+        memory: memory || new WebAssembly.Memory({initial:21,maximum:16384,shared:true}),
     };
     return {
         __proto__: null,
