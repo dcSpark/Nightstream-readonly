@@ -7,8 +7,8 @@ use neo_ccs::relations::CcsStructure;
 use neo_ccs::{Mat, MeInstance};
 use neo_fold::shard::ShardProof as FoldRun;
 use neo_math::{D, F as NeoF, K as NeoK};
-use neo_reductions::PiCcsProof;
 use neo_reductions::optimized_engine::PiCcsProofVariant;
+use neo_reductions::PiCcsProof;
 use neo_spartan_bridge::circuit::witness::PiCcsChallenges;
 use neo_spartan_bridge::circuit::{FoldRunCircuit, FoldRunInstance, FoldRunWitness};
 use neo_spartan_bridge::CircuitF;
@@ -101,7 +101,6 @@ fn claimed_initial_sum_gadget_matches_paper_exact_for_tiny_instance() {
     let instance = FoldRunInstance {
         params_digest: [0u8; 32],
         ccs_digest: [0u8; 32],
-        mcs_digest: [0u8; 32],
         initial_accumulator: me_inputs.clone(),
         final_accumulator: Vec::new(),
         pi_ccs_challenges: vec![pi_ccs_challenges.clone()],
@@ -114,7 +113,6 @@ fn claimed_initial_sum_gadget_matches_paper_exact_for_tiny_instance() {
     };
     let witness = FoldRunWitness {
         fold_run,
-        pi_ccs_proofs: Vec::new(),
         witnesses: Vec::new(),
         rlc_rhos: Vec::new(),
         dec_children_z: Vec::new(),

@@ -105,17 +105,16 @@ impl FoldRunCircuit {
     /// Currently we expose a minimal set of public inputs:
     /// - Params digest
     /// - CCS digest
-    /// - MCS digest
     ///
     /// The full accumulator and Π-CCS challenges remain private witness data for now.
     fn allocate_public_inputs<CS: ConstraintSystem<CircuitF>>(&self, cs: &mut CS) -> Result<()> {
-        // Helper to expose a 32-byte digest as 4 field elements by chunking into u64.
+        // Helper to expose a 32-byte digest as 8 field elements by chunking into u32.
         let mut alloc_digest = |label: &str, digest: &[u8; 32]| -> Result<()> {
-            for (i, chunk) in digest.chunks(8).enumerate() {
-                let mut limb_bytes = [0u8; 8];
+            for (i, chunk) in digest.chunks(4).enumerate() {
+                let mut limb_bytes = [0u8; 4];
                 limb_bytes.copy_from_slice(chunk);
-                let limb_u64 = u64::from_le_bytes(limb_bytes);
-                let value = CircuitF::from(limb_u64);
+                let limb_u32 = u32::from_le_bytes(limb_bytes);
+                let value = CircuitF::from(limb_u32 as u64);
                 // Allocate as public input.
                 let _ = cs.alloc_input(|| format!("{}_limb_{}", label, i), || Ok(value))?;
             }
@@ -124,7 +123,6 @@ impl FoldRunCircuit {
 
         alloc_digest("params_digest", &self.instance.params_digest)?;
         alloc_digest("ccs_digest", &self.instance.ccs_digest)?;
-        alloc_digest("mcs_digest", &self.instance.mcs_digest)?;
 
         Ok(())
     }
@@ -137,8 +135,8 @@ impl FoldRunCircuit {
         step: &FoldStep,
         witness: &FoldRunWitness,
     ) -> Result<()> {
-        // Get the Π-CCS proof and challenges for this step
-        let pi_ccs_proof = &witness.pi_ccs_proofs[step_idx];
+        // Get the Π-CCS proof and challenges for this step.
+        let pi_ccs_proof = &step.ccs_proof;
         let challenges = &self.instance.pi_ccs_challenges[step_idx];
 
         if pi_ccs_proof.variant != neo_reductions::optimized_engine::PiCcsProofVariant::SplitNcV1 {
@@ -148,12 +146,77 @@ impl FoldRunCircuit {
             )));
         }
 
+        // Allocate all per-step challenges once so all sub-gadgets are forced to
+        // use the same variables (no duplicated allocations with unconstrained equality).
+        let mut alpha_vars = Vec::with_capacity(challenges.alpha.len());
+        for (i, &val) in challenges.alpha.iter().enumerate() {
+            alpha_vars.push(helpers::alloc_k_from_neo(
+                cs,
+                val,
+                &format!("step_{}_alpha_{}", step_idx, i),
+            )?);
+        }
+
+        let mut beta_a_vars = Vec::with_capacity(challenges.beta_a.len());
+        for (i, &val) in challenges.beta_a.iter().enumerate() {
+            beta_a_vars.push(helpers::alloc_k_from_neo(
+                cs,
+                val,
+                &format!("step_{}_beta_a_{}", step_idx, i),
+            )?);
+        }
+
+        let mut beta_r_vars = Vec::with_capacity(challenges.beta_r.len());
+        for (i, &val) in challenges.beta_r.iter().enumerate() {
+            beta_r_vars.push(helpers::alloc_k_from_neo(
+                cs,
+                val,
+                &format!("step_{}_beta_r_{}", step_idx, i),
+            )?);
+        }
+
+        let mut beta_m_vars = Vec::with_capacity(challenges.beta_m.len());
+        for (i, &val) in challenges.beta_m.iter().enumerate() {
+            beta_m_vars.push(helpers::alloc_k_from_neo(
+                cs,
+                val,
+                &format!("step_{}_beta_m_{}", step_idx, i),
+            )?);
+        }
+
+        let gamma_var = helpers::alloc_k_from_neo(cs, challenges.gamma, &format!("step_{}_gamma", step_idx))?;
+
+        let mut sumcheck_chal_vars = Vec::with_capacity(challenges.sumcheck_challenges.len());
+        for (i, &val) in challenges.sumcheck_challenges.iter().enumerate() {
+            sumcheck_chal_vars.push(helpers::alloc_k_from_neo(
+                cs,
+                val,
+                &format!("step_{}_sumcheck_chal_{}", step_idx, i),
+            )?);
+        }
+
+        let mut sumcheck_chal_nc_vars = Vec::with_capacity(challenges.sumcheck_challenges_nc.len());
+        for (i, &val) in challenges.sumcheck_challenges_nc.iter().enumerate() {
+            sumcheck_chal_nc_vars.push(helpers::alloc_k_from_neo(
+                cs,
+                val,
+                &format!("step_{}_sumcheck_nc_chal_{}", step_idx, i),
+            )?);
+        }
+
         // 1a. Bind the public claimed initial sum T from ME inputs and challenges.
-        let initial_sum_var = self.verify_initial_sum_binding(cs, step_idx, pi_ccs_proof, challenges, witness)?;
+        let initial_sum_var =
+            self.verify_initial_sum_binding(cs, step_idx, pi_ccs_proof, challenges, witness, &alpha_vars, &gamma_var)?;
 
         // 1b. Run sumcheck rounds algebra starting from T to obtain the final running sum.
-        let sumcheck_final_var =
-            self.verify_sumcheck_rounds(cs, step_idx, pi_ccs_proof, challenges, &initial_sum_var)?;
+        let sumcheck_final_var = self.verify_sumcheck_rounds(
+            cs,
+            step_idx,
+            pi_ccs_proof,
+            challenges,
+            &sumcheck_chal_vars,
+            &initial_sum_var,
+        )?;
 
         // Pre-allocate y-tables and y_zcol vectors for Π-CCS outputs once so they can be shared
         // between terminal-identity, NC, and RLC gadgets.
@@ -185,16 +248,18 @@ impl FoldRunCircuit {
             witness,
             &sumcheck_final_var,
             &ccs_out_y_vars,
+            &alpha_vars,
+            &beta_a_vars,
+            &beta_r_vars,
+            &gamma_var,
+            &sumcheck_chal_vars,
         )?;
 
         // 1d. Verify Π-CCS NC sumcheck + NC terminal identity (split-NC variant).
         let initial_sum_nc_var = helpers::k_zero(cs, &format!("step_{}_nc_initial_sum_zero", step_idx))?;
         if let Some(sc_initial_nc) = pi_ccs_proof.sc_initial_sum_nc {
-            let sc_initial_nc_var = helpers::alloc_k_from_neo(
-                cs,
-                sc_initial_nc,
-                &format!("step_{}_sc_initial_sum_nc", step_idx),
-            )?;
+            let sc_initial_nc_var =
+                helpers::alloc_k_from_neo(cs, sc_initial_nc, &format!("step_{}_sc_initial_sum_nc", step_idx))?;
             helpers::enforce_k_eq(
                 cs,
                 &sc_initial_nc_var,
@@ -202,8 +267,14 @@ impl FoldRunCircuit {
                 &format!("step_{}_nc_initial_sum_matches_zero", step_idx),
             );
         }
-        let sumcheck_final_nc_var =
-            self.verify_sumcheck_rounds_nc(cs, step_idx, pi_ccs_proof, challenges, &initial_sum_nc_var)?;
+        let sumcheck_final_nc_var = self.verify_sumcheck_rounds_nc(
+            cs,
+            step_idx,
+            pi_ccs_proof,
+            challenges,
+            &sumcheck_chal_nc_vars,
+            &initial_sum_nc_var,
+        )?;
         self.verify_terminal_identity_nc(
             cs,
             step_idx,
@@ -212,6 +283,10 @@ impl FoldRunCircuit {
             challenges,
             &sumcheck_final_nc_var,
             &ccs_out_y_zcol_vars,
+            &beta_a_vars,
+            &beta_m_vars,
+            &gamma_var,
+            &sumcheck_chal_nc_vars,
         )?;
 
         // 2. Verify RLC equalities
@@ -230,11 +305,14 @@ impl FoldRunCircuit {
         step_idx: usize,
         proof: &neo_reductions::PiCcsProof,
         challenges: &crate::circuit::witness::PiCcsChallenges,
+        sumcheck_challenges: &[KNumVar],
         initial_sum: &KNumVar,
     ) -> Result<KNumVar> {
         // Sanity: number of rounds in the proof must match the number of
         // advertised challenges for this step.
-        if proof.sumcheck_rounds.len() != challenges.sumcheck_challenges.len() {
+        if proof.sumcheck_rounds.len() != challenges.sumcheck_challenges.len()
+            || proof.sumcheck_rounds.len() != sumcheck_challenges.len()
+        {
             return Err(SpartanBridgeError::InvalidInput(format!(
                 "Sumcheck rounds/challenges length mismatch at step {}: rounds={}, challenges={}",
                 step_idx,
@@ -271,19 +349,14 @@ impl FoldRunCircuit {
             )
             .map_err(|e| SpartanBridgeError::from(e))?;
 
-            // Allocate challenge for this round
-            let challenge = helpers::alloc_k_from_neo(
-                cs,
-                challenges.sumcheck_challenges[round_idx],
-                &format!("step_{}_round_{}_challenge", step_idx, round_idx),
-            )?;
+            let challenge = &sumcheck_challenges[round_idx];
 
             // Compute next claimed sum = p(challenge) via gadget (returns KNumVar)
             let next_sum = sumcheck_eval_gadget(
                 cs,
                 &coeffs,
                 round_poly,
-                &challenge,
+                challenge,
                 challenges.sumcheck_challenges[round_idx],
                 self.delta,
                 &format!("step_{}_round_{}_eval", step_idx, round_idx),
@@ -318,9 +391,12 @@ impl FoldRunCircuit {
         step_idx: usize,
         proof: &neo_reductions::PiCcsProof,
         challenges: &crate::circuit::witness::PiCcsChallenges,
+        sumcheck_challenges_nc: &[KNumVar],
         initial_sum: &KNumVar,
     ) -> Result<KNumVar> {
-        if proof.sumcheck_rounds_nc.len() != challenges.sumcheck_challenges_nc.len() {
+        if proof.sumcheck_rounds_nc.len() != challenges.sumcheck_challenges_nc.len()
+            || proof.sumcheck_rounds_nc.len() != sumcheck_challenges_nc.len()
+        {
             return Err(SpartanBridgeError::InvalidInput(format!(
                 "NC sumcheck rounds/challenges length mismatch at step {}: rounds={}, challenges={}",
                 step_idx,
@@ -352,17 +428,13 @@ impl FoldRunCircuit {
             )
             .map_err(SpartanBridgeError::from)?;
 
-            let challenge = helpers::alloc_k_from_neo(
-                cs,
-                challenges.sumcheck_challenges_nc[round_idx],
-                &format!("step_{}_nc_round_{}_challenge", step_idx, round_idx),
-            )?;
+            let challenge = &sumcheck_challenges_nc[round_idx];
 
             let next_sum = sumcheck_eval_gadget(
                 cs,
                 &coeffs,
                 round_poly,
-                &challenge,
+                challenge,
                 challenges.sumcheck_challenges_nc[round_idx],
                 self.delta,
                 &format!("step_{}_nc_round_{}_eval", step_idx, round_idx),
@@ -372,11 +444,8 @@ impl FoldRunCircuit {
             claimed_sum = next_sum;
         }
 
-        let final_sum_expected = helpers::alloc_k_from_neo(
-            cs,
-            proof.sumcheck_final_nc,
-            &format!("step_{}_nc_final_sum", step_idx),
-        )?;
+        let final_sum_expected =
+            helpers::alloc_k_from_neo(cs, proof.sumcheck_final_nc, &format!("step_{}_nc_final_sum", step_idx))?;
         helpers::enforce_k_eq(
             cs,
             &claimed_sum,
@@ -396,21 +465,19 @@ impl FoldRunCircuit {
         proof: &neo_reductions::PiCcsProof,
         challenges: &crate::circuit::witness::PiCcsChallenges,
         witness: &FoldRunWitness,
+        alpha_vars: &[KNumVar],
+        gamma_var: &KNumVar,
     ) -> Result<KNumVar> {
-        // 1. Allocate α and γ challenges as in-circuit K variables so that
-        //    the initial sum T is derived inside the circuit from these
-        //    challenges and the ME inputs' y-vectors.
-
-        let mut alpha_vars = Vec::with_capacity(challenges.alpha.len());
-        for (i, &val) in challenges.alpha.iter().enumerate() {
-            alpha_vars.push(helpers::alloc_k_from_neo(
-                cs,
-                val,
-                &format!("step_{}_alpha_{}", step_idx, i),
-            )?);
+        // Sanity: the caller must provide exactly one allocation for each
+        // logical challenge.
+        if alpha_vars.len() != challenges.alpha.len() {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "alpha length mismatch at step {}: vars={}, values={}",
+                step_idx,
+                alpha_vars.len(),
+                challenges.alpha.len()
+            )));
         }
-
-        let gamma_var = helpers::alloc_k_from_neo(cs, challenges.gamma, &format!("step_{}_gamma", step_idx))?;
 
         // 2. Select ME inputs for this step (same choice as the native
         //    verifier): step 0 uses the public initial accumulator; later
@@ -437,9 +504,9 @@ impl FoldRunCircuit {
         let t_var = self.claimed_initial_sum_gadget(
             cs,
             step_idx,
-            &alpha_vars,
+            alpha_vars,
             &challenges.alpha,
-            &gamma_var,
+            gamma_var,
             challenges.gamma,
             &me_inputs_y_vars,
             &me_inputs_y_vals,
@@ -511,9 +578,7 @@ impl FoldRunCircuit {
         for rho in 0..d_sz {
             // Start with w = 1 in both the native and in-circuit representation.
             let mut w_val = NeoK::ONE;
-            let w_hint = KNum::<CircuitF>::from_neo_k(w_val);
-            let mut w_var = alloc_k(cs, Some(w_hint), &format!("step_{}_chi_alpha_{}_init", step_idx, rho))
-                .map_err(SpartanBridgeError::BellpepperError)?;
+            let mut w_var = helpers::k_one(cs, &format!("step_{}_chi_alpha_{}_init", step_idx, rho))?;
 
             for (bit, (a_var, &a_val)) in alpha_vars.iter().zip(alpha_vals.iter()).enumerate() {
                 let bit_is_one = ((rho >> bit) & 1) == 1;
@@ -533,13 +598,7 @@ impl FoldRunCircuit {
                     .map_err(SpartanBridgeError::BellpepperError)?;
 
                     // one_var with explicit K value 1.
-                    let one_hint = KNum::<CircuitF>::from_neo_k(NeoK::ONE);
-                    let one_var = alloc_k(
-                        cs,
-                        Some(one_hint),
-                        &format!("step_{}_chi_alpha_{}_bit{}_one", step_idx, rho, bit),
-                    )
-                    .map_err(SpartanBridgeError::BellpepperError)?;
+                    let one_var = helpers::k_one(cs, &format!("step_{}_chi_alpha_{}_bit{}_one", step_idx, rho, bit))?;
 
                     // sum = factor + α_bit with native hint, enforce sum == 1.
                     let sum_val = factor_val + a_val;
@@ -579,10 +638,21 @@ impl FoldRunCircuit {
             chi_alpha_vals.push(w_val);
         }
 
-        // γ^k_total (used in the weights)
+        // γ^k_total (used in the weights): computed in-circuit so it is bound to γ.
+        let mut gamma_to_k = helpers::k_one(cs, &format!("step_{}_T_gamma_to_k_init", step_idx))?;
         let mut gamma_to_k_val = NeoK::ONE;
-        for _ in 0..k_total {
-            gamma_to_k_val *= gamma_val;
+        for pow_idx in 0..k_total {
+            let (new_gamma_to_k, new_gamma_to_k_val) = helpers::k_mul_with_hint(
+                cs,
+                &gamma_to_k,
+                gamma_to_k_val,
+                gamma_var,
+                gamma_val,
+                self.delta,
+                &format!("step_{}_T_gamma_to_k_mul_{}", step_idx, pow_idx),
+            )?;
+            gamma_to_k = new_gamma_to_k;
+            gamma_to_k_val = new_gamma_to_k_val;
         }
 
         // Inner weighted sum over (j, i>=2).
@@ -598,11 +668,20 @@ impl FoldRunCircuit {
         for j in 0..t {
             // (γ^k_total)^j – shared across all i for this j, tracked natively and then lifted.
             let mut gamma_k_j_val = NeoK::ONE;
-            for _ in 0..j {
-                gamma_k_j_val *= gamma_to_k_val;
+            let mut gamma_k_j = helpers::k_one(cs, &format!("step_{}_T_gamma_k_j_init_j{}", step_idx, j))?;
+            for pow_idx in 0..j {
+                let (new_gamma_k_j, new_gamma_k_j_val) = helpers::k_mul_with_hint(
+                    cs,
+                    &gamma_k_j,
+                    gamma_k_j_val,
+                    &gamma_to_k,
+                    gamma_to_k_val,
+                    self.delta,
+                    &format!("step_{}_T_gamma_k_j_step_j{}_{}", step_idx, j, pow_idx),
+                )?;
+                gamma_k_j = new_gamma_k_j;
+                gamma_k_j_val = new_gamma_k_j_val;
             }
-            let gamma_k_j =
-                helpers::alloc_k_from_neo(cs, gamma_k_j_val, &format!("step_{}_T_gamma_k_j_j{}", step_idx, j))?;
 
             for (idx, (y_table_vars, y_table_vals)) in me_inputs_y_vars
                 .iter()
@@ -692,11 +771,9 @@ impl FoldRunCircuit {
         }
 
         // T = γ^{k_total} * inner, matching the native `claimed_initial_sum_from_inputs`.
-        let gamma_k_var = helpers::alloc_k_from_neo(cs, gamma_to_k_val, &format!("step_{}_T_gamma_to_k", step_idx))?;
-
         let (t_var, _t_val) = helpers::k_mul_with_hint(
             cs,
-            &gamma_k_var,
+            &gamma_to_k,
             gamma_to_k_val,
             &inner,
             inner_val,
@@ -994,7 +1071,6 @@ impl FoldRunCircuit {
         let mut acc_native = NeoK::ONE;
 
         let b = self.base_b as i32;
-        let minus_one = CircuitF::from(0u64) - CircuitF::from(1u64);
 
         for t in (-(b - 1))..=(b - 1) {
             let abs = t.abs() as u64;
@@ -1014,20 +1090,22 @@ impl FoldRunCircuit {
                 &format!("step_{}_{}_val_minus_t_{}", step_idx, label, t),
             )?;
 
-            // Enforce diff = val - t limb-wise in K.
-            let t_var = helpers::alloc_k_from_neo(cs, t_native, &format!("step_{}_{}_t_{}", step_idx, label, t))?;
+            // Enforce diff = val - t limb-wise in K (t is a constant).
+            let t_hint = KNum::<CircuitF>::from_neo_k(t_native);
+            let minus_t_c0 = CircuitF::from(0u64) - t_hint.c0;
+            let minus_t_c1 = CircuitF::from(0u64) - t_hint.c1;
 
             // c0: diff.c0 = val.c0 - t.c0
             cs.enforce(
                 || format!("step_{}_{}_range_diff_t{}_c0", step_idx, label, t),
-                |lc| lc + val.c0 + (minus_one, t_var.c0),
+                |lc| lc + val.c0 + (minus_t_c0, CS::one()),
                 |lc| lc + CS::one(),
                 |lc| lc + diff_var.c0,
             );
             // c1: diff.c1 = val.c1 - t.c1
             cs.enforce(
                 || format!("step_{}_{}_range_diff_t{}_c1", step_idx, label, t),
-                |lc| lc + val.c1 + (minus_one, t_var.c1),
+                |lc| lc + val.c1 + (minus_t_c1, CS::one()),
                 |lc| lc + CS::one(),
                 |lc| lc + diff_var.c1,
             );
@@ -1176,6 +1254,11 @@ impl FoldRunCircuit {
         witness: &FoldRunWitness,
         sumcheck_final: &KNumVar,
         out_y_vars: &[Vec<Vec<KNumVar>>],
+        alpha_vars: &[KNumVar],
+        beta_a_vars: &[KNumVar],
+        beta_r_vars: &[KNumVar],
+        gamma_var: &KNumVar,
+        sumcheck_challenges: &[KNumVar],
     ) -> Result<()> {
         use neo_math::K as NeoK;
 
@@ -1195,97 +1278,55 @@ impl FoldRunCircuit {
             )));
         }
 
-        // Allocate α' and r' (used to tie them to sumcheck challenges).
-        let mut alpha_prime_vars = Vec::with_capacity(challenges.alpha_prime.len());
-        for (i, &k) in challenges.alpha_prime.iter().enumerate() {
-            alpha_prime_vars.push(helpers::alloc_k_from_neo(
-                cs,
-                k,
-                &format!("step_{}_alpha_prime_{}", step_idx, i),
-            )?);
-        }
-
-        let mut r_prime_vars = Vec::with_capacity(challenges.r_prime.len());
-        for (i, &k) in challenges.r_prime.iter().enumerate() {
-            r_prime_vars.push(helpers::alloc_k_from_neo(
-                cs,
-                k,
-                &format!("step_{}_r_prime_{}", step_idx, i),
-            )?);
-        }
-
-        // Enforce that (r_prime, alpha_prime) is exactly the split of the
-        // per-round sumcheck challenges vector.
-        let total_chals = challenges.sumcheck_challenges.len();
-        let rows = r_prime_vars.len();
-        let ajtai = alpha_prime_vars.len();
-        if total_chals != rows + ajtai {
+        // Split the per-round sumcheck challenges into the views used by Π-CCS:
+        // r' is the row-domain prefix and α' is the Ajtai-domain suffix.
+        if sumcheck_challenges.len() != challenges.sumcheck_challenges.len() {
             return Err(SpartanBridgeError::InvalidInput(format!(
-                "sumcheck_challenges length mismatch at step {}: expected {} (rows + ajtai), got {}",
+                "sumcheck_challenges length mismatch at step {}: vars={}, values={}",
                 step_idx,
-                rows + ajtai,
-                total_chals
+                sumcheck_challenges.len(),
+                challenges.sumcheck_challenges.len()
             )));
         }
-        // r' == prefix of sumcheck_challenges
-        for i in 0..rows {
-            let sc_val = helpers::alloc_k_from_neo(
-                cs,
-                challenges.sumcheck_challenges[i],
-                &format!("step_{}_sc_round_chal_row_{}", step_idx, i),
-            )?;
-            helpers::enforce_k_eq(
-                cs,
-                &r_prime_vars[i],
-                &sc_val,
-                &format!("step_{}_r_prime_matches_sc_{}", step_idx, i),
-            );
+        let rows = challenges.r_prime.len();
+        let ajtai = challenges.alpha_prime.len();
+        if sumcheck_challenges.len() != rows + ajtai {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "sumcheck_challenges split mismatch at step {}: expected {} (rows + ajtai), got {}",
+                step_idx,
+                rows + ajtai,
+                sumcheck_challenges.len()
+            )));
         }
-        // α' == suffix of sumcheck_challenges
-        for j in 0..ajtai {
-            let idx = rows + j;
-            let sc_val = helpers::alloc_k_from_neo(
-                cs,
-                challenges.sumcheck_challenges[idx],
-                &format!("step_{}_sc_round_chal_ajtai_{}", step_idx, j),
-            )?;
-            helpers::enforce_k_eq(
-                cs,
-                &alpha_prime_vars[j],
-                &sc_val,
-                &format!("step_{}_alpha_prime_matches_sc_{}", step_idx, j),
-            );
-        }
+        let (r_prime_vars, alpha_prime_vars) = sumcheck_challenges.split_at(rows);
 
         // --- Scalar equality polynomials eq((α',r'),β) and eq((α',r'),(α,r)) ---
         //
         // Computed in-circuit over K using eq_points, with native K values only
         // used as hints for k_mul_with_hint.
-
-        // Allocate β_a and β_r as K variables.
-        let mut beta_a_vars = Vec::with_capacity(challenges.beta_a.len());
-        for (i, &k) in challenges.beta_a.iter().enumerate() {
-            beta_a_vars.push(helpers::alloc_k_from_neo(
-                cs,
-                k,
-                &format!("step_{}_beta_a_{}", step_idx, i),
-            )?);
+        if beta_a_vars.len() != challenges.beta_a.len() {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "beta_a length mismatch at step {}: vars={}, values={}",
+                step_idx,
+                beta_a_vars.len(),
+                challenges.beta_a.len()
+            )));
         }
-        let mut beta_r_vars = Vec::with_capacity(challenges.beta_r.len());
-        for (i, &k) in challenges.beta_r.iter().enumerate() {
-            beta_r_vars.push(helpers::alloc_k_from_neo(
-                cs,
-                k,
-                &format!("step_{}_beta_r_{}", step_idx, i),
-            )?);
+        if beta_r_vars.len() != challenges.beta_r.len() {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "beta_r length mismatch at step {}: vars={}, values={}",
+                step_idx,
+                beta_r_vars.len(),
+                challenges.beta_r.len()
+            )));
         }
 
         // eq((α',r'), β) = eq(α', β_a) * eq(r', β_r) in K.
         let (eq_alpha_prime_beta_a, eq_alpha_prime_beta_a_native) = self.eq_points(
             cs,
             step_idx,
-            &alpha_prime_vars,
-            &beta_a_vars,
+            alpha_prime_vars,
+            beta_a_vars,
             &challenges.alpha_prime,
             &challenges.beta_a,
             "eq_alpha_prime_beta_a",
@@ -1294,8 +1335,8 @@ impl FoldRunCircuit {
         let (eq_r_prime_beta_r, eq_r_prime_beta_r_native) = self.eq_points(
             cs,
             step_idx,
-            &r_prime_vars,
-            &beta_r_vars,
+            r_prime_vars,
+            beta_r_vars,
             &challenges.r_prime,
             &challenges.beta_r,
             "eq_r_prime_beta_r",
@@ -1313,15 +1354,13 @@ impl FoldRunCircuit {
 
         // eq((α',r'),(α,r)) if we have ME inputs; else 0 (Eval' block vanishes).
         let (eq_aprp_ar, eq_aprp_ar_native) = if let Some(first_input) = me_inputs.first() {
-            // Allocate α as K variables (fresh vars; labels disambiguated from
-            // the α used in the initial-sum gadget).
-            let mut alpha_vars = Vec::with_capacity(challenges.alpha.len());
-            for (i, &k) in challenges.alpha.iter().enumerate() {
-                alpha_vars.push(helpers::alloc_k_from_neo(
-                    cs,
-                    k,
-                    &format!("step_{}_alpha_eq_{}", step_idx, i),
-                )?);
+            if alpha_vars.len() != challenges.alpha.len() {
+                return Err(SpartanBridgeError::InvalidInput(format!(
+                    "alpha length mismatch at step {}: vars={}, values={}",
+                    step_idx,
+                    alpha_vars.len(),
+                    challenges.alpha.len()
+                )));
             }
 
             // Allocate r (from the first ME input) as K variables.
@@ -1333,8 +1372,8 @@ impl FoldRunCircuit {
             let (eq_alpha_prime_alpha, eq_alpha_prime_alpha_native) = self.eq_points(
                 cs,
                 step_idx,
-                &alpha_prime_vars,
-                &alpha_vars,
+                alpha_prime_vars,
+                alpha_vars,
                 &challenges.alpha_prime,
                 &challenges.alpha,
                 "eq_alpha_prime_alpha",
@@ -1343,7 +1382,7 @@ impl FoldRunCircuit {
             let (eq_r_prime_r, eq_r_prime_r_native) = self.eq_points(
                 cs,
                 step_idx,
-                &r_prime_vars,
+                r_prime_vars,
                 &r_vars,
                 &challenges.r_prime,
                 &first_input.r,
@@ -1366,19 +1405,24 @@ impl FoldRunCircuit {
             (zero_var, NeoK::ZERO)
         };
 
-        // --- Allocate γ and precompute γ^k_total in K ---
+        // --- γ and γ^k_total ---
         let gamma_val = challenges.gamma;
-        let gamma_var = helpers::alloc_k_from_neo(cs, gamma_val, &format!("step_{}_gamma_terminal", step_idx))?;
-
         let k_total = out_me.len();
-        // Compute γ^k_total natively and lift as a single K constant, to avoid
-        // introducing additional K-multiplication constraints here.
+        let mut gamma_k_total = helpers::k_one(cs, &format!("step_{}_gamma_k_total_init", step_idx))?;
         let mut gamma_k_total_val = neo_math::K::ONE;
-        for _ in 0..k_total {
-            gamma_k_total_val *= gamma_val;
+        for pow_idx in 0..k_total {
+            let (new_gk, new_gk_val) = helpers::k_mul_with_hint(
+                cs,
+                &gamma_k_total,
+                gamma_k_total_val,
+                gamma_var,
+                gamma_val,
+                self.delta,
+                &format!("step_{}_gamma_k_total_mul_{}", step_idx, pow_idx),
+            )?;
+            gamma_k_total = new_gk;
+            gamma_k_total_val = new_gk_val;
         }
-        let gamma_k_total =
-            helpers::alloc_k_from_neo(cs, gamma_k_total_val, &format!("step_{}_gamma_k_total", step_idx))?;
 
         // --- F' from first output's y'[i=1] in-circuit ---
         //
@@ -1438,13 +1482,7 @@ impl FoldRunCircuit {
         let mut chi_alpha_prime_vals: Vec<NeoK> = Vec::with_capacity(d_sz);
         for rho in 0..d_sz {
             let mut w_val = NeoK::ONE;
-            let w_hint = KNum::<CircuitF>::from_neo_k(w_val);
-            let mut w_var = alloc_k(
-                cs,
-                Some(w_hint),
-                &format!("step_{}_chi_alpha_prime_{}_init", step_idx, rho),
-            )
-            .map_err(SpartanBridgeError::BellpepperError)?;
+            let mut w_var = helpers::k_one(cs, &format!("step_{}_chi_alpha_prime_{}_init", step_idx, rho))?;
 
             for (bit, (a_var, &a_val)) in alpha_prime_vars
                 .iter()
@@ -1466,14 +1504,8 @@ impl FoldRunCircuit {
                     )
                     .map_err(SpartanBridgeError::BellpepperError)?;
 
-                    // one_var with explicit K value 1.
-                    let one_hint = KNum::<CircuitF>::from_neo_k(NeoK::ONE);
-                    let one_var = alloc_k(
-                        cs,
-                        Some(one_hint),
-                        &format!("step_{}_chi_alpha_prime_{}_bit{}_one", step_idx, rho, bit),
-                    )
-                    .map_err(SpartanBridgeError::BellpepperError)?;
+                    let one_var =
+                        helpers::k_one(cs, &format!("step_{}_chi_alpha_prime_{}_bit{}_one", step_idx, rho, bit))?;
 
                     // sum = factor + α'_bit with native hint, enforce sum == 1.
                     let sum_val = factor_val + a_val;
@@ -1587,7 +1619,7 @@ impl FoldRunCircuit {
                             cs,
                             &gamma_i,
                             gamma_i_val,
-                            &gamma_var,
+                            gamma_var,
                             gamma_val,
                             self.delta,
                             &format!("step_{}_Eval_gamma_i_step_j{}_i{}_{}", step_idx, j, i_abs, pow_idx),
@@ -1698,6 +1730,10 @@ impl FoldRunCircuit {
         challenges: &crate::circuit::witness::PiCcsChallenges,
         sumcheck_final_nc: &KNumVar,
         out_y_zcol_vars: &[Vec<KNumVar>],
+        beta_a_vars: &[KNumVar],
+        beta_m_vars: &[KNumVar],
+        gamma_var: &KNumVar,
+        sumcheck_challenges_nc: &[KNumVar],
     ) -> Result<()> {
         use neo_math::K as NeoK;
 
@@ -1717,89 +1753,50 @@ impl FoldRunCircuit {
             )));
         }
 
-        // Allocate α'_nc and s_col' and bind them to the split of sumcheck_challenges_nc.
-        let mut alpha_prime_vars = Vec::with_capacity(challenges.alpha_prime_nc.len());
-        for (i, &k) in challenges.alpha_prime_nc.iter().enumerate() {
-            alpha_prime_vars.push(helpers::alloc_k_from_neo(
-                cs,
-                k,
-                &format!("step_{}_alpha_prime_nc_{}", step_idx, i),
-            )?);
-        }
-
-        let mut s_col_prime_vars = Vec::with_capacity(challenges.s_col_prime.len());
-        for (i, &k) in challenges.s_col_prime.iter().enumerate() {
-            s_col_prime_vars.push(helpers::alloc_k_from_neo(
-                cs,
-                k,
-                &format!("step_{}_s_col_prime_{}", step_idx, i),
-            )?);
-        }
-
-        let total_chals = challenges.sumcheck_challenges_nc.len();
-        let cols = s_col_prime_vars.len();
-        let ajtai = alpha_prime_vars.len();
-        if total_chals != cols + ajtai {
+        // Split the NC sumcheck challenges into the views used by Π-CCS (SplitNcV1):
+        // s_col' is the column-domain prefix and α'_nc is the Ajtai-domain suffix.
+        if sumcheck_challenges_nc.len() != challenges.sumcheck_challenges_nc.len() {
             return Err(SpartanBridgeError::InvalidInput(format!(
-                "sumcheck_challenges_nc length mismatch at step {}: expected {} (cols + ajtai), got {}",
+                "sumcheck_challenges_nc length mismatch at step {}: vars={}, values={}",
                 step_idx,
-                cols + ajtai,
-                total_chals
+                sumcheck_challenges_nc.len(),
+                challenges.sumcheck_challenges_nc.len()
             )));
         }
-        // s_col' == prefix
-        for i in 0..cols {
-            let sc_val = helpers::alloc_k_from_neo(
-                cs,
-                challenges.sumcheck_challenges_nc[i],
-                &format!("step_{}_sc_nc_round_chal_col_{}", step_idx, i),
-            )?;
-            helpers::enforce_k_eq(
-                cs,
-                &s_col_prime_vars[i],
-                &sc_val,
-                &format!("step_{}_s_col_prime_matches_sc_nc_{}", step_idx, i),
-            );
+        let cols = challenges.s_col_prime.len();
+        let ajtai = challenges.alpha_prime_nc.len();
+        if sumcheck_challenges_nc.len() != cols + ajtai {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "sumcheck_challenges_nc split mismatch at step {}: expected {} (cols + ajtai), got {}",
+                step_idx,
+                cols + ajtai,
+                sumcheck_challenges_nc.len()
+            )));
         }
-        // α'_nc == suffix
-        for j in 0..ajtai {
-            let idx = cols + j;
-            let sc_val = helpers::alloc_k_from_neo(
-                cs,
-                challenges.sumcheck_challenges_nc[idx],
-                &format!("step_{}_sc_nc_round_chal_ajtai_{}", step_idx, j),
-            )?;
-            helpers::enforce_k_eq(
-                cs,
-                &alpha_prime_vars[j],
-                &sc_val,
-                &format!("step_{}_alpha_prime_nc_matches_sc_nc_{}", step_idx, j),
-            );
-        }
+        let (s_col_prime_vars, alpha_prime_vars) = sumcheck_challenges_nc.split_at(cols);
 
-        // Allocate β_a and β_m.
-        let mut beta_a_vars = Vec::with_capacity(challenges.beta_a.len());
-        for (i, &k) in challenges.beta_a.iter().enumerate() {
-            beta_a_vars.push(helpers::alloc_k_from_neo(
-                cs,
-                k,
-                &format!("step_{}_beta_a_nc_{}", step_idx, i),
-            )?);
+        if beta_a_vars.len() != challenges.beta_a.len() {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "beta_a length mismatch at step {}: vars={}, values={}",
+                step_idx,
+                beta_a_vars.len(),
+                challenges.beta_a.len()
+            )));
         }
-        let mut beta_m_vars = Vec::with_capacity(challenges.beta_m.len());
-        for (i, &k) in challenges.beta_m.iter().enumerate() {
-            beta_m_vars.push(helpers::alloc_k_from_neo(
-                cs,
-                k,
-                &format!("step_{}_beta_m_{}", step_idx, i),
-            )?);
+        if beta_m_vars.len() != challenges.beta_m.len() {
+            return Err(SpartanBridgeError::InvalidInput(format!(
+                "beta_m length mismatch at step {}: vars={}, values={}",
+                step_idx,
+                beta_m_vars.len(),
+                challenges.beta_m.len()
+            )));
         }
 
         let (eq_alpha_prime_beta_a, eq_alpha_prime_beta_a_native) = self.eq_points(
             cs,
             step_idx,
-            &alpha_prime_vars,
-            &beta_a_vars,
+            alpha_prime_vars,
+            beta_a_vars,
             &challenges.alpha_prime_nc,
             &challenges.beta_a,
             "eq_alpha_prime_nc_beta_a",
@@ -1808,8 +1805,8 @@ impl FoldRunCircuit {
         let (eq_s_col_beta_m, eq_s_col_beta_m_native) = self.eq_points(
             cs,
             step_idx,
-            &s_col_prime_vars,
-            &beta_m_vars,
+            s_col_prime_vars,
+            beta_m_vars,
             &challenges.s_col_prime,
             &challenges.beta_m,
             "eq_s_col_beta_m",
@@ -1831,13 +1828,7 @@ impl FoldRunCircuit {
         let mut chi_alpha_prime_vals: Vec<NeoK> = Vec::with_capacity(d_sz);
         for rho in 0..d_sz {
             let mut w_val = NeoK::ONE;
-            let w_hint = KNum::<CircuitF>::from_neo_k(w_val);
-            let mut w_var = alloc_k(
-                cs,
-                Some(w_hint),
-                &format!("step_{}_chi_alpha_prime_nc_{}_init", step_idx, rho),
-            )
-            .map_err(SpartanBridgeError::BellpepperError)?;
+            let mut w_var = helpers::k_one(cs, &format!("step_{}_chi_alpha_prime_nc_{}_init", step_idx, rho))?;
 
             for (bit, (a_var, &a_val)) in alpha_prime_vars
                 .iter()
@@ -1857,13 +1848,10 @@ impl FoldRunCircuit {
                     )
                     .map_err(SpartanBridgeError::BellpepperError)?;
 
-                    let one_hint = KNum::<CircuitF>::from_neo_k(NeoK::ONE);
-                    let one_var = alloc_k(
+                    let one_var = helpers::k_one(
                         cs,
-                        Some(one_hint),
                         &format!("step_{}_chi_alpha_prime_nc_{}_bit{}_one", step_idx, rho, bit),
-                    )
-                    .map_err(SpartanBridgeError::BellpepperError)?;
+                    )?;
 
                     let sum_val = factor_val + a_val;
                     let sum_hint = KNum::<CircuitF>::from_neo_k(sum_val);
@@ -1926,12 +1914,11 @@ impl FoldRunCircuit {
 
         // Σ γ^i · N_i over outputs, where N_i = range_product(⟨y_zcol_i, χ_{α'_nc}⟩).
         let gamma_val = challenges.gamma;
-        let gamma_var = helpers::alloc_k_from_neo(cs, gamma_val, &format!("step_{}_gamma_nc", step_idx))?;
 
         let mut nc_sum = helpers::k_zero(cs, &format!("step_{}_nc_sum_init", step_idx))?;
         let mut nc_sum_native = NeoK::ZERO;
 
-        let mut g = gamma_var.clone();
+        let mut g = (*gamma_var).clone();
         let mut g_native = gamma_val;
         for (i_idx, out) in out_me.iter().enumerate() {
             let y = &out_y_zcol_vars[i_idx];
@@ -1968,8 +1955,13 @@ impl FoldRunCircuit {
                 .map_err(SpartanBridgeError::BellpepperError)?;
             }
 
-            let (Ni, Ni_native) =
-                self.range_product(cs, step_idx, &y_eval, y_eval_val, &format!("step_{}_nc_range_i{}", step_idx, i_idx))?;
+            let (Ni, Ni_native) = self.range_product(
+                cs,
+                step_idx,
+                &y_eval,
+                y_eval_val,
+                &format!("step_{}_nc_range_i{}", step_idx, i_idx),
+            )?;
 
             let (gNi, gNi_native) = helpers::k_mul_with_hint(
                 cs,
@@ -1996,7 +1988,7 @@ impl FoldRunCircuit {
                 cs,
                 &g,
                 g_native,
-                &gamma_var,
+                gamma_var,
                 gamma_val,
                 self.delta,
                 &format!("step_{}_nc_gamma_step_i{}", step_idx, i_idx),
@@ -2784,21 +2776,20 @@ impl FoldRunCircuit {
 /// circuit as an R1CS provider.
 impl SpartanCircuitTrait<GoldilocksP3MerkleMleEngine> for FoldRunCircuit {
     fn public_values(&self) -> std::result::Result<Vec<CircuitF>, SynthesisError> {
-        // Must mirror `allocate_public_inputs`: expose params/CCS/MCS digests as
-        // 4 little-endian u64 limbs each, in that order.
+        // Must mirror `allocate_public_inputs`: expose params/CCS digests as
+        // 8 little-endian u32 limbs each, in that order.
         fn append_digest(out: &mut Vec<CircuitF>, digest: &[u8; 32]) {
-            for chunk in digest.chunks(8) {
-                let mut limb_bytes = [0u8; 8];
+            for chunk in digest.chunks(4) {
+                let mut limb_bytes = [0u8; 4];
                 limb_bytes.copy_from_slice(chunk);
-                let limb_u64 = u64::from_le_bytes(limb_bytes);
-                out.push(CircuitF::from(limb_u64));
+                let limb_u32 = u32::from_le_bytes(limb_bytes);
+                out.push(CircuitF::from(limb_u32 as u64));
             }
         }
 
-        let mut vals = Vec::with_capacity(12);
+        let mut vals = Vec::with_capacity(16);
         append_digest(&mut vals, &self.instance.params_digest);
         append_digest(&mut vals, &self.instance.ccs_digest);
-        append_digest(&mut vals, &self.instance.mcs_digest);
         Ok(vals)
     }
 

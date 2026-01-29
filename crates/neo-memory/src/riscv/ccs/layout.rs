@@ -2,7 +2,7 @@ use std::collections::HashMap;
 
 use crate::cpu::bus_layout::{build_bus_layout_for_instances, BusLayout};
 use crate::plain::PlainMemLayout;
-use crate::riscv::lookups::{RAM_ID, PROG_ID};
+use crate::riscv::lookups::{PROG_ID, RAM_ID};
 
 use super::config::{derive_mem_ids_and_ell_addrs, derive_shout_ids_and_ell_addrs};
 
@@ -15,7 +15,7 @@ pub struct Rv32B1Layout {
     pub const_one: usize,
     // Public I/O (single values per chunk).
     pub pc0: usize,
-    pub regs0_start: usize,      // 32 cols
+    pub regs0_start: usize, // 32 cols
     pub pc_final: usize,
     pub regs_final_start: usize, // 32 cols
     pub halted_in: usize,
@@ -143,15 +143,15 @@ pub struct Rv32B1Layout {
     // MUL* helpers: rs1_val * rs2_val = mul_lo + 2^32 * mul_hi
     pub mul_lo: usize,
     pub mul_hi: usize,
-    pub mul_lo_bits_start: usize, // 32
-    pub mul_hi_bits_start: usize, // 32
+    pub mul_lo_bits_start: usize,   // 32
+    pub mul_hi_bits_start: usize,   // 32
     pub mul_hi_prefix_start: usize, // 31
     pub mul_carry: usize,
     pub mul_carry_bits_start: usize, // 2
 
     // Signed helpers: rs1/rs2 bits + absolute values.
-    pub rs1_bits_start: usize, // 32
-    pub rs2_bits_start: usize, // 32
+    pub rs1_bits_start: usize,        // 32
+    pub rs2_bits_start: usize,        // 32
     pub rs2_zero_prefix_start: usize, // 31
     pub rs1_abs: usize,
     pub rs2_abs: usize,
@@ -183,7 +183,7 @@ pub struct Rv32B1Layout {
     pub div_rem_check: usize,
     pub div_rem_check_signed: usize,
     // ECALL helpers (Jolt marker/print IDs).
-    pub ecall_a0_bits_start: usize, // 32
+    pub ecall_a0_bits_start: usize,      // 32
     pub ecall_cycle_prefix_start: usize, // 31
     pub ecall_is_cycle: usize,
     pub ecall_print_prefix_start: usize, // 31

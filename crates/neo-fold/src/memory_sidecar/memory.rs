@@ -647,7 +647,10 @@ pub(crate) fn prove_shout_addr_pre_time(
                 pow2_cycle,
             )?;
 
-            let has_any_lookup = has_lookup.entries().iter().any(|&(_t, gate)| gate != K::ZERO);
+            let has_any_lookup = has_lookup
+                .entries()
+                .iter()
+                .any(|&(_t, gate)| gate != K::ZERO);
 
             if has_any_lookup {
                 let (addr_oracle, lane_sum): (Box<dyn RoundOracle>, K) = match &lut_inst.table_spec {
@@ -830,7 +833,12 @@ pub fn verify_shout_addr_pre_time(
 
     let labels_all: Vec<&'static [u8]> = vec![b"shout/addr_pre".as_slice(); total_lanes];
     tr.append_message(b"shout/addr_pre_time/step_idx", &(step_idx as u64).to_le_bytes());
-    bind_batched_claim_sums(tr, b"shout/addr_pre_time/claimed_sums", &proof.claimed_sums, &labels_all);
+    bind_batched_claim_sums(
+        tr,
+        b"shout/addr_pre_time/claimed_sums",
+        &proof.claimed_sums,
+        &labels_all,
+    );
 
     let (r_addr, finals) = if active_count == 0 {
         // No Shout lookups: match prover's deterministic fallback `r_addr` sampling.
@@ -889,7 +897,11 @@ pub fn verify_shout_addr_pre_time(
     };
 
     let mut active_pos = 0usize;
-    let mut next_active = proof.active_lanes.get(active_pos).copied().unwrap_or(u32::MAX);
+    let mut next_active = proof
+        .active_lanes
+        .get(active_pos)
+        .copied()
+        .unwrap_or(u32::MAX);
     for lut_inst in step.lut_insts.iter() {
         let expected_lanes = lut_inst.lanes.max(1);
         for _lane_idx in 0..expected_lanes {
@@ -905,7 +917,11 @@ pub fn verify_shout_addr_pre_time(
                     .copied()
                     .ok_or_else(|| PiCcsError::ProtocolError("shout addr-pre finals index drift".into()))?;
                 active_pos += 1;
-                next_active = proof.active_lanes.get(active_pos).copied().unwrap_or(u32::MAX);
+                next_active = proof
+                    .active_lanes
+                    .get(active_pos)
+                    .copied()
+                    .unwrap_or(u32::MAX);
                 v
             } else {
                 K::ZERO
@@ -1288,10 +1304,7 @@ pub fn append_route_a_shout_time_claims<'a>(
     }
 
     let mut lane_ranges_iter = guard.lane_ranges.iter();
-    let mut next_end = lane_ranges_iter
-        .next()
-        .expect("non-empty")
-        .end;
+    let mut next_end = lane_ranges_iter.next().expect("non-empty").end;
     let mut bitness_iter = guard.bitness.iter_mut();
 
     for (lane_idx, lane) in guard.lanes.iter_mut().enumerate() {
@@ -1949,7 +1962,10 @@ pub fn verify_route_a_memory_step(
             )));
         }
         for (idx, (prev_inst, inst)) in prev.mem_insts.iter().zip(step.mem_insts.iter()).enumerate() {
-            if prev_inst.d != inst.d || prev_inst.ell != inst.ell || prev_inst.k != inst.k || prev_inst.lanes != inst.lanes
+            if prev_inst.d != inst.d
+                || prev_inst.ell != inst.ell
+                || prev_inst.k != inst.k
+                || prev_inst.lanes != inst.lanes
             {
                 return Err(PiCcsError::InvalidInput(format!(
                     "Twist rollover requires stable geometry at mem_idx={}: prev (k={}, d={}, ell={}, lanes={}) vs cur (k={}, d={}, ell={}, lanes={})",
@@ -2137,9 +2153,7 @@ pub fn verify_route_a_memory_step(
             .ok_or_else(|| PiCcsError::ProtocolError("shout lane index overflow".into()))?
             > shout_pre.len()
         {
-            return Err(PiCcsError::ProtocolError(
-                "Shout pre-time lane indexing drift".into(),
-            ));
+            return Err(PiCcsError::ProtocolError("Shout pre-time lane indexing drift".into()));
         }
 
         // Route A Shout ordering in batched_time:
@@ -2159,7 +2173,9 @@ pub fn verify_route_a_memory_step(
             }
             let expected = chi_cycle_at_r_time * acc;
             if expected != batched_final_values[shout_claims.bitness] {
-                return Err(PiCcsError::ProtocolError("shout/bitness terminal value mismatch".into()));
+                return Err(PiCcsError::ProtocolError(
+                    "shout/bitness terminal value mismatch".into(),
+                ));
             }
         }
 
@@ -2182,9 +2198,7 @@ pub fn verify_route_a_memory_step(
 
             let expected_value_final = chi_cycle_at_r_time * lane.has_lookup * lane.val;
             if expected_value_final != value_final {
-                return Err(PiCcsError::ProtocolError(
-                    "shout value terminal value mismatch".into(),
-                ));
+                return Err(PiCcsError::ProtocolError("shout value terminal value mismatch".into()));
             }
 
             let eq_addr = eq_bits_prod(&lane.addr_bits, &pre.r_addr)?;
@@ -2400,7 +2414,9 @@ pub fn verify_route_a_memory_step(
             }
             let expected = chi_cycle_at_r_time * acc;
             if expected != batched_final_values[twist_claims.bitness] {
-                return Err(PiCcsError::ProtocolError("twist/bitness terminal value mismatch".into()));
+                return Err(PiCcsError::ProtocolError(
+                    "twist/bitness terminal value mismatch".into(),
+                ));
             }
         }
 

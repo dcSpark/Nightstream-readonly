@@ -73,4 +73,3 @@ fn claimed_initial_sum_optimized_matches_paper_exact() {
     let t_paper = paper_exact_engine::claimed_initial_sum_from_inputs(&s, &ch, &me_inputs);
     assert_eq!(t_opt, t_paper);
 }
-

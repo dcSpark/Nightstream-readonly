@@ -44,4 +44,3 @@ fn test_rectangular_ccs_single_step_prove_verify() {
     assert_eq!(step0.fold.ccs_out[0].s_col.len(), dims.ell_m);
     assert_eq!(step0.fold.ccs_out[0].y_zcol.len(), 1usize << dims.ell_d);
 }
-

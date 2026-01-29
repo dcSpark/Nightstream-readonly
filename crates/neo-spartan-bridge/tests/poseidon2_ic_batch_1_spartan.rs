@@ -1,10 +1,10 @@
 #![allow(non_snake_case)]
 
-use neo_spartan_bridge::circuit::FoldRunWitness;
 use neo_spartan_bridge::circuit::fold_circuit::CircuitPolyTerm;
 use neo_spartan_bridge::circuit::FoldRunCircuit;
-use neo_spartan_bridge::{prove_fold_run, verify_fold_run};
+use neo_spartan_bridge::circuit::FoldRunWitness;
 use neo_spartan_bridge::CircuitF;
+use neo_spartan_bridge::{prove_fold_run, setup_fold_run, verify_fold_run};
 use p3_field::PrimeField64;
 use spartan2::traits::snark::R1CSSNARKTrait;
 use std::fs;
@@ -67,8 +67,7 @@ fn test_poseidon2_ic_batch_1_spartan_proof_size() {
     let total_start = Instant::now();
 
     let create_start = Instant::now();
-    let mut session = neo_fold::test_export::TestExportSession::new_from_circuit_json(&json)
-        .expect("session init");
+    let mut session = neo_fold::test_export::TestExportSession::new_from_circuit_json(&json).expect("session init");
     let create_ms = create_start.elapsed().as_secs_f64() * 1000.0;
 
     let setup = session.setup_timings_ms().clone();
@@ -131,16 +130,10 @@ fn test_poseidon2_ic_batch_1_spartan_proof_size() {
     let prove_ms = prove_start.elapsed().as_secs_f64() * 1000.0;
     println!("Timings: prove={}", fmt_ms(prove_ms));
     if !fold_step_ms.is_empty() {
-        println!(
-            "Folding prove per-step: {}",
-            fmt_ms_list(&fold_step_ms, 32)
-        );
+        println!("Folding prove per-step: {}", fmt_ms_list(&fold_step_ms, 32));
         let sum: f64 = fold_step_ms.iter().sum();
         let avg = sum / fold_step_ms.len() as f64;
-        let min = fold_step_ms
-            .iter()
-            .copied()
-            .fold(f64::INFINITY, f64::min);
+        let min = fold_step_ms.iter().copied().fold(f64::INFINITY, f64::min);
         let max = fold_step_ms.iter().copied().fold(0.0, f64::max);
         println!(
             "Folding prove per-step stats: avg={} min={} max={}",
@@ -167,26 +160,31 @@ fn test_poseidon2_ic_batch_1_spartan_proof_size() {
         .map(|acc| acc.me.clone())
         .unwrap_or_default();
 
-    let pi_ccs_proofs = fold_run
+    let rlc_rhos = fold_run
         .steps
         .iter()
-        .map(|s| s.fold.ccs_proof.clone())
+        .map(|s| s.fold.rlc_rhos.clone())
         .collect();
-    let rlc_rhos = fold_run.steps.iter().map(|s| s.fold.rlc_rhos.clone()).collect();
-    let per_step_empty = (0..fold_run.steps.len()).map(|_| Vec::new()).collect::<Vec<_>>();
-    let witness = FoldRunWitness::from_fold_run(
-        fold_run.clone(),
-        pi_ccs_proofs,
-        per_step_empty.clone(),
-        rlc_rhos,
-        per_step_empty,
-    );
+    let per_step_empty = (0..fold_run.steps.len())
+        .map(|_| Vec::new())
+        .collect::<Vec<_>>();
+    let witness = FoldRunWitness::from_fold_run(fold_run.clone(), per_step_empty.clone(), rlc_rhos, per_step_empty);
 
     let witness_for_setup = witness.clone();
 
     println!("Compressing with Spartan2…");
+    let keypair = setup_fold_run(
+        session.params(),
+        session.ccs(),
+        acc_init.as_slice(),
+        &fold_run,
+        witness_for_setup.clone(),
+    )
+    .expect("spartan setup");
+
     let spartan_prove_start = Instant::now();
     let proof = prove_fold_run(
+        &keypair.pk,
         session.params(),
         session.ccs(),
         acc_init.as_slice(),
@@ -197,31 +195,21 @@ fn test_poseidon2_ic_batch_1_spartan_proof_size() {
     let spartan_prove_ms = spartan_prove_start.elapsed().as_secs_f64() * 1000.0;
 
     println!(
-        "Spartan proof bytes: {} ({})",
-        proof.proof_data.len(),
-        fmt_bytes(proof.proof_data.len())
+        "Spartan SNARK bytes: {} ({})",
+        proof.snark_data.len(),
+        fmt_bytes(proof.snark_data.len())
     );
 
     type E = spartan2::provider::GoldilocksP3MerkleMleEngine;
     type SNARK = spartan2::spartan::R1CSSNARK<E>;
-    type VK = spartan2::spartan::SpartanVerifierKey<E>;
-
-    let (vk, snark): (VK, SNARK) =
-        bincode::deserialize(&proof.proof_data).expect("deserialize (vk, snark)");
-    let vk_bytes = bincode::serialize(&vk).expect("serialize vk").len();
-    let snark_bytes = bincode::serialize(&snark).expect("serialize snark").len();
+    let vk_bytes = bincode::serialize(&keypair.vk).expect("serialize vk").len();
 
     println!(
         "Spartan proof breakdown: vk={} ({}) snark={} ({})",
         vk_bytes,
         fmt_bytes(vk_bytes),
-        snark_bytes,
-        fmt_bytes(snark_bytes)
-    );
-    assert_eq!(
-        vk_bytes + snark_bytes,
-        proof.proof_data.len(),
-        "expected bincode tuple to equal vk+snark sizes"
+        proof.snark_data.len(),
+        fmt_bytes(proof.snark_data.len())
     );
 
     // Recompute vk deterministically from the circuit definition and compare.
@@ -248,17 +236,13 @@ fn test_poseidon2_ic_batch_1_spartan_proof_size() {
 
     let (_pk_recomputed, vk_recomputed) = SNARK::setup(circuit).expect("recompute (pk, vk)");
 
-    let vk_ser = bincode::serialize(&vk).expect("serialize proof vk");
     let vk_recomputed_ser = bincode::serialize(&vk_recomputed).expect("serialize recomputed vk");
+    let vk_ser = bincode::serialize(&keypair.vk).expect("serialize proof vk");
 
-    assert_eq!(
-        vk_recomputed_ser,
-        vk_ser,
-        "recomputed vk should match the vk included in proof bytes"
-    );
+    assert_eq!(vk_recomputed_ser, vk_ser, "recomputed vk should match the setup vk");
 
     let spartan_verify_start = Instant::now();
-    let ok = verify_fold_run(session.params(), session.ccs(), &proof).expect("spartan verify");
+    let ok = verify_fold_run(&keypair.vk, session.params(), session.ccs(), &proof).expect("spartan verify");
     let spartan_verify_ms = spartan_verify_start.elapsed().as_secs_f64() * 1000.0;
     assert!(ok, "spartan proof should verify");
 

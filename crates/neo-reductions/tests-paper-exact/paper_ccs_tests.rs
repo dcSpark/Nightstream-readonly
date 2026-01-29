@@ -860,8 +860,19 @@ fn paper_exact_gamma_zero_kills_nc_and_eval() {
         m_in: 0,
     };
     let ell_d_full = D.next_power_of_two().trailing_zeros() as usize;
-    let out =
-        refimpl::build_me_outputs_paper_exact(&s, &params, &[inst], &[w0], &[], &[], &r_p, &[], ell_d_full, [0; 32], &l);
+    let out = refimpl::build_me_outputs_paper_exact(
+        &s,
+        &params,
+        &[inst],
+        &[w0],
+        &[],
+        &[],
+        &r_p,
+        &[],
+        ell_d_full,
+        [0; 32],
+        &l,
+    );
     let b_k = K::from(F::from_u64(params.b as u64));
     let mut pow = vec![K::ONE; D];
     for i in 1..D {

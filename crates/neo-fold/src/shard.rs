@@ -23,6 +23,8 @@ pub use crate::shard_proof_types::{
     ShardObligations, ShardProof, ShoutProofK, StepProof, TwistProofK,
 };
 use crate::PiCcsError;
+#[cfg(target_arch = "wasm32")]
+use js_sys::Date;
 use neo_ajtai::{
     get_global_pp_for_dims, get_global_pp_seeded_params_for_dims, has_global_pp_for_dims, sample_uniform_rq,
     seeded_pp_chunk_seeds, try_get_loaded_global_pp_for_dims, Commitment as Cmt,
@@ -47,8 +49,6 @@ use std::borrow::Cow;
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-use js_sys::Date;
 
 #[cfg(target_arch = "wasm32")]
 type TimePoint = f64;
@@ -145,10 +145,7 @@ impl StepLinkingConfig {
     }
 }
 
-pub fn check_step_linking(
-    steps: &[StepInstanceBundle<Cmt, F, K>],
-    cfg: &StepLinkingConfig,
-) -> Result<(), PiCcsError> {
+pub fn check_step_linking(steps: &[StepInstanceBundle<Cmt, F, K>], cfg: &StepLinkingConfig) -> Result<(), PiCcsError> {
     if steps.len() <= 1 || cfg.prev_next_equalities.is_empty() {
         return Ok(());
     }
@@ -439,10 +436,7 @@ where
     } else {
         // Fallback: non-seeded entry. This will materialize PP if needed.
         let pp = get_global_pp_for_dims(D, s.m).map_err(|e| {
-            PiCcsError::InvalidInput(format!(
-                "DEC: Ajtai PP unavailable for (d,m)=({},{}) ({})",
-                D, s.m, e
-            ))
+            PiCcsError::InvalidInput(format!("DEC: Ajtai PP unavailable for (d,m)=({},{}) ({})", D, s.m, e))
         })?;
         if pp.kappa == 0 {
             return Err(PiCcsError::InvalidInput("DEC: PP.kappa must be > 0".into()));
@@ -548,9 +542,9 @@ where
         y: Vec<[K; D]>,      // [digit][t] -> [D]
         y_zcol: Vec<[K; D]>, // [digit] -> [D]
         any_nonzero: Vec<bool>,
-        vj: Vec<K>,               // scratch: t
-        digits: Vec<i32>,          // scratch: k*D (balanced digits)
-        rot_next: [F; D],          // scratch: rotation step output (written fully each time)
+        vj: Vec<K>,          // scratch: t
+        digits: Vec<i32>,    // scratch: k*D (balanced digits)
+        rot_next: [F; D],    // scratch: rotation step output (written fully each time)
         err: Option<String>, // first error wins
     }
 
@@ -854,10 +848,7 @@ where
                 {
                     (0..m)
                         .into_par_iter()
-                        .fold(
-                            || Acc::new(k_dec, kappa, t_mats),
-                            |st, col| process_col(st, col),
-                        )
+                        .fold(|| Acc::new(k_dec, kappa, t_mats), |st, col| process_col(st, col))
                         .reduce(
                             || Acc::new(k_dec, kappa, t_mats),
                             |mut a, b| {
@@ -1474,9 +1465,8 @@ where
 
     let Z_mix = Z_mix.as_ref();
 
-    let can_stream_dec = !want_witnesses
-        && has_global_pp_for_dims(D, s.m)
-        && !cpu_bus.map(|b| b.bus_cols > 0).unwrap_or(false);
+    let can_stream_dec =
+        !want_witnesses && has_global_pp_for_dims(D, s.m) && !cpu_bus.map(|b| b.bus_cols > 0).unwrap_or(false);
 
     let (mut dec_children, ok_y, ok_X, ok_c, maybe_wits) = if can_stream_dec {
         // Memory-optimized DEC: compute children + commitments without materializing Z_split.
@@ -1503,7 +1493,13 @@ where
                 Z_split
                     .par_iter()
                     .enumerate()
-                    .map(|(idx, Zi)| if digit_nonzero[idx] { l.commit(Zi) } else { zero_c.clone() })
+                    .map(|(idx, Zi)| {
+                        if digit_nonzero[idx] {
+                            l.commit(Zi)
+                        } else {
+                            zero_c.clone()
+                        }
+                    })
                     .collect()
             }
             #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
@@ -1511,7 +1507,13 @@ where
                 Z_split
                     .iter()
                     .enumerate()
-                    .map(|(idx, Zi)| if digit_nonzero[idx] { l.commit(Zi) } else { zero_c.clone() })
+                    .map(|(idx, Zi)| {
+                        if digit_nonzero[idx] {
+                            l.commit(Zi)
+                        } else {
+                            zero_c.clone()
+                        }
+                    })
                     .collect()
             }
         };
@@ -1552,9 +1554,7 @@ where
                 &mut rlc_parent,
             )?;
             for (child, Zi) in dec_children.iter_mut().zip(maybe_wits.iter()) {
-                crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
-                    params, bus, core_t, Zi, child,
-                )?;
+                crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(params, bus, core_t, Zi, child)?;
             }
         }
     }
@@ -2234,7 +2234,14 @@ where
         // 5) Finish CCS alone for remaining ell_d Ajtai rounds
         // 6) Emit CCS + memory ME claims at the shared r_time and fold via RLC/DEC
 
-        utils::bind_header_and_instances_with_digest(tr, params, &s, core::slice::from_ref(mcs_inst), dims, &ccs_mat_digest)?;
+        utils::bind_header_and_instances_with_digest(
+            tr,
+            params,
+            &s,
+            core::slice::from_ref(mcs_inst),
+            dims,
+            &ccs_mat_digest,
+        )?;
         utils::bind_me_inputs(tr, &accumulator)?;
         let mut ch = utils::sample_challenges(tr, ell_d, ell)?;
         ch.beta_m = utils::sample_beta_m(tr, ell_m)?;
@@ -2251,9 +2258,9 @@ where
         // Keep the optimized oracle concrete so we can build outputs from its Ajtai precompute.
         let mut ccs_oracle: CcsOracleDispatch<'_> = match mode.clone() {
             FoldingMode::Optimized => {
-                let sparse = ccs_sparse_cache.as_ref().ok_or_else(|| {
-                    PiCcsError::ProtocolError("missing SparseCache for optimized mode".into())
-                })?;
+                let sparse = ccs_sparse_cache
+                    .as_ref()
+                    .ok_or_else(|| PiCcsError::ProtocolError("missing SparseCache for optimized mode".into()))?;
                 CcsOracleDispatch::Optimized(
                     neo_reductions::engines::optimized_engine::oracle::OptimizedOracle::new_with_sparse(
                         &s,
@@ -2285,9 +2292,9 @@ where
             ),
             #[cfg(feature = "paper-exact")]
             FoldingMode::OptimizedWithCrosscheck(_) => {
-                let sparse = ccs_sparse_cache.as_ref().ok_or_else(|| {
-                    PiCcsError::ProtocolError("missing SparseCache for optimized mode".into())
-                })?;
+                let sparse = ccs_sparse_cache
+                    .as_ref()
+                    .ok_or_else(|| PiCcsError::ProtocolError("missing SparseCache for optimized mode".into()))?;
                 CcsOracleDispatch::Optimized(
                     neo_reductions::engines::optimized_engine::oracle::OptimizedOracle::new_with_sparse(
                         &s,
@@ -2339,7 +2346,9 @@ where
                 .ok_or_else(|| PiCcsError::ProtocolError("output binding mem_idx out of range for twist_pre".into()))?;
 
             if pre.decoded.lanes.is_empty() {
-                return Err(PiCcsError::ProtocolError("output binding: Twist decoded lanes empty".into()));
+                return Err(PiCcsError::ProtocolError(
+                    "output binding: Twist decoded lanes empty".into(),
+                ));
             }
 
             let mut oracles: Vec<Box<dyn RoundOracle>> = Vec::with_capacity(pre.decoded.lanes.len());
@@ -2473,13 +2482,7 @@ where
                 &mut ccs_out[0],
             )?;
             for (out, Z) in ccs_out.iter_mut().skip(1).zip(accumulator_wit.iter()) {
-                crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
-                    params,
-                    &cpu_bus,
-                    core_t,
-                    Z,
-                    out,
-                )?;
+                crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(params, &cpu_bus, core_t, Z, out)?;
             }
         }
 
@@ -3114,7 +3117,14 @@ where
         // --------------------------------------------------------------------
 
         // Bind CCS header + ME inputs and sample public challenges.
-        utils::bind_header_and_instances_with_digest(tr, params, &s, core::slice::from_ref(mcs_inst), dims, &ccs_mat_digest)?;
+        utils::bind_header_and_instances_with_digest(
+            tr,
+            params,
+            &s,
+            core::slice::from_ref(mcs_inst),
+            dims,
+            &ccs_mat_digest,
+        )?;
         utils::bind_me_inputs(tr, &accumulator)?;
         let mut ch = utils::sample_challenges(tr, ell_d, ell)?;
         if step_proof.fold.ccs_proof.variant == crate::optimized_engine::PiCcsProofVariant::SplitNcV1 {
@@ -3159,8 +3169,7 @@ where
         let r_cycle: Vec<K> =
             ts::sample_ext_point(tr, b"route_a/r_cycle", b"route_a/cycle/0", b"route_a/cycle/1", ell_n);
 
-        let shout_pre =
-            crate::memory_sidecar::memory::verify_shout_addr_pre_time(tr, step, &step_proof.mem, step_idx)?;
+        let shout_pre = crate::memory_sidecar::memory::verify_shout_addr_pre_time(tr, step, &step_proof.mem, step_idx)?;
         let twist_pre = crate::memory_sidecar::memory::verify_twist_addr_pre_time(tr, step, &step_proof.mem)?;
         let crate::memory_sidecar::route_a_time::RouteABatchedTimeVerifyOutput { r_time, final_values } =
             crate::memory_sidecar::route_a_time::verify_route_a_batched_time(

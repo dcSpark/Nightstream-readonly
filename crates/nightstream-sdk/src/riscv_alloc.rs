@@ -53,4 +53,3 @@ unsafe impl GlobalAlloc for BumpAllocator {
 
     unsafe fn dealloc(&self, _ptr: *mut u8, _layout: Layout) {}
 }
-

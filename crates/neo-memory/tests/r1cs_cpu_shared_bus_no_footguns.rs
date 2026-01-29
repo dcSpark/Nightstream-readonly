@@ -110,20 +110,28 @@ fn with_shared_cpu_bus_injects_constraints_and_forces_const_one() {
     );
 
     let mut mem_layouts: HashMap<u32, PlainMemLayout> = HashMap::new();
-    mem_layouts.insert(2, PlainMemLayout { k: 2, d: 1, n_side: 2 , lanes: 1});
+    mem_layouts.insert(
+        2,
+        PlainMemLayout {
+            k: 2,
+            d: 1,
+            n_side: 2,
+            lanes: 1,
+        },
+    );
 
     let cfg = SharedCpuBusConfig::<F> {
         mem_layouts,
         initial_mem: HashMap::new(),
         const_one_col: 0,
-	        shout_cpu: HashMap::from([(
-	            1,
-	            vec![ShoutCpuBinding {
-	                has_lookup: 1,
-	                addr: Some(2),
-	                val: 3,
-	            }],
-	        )]),
+        shout_cpu: HashMap::from([(
+            1,
+            vec![ShoutCpuBinding {
+                has_lookup: 1,
+                addr: Some(2),
+                val: 3,
+            }],
+        )]),
         twist_cpu: HashMap::from([(
             2,
             vec![TwistCpuBinding {
@@ -181,17 +189,17 @@ fn shared_bus_shout_lane_assignment_is_in_order_and_resets_per_step() {
         },
     );
 
-	    // Bindings are base columns; time index is base+j within a chunk.
-	    let shout_lane0 = ShoutCpuBinding {
-	        has_lookup: 1,
-	        addr: Some(3),
-	        val: 5,
-	    };
-	    let shout_lane1 = ShoutCpuBinding {
-	        has_lookup: 7,
-	        addr: Some(9),
-	        val: 11,
-	    };
+    // Bindings are base columns; time index is base+j within a chunk.
+    let shout_lane0 = ShoutCpuBinding {
+        has_lookup: 1,
+        addr: Some(3),
+        val: 5,
+    };
+    let shout_lane1 = ShoutCpuBinding {
+        has_lookup: 7,
+        addr: Some(9),
+        val: 11,
+    };
     let shout_lane0_cfg = shout_lane0.clone();
     let shout_lane1_cfg = shout_lane1.clone();
 
@@ -201,35 +209,35 @@ fn shared_bus_shout_lane_assignment_is_in_order_and_resets_per_step() {
         params,
         NoopCommit::default(),
         /*m_in=*/ 1,
-	        &tables,
-	        &HashMap::new(),
-	        Box::new(move |chunk| {
-	            let mut z = vec![F::ZERO; 13];
-	            let shout_lane0_addr = shout_lane0.addr.expect("shout_lane0 must have addr");
-	            let shout_lane1_addr = shout_lane1.addr.expect("shout_lane1 must have addr");
-	            for (j, step) in chunk.iter().enumerate() {
-	                // Two Shouts for the same table per VM step, assigned to lanes in event order.
-	                let mut events = Vec::<(u64, u64)>::new();
-	                for ev in &step.shout_events {
+        &tables,
+        &HashMap::new(),
+        Box::new(move |chunk| {
+            let mut z = vec![F::ZERO; 13];
+            let shout_lane0_addr = shout_lane0.addr.expect("shout_lane0 must have addr");
+            let shout_lane1_addr = shout_lane1.addr.expect("shout_lane1 must have addr");
+            for (j, step) in chunk.iter().enumerate() {
+                // Two Shouts for the same table per VM step, assigned to lanes in event order.
+                let mut events = Vec::<(u64, u64)>::new();
+                for ev in &step.shout_events {
                     if ev.shout_id.0 == 1 {
                         events.push((ev.key, ev.value));
                     }
                 }
                 assert_eq!(events.len(), 2, "expected exactly 2 shout events per step");
 
-	                let (k0, v0) = events[0];
-	                let (k1, v1) = events[1];
+                let (k0, v0) = events[0];
+                let (k1, v1) = events[1];
 
-	                z[shout_lane0.has_lookup + j] = F::ONE;
-	                z[shout_lane0_addr + j] = F::from_u64(k0);
-	                z[shout_lane0.val + j] = F::from_u64(v0);
+                z[shout_lane0.has_lookup + j] = F::ONE;
+                z[shout_lane0_addr + j] = F::from_u64(k0);
+                z[shout_lane0.val + j] = F::from_u64(v0);
 
-	                z[shout_lane1.has_lookup + j] = F::ONE;
-	                z[shout_lane1_addr + j] = F::from_u64(k1);
-	                z[shout_lane1.val + j] = F::from_u64(v1);
-	            }
-	            z
-	        }),
+                z[shout_lane1.has_lookup + j] = F::ONE;
+                z[shout_lane1_addr + j] = F::from_u64(k1);
+                z[shout_lane1.val + j] = F::from_u64(v1);
+            }
+            z
+        }),
     );
 
     let cfg = SharedCpuBusConfig::<F> {
@@ -368,16 +376,16 @@ fn shared_bus_rejects_shout_lane_overflow_in_one_step() {
         mem_layouts: HashMap::new(),
         initial_mem: HashMap::new(),
         const_one_col: 0,
-	        shout_cpu: HashMap::from([(
-	            1,
-	            vec![ShoutCpuBinding {
-	                has_lookup: 1,
-	                addr: Some(2),
-	                val: 3,
-	            }],
-	        )]),
-	        twist_cpu: HashMap::new(),
-	    };
+        shout_cpu: HashMap::from([(
+            1,
+            vec![ShoutCpuBinding {
+                has_lookup: 1,
+                addr: Some(2),
+                val: 3,
+            }],
+        )]),
+        twist_cpu: HashMap::new(),
+    };
 
     let cpu = cpu
         .with_shared_cpu_bus(cfg, /*chunk_size=*/ 1)
@@ -409,10 +417,7 @@ fn shared_bus_rejects_shout_lane_overflow_in_one_step() {
     };
 
     let err = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect_err("expected lane overflow");
-    assert!(
-        err.contains("too many shout events"),
-        "unexpected error: {err}"
-    );
+    assert!(err.contains("too many shout events"), "unexpected error: {err}");
 }
 
 #[test]
@@ -475,21 +480,29 @@ fn with_shared_cpu_bus_rejects_bindings_in_bus_tail() {
     );
 
     let mut mem_layouts: HashMap<u32, PlainMemLayout> = HashMap::new();
-    mem_layouts.insert(2, PlainMemLayout { k: 2, d: 1, n_side: 2 , lanes: 1});
+    mem_layouts.insert(
+        2,
+        PlainMemLayout {
+            k: 2,
+            d: 1,
+            n_side: 2,
+            lanes: 1,
+        },
+    );
 
     // One shout + one twist => bus_cols_total = (1*1 + 2) + (2*1*1 + 5) = 10, so bus_base = 64-10 = 54.
     let cfg = SharedCpuBusConfig::<F> {
         mem_layouts,
         initial_mem: HashMap::new(),
         const_one_col: 0,
-	        shout_cpu: HashMap::from([(
-	            1,
-	            vec![ShoutCpuBinding {
-	                has_lookup: 54, // inside bus tail
-	                addr: Some(2),
-	                val: 3,
-	            }],
-	        )]),
+        shout_cpu: HashMap::from([(
+            1,
+            vec![ShoutCpuBinding {
+                has_lookup: 54, // inside bus tail
+                addr: Some(2),
+                val: 3,
+            }],
+        )]),
         twist_cpu: HashMap::from([(
             2,
             vec![TwistCpuBinding {

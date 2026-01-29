@@ -4,7 +4,9 @@
 //! - Converting a FoldRun into a Spartan proof
 //! - Verifying a Spartan proof for a FoldRun
 //!
-//! **STATUS**: Stubs only. No Spartan2 integration yet.
+//! **STATUS**: Experimental. Spartan2 integration is implemented and used for
+//! benchmarking/proof-size measurement; the public statement/soundness story is
+//! still evolving.
 
 #![allow(unused_imports)]
 
@@ -23,71 +25,92 @@ use p3_field::PrimeCharacteristicRing;
 
 use spartan2::{provider::GoldilocksP3MerkleMleEngine, spartan::R1CSSNARK, traits::snark::R1CSSNARKTrait};
 
+pub type SpartanEngine = GoldilocksP3MerkleMleEngine;
+pub type SpartanSnark = R1CSSNARK<SpartanEngine>;
+pub type SpartanProverKey = spartan2::spartan::SpartanProverKey<SpartanEngine>;
+pub type SpartanVerifierKey = spartan2::spartan::SpartanVerifierKey<SpartanEngine>;
+
+/// (ProverKey, VerifierKey) for a fixed FoldRun circuit shape.
+///
+/// In production, the verifier key is deployed once (not carried per proof).
+pub struct SpartanKeypair {
+    pub pk: SpartanProverKey,
+    pub vk: SpartanVerifierKey,
+}
+
 /// Proof output from Spartan2
 #[derive(Clone, Debug)]
 pub struct SpartanProof {
-    /// The actual Spartan proof bytes
-    pub proof_data: Vec<u8>,
+    /// The Spartan SNARK proof bytes (does **not** include `vk`).
+    pub snark_data: Vec<u8>,
 
     /// Public instance (for verification)
     pub instance: FoldRunInstance,
 }
 
 impl SpartanProof {
-    /// Return the verifier key (vk) size in bytes.
-    ///
-    /// Note: `proof_data` currently encodes `(vk, snark)` via bincode.
-    pub fn vk_bytes_len(&self) -> Result<usize> {
-        type E = GoldilocksP3MerkleMleEngine;
-        type SNARK = R1CSSNARK<E>;
-        type VK = spartan2::spartan::SpartanVerifierKey<E>;
-        let (vk, _snark): (VK, SNARK) = bincode::deserialize(&self.proof_data).map_err(|e| {
-            SpartanBridgeError::InvalidInput(format!(
-                "SpartanProof.proof_data deserialization (vk, snark) failed: {e}"
-            ))
-        })?;
-        let bytes = bincode::serialized_size(&vk).map_err(|e| {
-            SpartanBridgeError::InvalidInput(format!("Spartan vk bincode::serialized_size failed: {e}"))
-        })?;
-        Ok(bytes as usize)
+    pub fn snark_bytes_len(&self) -> usize {
+        self.snark_data.len()
     }
+}
 
-    /// Return the SNARK proof size in bytes (without bundling `vk`).
-    ///
-    /// Note: `proof_data` currently encodes `(vk, snark)` via bincode.
-    pub fn snark_bytes_len(&self) -> Result<usize> {
-        type E = GoldilocksP3MerkleMleEngine;
-        type SNARK = R1CSSNARK<E>;
-        type VK = spartan2::spartan::SpartanVerifierKey<E>;
-        let (_vk, snark): (VK, SNARK) = bincode::deserialize(&self.proof_data).map_err(|e| {
-            SpartanBridgeError::InvalidInput(format!(
-                "SpartanProof.proof_data deserialization (vk, snark) failed: {e}"
-            ))
-        })?;
-        let bytes = bincode::serialized_size(&snark).map_err(|e| {
-            SpartanBridgeError::InvalidInput(format!(
-                "Spartan snark bincode::serialized_size failed: {e}"
-            ))
-        })?;
-        Ok(bytes as usize)
-    }
+fn build_fold_run_circuit(
+    params: &NeoParams,
+    ccs: &CcsStructure<NeoF>,
+    initial_accumulator: &[MeInstance<Cmt, NeoF, NeoK>],
+    fold_run: &FoldRun,
+    witness: FoldRunWitness,
+) -> Result<FoldRunCircuit> {
+    enforce_sumcheck_degree_bounds(params, ccs, &witness)?;
 
-    /// Return SNARK proof bytes only (without bundling `vk`).
-    ///
-    /// Note: This is intended for smaller downloads; verification still needs `vk`.
-    pub fn snark_bytes(&self) -> Result<Vec<u8>> {
-        type E = GoldilocksP3MerkleMleEngine;
-        type SNARK = R1CSSNARK<E>;
-        type VK = spartan2::spartan::SpartanVerifierKey<E>;
-        let (_vk, snark): (VK, SNARK) = bincode::deserialize(&self.proof_data).map_err(|e| {
-            SpartanBridgeError::InvalidInput(format!(
-                "SpartanProof.proof_data deserialization (vk, snark) failed: {e}"
-            ))
-        })?;
-        bincode::serialize(&snark).map_err(|e| {
-            SpartanBridgeError::InvalidInput(format!("Spartan snark bincode::serialize failed: {e}"))
+    let params_digest = compute_params_digest(params);
+    let ccs_digest = compute_ccs_digest(ccs);
+
+    // Extract challenges from FoldRun's Π-CCS proofs (native FS).
+    let pi_ccs_challenges = extract_challenges_from_fold_run(fold_run, params, ccs)?;
+
+    let instance = FoldRunInstance::from_fold_run(
+        fold_run,
+        params_digest,
+        ccs_digest,
+        initial_accumulator.to_vec(),
+        pi_ccs_challenges,
+    );
+
+    // Extract CCS polynomial f into circuit-friendly representation.
+    let poly_f: Vec<CircuitPolyTerm> = ccs
+        .f
+        .terms()
+        .iter()
+        .map(|term| {
+            use p3_field::PrimeField64;
+            let coeff_circ = CircuitF::from(term.coeff.as_canonical_u64());
+            CircuitPolyTerm {
+                coeff: coeff_circ,
+                coeff_native: term.coeff,
+                exps: term.exps.iter().map(|e| *e as u32).collect(),
+            }
         })
-    }
+        .collect();
+
+    let delta = CircuitF::from(7u64); // Goldilocks K delta
+    Ok(FoldRunCircuit::new(instance, Some(witness), delta, params.b, poly_f))
+}
+
+/// Build `(pk, vk)` for a fixed FoldRun circuit shape.
+///
+/// In production, `vk` is deployed once and reused across many proofs.
+pub fn setup_fold_run(
+    params: &NeoParams,
+    ccs: &CcsStructure<NeoF>,
+    initial_accumulator: &[MeInstance<Cmt, NeoF, NeoK>],
+    fold_run: &FoldRun,
+    witness_for_setup: FoldRunWitness,
+) -> Result<SpartanKeypair> {
+    let circuit = build_fold_run_circuit(params, ccs, initial_accumulator, fold_run, witness_for_setup)?;
+    let (pk, vk) = SpartanSnark::setup(circuit)
+        .map_err(|e| SpartanBridgeError::ProvingError(format!("Spartan2 setup failed: {e}")))?;
+    Ok(SpartanKeypair { pk, vk })
 }
 
 /// Generate a Spartan proof for a FoldRun.
@@ -99,25 +122,18 @@ impl SpartanProof {
 /// - Synthesizes the FoldRun circuit as a Spartan2 `SpartanCircuit`.
 /// - Runs Spartan2 setup/prep/prove using the Goldilocks + Hash-MLE PCS engine.
 pub fn prove_fold_run(
+    pk: &SpartanProverKey,
     params: &NeoParams,
     ccs: &CcsStructure<NeoF>,
     initial_accumulator: &[MeInstance<Cmt, NeoF, NeoK>],
     fold_run: &FoldRun,
     witness: FoldRunWitness,
 ) -> Result<SpartanProof> {
-    // Enforce sumcheck degree bounds on the Π-CCS proofs before we even
-    // build the circuit. This mirrors the native verifier's policy that
-    // each round polynomial must have degree ≤ d_sc.
-    enforce_sumcheck_degree_bounds(params, ccs, &witness)?;
-    // 1. Compute digests of params, CCS, and MCS
-    let params_digest = compute_params_digest(params);
-    let ccs_digest = compute_ccs_digest(ccs);
-    let mcs_digest = [0u8; 32]; // Would hash the MCS instances
-
-    // 2. Extract challenges from FoldRun's Π-CCS proofs
-    let pi_ccs_challenges = extract_challenges_from_fold_run(fold_run, params, ccs)?;
     #[cfg(feature = "debug-logs")]
     {
+        // Extract challenges from FoldRun's Π-CCS proofs (native FS) for logging.
+        let pi_ccs_challenges = extract_challenges_from_fold_run(fold_run, params, ccs)?;
+
         eprintln!("[spartan-bridge] Proving FoldRun with {} steps", fold_run.steps.len());
         eprintln!(
             "[spartan-bridge] initial_accumulator.len() = {}",
@@ -129,7 +145,7 @@ pub fn prove_fold_run(
             .zip(pi_ccs_challenges.iter())
             .enumerate()
         {
-            let proof = &witness.pi_ccs_proofs[step_idx];
+            let proof = &step.fold.ccs_proof;
             eprintln!("\n[spartan-bridge] === Step {} ===", step_idx);
             eprintln!(
                 "[spartan-bridge]   ccs_out.len() = {}, dec_children.len() = {}",
@@ -264,60 +280,22 @@ pub fn prove_fold_run(
         }
     }
 
-    // 3. Build instance with the actual initial accumulator used by the
-    // folding engine (ME(b, L)^k inputs to the first Π-CCS step).
-    let initial_accumulator = initial_accumulator.to_vec();
-    let instance = FoldRunInstance::from_fold_run(
-        fold_run,
-        params_digest,
-        ccs_digest,
-        mcs_digest,
-        initial_accumulator,
-        pi_ccs_challenges,
-    );
-
-    // 4. Extract CCS polynomial f into circuit-friendly representation
-    let poly_f: Vec<CircuitPolyTerm> = ccs
-        .f
-        .terms()
-        .iter()
-        .map(|term| {
-            use p3_field::PrimeField64;
-            let coeff_circ = CircuitF::from(term.coeff.as_canonical_u64());
-            CircuitPolyTerm {
-                coeff: coeff_circ,
-                coeff_native: term.coeff,
-                exps: term.exps.iter().map(|e| *e as u32).collect(),
-            }
-        })
-        .collect();
-
-    // 5. Create circuit
-    let delta = CircuitF::from(7u64); // Goldilocks K delta
-    let circuit = FoldRunCircuit::new(instance.clone(), Some(witness), delta, params.b, poly_f);
-
-    // 6. Run Spartan2 setup → prep → prove using the Goldilocks Hash-MLE engine.
-    type E = GoldilocksP3MerkleMleEngine;
-    type SNARK = R1CSSNARK<E>;
-
-    // Setup: derive prover/verifier keys from the circuit shape.
-    let (pk, vk) = SNARK::setup(circuit.clone())
-        .map_err(|e| SpartanBridgeError::ProvingError(format!("Spartan2 setup failed: {e}")))?;
+    // 2. Build the FoldRun circuit from the instance + witness.
+    let circuit = build_fold_run_circuit(params, ccs, initial_accumulator, fold_run, witness)?;
+    let instance = circuit.instance.clone();
 
     // Preprocess: build preprocessed state (witness commitments, etc.).
-    let prep = SNARK::prep_prove(&pk, circuit.clone(), true)
+    let prep = SpartanSnark::prep_prove(pk, circuit.clone(), true)
         .map_err(|e| SpartanBridgeError::ProvingError(format!("Spartan2 prep_prove failed: {e}")))?;
 
     // Prove: produce the SNARK proof object.
-    let snark = SNARK::prove(&pk, circuit, &prep, true)
+    let snark = SpartanSnark::prove(pk, circuit, &prep, true)
         .map_err(|e| SpartanBridgeError::ProvingError(format!("Spartan2 prove failed: {e}")))?;
 
-    // Pack verifier key + SNARK into proof bytes.
-    let packed = (vk, snark);
-    let proof_data = bincode::serialize(&packed)
+    let snark_data = bincode::serialize(&snark)
         .map_err(|e| SpartanBridgeError::ProvingError(format!("Spartan2 proof serialization failed: {e}")))?;
 
-    Ok(SpartanProof { proof_data, instance })
+    Ok(SpartanProof { snark_data, instance })
 }
 
 /// Verify a Spartan proof for a FoldRun.
@@ -325,9 +303,14 @@ pub fn prove_fold_run(
 /// This:
 /// - Checks Neo params/CCS digests against the proof's instance.
 /// - Recomputes expected public IO from the instance digests.
-/// - Deserializes the Spartan2 verifier key and SNARK.
-/// - Runs Spartan2 verification and checks the returned public IO matches.
-pub fn verify_fold_run(params: &NeoParams, ccs: &CcsStructure<NeoF>, proof: &SpartanProof) -> Result<bool> {
+/// - Deserializes the Spartan2 SNARK proof.
+/// - Runs Spartan2 verification under the deployed `vk` and checks the returned public IO matches.
+pub fn verify_fold_run(
+    vk: &SpartanVerifierKey,
+    params: &NeoParams,
+    ccs: &CcsStructure<NeoF>,
+    proof: &SpartanProof,
+) -> Result<bool> {
     // 1. Verify digests match
     let params_digest = compute_params_digest(params);
     let ccs_digest = compute_ccs_digest(ccs);
@@ -343,30 +326,25 @@ pub fn verify_fold_run(params: &NeoParams, ccs: &CcsStructure<NeoF>, proof: &Spa
     // 2. Recompute expected public IO from instance digests (must mirror
     // `FoldRunCircuit::public_values` / `allocate_public_inputs`).
     fn append_digest(out: &mut Vec<CircuitF>, digest: &[u8; 32]) {
-        for chunk in digest.chunks(8) {
-            let mut limb_bytes = [0u8; 8];
+        for chunk in digest.chunks(4) {
+            let mut limb_bytes = [0u8; 4];
             limb_bytes.copy_from_slice(chunk);
-            let limb_u64 = u64::from_le_bytes(limb_bytes);
-            out.push(CircuitF::from(limb_u64));
+            let limb_u32 = u32::from_le_bytes(limb_bytes);
+            out.push(CircuitF::from(limb_u32 as u64));
         }
     }
 
-    let mut expected_io = Vec::with_capacity(12);
+    let mut expected_io = Vec::with_capacity(16);
     append_digest(&mut expected_io, &proof.instance.params_digest);
     append_digest(&mut expected_io, &proof.instance.ccs_digest);
-    append_digest(&mut expected_io, &proof.instance.mcs_digest);
 
-    // 3. Deserialize (vk, snark) from proof bytes.
-    type E = GoldilocksP3MerkleMleEngine;
-    type SNARK = R1CSSNARK<E>;
-    type VK<E> = spartan2::spartan::SpartanVerifierKey<E>;
-
-    let (vk, snark): (VK<E>, SNARK) = bincode::deserialize(&proof.proof_data)
+    // 3. Deserialize SNARK from proof bytes.
+    let snark: SpartanSnark = bincode::deserialize(&proof.snark_data)
         .map_err(|e| SpartanBridgeError::VerificationError(format!("Spartan2 proof deserialization failed: {e}")))?;
 
     // 4. Run Spartan2 verification.
     let io = snark
-        .verify(&vk)
+        .verify(vk)
         .map_err(|e| SpartanBridgeError::VerificationError(format!("Spartan2 verification failed: {e}")))?;
 
     // 5. Check that the public IO returned by Spartan matches the expected
@@ -386,9 +364,8 @@ pub fn verify_fold_run(params: &NeoParams, ccs: &CcsStructure<NeoF>, proof: &Spa
 fn compute_params_digest(params: &NeoParams) -> [u8; 32] {
     use blake3::Hasher;
     let mut hasher = Hasher::new();
-    hasher.update(&params.q.to_le_bytes());
-    hasher.update(&params.b.to_le_bytes());
-    hasher.update(&params.k_rho.to_le_bytes());
+    let bytes = bincode::serialize(params).expect("NeoParams should be serializable");
+    hasher.update(&bytes);
     let hash = hasher.finalize();
     let mut digest = [0u8; 32];
     digest.copy_from_slice(hash.as_bytes());
@@ -401,9 +378,8 @@ fn compute_params_digest(params: &NeoParams) -> [u8; 32] {
 fn compute_ccs_digest(ccs: &CcsStructure<NeoF>) -> [u8; 32] {
     use blake3::Hasher;
     let mut hasher = Hasher::new();
-    hasher.update(&ccs.m.to_le_bytes());
-    hasher.update(&ccs.n.to_le_bytes());
-    hasher.update(&ccs.t().to_le_bytes());
+    let bytes = bincode::serialize(ccs).expect("CcsStructure should be serializable");
+    hasher.update(&bytes);
     let hash = hasher.finalize();
     let mut digest = [0u8; 32];
     digest.copy_from_slice(hash.as_bytes());
@@ -518,7 +494,8 @@ fn enforce_sumcheck_degree_bounds(
         core::cmp::max(max_deg, range_bound)
     };
 
-    for (step_idx, proof) in witness.pi_ccs_proofs.iter().enumerate() {
+    for (step_idx, step) in witness.fold_run.steps.iter().enumerate() {
+        let proof = &step.fold.ccs_proof;
         for (round_idx, round_poly) in proof.sumcheck_rounds.iter().enumerate() {
             if round_poly.len() > d_sc + 1 {
                 return Err(SpartanBridgeError::InvalidInput(format!(

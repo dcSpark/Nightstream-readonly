@@ -1,0 +1,35 @@
+[package]
+name = "neo-midnight-bridge"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license = "MIT"
+description = "Experimental bridge: prove Neo FoldRun validity using Midnight's PLONK/KZG verifier (BLS12-381) by emulating Goldilocks arithmetic in-circuit."
+
+[dependencies]
+anyhow = { workspace = true }
+bincode = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+num-bigint = "0.4"
+
+# Midnight proving stack (PLONK + KZG over BLS12-381)
+midnight-curves = "0.2"
+midnight-proofs = "0.7"
+midnight-circuits = "6"
+midnight-zk-stdlib = "1"
+blake2b_simd = "1"
+ff = "0.13"
+
+[dev-dependencies]
+rand = "0.8"
+rand_chacha = "0.3"
+neo-fold = { path = "../neo-fold" }
+neo-ajtai = { path = "../neo-ajtai" }
+neo-ccs = { path = "../neo-ccs" }
+neo-math = { path = "../neo-math" }
+neo-params = { path = "../neo-params" }
+neo-reductions = { path = "../neo-reductions" }
+p3-field = { workspace = true }
+
+[lints]
+workspace = true

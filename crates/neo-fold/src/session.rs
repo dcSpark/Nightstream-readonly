@@ -26,11 +26,11 @@ pub use layout::*;
 mod ccs_builder;
 pub use ccs_builder::*;
 mod circuit;
-pub use circuit::*;
 pub use crate::witness_layout;
+pub use circuit::*;
 
-use neo_ajtai::{has_seed_for_dims, s_lincomb, s_mul, unload_global_pp_for_dims, Commitment as Cmt};
 use neo_ajtai::AjtaiSModule;
+use neo_ajtai::{has_seed_for_dims, s_lincomb, s_mul, unload_global_pp_for_dims, Commitment as Cmt};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
 use neo_math::ring::Rq as RqEl;
@@ -38,8 +38,8 @@ use neo_math::{D, F, K};
 use neo_memory::ajtai::encode_vector_balanced_to_mat;
 use neo_memory::builder::{build_shard_witness_shared_cpu_bus_with_aux, CpuArithmetization, ShardWitnessAux};
 use neo_memory::plain::{LutTable, PlainMemLayout};
-use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
 use neo_memory::witness::LutTableSpec;
+use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
 use neo_params::NeoParams;
 use neo_transcript::{Poseidon2Transcript, Transcript};
 use p3_field::PrimeCharacteristicRing;
@@ -50,8 +50,8 @@ use std::sync::Arc;
 use crate::pi_ccs::FoldingMode;
 use crate::shard::{self, CommitMixers, ShardProof as FoldRun, ShardProverContext, StepLinkingConfig};
 use crate::PiCcsError;
-use neo_reductions::engines::utils;
 use neo_reductions::engines::optimized_engine::oracle::SparseCache;
+use neo_reductions::engines::utils;
 
 #[inline]
 fn mode_uses_sparse_cache(mode: &FoldingMode) -> bool {
@@ -155,12 +155,12 @@ impl StepSpec {
         for j in 0..self.y_len {
             let y_step_z = self.y_step_indices[j];
             let y_prev_z = app[j];
-            let step_pos = *pos_by_z.get(&y_step_z).ok_or_else(|| {
-                PiCcsError::InvalidInput("StepSpec: y_step_indices must be included in x".into())
-            })?;
-            let prev_pos = *pos_by_z.get(&y_prev_z).ok_or_else(|| {
-                PiCcsError::InvalidInput("StepSpec: app_input_indices must be included in x".into())
-            })?;
+            let step_pos = *pos_by_z
+                .get(&y_step_z)
+                .ok_or_else(|| PiCcsError::InvalidInput("StepSpec: y_step_indices must be included in x".into()))?;
+            let prev_pos = *pos_by_z
+                .get(&y_prev_z)
+                .ok_or_else(|| PiCcsError::InvalidInput("StepSpec: app_input_indices must be included in x".into()))?;
             pairs.push((step_pos, prev_pos));
         }
 
@@ -704,7 +704,8 @@ where
 
     /// Mutably access (and lazily initialize) the shared-bus resource configuration.
     pub fn shared_bus_resources_mut(&mut self) -> &mut SharedBusResources {
-        self.shared_bus_resources.get_or_insert_with(SharedBusResources::new)
+        self.shared_bus_resources
+            .get_or_insert_with(SharedBusResources::new)
     }
 
     /// Execute a VM shard in shared-CPU-bus mode using the resources stored on this session.
@@ -976,12 +977,7 @@ where
     }
 
     /// Convenience: add one step directly from `(x, w)` without constructing `ProveInput`.
-    pub fn add_step_io(
-        &mut self,
-        ccs: &CcsStructure<F>,
-        public_input: &[F],
-        witness: &[F],
-    ) -> Result<(), PiCcsError> {
+    pub fn add_step_io(&mut self, ccs: &CcsStructure<F>, public_input: &[F], witness: &[F]) -> Result<(), PiCcsError> {
         let input = ProveInput {
             ccs,
             public_input,
@@ -1157,17 +1153,13 @@ where
             None
         };
 
-        let ccs_mat_digest =
-            utils::digest_ccs_matrices_with_sparse_cache(s, ccs_sparse_cache.as_deref());
+        let ccs_mat_digest = utils::digest_ccs_matrices_with_sparse_cache(s, ccs_sparse_cache.as_deref());
         let ctx = ShardProverContext {
             ccs_mat_digest,
             ccs_sparse_cache,
         };
 
-        Ok(SessionCcsCache {
-            src_ptr,
-            ctx,
-        })
+        Ok(SessionCcsCache { src_ptr, ctx })
     }
 
     fn ensure_prover_ctx_for_ccs(&mut self, s: &CcsStructure<F>) -> Result<(), PiCcsError> {
@@ -1180,12 +1172,8 @@ where
         eprintln!(
             "\x1b[33m[neo-fold] Cache miss: synthesizing circuit preprocessing (SparseCache + matrix digest).\x1b[0m"
         );
-        eprintln!(
-            "\x1b[33m           This is a one-time cost per CCS structure. Subsequent runs with the same\x1b[0m"
-        );
-        eprintln!(
-            "\x1b[33m           CCS pointer will reuse the cache and be faster.\x1b[0m"
-        );
+        eprintln!("\x1b[33m           This is a one-time cost per CCS structure. Subsequent runs with the same\x1b[0m");
+        eprintln!("\x1b[33m           CCS pointer will reuse the cache and be faster.\x1b[0m");
         self.prover_ctx = Some(self.build_ccs_cache(s, None)?);
         Ok(())
     }
@@ -1230,10 +1218,7 @@ where
     ///
     /// Returns `(run, step_prove_ms)` where `step_prove_ms[i]` is the time spent proving
     /// fold step `i` inside the shard prover.
-    pub fn fold_and_prove_with_step_timings(
-        &mut self,
-        s: &CcsStructure<F>,
-    ) -> Result<(FoldRun, Vec<f64>), PiCcsError> {
+    pub fn fold_and_prove_with_step_timings(&mut self, s: &CcsStructure<F>) -> Result<(FoldRun, Vec<f64>), PiCcsError> {
         let mut tr = Poseidon2Transcript::new(b"neo.fold/session");
         self.fold_and_prove_with_transcript_and_step_timings(&mut tr, s)
     }
@@ -1443,7 +1428,10 @@ where
         self.fold_and_prove_with_output_binding(&mut tr, s, ob_cfg, final_memory_state)
     }
 
-    fn final_memory_state_for_output_binding(&self, ob_cfg: &crate::output_binding::OutputBindingConfig) -> Result<Vec<F>, PiCcsError> {
+    fn final_memory_state_for_output_binding(
+        &self,
+        ob_cfg: &crate::output_binding::OutputBindingConfig,
+    ) -> Result<Vec<F>, PiCcsError> {
         let aux = self.shared_bus_aux.as_ref().ok_or_else(|| {
             PiCcsError::InvalidInput(
                 "output binding auto mode requires shared-bus aux; call execute_shard_shared_cpu_bus(...) first".into(),
@@ -1646,13 +1634,13 @@ where
                     )?,
                 },
                 None => {
-                    let mut msg = "multi-step verification requires step linking; call FoldingSession::set_step_linking(...)".to_string();
+                    let mut msg =
+                        "multi-step verification requires step linking; call FoldingSession::set_step_linking(...)"
+                            .to_string();
                     if let Some(diag) = &self.auto_step_linking_error {
                         msg.push_str(&format!(" (auto step-linking from StepSpec failed: {diag})"));
                     }
-                    return Err(PiCcsError::InvalidInput(
-                        msg,
-                    ));
+                    return Err(PiCcsError::InvalidInput(msg));
                 }
             }
         } else {
@@ -1812,13 +1800,13 @@ where
                     )?,
                 },
                 None => {
-                    let mut msg = "multi-step verification requires step linking; call FoldingSession::set_step_linking(...)".to_string();
+                    let mut msg =
+                        "multi-step verification requires step linking; call FoldingSession::set_step_linking(...)"
+                            .to_string();
                     if let Some(diag) = &self.auto_step_linking_error {
                         msg.push_str(&format!(" (auto step-linking from StepSpec failed: {diag})"));
                     }
-                    return Err(PiCcsError::InvalidInput(
-                        msg,
-                    ));
+                    return Err(PiCcsError::InvalidInput(msg));
                 }
             }
         } else {
@@ -1891,11 +1879,7 @@ impl FoldingSession<AjtaiSModule> {
     /// Same as `new_ajtai`, but with a deterministic ChaCha8 seed for reproducible tests/benchmarks.
     ///
     /// This uses the sequential Ajtai setup to avoid any parallelism-related determinism concerns.
-    pub fn new_ajtai_seeded(
-        mode: FoldingMode,
-        ccs: &CcsStructure<F>,
-        seed: [u8; 32],
-    ) -> Result<Self, PiCcsError> {
+    pub fn new_ajtai_seeded(mode: FoldingMode, ccs: &CcsStructure<F>, seed: [u8; 32]) -> Result<Self, PiCcsError> {
         let m_commit = ccs.m;
         let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n.max(ccs.m))
             .map_err(|e| PiCcsError::InvalidInput(format!("NeoParams::goldilocks_auto_r1cs_ccs failed: {e}")))?;

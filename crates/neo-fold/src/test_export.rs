@@ -12,6 +12,8 @@
 use crate::pi_ccs::FoldingMode;
 use crate::session::{FoldingSession, NeoStep, StepArtifacts, StepSpec};
 use crate::shard::StepLinkingConfig;
+#[cfg(target_arch = "wasm32")]
+use js_sys::Date;
 use neo_ajtai::{set_global_pp, setup as ajtai_setup, AjtaiSModule};
 use neo_ccs::{CcsMatrix, CcsStructure, CscMat, SparsePoly, Term};
 use neo_math::{D, F};
@@ -22,8 +24,6 @@ use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
-#[cfg(target_arch = "wasm32")]
-use js_sys::Date;
 
 #[derive(Serialize, Deserialize, Clone)]
 pub struct SparseMatrix {
@@ -264,12 +264,7 @@ impl NeoStep for StepCircuit {
         self.step_spec.clone()
     }
 
-    fn synthesize_step(
-        &mut self,
-        step_idx: usize,
-        _y_prev: &[F],
-        _inputs: &Self::ExternalInputs,
-    ) -> StepArtifacts {
+    fn synthesize_step(&mut self, step_idx: usize, _y_prev: &[F], _inputs: &Self::ExternalInputs) -> StepArtifacts {
         let z = self.steps[step_idx].clone();
         let z_padded = pad_witness_to_m(z, self.step_ccs.m);
         StepArtifacts {
@@ -330,8 +325,7 @@ impl TestExportSession {
     }
 
     pub fn new_from_circuit_json(json: &str) -> Result<Self, String> {
-        let circuit = parse_test_export_circuit_json(json)
-            .map_err(|e| format!("parse circuit json error: {e}"))?;
+        let circuit = parse_test_export_circuit_json(json).map_err(|e| format!("parse circuit json error: {e}"))?;
         Self::new_from_circuit(&circuit)
     }
 
@@ -352,8 +346,7 @@ impl TestExportSession {
 
         let ajtai_start = time_now();
         setup_ajtai_for_dims(r1cs_padded_n);
-        let l = AjtaiSModule::from_global_for_dims(D, r1cs_padded_n)
-            .map_err(|e| format!("Ajtai init: {e}"))?;
+        let l = AjtaiSModule::from_global_for_dims(D, r1cs_padded_n).map_err(|e| format!("Ajtai init: {e}"))?;
         let ajtai_setup_ms = elapsed_ms(ajtai_start);
 
         let build_ccs_start = time_now();
@@ -477,16 +470,13 @@ impl TestExportSession {
     }
 
     pub fn add_step_witness_json(&mut self, json: &str) -> Result<(), String> {
-        let z: Vec<u64> =
-            serde_json::from_str(json).map_err(|e| format!("parse witness json error: {e}"))?;
+        let z: Vec<u64> = serde_json::from_str(json).map_err(|e| format!("parse witness json error: {e}"))?;
         self.add_step_witness_u64(&z)
     }
 
     pub fn add_step_io_json(&mut self, x_json: &str, w_json: &str) -> Result<(), String> {
-        let x: Vec<u64> = serde_json::from_str(x_json)
-            .map_err(|e| format!("parse x json error: {e}"))?;
-        let w: Vec<u64> = serde_json::from_str(w_json)
-            .map_err(|e| format!("parse w json error: {e}"))?;
+        let x: Vec<u64> = serde_json::from_str(x_json).map_err(|e| format!("parse x json error: {e}"))?;
+        let w: Vec<u64> = serde_json::from_str(w_json).map_err(|e| format!("parse w json error: {e}"))?;
         self.add_step_io_u64(&x, &w)
     }
 
@@ -521,9 +511,7 @@ impl TestExportSession {
         Ok((elapsed_ms(total_start), per_step_ms))
     }
 
-    pub fn fold_and_prove_with_step_timings(
-        &mut self,
-    ) -> Result<(crate::shard::ShardProof, Vec<f64>), String> {
+    pub fn fold_and_prove_with_step_timings(&mut self) -> Result<(crate::shard::ShardProof, Vec<f64>), String> {
         self.session
             .fold_and_prove_with_step_timings(self.step_ccs.as_ref())
             .map_err(|e| format!("fold_and_prove failed: {e}"))
@@ -603,10 +591,9 @@ pub fn estimate_proof(proof: &crate::shard::ShardProof) -> TestExportProofEstima
     let mut mem_cpu_val_claim_commitments: usize = 0;
     let mut val_lane_commitments: usize = 0;
     for step in &proof.steps {
-        fold_lane_commitments = fold_lane_commitments
-            .saturating_add(step.fold.ccs_out.len() + step.fold.dec_children.len() + 1);
-        mem_cpu_val_claim_commitments = mem_cpu_val_claim_commitments
-            .saturating_add(step.mem.cpu_me_claims_val.len());
+        fold_lane_commitments =
+            fold_lane_commitments.saturating_add(step.fold.ccs_out.len() + step.fold.dec_children.len() + 1);
+        mem_cpu_val_claim_commitments = mem_cpu_val_claim_commitments.saturating_add(step.mem.cpu_me_claims_val.len());
         if let Some(val) = &step.val_fold {
             val_lane_commitments = val_lane_commitments.saturating_add(val.dec_children.len() + 1);
         }
@@ -620,7 +607,9 @@ pub fn estimate_proof(proof: &crate::shard::ShardProof) -> TestExportProofEstima
         .first()
         .map(|s| (s.fold.rlc_parent.c.d, s.fold.rlc_parent.c.kappa))
         .unwrap_or((0, 0));
-    let commitment_bytes: usize = commitment_d.saturating_mul(commitment_kappa).saturating_mul(8);
+    let commitment_bytes: usize = commitment_d
+        .saturating_mul(commitment_kappa)
+        .saturating_mul(8);
     let estimated_commitment_bytes: f64 = total_commitments as f64 * commitment_bytes as f64;
 
     let final_accumulator_len = proof
@@ -652,7 +641,11 @@ pub fn folding_summary(proof: &crate::shard::ShardProof) -> TestExportFoldingSum
         k_in.push(acc_len + 1);
         acc_len = step.fold.dec_children.len();
     }
-    let acc_len_after = proof.steps.iter().map(|s| s.fold.dec_children.len()).collect();
+    let acc_len_after = proof
+        .steps
+        .iter()
+        .map(|s| s.fold.dec_children.len())
+        .collect();
     TestExportFoldingSummary { k_in, acc_len_after }
 }
 
@@ -681,8 +674,7 @@ pub fn run_test_export(export: &TestExport) -> Result<TestExportResult, String> 
 
     let ajtai_start = time_now();
     setup_ajtai_for_dims(r1cs_padded_n);
-    let l = AjtaiSModule::from_global_for_dims(D, r1cs_padded_n)
-        .map_err(|e| format!("Ajtai init: {e}"))?;
+    let l = AjtaiSModule::from_global_for_dims(D, r1cs_padded_n).map_err(|e| format!("Ajtai init: {e}"))?;
     let ajtai_setup_ms = elapsed_ms(ajtai_start);
 
     let step_spec = StepSpec {
@@ -722,8 +714,8 @@ pub fn run_test_export(export: &TestExport) -> Result<TestExportResult, String> 
         witness_fields_total = witness_fields_total.saturating_add(step.len());
         witness_fields_min = witness_fields_min.min(step.len());
         witness_fields_max = witness_fields_max.max(step.len());
-        witness_nonzero_fields_total = witness_nonzero_fields_total
-            .saturating_add(step.iter().filter(|&&v| v != 0).count());
+        witness_nonzero_fields_total =
+            witness_nonzero_fields_total.saturating_add(step.iter().filter(|&&v| v != 0).count());
     }
     if witness_steps == 0 {
         witness_fields_min = 0;

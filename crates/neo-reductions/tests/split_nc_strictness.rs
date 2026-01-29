@@ -47,7 +47,10 @@ fn build_fixture(
     let z = Mat::from_row_major(D, m, vec![F::ZERO; D * m]);
     let c = l.commit(&z);
     let mcs_inst = McsInstance { c, x: vec![], m_in: 0 };
-    let mcs_wit = McsWitness { w: vec![F::ZERO; m], Z: z };
+    let mcs_wit = McsWitness {
+        w: vec![F::ZERO; m],
+        Z: z,
+    };
 
     let tr = Poseidon2Transcript::new(label);
     (params, s, l, mcs_inst, mcs_wit, tr)

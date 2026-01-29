@@ -52,11 +52,7 @@ pub fn commit_u32(value: u32) {
 #[inline]
 pub fn halt() -> ! {
     unsafe {
-        asm!(
-            "li a0, 0",
-            "ecall",
-            options(nostack)
-        );
+        asm!("li a0, 0", "ecall", options(nostack));
     }
     loop {}
 }

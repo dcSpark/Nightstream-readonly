@@ -8,12 +8,12 @@
 //! NOTE: eq_gadget and mle_eval_gadget currently use cs.get() which is unsafe for production.
 //! They are gated behind #[cfg(feature = "unsafe-gadgets")] until rewritten.
 
-use crate::gadgets::k_field::KNumVar;
-use bellpepper_core::{ConstraintSystem, SynthesisError};
-use ff::PrimeField;
-
 #[cfg(feature = "unsafe-gadgets")]
-use bellpepper_core::Variable;
+use crate::gadgets::k_field::KNumVar;
+#[cfg(feature = "unsafe-gadgets")]
+use bellpepper_core::{ConstraintSystem, SynthesisError, Variable};
+#[cfg(feature = "unsafe-gadgets")]
+use ff::PrimeField;
 
 #[cfg(feature = "unsafe-gadgets")]
 /// Compute eq(x, a) = ∏_i ((1 - x_i)(1 - a_i) + x_i * a_i) in the circuit
@@ -106,16 +106,13 @@ pub fn eq_gadget<F: PrimeField, CS: ConstraintSystem<F>>(
     Ok(chi)
 }
 
+#[cfg(feature = "unsafe-gadgets")]
 /// Compute range product over K: ∏_{t=-(b-1)}^{b-1} (y - t)
 ///
 /// This is used in Π-CCS to verify the range constraint on Ajtai digits.
 ///
-/// y: K-field element
-/// b: base (defines range [-(b-1), b-1])
-/// delta: δ constant for K multiplication (u^2 = δ)
-///
-/// **NOTE**: This is currently a placeholder. Real implementation would compute
-/// the product over the full range without cs.get(). For now, just returns y.
+/// **WARNING**: This is currently a placeholder and does not constrain `y`.
+/// It is gated behind `unsafe-gadgets` to avoid accidental use.
 pub fn range_product_gadget<F: PrimeField, CS: ConstraintSystem<F>>(
     _cs: &mut CS,
     y: &KNumVar,
