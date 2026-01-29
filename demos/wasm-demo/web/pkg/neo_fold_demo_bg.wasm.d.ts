@@ -3,6 +3,7 @@
 export const memory: WebAssembly.Memory;
 export const init_panic_hook: () => void;
 export const prove_verify_test_export_json: (a: number, b: number) => [number, number, number];
+export const prove_verify_rv32_b1_fibonacci_asm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
 export const __wbg_neofoldsession_free: (a: number, b: number) => void;
 export const neofoldsession_new: (a: number, b: number) => [number, number, number];
 export const neofoldsession_step_count: (a: number) => number;
@@ -25,11 +26,12 @@ export const neofoldproof_folding_summary: (a: number) => [number, number, numbe
 export const __wbg_spartancompressedproof_free: (a: number, b: number) => void;
 export const spartancompressedproof_bytes_len: (a: number) => [number, number, number];
 export const spartancompressedproof_bytes: (a: number) => [number, number, number, number];
-export const spartancompressedproof_vk_bytes_len: (a: number) => [number, number, number];
 export const spartancompressedproof_vk_and_snark_bytes_len: (a: number) => number;
 export const __wbindgen_malloc: (a: number, b: number) => number;
 export const __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
 export const __wbindgen_free: (a: number, b: number, c: number) => void;
+export const __wbindgen_exn_store: (a: number) => void;
+export const __externref_table_alloc: () => number;
 export const __wbindgen_externrefs: WebAssembly.Table;
 export const __externref_table_dealloc: (a: number) => void;
 export const __wbindgen_start: () => void;

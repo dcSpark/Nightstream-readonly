@@ -85,6 +85,16 @@
           <div class="controls-grid">
             <div class="controls-col">
               <div class="section-title">Circuits</div>
+              <div class="field">
+                <label class="label">Input mode</label>
+                <select id="input-mode" class="select" aria-label="Input mode">
+                  <option value="test_export" selected>TestExport JSON (R1CS + witness)</option>
+                  <option value="rv32_fibonacci">RISC-V (RV32 B1) · Fibonacci</option>
+                </select>
+                <div class="help">
+                  RISC-V mode expects a small “mini-asm” subset (or one 32-bit word per line).
+                </div>
+              </div>
               <div class="preset-row" role="group" aria-label="Preset circuits">
                 <button class="btn btn-secondary preset-btn" type="button" data-preset="toy_square">
                   Toy circuit
@@ -103,9 +113,12 @@
                 >
                   Poseidon2 IC (batch 1)
                 </button>
+                <button class="btn btn-secondary preset-btn" type="button" data-preset="rv32_fibonacci">
+                  RV32 Fibonacci
+                </button>
               </div>
 
-              <div class="field">
+              <div id="json-loader-field" class="field">
                 <label class="label">Load JSON</label>
                 <div id="file-drop" class="dropzone" tabindex="0" role="button">
                   <div class="dropzone-title">Drag &amp; drop a <code>.json</code> file</div>
@@ -145,6 +158,33 @@
                   Produces a Spartan2 proof from the folding proof (larger wasm + longer runtime).
                 </div>
               </div>
+
+              <div id="riscv-options" class="field" hidden>
+                <div class="label">RV32 Fibonacci inputs</div>
+                <div class="riscv-input-grid" role="group" aria-label="RV32 Fibonacci inputs">
+                  <div class="mini-field">
+                    <label class="mini-label" for="riscv-n">n</label>
+                    <input id="riscv-n" class="select" type="number" min="0" step="1" value="3" />
+                  </div>
+                  <div class="mini-field">
+                    <label class="mini-label" for="riscv-ram-bytes">ram_bytes</label>
+                    <input id="riscv-ram-bytes" class="select" type="text" value="0x800" />
+                  </div>
+                  <div class="mini-field">
+                    <label class="mini-label" for="riscv-chunk-size">chunk_size</label>
+                    <input id="riscv-chunk-size" class="select" type="number" min="1" step="1" value="128" />
+                  </div>
+                  <div class="mini-field">
+                    <label class="mini-label" for="riscv-max-steps">max_steps</label>
+                    <input id="riscv-max-steps" class="select" type="number" min="0" step="1" value="0" />
+                  </div>
+                </div>
+                <div class="help">
+                  Inputs: <code>n</code>, <code>ram_bytes</code>, <code>chunk_size</code>,
+                  <code>max_steps</code> (0 = default). The guest reads <code>n</code> from RAM[0x104]
+                  and must write <code>fib(n)</code> to RAM[0x100] before <code>ecall</code>.
+                </div>
+              </div>
             </div>
 
             <div class="controls-col">
@@ -179,7 +219,7 @@
                   aria-label="Collapse Circuit JSON"
                   title="Collapse Circuit JSON"
                 ></button>
-                <h2>Circuit JSON</h2>
+                <h2 id="input-title">Circuit JSON</h2>
               </div>
               <div class="toolbar">
                 <button id="json-format" class="btn btn-tertiary btn-sm" type="button">

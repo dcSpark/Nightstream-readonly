@@ -76,6 +76,8 @@ if [[ "${THREADS}" == "1" ]]; then
     exit 1
   fi
 
+  # NOTE: avoid `panic_immediate_abort` so panics can surface (e.g. via console_error_panic_hook)
+  # instead of trapping with an opaque "unreachable" in the browser.
   RUSTUP_TOOLCHAIN="${TOOLCHAIN}" \
     wasm-pack build "${WASM_DIR}" \
     --release \
@@ -84,8 +86,7 @@ if [[ "${THREADS}" == "1" ]]; then
     --out-name "${OUT_NAME}" \
     -- \
     --features wasm-threads \
-    -Z build-std=std,panic_abort \
-    -Z build-std-features=panic_immediate_abort
+    -Z build-std=std,panic_abort
 
   # wasm-bindgen-rayon has two modes:
   # - "no-bundler" (preferred for this demo): emits workerHelpers.no-bundler.js (no patch needed)

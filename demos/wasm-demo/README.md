@@ -4,8 +4,12 @@ Minimal browser demo that runs `neo-fold` prove+verify inside `wasm32-unknown-un
 
 If you want a native iOS build (Swift/Xcode) alongside wasm, see `docs/ios-native.md`.
 
-This demo expects a circuit in the same JSON schema as `crates/neo-fold/poseidon2-tests/*.json`
-(`TestExport`: R1CS A/B/C sparse matrices + per-step witnesses).
+This demo supports two input modes:
+
+- **TestExport JSON** (same schema as `crates/neo-fold/poseidon2-tests/*.json`):
+  R1CS A/B/C sparse matrices + per-step witnesses.
+- **RV32 Fibonacci** (pasteable “mini-asm” / words): assembles a small RV32 program, generates a trace,
+  and proves it under the RV32 B1 shared-bus step circuit.
 
 ## API surface / extending from JS
 
@@ -123,6 +127,7 @@ Then click `Prove + Verify`.
 - `toy_square.json` (tiny sanity check)
 - `toy_square_folding_8_steps.json` (same toy circuit, but 8 steps to demonstrate folding)
 - `poseidon2_ic_batch_1.json` (from `crates/neo-fold/poseidon2-tests/poseidon2_ic_circuit_batch_1.json`)
+- `rv32_fibonacci.asm` (RV32 “mini-asm” Fibonacci program; reads `n` from RAM[0x104], writes fib(n) to RAM[0x100])
 
 ## Deploy (GitHub Pages)
 

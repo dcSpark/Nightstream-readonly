@@ -3,8 +3,17 @@ const logEl = document.getElementById("log");
 const jsonTextareaEl = document.getElementById("circuit-json");
 const jsonGutterEl = document.getElementById("circuit-json-gutter");
 const jsonErrorEl = document.getElementById("json-error");
+const inputTitleEl = document.getElementById("input-title");
 
 const presetButtons = Array.from(document.querySelectorAll(".preset-btn"));
+
+const inputModeEl = document.getElementById("input-mode");
+const jsonLoaderFieldEl = document.getElementById("json-loader-field");
+const riscvOptionsEl = document.getElementById("riscv-options");
+const riscvNEl = document.getElementById("riscv-n");
+const riscvRamBytesEl = document.getElementById("riscv-ram-bytes");
+const riscvChunkSizeEl = document.getElementById("riscv-chunk-size");
+const riscvMaxStepsEl = document.getElementById("riscv-max-steps");
 
 const circuitJsonToggleEl = document.getElementById("circuit-json-toggle");
 const circuitJsonBodyEl = document.getElementById("circuit-json-body");
@@ -58,6 +67,10 @@ let activeWasmBundle = null; // "pkg" | "pkg_threads"
 let activeWasmThreads = 0;
 let runId = 0;
 let runInProgress = false;
+let inputMode = typeof inputModeEl?.value === "string" ? inputModeEl.value : "test_export";
+let runStatusBase = "";
+let runElapsedTimer = 0;
+let runElapsedStartMs = 0;
 
 const urlParams = new URLSearchParams(window.location.search);
 const threadsParam = urlParams.get("threads"); // "1" | "0" | null
@@ -134,6 +147,73 @@ function defaultThreadCount() {
 function setText(el, text) {
   if (!el) return;
   el.textContent = text;
+}
+
+function fmtElapsed(ms) {
+  const totalSec = Math.max(0, Math.floor(ms / 1000));
+  const h = Math.floor(totalSec / 3600);
+  const m = Math.floor((totalSec % 3600) / 60);
+  const s = totalSec % 60;
+  const pad2 = (n) => String(n).padStart(2, "0");
+  if (h > 0) return `${h}:${pad2(m)}:${pad2(s)}`;
+  return `${m}:${pad2(s)}`;
+}
+
+function updateRunStatusText() {
+  if (!runStatusEl) return;
+  if (runInProgress && runElapsedStartMs > 0) {
+    const elapsed = performance.now() - runElapsedStartMs;
+    const base = runStatusBase || "Running…";
+    runStatusEl.textContent = `${base} (elapsed ${fmtElapsed(elapsed)})`;
+    return;
+  }
+  runStatusEl.textContent = runStatusBase || "";
+}
+
+function startRunElapsedTimer() {
+  stopRunElapsedTimer();
+  runElapsedStartMs = performance.now();
+  runElapsedTimer = window.setInterval(updateRunStatusText, 1000);
+  updateRunStatusText();
+}
+
+function stopRunElapsedTimer() {
+  if (runElapsedTimer) window.clearInterval(runElapsedTimer);
+  runElapsedTimer = 0;
+  runElapsedStartMs = 0;
+}
+
+function parseIntLoose(value) {
+  const s = String(value ?? "").trim();
+  if (!s) return null;
+  const n = Number.parseInt(s, 0);
+  return Number.isFinite(n) ? n : null;
+}
+
+function setInputMode(mode) {
+  const m = mode === "rv32_fibonacci" ? "rv32_fibonacci" : "test_export";
+  inputMode = m;
+  if (inputModeEl) inputModeEl.value = m;
+
+  const isJson = m === "test_export";
+  const isRiscv = m === "rv32_fibonacci";
+
+  if (jsonLoaderFieldEl) jsonLoaderFieldEl.hidden = !isJson;
+  if (riscvOptionsEl) riscvOptionsEl.hidden = !isRiscv;
+
+  if (inputTitleEl) inputTitleEl.textContent = isJson ? "Circuit JSON" : "RISC-V Program";
+
+  if (jsonFormatEl) jsonFormatEl.disabled = !isJson;
+  if (jsonValidateEl) jsonValidateEl.disabled = !isJson;
+
+  if (!isJson) clearJsonError();
+
+  // Switching modes should immediately update which controls are enabled. Previously the RV32
+  // inputs could remain disabled because `setButtonsEnabled(true)` wasn't re-run on mode changes.
+  const uiEnabled = inputModeEl ? inputModeEl.disabled !== true : true;
+  setButtonsEnabled(uiEnabled && !runInProgress);
+
+  setCircuitJsonCollapsed(circuitJsonCollapsed);
 }
 
 function setChip(el, { text, tone = "neutral", icon = "●", title } = {}) {
@@ -363,24 +443,32 @@ function setCircuitJsonCollapsed(collapsed) {
   if (circuitJsonBodyEl) circuitJsonBodyEl.hidden = circuitJsonCollapsed;
   if (circuitJsonToggleEl) {
     circuitJsonToggleEl.setAttribute("aria-expanded", circuitJsonCollapsed ? "false" : "true");
-    const label = circuitJsonCollapsed ? "Expand Circuit JSON" : "Collapse Circuit JSON";
+    const name = inputMode === "test_export" ? "Circuit JSON" : "RISC-V Program";
+    const label = circuitJsonCollapsed ? `Expand ${name}` : `Collapse ${name}`;
     circuitJsonToggleEl.setAttribute("aria-label", label);
     circuitJsonToggleEl.title = label;
   }
 }
 
 function setButtonsEnabled(enabled) {
+  const isJson = inputMode === "test_export";
+  const isRiscv = inputMode === "rv32_fibonacci";
   for (const btn of presetButtons) btn.disabled = !enabled;
-  if (fileInputEl) fileInputEl.disabled = !enabled;
+  if (inputModeEl) inputModeEl.disabled = !enabled;
+  if (fileInputEl) fileInputEl.disabled = !enabled || !isJson;
   if (fileClearEl) fileClearEl.disabled = !enabled || fileMetaEl?.hidden !== false;
   if (runBtnEl) runBtnEl.disabled = !enabled;
   if (jsonTextareaEl) jsonTextareaEl.disabled = !enabled;
   if (compressSpartanEl) compressSpartanEl.disabled = !enabled;
   if (downloadSpartanEl) downloadSpartanEl.disabled = !enabled || !lastSpartanProofBytes;
-  if (jsonFormatEl) jsonFormatEl.disabled = !enabled;
+  if (jsonFormatEl) jsonFormatEl.disabled = !enabled || !isJson;
   if (jsonCopyEl) jsonCopyEl.disabled = !enabled;
   if (jsonDownloadEl) jsonDownloadEl.disabled = !enabled;
-  if (jsonValidateEl) jsonValidateEl.disabled = !enabled;
+  if (jsonValidateEl) jsonValidateEl.disabled = !enabled || !isJson;
+  if (riscvNEl) riscvNEl.disabled = !enabled || !isRiscv;
+  if (riscvRamBytesEl) riscvRamBytesEl.disabled = !enabled || !isRiscv;
+  if (riscvChunkSizeEl) riscvChunkSizeEl.disabled = !enabled || !isRiscv;
+  if (riscvMaxStepsEl) riscvMaxStepsEl.disabled = !enabled || !isRiscv;
 }
 
 function downloadBytes(filename, bytes) {
@@ -415,16 +503,25 @@ const PRESETS = {
     label: "Toy circuit",
     url: "./examples/toy_square.json",
     filename: "toy_square.json",
+    mode: "test_export",
   },
   toy_square_folding_8_steps: {
     label: "Toy folding circuit (8 steps)",
     url: "./examples/toy_square_folding_8_steps.json",
     filename: "toy_square_folding_8_steps.json",
+    mode: "test_export",
   },
   poseidon2_ic_batch_1: {
     label: "Poseidon2 IC (batch 1)",
     url: "./examples/poseidon2_ic_batch_1.json",
     filename: "poseidon2_ic_batch_1.json",
+    mode: "test_export",
+  },
+  rv32_fibonacci: {
+    label: "RV32 Fibonacci (mini-asm)",
+    url: "./examples/rv32_fibonacci.asm",
+    filename: "rv32_fibonacci.asm",
+    mode: "rv32_fibonacci",
   },
 };
 
@@ -545,6 +642,7 @@ function validateJson(text, { focusOnError = false } = {}) {
 let autoValidateTimer = 0;
 function scheduleAutoValidate() {
   if (!jsonTextareaEl) return;
+  if (inputMode !== "test_export") return;
   const len = jsonTextareaEl.value?.length ?? 0;
   if (len > 1_000_000) return; // avoid expensive parse on huge inputs while typing
   if (autoValidateTimer) window.clearTimeout(autoValidateTimer);
@@ -565,6 +663,7 @@ async function loadPreset(key) {
   const resp = await fetch(preset.url);
   if (!resp.ok) throw new Error(`Failed to load preset: ${resp.status}`);
   const txt = await resp.text();
+  setInputMode(preset.mode);
   setJsonText(txt, { filename: preset.filename });
   setActivePreset(key);
   logInfo(`Loaded preset: ${preset.label} (${fmtBytes(txt.length)})`);
@@ -587,6 +686,7 @@ function clearFileSelection() {
 
 async function loadFile(file) {
   const txt = await file.text();
+  setInputMode("test_export");
   setJsonText(txt, { filename: file.name });
   setActivePreset(null);
   if (fileMetaEl) fileMetaEl.hidden = false;
@@ -601,21 +701,64 @@ function setRunUiState({ running, label, status } = {}) {
     const labelEl = runBtnEl.querySelector(".btn-label");
     if (labelEl && typeof label === "string") labelEl.textContent = label;
   }
-  if (runStatusEl && typeof status === "string") runStatusEl.textContent = status;
+  if (typeof status === "string") runStatusBase = status;
+  updateRunStatusText();
 }
 
 async function run() {
-  const json = jsonTextareaEl?.value ?? "";
+  const inputText = jsonTextareaEl?.value ?? "";
   lastSpartanProofBytes = null;
   lastSpartanProofFilename = null;
   if (downloadSpartanEl) downloadSpartanEl.disabled = true;
-  if (!json.trim()) {
-    logWarn("No JSON provided.");
+  if (!inputText.trim()) {
+    logWarn(inputMode === "test_export" ? "No JSON provided." : "No RISC-V program provided.");
     return;
   }
 
-  const parsed = validateJson(json, { focusOnError: true });
-  if (!parsed.ok) return;
+  let json = null;
+  let asm = null;
+  let riscv = null;
+
+  if (inputMode === "test_export") {
+    json = inputText;
+    const parsed = validateJson(json, { focusOnError: true });
+    if (!parsed.ok) return;
+  } else if (inputMode === "rv32_fibonacci") {
+    asm = inputText;
+    clearJsonError();
+
+    const n = parseIntLoose(riscvNEl?.value);
+    const ramBytes = parseIntLoose(riscvRamBytesEl?.value);
+    const chunkSize = parseIntLoose(riscvChunkSizeEl?.value);
+    const maxSteps = parseIntLoose(riscvMaxStepsEl?.value);
+
+    if (n === null || n < 0) {
+      logWarn("Invalid RV32 input: n must be a non-negative integer.");
+      return;
+    }
+    if (ramBytes === null || ramBytes <= 0) {
+      logWarn("Invalid RV32 input: ram_bytes must be a positive integer (e.g. 0x800).");
+      return;
+    }
+    if (chunkSize === null || chunkSize <= 0) {
+      logWarn("Invalid RV32 input: chunk_size must be a positive integer.");
+      return;
+    }
+    if (maxSteps === null || maxSteps < 0) {
+      logWarn("Invalid RV32 input: max_steps must be >= 0.");
+      return;
+    }
+
+    riscv = {
+      n,
+      ram_bytes: ramBytes,
+      chunk_size: chunkSize,
+      max_steps: maxSteps,
+    };
+  } else {
+    logError(`Unknown input mode: ${String(inputMode)}`);
+    return;
+  }
 
   if (runInProgress) {
     logWarn("Run already in progress.");
@@ -628,6 +771,7 @@ async function run() {
 
   setButtonsEnabled(false);
   setRunUiState({ running: true, label: "Running…", status: "Preparing…" });
+  startRunElapsedTimer();
   try {
     const worker = ensureProverWorker();
     const id = ++runId;
@@ -685,7 +829,10 @@ async function run() {
       worker.postMessage({
         type: "run",
         id,
+        mode: inputMode,
         json,
+        asm,
+        riscv,
         doSpartan,
         bundle: activeWasmBundle ?? "pkg",
         threads: activeWasmThreads,
@@ -701,6 +848,7 @@ async function run() {
     console.error(e);
     setRunUiState({ running: false, label: "Prove + Verify", status: "Failed." });
   } finally {
+    stopRunElapsedTimer();
     setButtonsEnabled(true);
     runInProgress = false;
     if (runBtnEl) runBtnEl.dataset.loading = "false";
@@ -923,6 +1071,17 @@ async function main() {
     });
   }
 
+  if (inputModeEl) {
+    inputModeEl.addEventListener("change", () => {
+      clearFileSelection();
+      setActivePreset(null);
+      setInputMode(inputModeEl.value);
+      if (inputModeEl.value === "rv32_fibonacci") {
+        logInfo("Switched to RV32 Fibonacci mode. Load the 'RV32 Fibonacci' preset or paste a program.");
+      }
+    });
+  }
+
   if (fileDropEl && fileInputEl) {
     const setDrag = (on) => fileDropEl.classList.toggle("is-dragover", on);
     const prevent = (e) => {
@@ -1036,6 +1195,9 @@ async function main() {
       if (e.key === "Escape" && !infoPanelEl.hidden) close();
     });
   }
+
+  // Ensure initial mode-based UI state.
+  setInputMode(inputMode);
 
   await loadPreset("poseidon2_ic_batch_1");
 
