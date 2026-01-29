@@ -1,3 +1,5 @@
+import org.gradle.api.tasks.Copy
+
 plugins {
     id("com.android.application")
     id("org.jetbrains.kotlin.android")
@@ -6,6 +8,10 @@ plugins {
 android {
     namespace = "com.midnight.neofold.demo"
     compileSdk = 34
+
+    buildFeatures {
+        buildConfig = true
+    }
 
     defaultConfig {
         applicationId = "com.midnight.neofold.demo"
@@ -48,3 +54,42 @@ dependencies {
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.8.0")
 }
 
+val wasmDemoWebDir = rootProject.file("../wasm-demo/web")
+val wasmDemoPkgDir = wasmDemoWebDir.resolve("pkg")
+val wasmDemoPkgThreadsDir = wasmDemoWebDir.resolve("pkg_threads")
+
+val assetsWebDir = projectDir.resolve("src/main/assets/web")
+val assetsPkgDir = assetsWebDir.resolve("pkg")
+val assetsPkgThreadsDir = assetsWebDir.resolve("pkg_threads")
+
+val syncWasmDemoPkg by tasks.registering(Copy::class) {
+    group = "demo"
+    description = "Copies the prebuilt wasm-demo bundle (pkg) into Android assets if missing."
+    from(wasmDemoPkgDir)
+    into(assetsPkgDir)
+    exclude(".gitignore")
+    onlyIf {
+        wasmDemoPkgDir.exists() && !assetsPkgDir.resolve("neo_fold_demo.js").exists()
+    }
+}
+
+val syncWasmDemoPkgThreads by tasks.registering(Copy::class) {
+    group = "demo"
+    description = "Copies the prebuilt wasm-demo bundle (pkg_threads) into Android assets if missing."
+    from(wasmDemoPkgThreadsDir)
+    into(assetsPkgThreadsDir)
+    exclude(".gitignore")
+    onlyIf {
+        wasmDemoPkgThreadsDir.exists() && !assetsPkgThreadsDir.resolve("neo_fold_demo.js").exists()
+    }
+}
+
+val syncWasmAssets by tasks.registering {
+    group = "demo"
+    description = "Ensures the WASM bundles exist under app assets."
+    dependsOn(syncWasmDemoPkg, syncWasmDemoPkgThreads)
+}
+
+tasks.named("preBuild") {
+    dependsOn(syncWasmAssets)
+}

@@ -1,6 +1,6 @@
 <resources>
     <style name="Theme.NeoFoldDemo" parent="Theme.Material3.DayNight.NoActionBar">
-        <!-- Dark, web-demo inspired palette -->
+        <!-- Keep night theme aligned with day theme (web-demo style). -->
         <item name="colorPrimary">#7CA6FF</item>
         <item name="colorOnPrimary">#071426</item>
         <item name="colorPrimaryContainer">#1A2B52</item>
