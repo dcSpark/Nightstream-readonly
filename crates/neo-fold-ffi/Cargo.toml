@@ -15,12 +15,13 @@ workspace = true
 crate-type = ["staticlib", "rlib"]
 
 [dependencies]
+bincode = { workspace = true, optional = true }
 neo-fold = { path = "../neo-fold" }
 neo-spartan-bridge = { path = "../neo-spartan-bridge", optional = true }
 serde_json = { workspace = true }
 
 [features]
 default = []
-spartan = ["dep:neo-spartan-bridge"]
+spartan = ["dep:bincode", "dep:neo-spartan-bridge"]
 debug-logs = ["neo-fold/debug-logs"]
 spartan-debug-logs = ["spartan", "neo-spartan-bridge/debug-logs"]

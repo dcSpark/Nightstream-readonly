@@ -41,10 +41,7 @@ fn sha256_fields_concat(x: &[F], w: &[F]) -> [u8; 32] {
 }
 
 fn nonzero_concat(x: &[F], w: &[F]) -> usize {
-    x.iter()
-        .chain(w.iter())
-        .filter(|v| **v != F::ZERO)
-        .count()
+    x.iter().chain(w.iter()).filter(|v| **v != F::ZERO).count()
 }
 
 fn preview_first_last(values: &[F], n: usize) -> (Vec<u64>, Vec<u64>) {
@@ -119,7 +116,10 @@ fn test_riscv_fibonacci_compiled_full_prove_verify() {
         .prove()
         .expect("prove");
 
-    println!("RV32 executed steps (trace len): {}", run.riscv_trace_len().expect("trace len"));
+    println!(
+        "RV32 executed steps (trace len): {}",
+        run.riscv_trace_len().expect("trace len")
+    );
     println!(
         "Circuit size (CCS): n_constraints={} m_variables={}",
         run.ccs_num_constraints(),
@@ -136,14 +136,20 @@ fn test_riscv_fibonacci_compiled_full_prove_verify() {
         let proof = run.proof();
         let num_steps = proof.steps.len();
         // Each MeInstance has exactly one commitment
-        let num_commitments: usize = proof.steps.iter().map(|s| {
-            s.fold.ccs_out.len() + s.fold.dec_children.len() + 1 // +1 for rlc_parent
+        let num_commitments: usize = proof
+            .steps
+            .iter()
+            .map(|s| {
+                s.fold.ccs_out.len() + s.fold.dec_children.len() + 1 // +1 for rlc_parent
                 + s.mem.cpu_me_claims_val.len()
                 + s.val_fold.as_ref().map(|v| v.dec_children.len() + 1).unwrap_or(0)
-        }).sum();
+            })
+            .sum();
         // Commitment size: d * kappa * 8 bytes (d=54, kappa varies)
         // Get d and kappa from the first commitment in the proof
-        let (d, kappa) = proof.steps.first()
+        let (d, kappa) = proof
+            .steps
+            .first()
             .map(|s| (s.fold.rlc_parent.c.d, s.fold.rlc_parent.c.kappa))
             .unwrap_or((54, 2));
         let commitment_bytes = d * kappa * 8;
@@ -206,8 +212,14 @@ fn test_riscv_fibonacci_compiled_full_prove_verify() {
         println!("  Z_last ={Z_last:?}");
 
         if print_full {
-            println!("  x_full={:?}", x.iter().map(|v| v.as_canonical_u64()).collect::<Vec<_>>());
-            println!("  w_full={:?}", w.iter().map(|v| v.as_canonical_u64()).collect::<Vec<_>>());
+            println!(
+                "  x_full={:?}",
+                x.iter().map(|v| v.as_canonical_u64()).collect::<Vec<_>>()
+            );
+            println!(
+                "  w_full={:?}",
+                w.iter().map(|v| v.as_canonical_u64()).collect::<Vec<_>>()
+            );
         }
     }
 

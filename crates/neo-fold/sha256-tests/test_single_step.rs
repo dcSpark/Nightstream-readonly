@@ -11,11 +11,9 @@ use std::{
     time::Instant,
 };
 
-use bincode::Options;
 use bellpepper::gadgets::boolean::{AllocatedBit, Boolean};
-use bellpepper_core::{
-    Circuit, ConstraintSystem, Index, LinearCombination, SynthesisError, Variable,
-};
+use bellpepper_core::{Circuit, ConstraintSystem, Index, LinearCombination, SynthesisError, Variable};
+use bincode::Options;
 use ff::PrimeField;
 use neo_ajtai::{set_global_pp_seeded, AjtaiSModule};
 use neo_ccs::{CcsMatrix, CcsStructure, CscMat, SparsePoly, Term};
@@ -32,14 +30,10 @@ const CIRCUIT_CACHE_FORMAT_VERSION: u32 = 2;
 const SHA256_CIRCUIT_CACHE_MAX_BYTES: u64 = 1024 * 1024 * 1024; // 1 GiB
 static CIRCUIT_CACHE_TMP_COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-const SHA256_CIRCUIT_CACHE_KEY_SECTION_1_BEGIN: &[u8] =
-    b"\n// === SHA256_CIRCUIT_CACHE_KEY_SECTION_1_BEGIN ===\n";
-const SHA256_CIRCUIT_CACHE_KEY_SECTION_1_END: &[u8] =
-    b"\n// === SHA256_CIRCUIT_CACHE_KEY_SECTION_1_END ===\n";
-const SHA256_CIRCUIT_CACHE_KEY_SECTION_2_BEGIN: &[u8] =
-    b"\n// === SHA256_CIRCUIT_CACHE_KEY_SECTION_2_BEGIN ===\n";
-const SHA256_CIRCUIT_CACHE_KEY_SECTION_2_END: &[u8] =
-    b"\n// === SHA256_CIRCUIT_CACHE_KEY_SECTION_2_END ===\n";
+const SHA256_CIRCUIT_CACHE_KEY_SECTION_1_BEGIN: &[u8] = b"\n// === SHA256_CIRCUIT_CACHE_KEY_SECTION_1_BEGIN ===\n";
+const SHA256_CIRCUIT_CACHE_KEY_SECTION_1_END: &[u8] = b"\n// === SHA256_CIRCUIT_CACHE_KEY_SECTION_1_END ===\n";
+const SHA256_CIRCUIT_CACHE_KEY_SECTION_2_BEGIN: &[u8] = b"\n// === SHA256_CIRCUIT_CACHE_KEY_SECTION_2_BEGIN ===\n";
+const SHA256_CIRCUIT_CACHE_KEY_SECTION_2_END: &[u8] = b"\n// === SHA256_CIRCUIT_CACHE_KEY_SECTION_2_END ===\n";
 
 fn find_subslice(haystack: &[u8], needle: &[u8]) -> Option<usize> {
     haystack
@@ -81,10 +75,7 @@ fn sha256_circuit_cache_key() -> [u8; 32] {
             h.update(src);
         }
 
-        h.update(include_bytes!(concat!(
-            env!("CARGO_MANIFEST_DIR"),
-            "/../../Cargo.lock"
-        )));
+        h.update(include_bytes!(concat!(env!("CARGO_MANIFEST_DIR"), "/../../Cargo.lock")));
 
         let digest = h.finalize();
         let mut out = [0u8; 32];
@@ -146,10 +137,7 @@ struct Sha256CircuitDiskCacheRef<'a> {
     witness: &'a [F],
 }
 
-fn load_cached_sha256_circuit(
-    cache_path: &Path,
-    preimage_len_bytes: usize,
-) -> Option<(CcsStructure<F>, Vec<F>)> {
+fn load_cached_sha256_circuit(cache_path: &Path, preimage_len_bytes: usize) -> Option<(CcsStructure<F>, Vec<F>)> {
     let file = fs::File::open(cache_path).ok()?;
     let mut reader = BufReader::new(file);
     let cache: Sha256CircuitDiskCache = bincode::options()
@@ -179,12 +167,7 @@ fn load_cached_sha256_circuit(
     Some((cache.ccs, cache.witness))
 }
 
-fn store_sha256_circuit_cache(
-    cache_path: &Path,
-    preimage_len_bytes: usize,
-    ccs: &CcsStructure<F>,
-    witness: &[F],
-) {
+fn store_sha256_circuit_cache(cache_path: &Path, preimage_len_bytes: usize, ccs: &CcsStructure<F>, witness: &[F]) {
     if cache_path.exists() {
         return;
     }
@@ -342,11 +325,7 @@ impl TripletConstraintSystem {
         }
     }
 
-    fn push_lc_trips(
-        row: u32,
-        lc: &LinearCombination<FpGoldilocks>,
-        trips: &mut Vec<(u32, u32, F)>,
-    ) {
+    fn push_lc_trips(row: u32, lc: &LinearCombination<FpGoldilocks>, trips: &mut Vec<(u32, u32, F)>) {
         for (var, coeff) in lc.iter() {
             let value = fp_to_u64(coeff);
             if value == 0 {
@@ -460,8 +439,7 @@ fn test_sha256_circuit_is_satisfied() {
     // Verify that the packed public inputs match the SHA256 digest of the preimage.
     let digest = Sha256::digest(&preimage);
     let digest_bits = bellpepper::gadgets::multipack::bytes_to_bits(digest.as_ref());
-    let expected_inputs =
-        bellpepper::gadgets::multipack::compute_multipacking::<FpGoldilocks>(&digest_bits);
+    let expected_inputs = bellpepper::gadgets::multipack::compute_multipacking::<FpGoldilocks>(&digest_bits);
     assert!(cs.verify(&expected_inputs));
 }
 
@@ -504,8 +482,7 @@ fn test_sha256_preimage_len_bytes(preimage_len_bytes: usize) {
     let preimage = sha256_preimage_for_len(preimage_len_bytes);
     let digest = Sha256::digest(&preimage);
     let digest_bits = bellpepper::gadgets::multipack::bytes_to_bits(digest.as_ref());
-    let expected_inputs_fp =
-        bellpepper::gadgets::multipack::compute_multipacking::<FpGoldilocks>(&digest_bits);
+    let expected_inputs_fp = bellpepper::gadgets::multipack::compute_multipacking::<FpGoldilocks>(&digest_bits);
     let expected_inputs: Vec<F> = expected_inputs_fp
         .iter()
         .map(|x| F::from_u64(fp_to_u64(x)))
@@ -513,8 +490,8 @@ fn test_sha256_preimage_len_bytes(preimage_len_bytes: usize) {
 
     let (step_ccs, witness) = cached_bellpepper_sha256_circuit(preimage_len_bytes);
 
-    let mut params = NeoParams::goldilocks_auto_r1cs_ccs(step_ccs.n)
-        .expect("goldilocks_auto_r1cs_ccs should find valid params");
+    let mut params =
+        NeoParams::goldilocks_auto_r1cs_ccs(step_ccs.n).expect("goldilocks_auto_r1cs_ccs should find valid params");
 
     params.b = 3;
 
@@ -593,10 +570,7 @@ struct Sha256Circuit {
 }
 
 impl Circuit<FpGoldilocks> for Sha256Circuit {
-    fn synthesize<CS: ConstraintSystem<FpGoldilocks>>(
-        self,
-        cs: &mut CS,
-    ) -> Result<(), SynthesisError> {
+    fn synthesize<CS: ConstraintSystem<FpGoldilocks>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
         // SHA256 expects a big-endian bit order within each byte.
         let bit_values: Vec<_> = bellpepper::gadgets::multipack::bytes_to_bits(&self.preimage)
             .into_iter()
@@ -613,8 +587,7 @@ impl Circuit<FpGoldilocks> for Sha256Circuit {
 
         // TODO: these would have to be added as outputs
         // it doesn't matter right now though
-        let hash_bits =
-            bellpepper::gadgets::sha256::sha256(cs.namespace(|| "sha256"), &preimage_bits)?;
+        let hash_bits = bellpepper::gadgets::sha256::sha256(cs.namespace(|| "sha256"), &preimage_bits)?;
 
         // Bind the SHA256 digest as compact public inputs.
         bellpepper::gadgets::multipack::pack_into_inputs(cs.namespace(|| "hash_out"), &hash_bits)?;
@@ -623,15 +596,11 @@ impl Circuit<FpGoldilocks> for Sha256Circuit {
     }
 }
 
-fn bellpepper_sha256_circuit(
-    preimage_len_bytes: usize,
-) -> (CcsStructure<F>, Vec<F>) {
+fn bellpepper_sha256_circuit(preimage_len_bytes: usize) -> (CcsStructure<F>, Vec<F>) {
     let mut cs = TripletConstraintSystem::new();
 
     let preimage = sha256_preimage_for_len(preimage_len_bytes);
-    let circuit = Sha256Circuit {
-        preimage,
-    };
+    let circuit = Sha256Circuit { preimage };
     circuit
         .synthesize(&mut cs)
         .expect("Circuit synthesis should succeed");
@@ -650,11 +619,7 @@ fn bellpepper_sha256_circuit(
     let num_aux = aux.len();
     let num_variables = num_inputs + num_aux;
 
-    println!(
-        "SHA256 CCS: n={}, m={}",
-        num_constraints,
-        num_inputs + num_aux
-    );
+    println!("SHA256 CCS: n={}, m={}", num_constraints, num_inputs + num_aux);
 
     let n = num_constraints.max(num_variables);
 

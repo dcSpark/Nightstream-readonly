@@ -1,14 +1,8 @@
 #![allow(non_snake_case)]
 
 use neo_ccs::{
-    poly::SparsePoly,
-    poly::Term,
-    relations::check_me_consistency,
-    traits::SModuleHomomorphism,
-    CcsStructure,
-    Mat,
-    MeInstance,
-    MeWitness,
+    poly::SparsePoly, poly::Term, relations::check_me_consistency, traits::SModuleHomomorphism, CcsStructure, Mat,
+    MeInstance, MeWitness,
 };
 use neo_math::ring::D;
 use neo_math::K;
@@ -130,4 +124,3 @@ fn me_consistency_accepts_padded_y_rows() {
     inst_bad.y[0][D] += K::ONE;
     assert!(check_me_consistency(&s, &L, &inst_bad, &wit).is_err());
 }
-

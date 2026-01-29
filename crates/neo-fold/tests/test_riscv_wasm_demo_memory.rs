@@ -42,7 +42,8 @@ fn test_rv32_fibonacci_mini_asm_peak_rss() {
     let rss0 = riscv_wasm_demo::max_rss_bytes();
     println!(
         "rv32-fib: start rss_peak={} pid={}",
-        rss0.map(riscv_wasm_demo::fmt_bytes).unwrap_or_else(|| "?".into()),
+        rss0.map(riscv_wasm_demo::fmt_bytes)
+            .unwrap_or_else(|| "?".into()),
         std::process::id()
     );
 
@@ -63,7 +64,8 @@ fn test_rv32_fibonacci_mini_asm_peak_rss() {
     let rss1 = riscv_wasm_demo::max_rss_bytes();
     println!(
         "rv32-fib: after prove rss_peak={} prove_ms={:.1}",
-        rss1.map(riscv_wasm_demo::fmt_bytes).unwrap_or_else(|| "?".into()),
+        rss1.map(riscv_wasm_demo::fmt_bytes)
+            .unwrap_or_else(|| "?".into()),
         run.prove_duration().as_secs_f64() * 1000.0
     );
 
@@ -72,8 +74,11 @@ fn test_rv32_fibonacci_mini_asm_peak_rss() {
     let rss2 = riscv_wasm_demo::max_rss_bytes();
     println!(
         "rv32-fib: after verify rss_peak={} verify_ms={:.1}",
-        rss2.map(riscv_wasm_demo::fmt_bytes).unwrap_or_else(|| "?".into()),
-        run.verify_duration().map(|d| d.as_secs_f64() * 1000.0).unwrap_or(0.0)
+        rss2.map(riscv_wasm_demo::fmt_bytes)
+            .unwrap_or_else(|| "?".into()),
+        run.verify_duration()
+            .map(|d| d.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0)
     );
 
     let trace_len = run.riscv_trace_len().ok();
@@ -91,6 +96,7 @@ fn test_rv32_fibonacci_mini_asm_peak_rss() {
         run.shout_lookup_count().ok()
     );
 
-    assert!(run.verify_default_output_claim().expect("verify output claim"));
+    assert!(run
+        .verify_default_output_claim()
+        .expect("verify output claim"));
 }
-

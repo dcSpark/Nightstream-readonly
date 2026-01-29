@@ -79,9 +79,7 @@ pub(super) fn build_r1cs_ccs(
         return Err("RV32 B1 CCS: n must be >= 1".into());
     }
     if const_one_col >= m {
-        return Err(format!(
-            "RV32 B1 CCS: const_one_col({const_one_col}) must be < m({m})"
-        ));
+        return Err(format!("RV32 B1 CCS: const_one_col({const_one_col}) must be < m({m})"));
     }
     if constraints.len() > n {
         return Err(format!(
@@ -146,6 +144,5 @@ pub(super) fn build_r1cs_ccs(
         (vec![a, b, c], f_base)
     };
 
-    CcsStructure::new_sparse(matrices, f)
-        .map_err(|e| format!("RV32 B1 CCS: invalid structure: {e:?}"))
+    CcsStructure::new_sparse(matrices, f).map_err(|e| format!("RV32 B1 CCS: invalid structure: {e:?}"))
 }

@@ -42,10 +42,7 @@ fn alloc_error(_layout: core::alloc::Layout) -> ! {
     halt()
 }
 
-#[cfg(all(
-    not(feature = "std"),
-    any(target_arch = "riscv32", target_arch = "riscv64")
-))]
+#[cfg(all(not(feature = "std"), any(target_arch = "riscv32", target_arch = "riscv64")))]
 #[panic_handler]
 fn panic(_info: &core::panic::PanicInfo) -> ! {
     halt()

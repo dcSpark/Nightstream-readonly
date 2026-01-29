@@ -88,7 +88,10 @@ fn parse_i32(token: &str, line_no: usize) -> Result<i32, String> {
     if s0.is_empty() {
         return Err(format!("line {line_no}: expected immediate, got empty token"));
     }
-    let (neg, s) = s0.strip_prefix('-').map(|rest| (true, rest)).unwrap_or((false, s0.as_str()));
+    let (neg, s) = s0
+        .strip_prefix('-')
+        .map(|rest| (true, rest))
+        .unwrap_or((false, s0.as_str()));
     let val: i64 = if let Some(hex) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
         i64::from_str_radix(hex, 16).map_err(|_| format!("line {line_no}: invalid hex immediate '{token}'"))?
     } else {
@@ -131,7 +134,11 @@ fn parse_mem_operand(token: &str, line_no: usize) -> Result<(i32, u8), String> {
     }
     let off_str = t[..open].trim();
     let base_str = t[open + 1..close].trim();
-    let off = if off_str.is_empty() { 0 } else { parse_i32(off_str, line_no)? };
+    let off = if off_str.is_empty() {
+        0
+    } else {
+        parse_i32(off_str, line_no)?
+    };
     let base = parse_reg(base_str, line_no)?;
     Ok((off, base))
 }
@@ -348,8 +355,8 @@ fn parse_line(
         }
         _ => {
             return Err(format!(
-                "line {line_no}: unsupported opcode '{op}' (supported: addi, add, lw, sw, beq, jal, j, li, mv, ecall, nop)"
-            ))
+            "line {line_no}: unsupported opcode '{op}' (supported: addi, add, lw, sw, beq, jal, j, li, mv, ecall, nop)"
+        ))
         }
     };
 

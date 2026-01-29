@@ -362,7 +362,9 @@ where
     // can omit these fields without failing consistency checks.
     if !(inst.s_col.is_empty() && inst.y_zcol.is_empty()) {
         if inst.s_col.is_empty() || inst.y_zcol.is_empty() {
-            return Err(CcsError::Relation("incomplete NC channel: expected both s_col and y_zcol".into()));
+            return Err(CcsError::Relation(
+                "incomplete NC channel: expected both s_col and y_zcol".into(),
+            ));
         }
 
         // Column-domain length is derived from CCS width `m` (not `n`).

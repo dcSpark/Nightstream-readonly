@@ -13,21 +13,14 @@ fn elapsed_ms(start: Instant) -> f64 {
 
 #[cfg(feature = "spartan")]
 fn fold_run_witness_placeholder(run: &neo_fold::shard::ShardProof) -> FoldRunWitness {
-    let pi_ccs_proofs = run.steps.iter().map(|s| s.fold.ccs_proof.clone()).collect();
     let rlc_rhos = run.steps.iter().map(|s| s.fold.rlc_rhos.clone()).collect();
 
-    // NOTE: The current Spartan bridge circuit does not yet use these matrices.
-    // Keep them as correctly-shaped placeholders (one entry per step) so we can
-    // wire them up later without changing the FFI API.
+    // NOTE: The current Spartan bridge circuit does not yet use these matrices
+    // (they are kept as correctly-shaped placeholders so we can wire them up
+    // later without changing the FFI API).
     let per_step_empty = (0..run.steps.len()).map(|_| Vec::new()).collect::<Vec<_>>();
 
-    FoldRunWitness::from_fold_run(
-        run.clone(),
-        pi_ccs_proofs,
-        per_step_empty.clone(),
-        rlc_rhos,
-        per_step_empty,
-    )
+    FoldRunWitness::from_fold_run(run.clone(), per_step_empty.clone(), rlc_rhos, per_step_empty)
 }
 
 fn write_null(out_ptr: *mut *mut u8, out_len: *mut usize) {
@@ -94,11 +87,7 @@ pub extern "C" fn neo_fold_prove_verify_test_export_json(
     let json = match core::str::from_utf8(json_bytes) {
         Ok(s) => s,
         Err(e) => {
-            let _ = write_allocated_bytes(
-                err_ptr,
-                err_len,
-                format!("input is not valid UTF-8: {e}").into_bytes(),
-            );
+            let _ = write_allocated_bytes(err_ptr, err_len, format!("input is not valid UTF-8: {e}").into_bytes());
             return 3;
         }
     };
@@ -106,11 +95,7 @@ pub extern "C" fn neo_fold_prove_verify_test_export_json(
     let export = match parse_test_export_json(json) {
         Ok(e) => e,
         Err(e) => {
-            let _ = write_allocated_bytes(
-                err_ptr,
-                err_len,
-                format!("parse error: {e}").into_bytes(),
-            );
+            let _ = write_allocated_bytes(err_ptr, err_len, format!("parse error: {e}").into_bytes());
             return 4;
         }
     };
@@ -118,8 +103,7 @@ pub extern "C" fn neo_fold_prove_verify_test_export_json(
     let result = match run_test_export(&export) {
         Ok(r) => r,
         Err(e) => {
-            let _ =
-                write_allocated_bytes(err_ptr, err_len, format!("run error: {e}").into_bytes());
+            let _ = write_allocated_bytes(err_ptr, err_len, format!("run error: {e}").into_bytes());
             return 5;
         }
     };
@@ -127,11 +111,7 @@ pub extern "C" fn neo_fold_prove_verify_test_export_json(
     let out_json = match serde_json::to_vec(&result) {
         Ok(v) => v,
         Err(e) => {
-            let _ = write_allocated_bytes(
-                err_ptr,
-                err_len,
-                format!("serialize error: {e}").into_bytes(),
-            );
+            let _ = write_allocated_bytes(err_ptr, err_len, format!("serialize error: {e}").into_bytes());
             return 6;
         }
     };
@@ -178,11 +158,7 @@ pub extern "C" fn neo_fold_run_wasm_demo_workflow_json(
     let json = match core::str::from_utf8(json_bytes) {
         Ok(s) => s,
         Err(e) => {
-            let _ = write_allocated_bytes(
-                err_ptr,
-                err_len,
-                format!("input is not valid UTF-8: {e}").into_bytes(),
-            );
+            let _ = write_allocated_bytes(err_ptr, err_len, format!("input is not valid UTF-8: {e}").into_bytes());
             return 3;
         }
     };
@@ -193,8 +169,7 @@ pub extern "C" fn neo_fold_run_wasm_demo_workflow_json(
     let mut session = match TestExportSession::new_from_circuit_json(json) {
         Ok(s) => s,
         Err(e) => {
-            let _ =
-                write_allocated_bytes(err_ptr, err_len, format!("session init error: {e}").into_bytes());
+            let _ = write_allocated_bytes(err_ptr, err_len, format!("session init error: {e}").into_bytes());
             return 4;
         }
     };
@@ -219,11 +194,7 @@ pub extern "C" fn neo_fold_run_wasm_demo_workflow_json(
     let (fold_run, fold_steps) = match session.fold_and_prove_with_step_timings() {
         Ok(v) => v,
         Err(e) => {
-            let _ = write_allocated_bytes(
-                err_ptr,
-                err_len,
-                format!("fold_and_prove error: {e}").into_bytes(),
-            );
+            let _ = write_allocated_bytes(err_ptr, err_len, format!("fold_and_prove error: {e}").into_bytes());
             return 6;
         }
     };
@@ -233,8 +204,7 @@ pub extern "C" fn neo_fold_run_wasm_demo_workflow_json(
     let verify_ok = match session.verify(&fold_run) {
         Ok(ok) => ok,
         Err(e) => {
-            let _ =
-                write_allocated_bytes(err_ptr, err_len, format!("verify error: {e}").into_bytes());
+            let _ = write_allocated_bytes(err_ptr, err_len, format!("verify error: {e}").into_bytes());
             return 7;
         }
     };
@@ -287,23 +257,16 @@ pub extern "C" fn neo_fold_run_wasm_demo_workflow_json(
             let witness = fold_run_witness_placeholder(&fold_run);
 
             let sp_prove_start = Instant::now();
-            let spartan = match neo_spartan_bridge::prove_fold_run(
-                session.params(),
-                session.ccs(),
-                acc_init,
-                &fold_run,
-                witness,
-            ) {
-                Ok(p) => p,
-                Err(e) => {
-                    let _ = write_allocated_bytes(
-                        err_ptr,
-                        err_len,
-                        format!("spartan prove error: {e}").into_bytes(),
-                    );
-                    return 9;
-                }
-            };
+            let spartan =
+                match neo_spartan_bridge::prove_fold_run(session.params(), session.ccs(), acc_init, &fold_run, witness)
+                {
+                    Ok(p) => p,
+                    Err(e) => {
+                        let _ =
+                            write_allocated_bytes(err_ptr, err_len, format!("spartan prove error: {e}").into_bytes());
+                        return 9;
+                    }
+                };
             let sp_prove_ms = elapsed_ms(sp_prove_start);
 
             let snark_bytes = match spartan.snark_bytes_len() {
@@ -331,18 +294,10 @@ pub extern "C" fn neo_fold_run_wasm_demo_workflow_json(
             let vk_and_snark_bytes = spartan.proof_data.len();
 
             let sp_verify_start = Instant::now();
-            let sp_verify_ok = match neo_spartan_bridge::verify_fold_run(
-                session.params(),
-                session.ccs(),
-                &spartan,
-            ) {
+            let sp_verify_ok = match neo_spartan_bridge::verify_fold_run(session.params(), session.ccs(), &spartan) {
                 Ok(ok) => ok,
                 Err(e) => {
-                    let _ = write_allocated_bytes(
-                        err_ptr,
-                        err_len,
-                        format!("spartan verify error: {e}").into_bytes(),
-                    );
+                    let _ = write_allocated_bytes(err_ptr, err_len, format!("spartan verify error: {e}").into_bytes());
                     return 12;
                 }
             };
@@ -365,11 +320,7 @@ pub extern "C" fn neo_fold_run_wasm_demo_workflow_json(
     let out_json = match serde_json::to_vec(&serde_json::Value::Object(raw_obj)) {
         Ok(v) => v,
         Err(e) => {
-            let _ = write_allocated_bytes(
-                err_ptr,
-                err_len,
-                format!("serialize error: {e}").into_bytes(),
-            );
+            let _ = write_allocated_bytes(err_ptr, err_len, format!("serialize error: {e}").into_bytes());
             return 13;
         }
     };

@@ -5,11 +5,11 @@ use p3_goldilocks::Goldilocks as F;
 use crate::cpu::constraints::{CpuConstraintBuilder, ShoutCpuBinding, TwistCpuBinding};
 use crate::cpu::r1cs_adapter::SharedCpuBusConfig;
 use crate::plain::PlainMemLayout;
-use crate::riscv::lookups::{RAM_ID, PROG_ID};
+use crate::riscv::lookups::{PROG_ID, RAM_ID};
 
 use super::config::{derive_mem_ids_and_ell_addrs, derive_shout_ids_and_ell_addrs};
 use super::constants::{
-    ADD_TABLE_ID, AND_TABLE_ID, EQ_TABLE_ID, NEQ_TABLE_ID, OR_TABLE_ID, SLL_TABLE_ID, SLT_TABLE_ID, SLTU_TABLE_ID,
+    ADD_TABLE_ID, AND_TABLE_ID, EQ_TABLE_ID, NEQ_TABLE_ID, OR_TABLE_ID, SLL_TABLE_ID, SLTU_TABLE_ID, SLT_TABLE_ID,
     SRA_TABLE_ID, SRL_TABLE_ID, SUB_TABLE_ID, XOR_TABLE_ID,
 };
 use super::Rv32B1Layout;
@@ -126,8 +126,14 @@ fn twist_cpu_binding(layout: &Rv32B1Layout, mem_id: u32) -> TwistCpuBinding {
 }
 
 pub(super) fn injected_bus_constraints_len(layout: &Rv32B1Layout, table_ids: &[u32], mem_ids: &[u32]) -> usize {
-    let shout_cpu: Vec<ShoutCpuBinding> = table_ids.iter().map(|&id| shout_cpu_binding(layout, id)).collect();
-    let twist_cpu: Vec<TwistCpuBinding> = mem_ids.iter().map(|&id| twist_cpu_binding(layout, id)).collect();
+    let shout_cpu: Vec<ShoutCpuBinding> = table_ids
+        .iter()
+        .map(|&id| shout_cpu_binding(layout, id))
+        .collect();
+    let twist_cpu: Vec<TwistCpuBinding> = mem_ids
+        .iter()
+        .map(|&id| twist_cpu_binding(layout, id))
+        .collect();
 
     let mut builder = CpuConstraintBuilder::<F>::new(layout.m, layout.m, layout.const_one);
     for (i, cpu) in shout_cpu.iter().enumerate() {

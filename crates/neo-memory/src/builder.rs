@@ -1,8 +1,8 @@
 use crate::mem_init::mem_init_from_state_map;
 use crate::plain::{LutTable, PlainMemLayout};
 use crate::witness::{LutInstance, LutTableSpec, LutWitness, MemInstance, MemWitness, StepWitnessBundle};
-use neo_vm_trace::VmTrace;
 use neo_vm_trace::TwistOpKind;
+use neo_vm_trace::VmTrace;
 
 use neo_ccs::relations::{McsInstance, McsWitness};
 use p3_field::PrimeCharacteristicRing;
@@ -184,7 +184,11 @@ where
     // Deterministic ordering (required for the shared-bus column schema).
     let mut mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
     mem_ids.sort_unstable();
-    let mut table_ids: Vec<u32> = lut_tables.keys().copied().chain(lut_table_specs.keys().copied()).collect();
+    let mut table_ids: Vec<u32> = lut_tables
+        .keys()
+        .copied()
+        .chain(lut_table_specs.keys().copied())
+        .collect();
     table_ids.sort_unstable();
     table_ids.dedup();
 
@@ -315,18 +319,18 @@ where
                 // Derive addressing parameters from the implicit table spec.
                 match spec {
                     LutTableSpec::RiscvOpcode { xlen, .. } => {
-                        let d = xlen
-                            .checked_mul(2)
-                            .ok_or_else(|| ShardBuildError::InvalidInit("2*xlen overflow for RISC-V shout table".into()))?;
+                        let d = xlen.checked_mul(2).ok_or_else(|| {
+                            ShardBuildError::InvalidInit("2*xlen overflow for RISC-V shout table".into())
+                        })?;
                         let n_side = 2usize;
                         let ell = 1usize;
                         (0usize, d, n_side, ell, Vec::new())
                     }
                 }
             } else {
-                let table = lut_tables
-                    .get(&table_id)
-                    .ok_or_else(|| ShardBuildError::MissingTable(format!("missing LutTable for shout_id {}", table_id)))?;
+                let table = lut_tables.get(&table_id).ok_or_else(|| {
+                    ShardBuildError::MissingTable(format!("missing LutTable for shout_id {}", table_id))
+                })?;
                 let ell = ell_from_pow2_n_side(table.n_side)?;
                 (table.k, table.d, table.n_side, ell, table.content.clone())
             };

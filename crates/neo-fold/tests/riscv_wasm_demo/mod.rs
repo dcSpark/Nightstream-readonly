@@ -57,4 +57,3 @@ pub fn max_rss_bytes() -> Option<u64> {
 pub fn max_rss_bytes() -> Option<u64> {
     None
 }
-
