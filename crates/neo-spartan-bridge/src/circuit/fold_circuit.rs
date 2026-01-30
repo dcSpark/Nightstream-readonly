@@ -190,11 +190,8 @@ impl FoldRunCircuit {
         // 1d. Verify Π-CCS NC sumcheck + NC terminal identity (split-NC variant).
         let initial_sum_nc_var = helpers::k_zero(cs, &format!("step_{}_nc_initial_sum_zero", step_idx))?;
         if let Some(sc_initial_nc) = pi_ccs_proof.sc_initial_sum_nc {
-            let sc_initial_nc_var = helpers::alloc_k_from_neo(
-                cs,
-                sc_initial_nc,
-                &format!("step_{}_sc_initial_sum_nc", step_idx),
-            )?;
+            let sc_initial_nc_var =
+                helpers::alloc_k_from_neo(cs, sc_initial_nc, &format!("step_{}_sc_initial_sum_nc", step_idx))?;
             helpers::enforce_k_eq(
                 cs,
                 &sc_initial_nc_var,
@@ -372,11 +369,8 @@ impl FoldRunCircuit {
             claimed_sum = next_sum;
         }
 
-        let final_sum_expected = helpers::alloc_k_from_neo(
-            cs,
-            proof.sumcheck_final_nc,
-            &format!("step_{}_nc_final_sum", step_idx),
-        )?;
+        let final_sum_expected =
+            helpers::alloc_k_from_neo(cs, proof.sumcheck_final_nc, &format!("step_{}_nc_final_sum", step_idx))?;
         helpers::enforce_k_eq(
             cs,
             &claimed_sum,
@@ -1968,8 +1962,13 @@ impl FoldRunCircuit {
                 .map_err(SpartanBridgeError::BellpepperError)?;
             }
 
-            let (Ni, Ni_native) =
-                self.range_product(cs, step_idx, &y_eval, y_eval_val, &format!("step_{}_nc_range_i{}", step_idx, i_idx))?;
+            let (Ni, Ni_native) = self.range_product(
+                cs,
+                step_idx,
+                &y_eval,
+                y_eval_val,
+                &format!("step_{}_nc_range_i{}", step_idx, i_idx),
+            )?;
 
             let (gNi, gNi_native) = helpers::k_mul_with_hint(
                 cs,

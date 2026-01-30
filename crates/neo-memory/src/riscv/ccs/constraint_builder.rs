@@ -66,17 +66,27 @@ impl<Ff: PrimeCharacteristicRing + Copy> Constraint<Ff> {
     }
 }
 
-pub(super) fn build_identity_first_r1cs_ccs(
+pub(super) fn build_r1cs_ccs(
     constraints: &[Constraint<F>],
+    n: usize,
     m: usize,
     const_one_col: usize,
 ) -> Result<CcsStructure<F>, String> {
-    let n = m;
+    if m == 0 {
+        return Err("RV32 B1 CCS: m must be >= 1".into());
+    }
+    if n == 0 {
+        return Err("RV32 B1 CCS: n must be >= 1".into());
+    }
+    if const_one_col >= m {
+        return Err(format!("RV32 B1 CCS: const_one_col({const_one_col}) must be < m({m})"));
+    }
     if constraints.len() > n {
         return Err(format!(
-            "RV32 B1 CCS: too many constraints ({}) for square CCS with m=n={}",
+            "RV32 B1 CCS: too many constraints ({}) for CCS with n={} m={}",
             constraints.len(),
-            n
+            n,
+            m
         ));
     }
 
@@ -108,26 +118,31 @@ pub(super) fn build_identity_first_r1cs_ccs(
         }
     }
 
-    let i_n = CcsMatrix::Identity { n };
     let a = CcsMatrix::Csc(CscMat::from_triplets(a_trips, n, m));
     let b = CcsMatrix::Csc(CscMat::from_triplets(b_trips, n, m));
     let c = CcsMatrix::Csc(CscMat::from_triplets(c_trips, n, m));
 
-    let f = SparsePoly::new(
-        4,
+    // Base polynomial f(X1,X2,X3) = X1 * X2 - X3
+    let f_base = SparsePoly::new(
+        3,
         vec![
             Term {
                 coeff: F::ONE,
-                exps: vec![0, 1, 1, 0],
+                exps: vec![1, 1, 0],
             },
             Term {
                 coeff: -F::ONE,
-                exps: vec![0, 0, 0, 1],
+                exps: vec![0, 0, 1],
             },
         ],
     );
 
-    CcsStructure::new_sparse(vec![i_n, a, b, c], f)
-        .map_err(|e| format!("RV32 B1 CCS: invalid structure: {e:?}"))
-}
+    // Match `neo_ccs::r1cs_to_ccs`: insert identity-first only when square.
+    let (matrices, f) = if n == m {
+        (vec![CcsMatrix::Identity { n }, a, b, c], f_base.insert_var_at_front())
+    } else {
+        (vec![a, b, c], f_base)
+    };
 
+    CcsStructure::new_sparse(matrices, f).map_err(|e| format!("RV32 B1 CCS: invalid structure: {e:?}"))
+}

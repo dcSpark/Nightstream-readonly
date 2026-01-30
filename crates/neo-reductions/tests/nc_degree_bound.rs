@@ -35,29 +35,25 @@ fn nc_oracle_round_polys_respect_degree_bound() {
         }
     }
     let Z = Mat::from_row_major(D, m, data);
-    let mcs_witnesses = vec![McsWitness {
-        w: vec![F::ZERO; m],
-        Z,
-    }];
+    let mcs_witnesses = vec![McsWitness { w: vec![F::ZERO; m], Z }];
 
     let ch = Challenges {
-        alpha: (0..dims.ell_d).map(|i| K::from(F::from_u64(100 + i as u64))).collect(),
-        beta_a: (0..dims.ell_d).map(|i| K::from(F::from_u64(200 + i as u64))).collect(),
-        beta_r: (0..dims.ell_n).map(|i| K::from(F::from_u64(300 + i as u64))).collect(),
-        beta_m: (0..dims.ell_m).map(|i| K::from(F::from_u64(400 + i as u64))).collect(),
+        alpha: (0..dims.ell_d)
+            .map(|i| K::from(F::from_u64(100 + i as u64)))
+            .collect(),
+        beta_a: (0..dims.ell_d)
+            .map(|i| K::from(F::from_u64(200 + i as u64)))
+            .collect(),
+        beta_r: (0..dims.ell_n)
+            .map(|i| K::from(F::from_u64(300 + i as u64)))
+            .collect(),
+        beta_m: (0..dims.ell_m)
+            .map(|i| K::from(F::from_u64(400 + i as u64)))
+            .collect(),
         gamma: K::from(F::from_u64(777)),
     };
 
-    let mut oracle = NcOracle::new(
-        &s,
-        &params,
-        &mcs_witnesses,
-        &[],
-        ch,
-        dims.ell_d,
-        dims.ell_m,
-        dims.d_sc,
-    );
+    let mut oracle = NcOracle::new(&s, &params, &mcs_witnesses, &[], ch, dims.ell_d, dims.ell_m, dims.d_sc);
 
     let deg = oracle.degree_bound();
     let xs: Vec<K> = (0..=deg).map(|t| K::from(F::from_u64(t as u64))).collect();
@@ -85,4 +81,3 @@ fn nc_oracle_round_polys_respect_degree_bound() {
         oracle.fold(K::from(F::from_u64(1000 + round_idx as u64)));
     }
 }
-

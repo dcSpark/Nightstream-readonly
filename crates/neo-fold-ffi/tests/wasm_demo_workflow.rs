@@ -55,4 +55,3 @@ fn workflow_reports_parse_error() {
     let err = call_workflow("{ not valid json").expect_err("expected parse failure");
     assert!(err.contains("session init error") || err.contains("parse") || err.contains("JSON"));
 }
-

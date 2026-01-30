@@ -5,11 +5,11 @@ use neo_vm_trace::{StepTrace, TwistOpKind};
 
 use crate::riscv::lookups::{
     decode_instruction, BranchCondition, RiscvInstruction, RiscvMemOp, RiscvOpcode, JOLT_CYCLE_TRACK_ECALL_NUM,
-    JOLT_PRINT_ECALL_NUM, RAM_ID, PROG_ID,
+    JOLT_PRINT_ECALL_NUM, PROG_ID, RAM_ID,
 };
 
 use super::constants::{
-    ADD_TABLE_ID, AND_TABLE_ID, EQ_TABLE_ID, NEQ_TABLE_ID, OR_TABLE_ID, SLL_TABLE_ID, SLT_TABLE_ID, SLTU_TABLE_ID,
+    ADD_TABLE_ID, AND_TABLE_ID, EQ_TABLE_ID, NEQ_TABLE_ID, OR_TABLE_ID, SLL_TABLE_ID, SLTU_TABLE_ID, SLT_TABLE_ID,
     SRA_TABLE_ID, SRL_TABLE_ID, SUB_TABLE_ID, XOR_TABLE_ID,
 };
 use super::Rv32B1Layout;
@@ -46,13 +46,7 @@ fn write_bus_u64_bits<Ff: PrimeCharacteristicRing>(
     }
 }
 
-fn set_ecall_helpers(
-    z: &mut [F],
-    layout: &Rv32B1Layout,
-    j: usize,
-    a0_u64: u64,
-    is_halt: bool,
-) -> Result<(), String> {
+fn set_ecall_helpers(z: &mut [F], layout: &Rv32B1Layout, j: usize, a0_u64: u64, is_halt: bool) -> Result<(), String> {
     let a0_u32 = u32::try_from(a0_u64).map_err(|_| format!("RV32 B1: a0 value does not fit in u32: {a0_u64}"))?;
 
     for bit in 0..32 {
@@ -95,9 +89,7 @@ fn set_ecall_helpers(
 ///
 /// In shared-bus mode, `R1csCpu` overwrites the reserved bus tail from `StepTrace` events, so this
 /// witness builder leaves the bus region at its zero default and only populates CPU columns.
-pub fn rv32_b1_chunk_to_witness(
-    layout: Rv32B1Layout,
-) -> Box<dyn Fn(&[StepTrace<u64, u64>]) -> Vec<F> + Send + Sync> {
+pub fn rv32_b1_chunk_to_witness(layout: Rv32B1Layout) -> Box<dyn Fn(&[StepTrace<u64, u64>]) -> Vec<F> + Send + Sync> {
     Box::new(move |chunk: &[StepTrace<u64, u64>]| {
         rv32_b1_chunk_to_witness_checked(&layout, chunk).unwrap_or_else(|e| {
             panic!("RV32 B1 witness build failed: {e}");
@@ -116,11 +108,17 @@ pub fn rv32_b1_chunk_to_full_witness(
     })
 }
 
-pub fn rv32_b1_chunk_to_witness_checked(layout: &Rv32B1Layout, chunk: &[StepTrace<u64, u64>]) -> Result<Vec<F>, String> {
+pub fn rv32_b1_chunk_to_witness_checked(
+    layout: &Rv32B1Layout,
+    chunk: &[StepTrace<u64, u64>],
+) -> Result<Vec<F>, String> {
     rv32_b1_chunk_to_witness_internal(layout, chunk, /*fill_bus=*/ false)
 }
 
-pub fn rv32_b1_chunk_to_full_witness_checked(layout: &Rv32B1Layout, chunk: &[StepTrace<u64, u64>]) -> Result<Vec<F>, String> {
+pub fn rv32_b1_chunk_to_full_witness_checked(
+    layout: &Rv32B1Layout,
+    chunk: &[StepTrace<u64, u64>],
+) -> Result<Vec<F>, String> {
     rv32_b1_chunk_to_witness_internal(layout, chunk, /*fill_bus=*/ true)
 }
 
@@ -331,7 +329,11 @@ fn rv32_b1_chunk_to_witness_internal(
 
         // Bits.
         for i in 0..32 {
-            z[layout.instr_bit(i, j)] = if ((instr_word_u32 >> i) & 1) == 1 { F::ONE } else { F::ZERO };
+            z[layout.instr_bit(i, j)] = if ((instr_word_u32 >> i) & 1) == 1 {
+                F::ONE
+            } else {
+                F::ZERO
+            };
         }
 
         // Decode fields.
@@ -1151,11 +1153,10 @@ fn rv32_b1_chunk_to_witness_internal(
         }
 
         let mul_carry = if is_mulh {
-            let rhs = (mul_hi as i128)
-                - (rs1_sign as i128) * (rs2_u64 as i128)
-                - (rs2_sign as i128) * (rs1_u64 as i128)
-                + (rs1_sign as i128) * (rs2_sign as i128) * (1i128 << 32)
-                + (1i128 << 32);
+            let rhs =
+                (mul_hi as i128) - (rs1_sign as i128) * (rs2_u64 as i128) - (rs2_sign as i128) * (rs1_u64 as i128)
+                    + (rs1_sign as i128) * (rs2_sign as i128) * (1i128 << 32)
+                    + (1i128 << 32);
             let diff = rhs - (mulh_u32 as i128);
             if diff < 0 || diff % (1i128 << 32) != 0 {
                 return Err(format!(
@@ -1183,18 +1184,42 @@ fn rv32_b1_chunk_to_witness_internal(
         let rd_write_u32 = u32::try_from(rd_write_u64)
             .map_err(|_| format!("RV32 B1: rd_write_val does not fit in u32: {rd_write_u64}"))?;
         let mem_rv_u64 = z[layout.mem_rv(j)].as_canonical_u64();
-        let mem_rv_u32 = u32::try_from(mem_rv_u64)
-            .map_err(|_| format!("RV32 B1: mem_rv does not fit in u32: {mem_rv_u64}"))?;
+        let mem_rv_u32 =
+            u32::try_from(mem_rv_u64).map_err(|_| format!("RV32 B1: mem_rv does not fit in u32: {mem_rv_u64}"))?;
         let div_quot_u32 = u32::try_from(div_quot).map_err(|_| "RV32 B1: div_quot overflow".to_string())?;
         let div_rem_u32 = u32::try_from(div_rem).map_err(|_| "RV32 B1: div_rem overflow".to_string())?;
 
         for bit in 0..32 {
-            z[layout.rd_write_bit(bit, j)] = if ((rd_write_u32 >> bit) & 1) == 1 { F::ONE } else { F::ZERO };
-            z[layout.mem_rv_bit(bit, j)] = if ((mem_rv_u32 >> bit) & 1) == 1 { F::ONE } else { F::ZERO };
-            z[layout.mul_lo_bit(bit, j)] = if ((mul_lo as u32 >> bit) & 1) == 1 { F::ONE } else { F::ZERO };
-            z[layout.mul_hi_bit(bit, j)] = if ((mul_hi as u32 >> bit) & 1) == 1 { F::ONE } else { F::ZERO };
-            z[layout.div_quot_bit(bit, j)] = if ((div_quot_u32 >> bit) & 1) == 1 { F::ONE } else { F::ZERO };
-            z[layout.div_rem_bit(bit, j)] = if ((div_rem_u32 >> bit) & 1) == 1 { F::ONE } else { F::ZERO };
+            z[layout.rd_write_bit(bit, j)] = if ((rd_write_u32 >> bit) & 1) == 1 {
+                F::ONE
+            } else {
+                F::ZERO
+            };
+            z[layout.mem_rv_bit(bit, j)] = if ((mem_rv_u32 >> bit) & 1) == 1 {
+                F::ONE
+            } else {
+                F::ZERO
+            };
+            z[layout.mul_lo_bit(bit, j)] = if ((mul_lo as u32 >> bit) & 1) == 1 {
+                F::ONE
+            } else {
+                F::ZERO
+            };
+            z[layout.mul_hi_bit(bit, j)] = if ((mul_hi as u32 >> bit) & 1) == 1 {
+                F::ONE
+            } else {
+                F::ZERO
+            };
+            z[layout.div_quot_bit(bit, j)] = if ((div_quot_u32 >> bit) & 1) == 1 {
+                F::ONE
+            } else {
+                F::ZERO
+            };
+            z[layout.div_rem_bit(bit, j)] = if ((div_rem_u32 >> bit) & 1) == 1 {
+                F::ONE
+            } else {
+                F::ZERO
+            };
         }
         for bit in 0..2 {
             z[layout.mul_carry_bit(bit, j)] = if ((mul_carry >> bit) & 1) == 1 { F::ONE } else { F::ZERO };

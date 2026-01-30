@@ -36,8 +36,7 @@ fn append_bus_openings_matches_manual_for_chunk_size_2() {
     let m_in = 2usize;
     let chunk_size = 2usize;
     let m = 32usize;
-    let bus = build_bus_layout_for_instances(m, m_in, chunk_size, [2usize], [])
-        .expect("bus layout should build");
+    let bus = build_bus_layout_for_instances(m, m_in, chunk_size, [2usize], []).expect("bus layout should build");
     assert!(bus.bus_cols > 0);
 
     // Witness decomposition Z (D×m).

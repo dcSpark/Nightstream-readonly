@@ -225,8 +225,13 @@ pub fn paper_exact_verify(
         me_inputs.first().map(|mi| mi.r.as_slice()),
     );
 
-    let rhs_nc =
-        crate::paper_exact_engine::rhs_terminal_identity_nc_paper_exact(params, &ch, s_col_prime, alpha_prime_nc, me_outputs);
+    let rhs_nc = crate::paper_exact_engine::rhs_terminal_identity_nc_paper_exact(
+        params,
+        &ch,
+        s_col_prime,
+        alpha_prime_nc,
+        me_outputs,
+    );
 
     Ok(running_sum == rhs && running_sum_nc == rhs_nc)
 }

@@ -65,9 +65,7 @@ impl SpartanProof {
             ))
         })?;
         let bytes = bincode::serialized_size(&snark).map_err(|e| {
-            SpartanBridgeError::InvalidInput(format!(
-                "Spartan snark bincode::serialized_size failed: {e}"
-            ))
+            SpartanBridgeError::InvalidInput(format!("Spartan snark bincode::serialized_size failed: {e}"))
         })?;
         Ok(bytes as usize)
     }
@@ -84,9 +82,8 @@ impl SpartanProof {
                 "SpartanProof.proof_data deserialization (vk, snark) failed: {e}"
             ))
         })?;
-        bincode::serialize(&snark).map_err(|e| {
-            SpartanBridgeError::InvalidInput(format!("Spartan snark bincode::serialize failed: {e}"))
-        })
+        bincode::serialize(&snark)
+            .map_err(|e| SpartanBridgeError::InvalidInput(format!("Spartan snark bincode::serialize failed: {e}")))
     }
 }
 

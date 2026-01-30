@@ -35,8 +35,8 @@ pub use common::{
     claimed_initial_sum_from_inputs,
 
     dec_reduction_paper_exact,
-    dec_reduction_paper_exact_with_sparse_cache,
     dec_reduction_paper_exact_with_commit_check,
+    dec_reduction_paper_exact_with_sparse_cache,
     // Core equalities & helpers
     eq_points,
     // Q(X) and sums
@@ -47,10 +47,10 @@ pub use common::{
     // Utilities
     recomposed_z_from_Z,
 
+    rlc_reduction_optimized,
     // Paper-exact RLC/DEC
     rlc_reduction_paper_exact,
     rlc_reduction_paper_exact_with_commit_mix,
-    rlc_reduction_optimized,
     sum_q_over_hypercube_paper_exact,
 };
 

@@ -11,7 +11,7 @@
 use neo_ajtai::Commitment as Cmt;
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
-use neo_math::{D, Fq, K, KExtensions};
+use neo_math::{Fq, KExtensions, D, K};
 use p3_field::{Field, PrimeCharacteristicRing};
 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
 use rayon::prelude::*;
@@ -358,14 +358,8 @@ where
             let mut g = self.ch.gamma;
             let mut weighted_sum = K::ZERO;
             for digits in digits_pref.iter() {
-                let acc = ajtai_tail_weighted_range_prefolded(
-                    digits,
-                    x,
-                    j,
-                    head_stride,
-                    &w_beta_tail,
-                    &self.range_t_sq,
-                );
+                let acc =
+                    ajtai_tail_weighted_range_prefolded(digits, x, j, head_stride, &w_beta_tail, &self.range_t_sq);
                 weighted_sum += g * acc;
                 g *= self.ch.gamma;
             }
@@ -509,7 +503,9 @@ impl RowStreamState {
             && ch.alpha.iter().all(|x| x.imag() == Fq::ZERO)
             && ch.beta_a.iter().all(|x| x.imag() == Fq::ZERO)
             && ch.beta_r.iter().all(|x| x.imag() == Fq::ZERO)
-            && r_inputs.map(|r| r.iter().all(|x| x.imag() == Fq::ZERO)).unwrap_or(true);
+            && r_inputs
+                .map(|r| r.iter().all(|x| x.imag() == Fq::ZERO))
+                .unwrap_or(true);
 
         // Compile CCS polynomial f to avoid scanning t variables per evaluation.
         if s.f.arity() != t_mats {
@@ -545,25 +541,24 @@ impl RowStreamState {
             pos_by_j[j] = pos;
         }
 
-        let f_terms: Vec<CompiledPolyTerm> = s
-            .f
-            .terms()
-            .iter()
-            .map(|term| {
-                let mut vars = Vec::new();
-                for (j, &exp) in term.exps.iter().enumerate() {
-                    if exp != 0 {
-                        let pos = pos_by_j[j];
-                        debug_assert_ne!(pos, usize::MAX, "missing f var mapping");
-                        vars.push((pos, exp));
+        let f_terms: Vec<CompiledPolyTerm> =
+            s.f.terms()
+                .iter()
+                .map(|term| {
+                    let mut vars = Vec::new();
+                    for (j, &exp) in term.exps.iter().enumerate() {
+                        if exp != 0 {
+                            let pos = pos_by_j[j];
+                            debug_assert_ne!(pos, usize::MAX, "missing f var mapping");
+                            vars.push((pos, exp));
+                        }
                     }
-                }
-                CompiledPolyTerm {
-                    coeff: K::from(term.coeff),
-                    vars,
-                }
-            })
-            .collect();
+                    CompiledPolyTerm {
+                        coeff: K::from(term.coeff),
+                        vars,
+                    }
+                })
+                .collect();
 
         // Gather witnesses in oracle order: all MCS first, then ME.
         let all_witnesses: Vec<&Mat<Ff>> = mcs_witnesses
@@ -582,7 +577,9 @@ impl RowStreamState {
             );
         }
         let w_gamma_nc = if include_nc {
-            let w_beta_a: Vec<K> = (0..D).map(|rho| eq_points_bool_mask(rho, &ch.beta_a)).collect();
+            let w_beta_a: Vec<K> = (0..D)
+                .map(|rho| eq_points_bool_mask(rho, &ch.beta_a))
+                .collect();
             let mut w_gamma_nc = vec![K::ZERO; k_total * D];
             let mut g = ch.gamma;
             for i in 0..k_total {
@@ -710,7 +707,9 @@ impl RowStreamState {
         }
 
         let eval_tbl = if k_total >= 2 && eq_r_inputs_tbl.is_some() {
-            let w_alpha: Vec<K> = (0..D).map(|rho| eq_points_bool_mask(rho, &ch.alpha)).collect();
+            let w_alpha: Vec<K> = (0..D)
+                .map(|rho| eq_points_bool_mask(rho, &ch.alpha))
+                .collect();
 
             let mut gamma_pow_i = vec![K::ONE; k_total];
             for i in 1..k_total {
@@ -756,7 +755,9 @@ impl RowStreamState {
                         continue;
                     }
 
-                    let csc = sparse.csc(j).unwrap_or_else(|| panic!("missing CSC for matrix j={j}"));
+                    let csc = sparse
+                        .csc(j)
+                        .unwrap_or_else(|| panic!("missing CSC for matrix j={j}"));
                     if csc.ncols != s_alpha.len() {
                         panic!(
                             "matrix-vector dim mismatch for eval j={j}: csc.ncols={} != s_alpha.len()={}",
@@ -936,7 +937,12 @@ impl RowStreamState {
         let f_max_term_deg: usize = self
             .f_terms
             .iter()
-            .map(|term| term.vars.iter().map(|&(_, exp)| exp as usize).sum::<usize>())
+            .map(|term| {
+                term.vars
+                    .iter()
+                    .map(|&(_, exp)| exp as usize)
+                    .sum::<usize>()
+            })
             .max()
             .unwrap_or(0);
         // NC contributes degree 4 after multiplying by eq_beta_r(X).
@@ -1016,9 +1022,7 @@ impl RowStreamState {
                     coeffs[d] += (e0 * inner[d]) + (e1 * inner[d - 1]);
                 }
 
-                if let (Some(eq_tbl), Some(eval_tbl)) =
-                    (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref())
-                {
+                if let (Some(eq_tbl), Some(eval_tbl)) = (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref()) {
                     let r0 = eq_tbl[idx].real();
                     let r1 = eq_tbl[idx + 1].real() - r0;
                     let v0 = eval_tbl[idx].real();
@@ -1177,7 +1181,12 @@ impl RowStreamState {
         let f_max_term_deg: usize = self
             .f_terms
             .iter()
-            .map(|term| term.vars.iter().map(|&(_, exp)| exp as usize).sum::<usize>())
+            .map(|term| {
+                term.vars
+                    .iter()
+                    .map(|&(_, exp)| exp as usize)
+                    .sum::<usize>()
+            })
             .max()
             .unwrap_or(0);
         // NC contributes degree 6 after multiplying by eq_beta_r(X).
@@ -1277,9 +1286,7 @@ impl RowStreamState {
                     coeffs[d] += (e0 * inner[d]) + (e1 * inner[d - 1]);
                 }
 
-                if let (Some(eq_tbl), Some(eval_tbl)) =
-                    (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref())
-                {
+                if let (Some(eq_tbl), Some(eval_tbl)) = (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref()) {
                     let r0 = eq_tbl[idx].real();
                     let r1 = eq_tbl[idx + 1].real() - r0;
                     let v0 = eval_tbl[idx].real();
@@ -1455,7 +1462,6 @@ impl RowStreamState {
             .collect()
     }
 
-
     /// Multiply a polynomial by an affine `(a + b·x)` in-place.
     ///
     /// Coefficients are in low→high order. Output is truncated to the input length.
@@ -1491,7 +1497,12 @@ impl RowStreamState {
             let f_max_term_deg: usize = self
                 .f_terms
                 .iter()
-                .map(|term| term.vars.iter().map(|&(_, exp)| exp as usize).sum::<usize>())
+                .map(|term| {
+                    term.vars
+                        .iter()
+                        .map(|&(_, exp)| exp as usize)
+                        .sum::<usize>()
+                })
                 .max()
                 .unwrap_or(0);
             // NC contributes degree 4 after multiplying by eq_beta_r(X).
@@ -1572,9 +1583,7 @@ impl RowStreamState {
                 }
 
                 // Eval: eq_r_inputs(X) * gamma_to_k * eval_tbl(X) (quadratic).
-                if let (Some(eq_tbl), Some(eval_tbl)) =
-                    (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref())
-                {
+                if let (Some(eq_tbl), Some(eval_tbl)) = (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref()) {
                     let r0 = eq_tbl[2 * t];
                     let r1 = eq_tbl[2 * t + 1] - r0;
                     let v0 = eval_tbl[2 * t];
@@ -1618,7 +1627,12 @@ impl RowStreamState {
             let f_max_term_deg: usize = self
                 .f_terms
                 .iter()
-                .map(|term| term.vars.iter().map(|&(_, exp)| exp as usize).sum::<usize>())
+                .map(|term| {
+                    term.vars
+                        .iter()
+                        .map(|&(_, exp)| exp as usize)
+                        .sum::<usize>()
+                })
                 .max()
                 .unwrap_or(0);
             // NC contributes degree 6 after multiplying by eq_beta_r(X).
@@ -1851,8 +1865,7 @@ impl RowStreamState {
                         }
 
                         // Eval: eq_r_inputs(X) * gamma_to_k * eval_tbl(X) (quadratic).
-                        if let (Some(eq_tbl), Some(eval_tbl)) =
-                            (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref())
+                        if let (Some(eq_tbl), Some(eval_tbl)) = (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref())
                         {
                             let r0 = eq_tbl[2 * t];
                             let r1 = eq_tbl[2 * t + 1] - r0;
@@ -1892,8 +1905,7 @@ impl RowStreamState {
                 let mut sum_x = K::ZERO;
 
                 for t in 0..tail_len {
-                    let eq_beta_r =
-                        one_minus * self.eq_beta_r_tbl[2 * t] + x * self.eq_beta_r_tbl[2 * t + 1];
+                    let eq_beta_r = one_minus * self.eq_beta_r_tbl[2 * t] + x * self.eq_beta_r_tbl[2 * t + 1];
 
                     // f variables at (prefix, x, tail)
                     for (pos, tbl) in self.f_var_tables.iter().enumerate() {
@@ -2014,13 +2026,7 @@ fn fold_bit_inplace(digits: &mut [K; D], bit: usize, a: K) {
 /// Fold the current Ajtai bit into `digits_pref` (which already has the prefix folded),
 /// then compute the tail-weighted sum of the resulting MLE "heads".
 #[inline]
-fn ajtai_tail_weighted_dot_prefolded(
-    digits_pref: &[K; D],
-    x: K,
-    bit: usize,
-    head_stride: usize,
-    w_tail: &[K],
-) -> K {
+fn ajtai_tail_weighted_dot_prefolded(digits_pref: &[K; D], x: K, bit: usize, head_stride: usize, w_tail: &[K]) -> K {
     let mut tmp = *digits_pref;
     fold_bit_inplace(&mut tmp, bit, x);
     let mut acc = K::ZERO;
@@ -2405,43 +2411,37 @@ where
         let has_inputs = self.r_inputs.is_some();
 
         let eval_at = |x: K| {
-                // eq((α',r'), β) factor across α' = (prefix, x, tail)
-                let eq_beta_px = eq_beta_pref * eq_lin(x, beta_j);
-                let eq_beta = pre.eq_beta_r * eq_beta_px;
+            // eq((α',r'), β) factor across α' = (prefix, x, tail)
+            let eq_beta_px = eq_beta_pref * eq_lin(x, beta_j);
+            let eq_beta = pre.eq_beta_r * eq_beta_px;
 
-                // eq((α',r'), (α,r)) factor if inputs present
-                let eq_ar_px = if has_inputs {
-                    pre.eq_r_inputs * (eq_alpha_pref * eq_lin(x, alpha_j))
-                } else {
-                    K::ZERO
-                };
-
-                // Base: eq_beta * F'
-                let mut out = eq_beta * pre.f_prime;
-
-                // --- Eval block: γ^k · eq_ar · Σ_{j_mat,i≥2} γ^{i-1} (γ^k)^{j_mat} · Σ_tail w_alpha(tail) · ẏ_{(i,j)}(...)
-                if k_total >= 2 && eq_ar_px != K::ZERO {
-                    let mut inner = K::ZERO;
-                    for j_mat in 0..t_mats {
-                        let mut sum_j = K::ZERO;
-                        for i_abs in 1..k_total {
-                            let digits = &y_eval_pref[i_abs * t_mats + j_mat];
-                            let ydot = ajtai_tail_weighted_dot_prefolded(
-                                digits,
-                                x,
-                                j,
-                                head_stride,
-                                &w_alpha_tail,
-                            );
-                            sum_j += gamma_pow_i[i_abs] * gamma_k_pow_j[j_mat] * ydot;
-                        }
-                        inner += sum_j;
-                    }
-                    out += eq_ar_px * (gamma_to_k * inner);
-                }
-
-                out
+            // eq((α',r'), (α,r)) factor if inputs present
+            let eq_ar_px = if has_inputs {
+                pre.eq_r_inputs * (eq_alpha_pref * eq_lin(x, alpha_j))
+            } else {
+                K::ZERO
             };
+
+            // Base: eq_beta * F'
+            let mut out = eq_beta * pre.f_prime;
+
+            // --- Eval block: γ^k · eq_ar · Σ_{j_mat,i≥2} γ^{i-1} (γ^k)^{j_mat} · Σ_tail w_alpha(tail) · ẏ_{(i,j)}(...)
+            if k_total >= 2 && eq_ar_px != K::ZERO {
+                let mut inner = K::ZERO;
+                for j_mat in 0..t_mats {
+                    let mut sum_j = K::ZERO;
+                    for i_abs in 1..k_total {
+                        let digits = &y_eval_pref[i_abs * t_mats + j_mat];
+                        let ydot = ajtai_tail_weighted_dot_prefolded(digits, x, j, head_stride, &w_alpha_tail);
+                        sum_j += gamma_pow_i[i_abs] * gamma_k_pow_j[j_mat] * ydot;
+                    }
+                    inner += sum_j;
+                }
+                out += eq_ar_px * (gamma_to_k * inner);
+            }
+
+            out
+        };
 
         // `xs` is typically very small (sumcheck evaluation points), so Rayon overhead dominates here.
         xs.iter().map(|&x| eval_at(x)).collect()
@@ -2492,7 +2492,11 @@ where
             self.ell_d
         );
 
-        let chi_s = if s_col.is_empty() { None } else { Some(chi_tail_weights(s_col)) };
+        let chi_s = if s_col.is_empty() {
+            None
+        } else {
+            Some(chi_tail_weights(s_col))
+        };
 
         // Base-b recomposition cache for y_scalars.
         let base = K::from(F::from_u64(self.params.b as u64));
@@ -2573,12 +2577,8 @@ where
             let y_zcol = if let Some(chi_s) = chi_s.as_ref() {
                 debug_assert!(chi_s.len() >= self.s.m, "chi_s too short for CCS width");
                 let Zi = &self.me_witnesses[me_idx];
-                let mut yz = neo_ccs::utils::mat_vec_mul_fk::<F, K>(
-                    Zi.as_slice(),
-                    Zi.rows(),
-                    Zi.cols(),
-                    &chi_s[..self.s.m],
-                );
+                let mut yz =
+                    neo_ccs::utils::mat_vec_mul_fk::<F, K>(Zi.as_slice(), Zi.rows(), Zi.cols(), &chi_s[..self.s.m]);
                 yz.resize(d_pad, K::ZERO);
                 yz
             } else {

@@ -82,11 +82,7 @@ where
     ///
     /// Encoded as: (left - right) * 1 = 0.
     pub fn eq(&mut self, left: usize, right: usize) -> &mut Self {
-        self.r1cs_terms(
-            [(left, F::ONE), (right, -F::ONE)],
-            [(self.const_one_col, F::ONE)],
-            [],
-        )
+        self.r1cs_terms([(left, F::ONE), (right, -F::ONE)], [(self.const_one_col, F::ONE)], [])
     }
 
     /// Add a per-lane "continuity" constraint:
@@ -115,10 +111,7 @@ where
         let m = m_min;
 
         if self.m_in > m {
-            return Err(format!(
-                "CcsBuilder: m_in({}) exceeds CCS width m({m})",
-                self.m_in
-            ));
+            return Err(format!("CcsBuilder: m_in({}) exceeds CCS width m({m})", self.m_in));
         }
 
         let mut a_trips: Vec<(usize, usize, F)> = Vec::new();

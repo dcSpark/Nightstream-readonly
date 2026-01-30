@@ -111,11 +111,7 @@ pub fn derive_neo_abi(item: TokenStream) -> TokenStream {
                 },
             )
         }
-        Fields::Unit => (
-            quote! { 0usize },
-            quote! { Self },
-            quote! {},
-        ),
+        Fields::Unit => (quote! { 0usize }, quote! { Self }, quote! {}),
     };
 
     let expanded = quote! {
@@ -149,15 +145,12 @@ pub fn entry(attr: TokenStream, item: TokenStream) -> TokenStream {
             f.sig.inputs.span(),
             "`#[nightstream_sdk::entry]` function must take no arguments",
         )
-            .to_compile_error()
-            .into();
+        .to_compile_error()
+        .into();
     }
 
     let call_ident = &f.sig.ident;
-    let wrapper_ident = syn::Ident::new(
-        &format!("__nightstream_sdk_entry_{}", call_ident),
-        call_ident.span(),
-    );
+    let wrapper_ident = syn::Ident::new(&format!("__nightstream_sdk_entry_{}", call_ident), call_ident.span());
     let returns_never = matches!(
         &f.sig.output,
         ReturnType::Type(_, ty) if is_never_type(&**ty)
@@ -238,10 +231,7 @@ pub fn provable(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
 
     let call_ident = &f.sig.ident;
-    let wrapper_ident = syn::Ident::new(
-        &format!("__nightstream_sdk_provable_{}", call_ident),
-        call_ident.span(),
-    );
+    let wrapper_ident = syn::Ident::new(&format!("__nightstream_sdk_provable_{}", call_ident), call_ident.span());
 
     let (ret_ty, returns_never) = match &f.sig.output {
         ReturnType::Type(_, ty) => ((**ty).clone(), is_never_type(&**ty)),
@@ -263,18 +253,15 @@ _start:
         wrapper = wrapper_ident
     );
 
-    let arg_stmts = arg_idents
-        .iter()
-        .zip(arg_types.iter())
-        .map(|(ident, ty)| {
-            quote! {
-                let #ident: #ty = unsafe {
-                    let v = <#ty as ::nightstream_sdk::abi::NeoAbi>::read_from_words(__neo_ptr);
-                    __neo_ptr = __neo_ptr.add(<#ty as ::nightstream_sdk::abi::NeoAbi>::WORDS);
-                    v
-                };
-            }
-        });
+    let arg_stmts = arg_idents.iter().zip(arg_types.iter()).map(|(ident, ty)| {
+        quote! {
+            let #ident: #ty = unsafe {
+                let v = <#ty as ::nightstream_sdk::abi::NeoAbi>::read_from_words(__neo_ptr);
+                __neo_ptr = __neo_ptr.add(<#ty as ::nightstream_sdk::abi::NeoAbi>::WORDS);
+                v
+            };
+        }
+    });
 
     let wrapper_body = if returns_never {
         quote! {

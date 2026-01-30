@@ -1,0 +1,26 @@
+[package]
+name = "neo-fold-jni"
+version = { workspace = true }
+authors = { workspace = true }
+edition = { workspace = true }
+rust-version = { workspace = true }
+license = "Apache-2.0"
+publish = false
+description = "JNI wrapper for neo-fold (Android integration)"
+
+[lints]
+workspace = true
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+jni = "0.21"
+neo-fold-ffi = { path = "../neo-fold-ffi" }
+
+[features]
+default = []
+spartan = ["neo-fold-ffi/spartan"]
+debug-logs = ["neo-fold-ffi/debug-logs"]
+spartan-debug-logs = ["neo-fold-ffi/spartan-debug-logs"]
+

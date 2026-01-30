@@ -282,7 +282,13 @@ where
                 if let Some(addr) = b.addr {
                     cols.push(("addr", addr));
                 }
-                validate_cpu_binding_cols(&format!("shout_cpu[lane={lane_idx}]"), *table_id, bus_base, chunk_size, &cols)?;
+                validate_cpu_binding_cols(
+                    &format!("shout_cpu[lane={lane_idx}]"),
+                    *table_id,
+                    bus_base,
+                    chunk_size,
+                    &cols,
+                )?;
                 shout_cpu.push(b.clone());
             }
         }
@@ -560,10 +566,9 @@ where
                     // Collect Shout events keyed by (sorted) table_id list.
                     for ev in &step.shout_events {
                         let id = ev.shout_id.0;
-                        let idx = shared
-                            .table_ids
-                            .binary_search(&id)
-                            .map_err(|_| format!("unexpected shout_id={id} in one step (chunk_start={chunk_start}, j={j})"))?;
+                        let idx = shared.table_ids.binary_search(&id).map_err(|_| {
+                            format!("unexpected shout_id={id} in one step (chunk_start={chunk_start}, j={j})")
+                        })?;
                         let lanes = shout_events[idx].len();
                         let lane_idx = used_shout[idx];
                         if lane_idx >= lanes {
@@ -578,10 +583,9 @@ where
                     // Collect Twist events keyed by (sorted) mem_id list.
                     for ev in &step.twist_events {
                         let id = ev.twist_id.0;
-                        let idx = shared
-                            .mem_ids
-                            .binary_search(&id)
-                            .map_err(|_| format!("unexpected twist_id={id} in one step (chunk_start={chunk_start}, j={j})"))?;
+                        let idx = shared.mem_ids.binary_search(&id).map_err(|_| {
+                            format!("unexpected twist_id={id} in one step (chunk_start={chunk_start}, j={j})")
+                        })?;
                         match ev.kind {
                             neo_vm_trace::TwistOpKind::Read => {
                                 let lanes = twist_reads

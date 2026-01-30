@@ -59,7 +59,8 @@ fn dec_reduction_emits_and_checks_y_zcol() {
     }
 
     let X_parent = project_x_first_cols(&Z_parent, m_in);
-    let (y_parent, y_scalars_parent) = neo_reductions::common::compute_y_from_Z_and_r(&s, &Z_parent, &r, ell_d, params.b);
+    let (y_parent, y_scalars_parent) =
+        neo_reductions::common::compute_y_from_Z_and_r(&s, &Z_parent, &r, ell_d, params.b);
     assert_eq!(y_parent.len(), s.t());
     assert_eq!(y_parent[0].len(), d_pad);
 
@@ -81,13 +82,8 @@ fn dec_reduction_emits_and_checks_y_zcol() {
         u_len: 0,
     };
 
-    let (children, ok_y, ok_X) = neo_reductions::optimized_engine::dec_reduction_paper_exact::<F>(
-        &s,
-        &params,
-        &parent,
-        &Z_split,
-        ell_d,
-    );
+    let (children, ok_y, ok_X) =
+        neo_reductions::optimized_engine::dec_reduction_paper_exact::<F>(&s, &params, &parent, &Z_split, ell_d);
     assert!(ok_y && ok_X, "DEC must pass y/X checks (including y_zcol)");
     assert_eq!(children.len(), 2);
     for (i, child) in children.iter().enumerate() {

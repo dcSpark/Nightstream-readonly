@@ -1,19 +1,17 @@
 #![allow(non_snake_case)]
 
 use bellpepper::gadgets::boolean::{AllocatedBit, Boolean};
-use bellpepper_core::{
-    Circuit, ConstraintSystem, Index, LinearCombination, SynthesisError, Variable,
-};
+use bellpepper_core::{Circuit, ConstraintSystem, Index, LinearCombination, SynthesisError, Variable};
 use ff::PrimeField;
 use neo_ajtai::Commitment as Cmt;
-use neo_ajtai::{set_global_pp_seeded, s_lincomb, s_mul, AjtaiSModule};
+use neo_ajtai::{s_lincomb, s_mul, set_global_pp_seeded, AjtaiSModule};
 use neo_ccs::relations::{McsInstance, McsWitness, MeInstance};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::{CcsMatrix, CcsStructure, CscMat, Mat, SparsePoly, Term};
 use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::shard::{
     fold_shard_prove_with_witnesses, fold_shard_prove_with_witnesses_with_step_offset, fold_shard_verify,
-    fold_shard_verify_with_step_offset, fold_shard_verify_with_step_linking, CommitMixers, StepLinkingConfig,
+    fold_shard_verify_with_step_linking, fold_shard_verify_with_step_offset, CommitMixers, StepLinkingConfig,
 };
 use neo_math::ring::{cf_inv, Rq as RqEl};
 use neo_math::{D, F, K};
@@ -102,11 +100,7 @@ impl TripletConstraintSystem {
         }
     }
 
-    fn push_lc_trips(
-        row: u32,
-        lc: &LinearCombination<FpGoldilocks>,
-        trips: &mut Vec<(u32, u32, F)>,
-    ) {
+    fn push_lc_trips(row: u32, lc: &LinearCombination<FpGoldilocks>, trips: &mut Vec<(u32, u32, F)>) {
         for (var, coeff) in lc.iter() {
             let value = fp_to_u64(coeff);
             if value == 0 {
@@ -209,10 +203,7 @@ struct Sha256StateChainCircuit {
 }
 
 impl Circuit<FpGoldilocks> for Sha256StateChainCircuit {
-    fn synthesize<CS: ConstraintSystem<FpGoldilocks>>(
-        self,
-        cs: &mut CS,
-    ) -> Result<(), SynthesisError> {
+    fn synthesize<CS: ConstraintSystem<FpGoldilocks>>(self, cs: &mut CS) -> Result<(), SynthesisError> {
         let prev_bit_values: Vec<_> = bellpepper::gadgets::multipack::bytes_to_bits(&self.prev_state)
             .into_iter()
             .map(Some)
@@ -230,8 +221,7 @@ impl Circuit<FpGoldilocks> for Sha256StateChainCircuit {
         bellpepper::gadgets::multipack::pack_into_inputs(cs.namespace(|| "prev_state"), &prev_bits)?;
 
         // Compute `next_state = SHA256(prev_state)`.
-        let hash_bits =
-            bellpepper::gadgets::sha256::sha256(cs.namespace(|| "sha256"), &prev_bits)?;
+        let hash_bits = bellpepper::gadgets::sha256::sha256(cs.namespace(|| "sha256"), &prev_bits)?;
         assert_eq!(hash_bits.len(), STATE_BITS);
 
         // Expose `next_state` as compact public inputs.
@@ -248,8 +238,7 @@ fn state_packed_len() -> usize {
 
 fn pack_state_bytes(state: &[u8; STATE_BYTES]) -> Vec<F> {
     let bits = bellpepper::gadgets::multipack::bytes_to_bits(state);
-    let packed =
-        bellpepper::gadgets::multipack::compute_multipacking::<FpGoldilocks>(&bits);
+    let packed = bellpepper::gadgets::multipack::compute_multipacking::<FpGoldilocks>(&bits);
     packed.iter().map(|x| F::from_u64(fp_to_u64(x))).collect()
 }
 
@@ -376,10 +365,7 @@ fn build_step<L: SModuleHomomorphism<F, Cmt>>(
     let c = l.commit(&Z);
     let x = z[..m_in].to_vec();
     let w = z[m_in..].to_vec();
-    StepWitnessBundle::from((
-        McsInstance { c, x, m_in },
-        McsWitness { w, Z },
-    ))
+    StepWitnessBundle::from((McsInstance { c, x, m_in }, McsWitness { w, Z }))
 }
 
 #[test]
@@ -441,19 +427,16 @@ fn shard_continuation_extend_and_fold() {
     // y1 = sha256(y0)
     // y2 = sha256(y1)
     const Y0_EXPECTED: [u8; STATE_BYTES] = [
-        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae,
-        0x22, 0x23, 0xb0, 0x03, 0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61,
-        0xf2, 0x00, 0x15, 0xad,
+        0xba, 0x78, 0x16, 0xbf, 0x8f, 0x01, 0xcf, 0xea, 0x41, 0x41, 0x40, 0xde, 0x5d, 0xae, 0x22, 0x23, 0xb0, 0x03,
+        0x61, 0xa3, 0x96, 0x17, 0x7a, 0x9c, 0xb4, 0x10, 0xff, 0x61, 0xf2, 0x00, 0x15, 0xad,
     ];
     const Y1_EXPECTED: [u8; STATE_BYTES] = [
-        0x4f, 0x8b, 0x42, 0xc2, 0x2d, 0xd3, 0x72, 0x9b, 0x51, 0x9b, 0xa6, 0xf6, 0x8d, 0x2d,
-        0xa7, 0xcc, 0x5b, 0x2d, 0x60, 0x6d, 0x05, 0xda, 0xed, 0x5a, 0xd5, 0x12, 0x8c, 0xc0,
-        0x3e, 0x6c, 0x63, 0x58,
+        0x4f, 0x8b, 0x42, 0xc2, 0x2d, 0xd3, 0x72, 0x9b, 0x51, 0x9b, 0xa6, 0xf6, 0x8d, 0x2d, 0xa7, 0xcc, 0x5b, 0x2d,
+        0x60, 0x6d, 0x05, 0xda, 0xed, 0x5a, 0xd5, 0x12, 0x8c, 0xc0, 0x3e, 0x6c, 0x63, 0x58,
     ];
     const Y2_EXPECTED: [u8; STATE_BYTES] = [
-        0xf2, 0xa7, 0x78, 0xf1, 0xa6, 0xed, 0x3d, 0x5b, 0xc5, 0x9a, 0x5d, 0x79, 0x10, 0x4c,
-        0x59, 0x8f, 0x3f, 0x07, 0x09, 0x3f, 0x24, 0x0c, 0xa4, 0xe9, 0x13, 0x33, 0xfb, 0x09,
-        0xed, 0x4f, 0x36, 0xda,
+        0xf2, 0xa7, 0x78, 0xf1, 0xa6, 0xed, 0x3d, 0x5b, 0xc5, 0x9a, 0x5d, 0x79, 0x10, 0x4c, 0x59, 0x8f, 0x3f, 0x07,
+        0x09, 0x3f, 0x24, 0x0c, 0xa4, 0xe9, 0x13, 0x33, 0xfb, 0x09, 0xed, 0x4f, 0x36, 0xda,
     ];
 
     assert_eq!(y0, Y0_EXPECTED);
@@ -509,7 +492,10 @@ fn shard_continuation_extend_and_fold() {
     .expect("prove prefix");
     let prove_prefix_duration = prove_prefix_start.elapsed();
     println!("Prove prefix shard (step 0): {:?}", prove_prefix_duration);
-    assert!(out0.obligations.val.is_empty(), "CCS-only prefix should not emit val-lane obligations");
+    assert!(
+        out0.obligations.val.is_empty(),
+        "CCS-only prefix should not emit val-lane obligations"
+    );
     println!("Stage 0 proved output (y1): {}", hex_lower(&y1));
 
     let acc1: Vec<MeInstance<Cmt, F, K>> = out0.obligations.main.clone();
@@ -533,7 +519,10 @@ fn shard_continuation_extend_and_fold() {
     .expect("prove extension");
     let prove_extend_duration = prove_extend_start.elapsed();
     println!("Prove extension shard (step 1): {:?}", prove_extend_duration);
-    assert!(out1.obligations.val.is_empty(), "CCS-only extension should not emit val-lane obligations");
+    assert!(
+        out1.obligations.val.is_empty(),
+        "CCS-only extension should not emit val-lane obligations"
+    );
     println!("Stage 1 proved output (y2): {}", hex_lower(&y2));
     println!(
         "Stage 1 output (y2) packed public inputs: {:?}",
@@ -566,10 +555,7 @@ fn shard_continuation_extend_and_fold() {
         mixers,
     )
     .expect("prove full IVC shard (steps 0..1)");
-    println!(
-        "Prove full IVC shard (steps 0..1): {:?}",
-        prove_full_start.elapsed()
-    );
+    println!("Prove full IVC shard (steps 0..1): {:?}", prove_full_start.elapsed());
 
     // ---------------------------------------------------------------------
     // Verifier side: verify the prefix to get the foldable state, then verify
@@ -624,7 +610,10 @@ fn shard_continuation_extend_and_fold() {
     .expect("verify prefix");
     let verify_prefix_duration = verify_prefix_start.elapsed();
     println!("Verify prefix shard (step 0): {:?}", verify_prefix_duration);
-    assert_eq!(out0_v.obligations.main, out0.obligations.main, "prefix obligations mismatch");
+    assert_eq!(
+        out0_v.obligations.main, out0.obligations.main,
+        "prefix obligations mismatch"
+    );
     assert!(out0_v.obligations.val.is_empty());
 
     // Sanity check: verifying step 1 with the wrong step offset must fail.
@@ -671,7 +660,10 @@ fn shard_continuation_extend_and_fold() {
     .expect("verify extension");
     let verify_extend_duration = verify_extend_start.elapsed();
     println!("Verify extension shard (step 1): {:?}", verify_extend_duration);
-    assert_eq!(out1_v.obligations.main, out1.obligations.main, "extended obligations mismatch");
+    assert_eq!(
+        out1_v.obligations.main, out1.obligations.main,
+        "extended obligations mismatch"
+    );
     assert!(out1_v.obligations.val.is_empty());
 
     // Full IVC verification: verify a single 2-step shard proof with step linking enabled.
@@ -694,13 +686,9 @@ fn shard_continuation_extend_and_fold() {
         verify_full_start.elapsed()
     );
 
-    let step0_next = unpack_state_bytes_from_packed(
-        &step0_pub.mcs_inst.x[1 + packed_len..1 + 2 * packed_len],
-    );
+    let step0_next = unpack_state_bytes_from_packed(&step0_pub.mcs_inst.x[1 + packed_len..1 + 2 * packed_len]);
     let step1_prev = unpack_state_bytes_from_packed(&step1_pub.mcs_inst.x[1..1 + packed_len]);
-    let step1_next = unpack_state_bytes_from_packed(
-        &step1_pub.mcs_inst.x[1 + packed_len..1 + 2 * packed_len],
-    );
+    let step1_next = unpack_state_bytes_from_packed(&step1_pub.mcs_inst.x[1 + packed_len..1 + 2 * packed_len]);
     assert_eq!(step0_next, step1_prev, "chaining boundary mismatch");
     println!("Stage 1 verified input (y1):  {}", hex_lower(&step1_prev));
     println!("Stage 1 verified output (y2): {}", hex_lower(&step1_next));

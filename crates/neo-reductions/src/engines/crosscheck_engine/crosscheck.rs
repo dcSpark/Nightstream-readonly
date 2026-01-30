@@ -7,9 +7,9 @@
 #![allow(non_snake_case)]
 
 use crate::engines::optimized_engine::PiCcsProof;
-use crate::optimized_engine::PiCcsProofVariant;
 use crate::engines::PiCcsEngine;
 use crate::error::PiCcsError;
+use crate::optimized_engine::PiCcsProofVariant;
 use neo_ajtai::Commitment as Cmt;
 use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
 use neo_math::{F, K};
@@ -83,7 +83,11 @@ where
             "crosscheck engine expects SplitNcV1 proofs".into(),
         ));
     }
-    assert_eq!(proof.sumcheck_challenges.len(), dims.ell, "sumcheck_challenges length mismatch");
+    assert_eq!(
+        proof.sumcheck_challenges.len(),
+        dims.ell,
+        "sumcheck_challenges length mismatch"
+    );
     assert_eq!(
         proof.sumcheck_challenges_nc.len(),
         dims.ell_nc,
@@ -229,16 +233,17 @@ where
         }
 
         let r_inputs = me_inputs.get(0).map(|mi| mi.r.as_slice());
-        let (lhs_exact, _rhs_unused) = crate::engines::paper_exact_engine::q_eval_at_ext_point_fe_paper_exact_with_inputs(
-            s,
-            params,
-            mcs_witnesses,
-            me_witnesses,
-            alpha_prime,
-            r_prime,
-            &proof.challenges_public,
-            r_inputs,
-        );
+        let (lhs_exact, _rhs_unused) =
+            crate::engines::paper_exact_engine::q_eval_at_ext_point_fe_paper_exact_with_inputs(
+                s,
+                params,
+                mcs_witnesses,
+                me_witnesses,
+                alpha_prime,
+                r_prime,
+                &proof.challenges_public,
+                r_inputs,
+            );
         if detailed_log {
             log_terminal_paper_exact_result(lhs_exact);
             log_terminal_comparison(running_sum_prover, rhs_opt, lhs_exact);
