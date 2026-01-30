@@ -68,9 +68,10 @@ jobs:
         targets: wasm32-unknown-unknown
         components: rust-src
     
-    - name: Install Rust (nightly wasm32 + rust-src)
-      uses: dtolnay/rust-toolchain@nightly
+    - name: Install Rust (nightly-2025-09-01 wasm32 + rust-src)
+      uses: dtolnay/rust-toolchain@master
       with:
+        toolchain: nightly-2025-09-01
         targets: wasm32-unknown-unknown
         components: rust-src
 
@@ -82,28 +83,8 @@ jobs:
     - name: Install wasm-pack
       uses: jetli/wasm-pack-action@v0.4.0
 
-    # Single-threaded builds
-    - name: Build Web WASM
-      run: ./demos/wasm-demo/build_wasm.sh --no-threads
-
-    - name: Build iOS WASM
-      run: ./demos/ios-demo/scripts/build_wasm.sh --release
-
-    - name: Build Android WASM
-      run: ./demos/android-demo/scripts/build_wasm.sh --release
-
-    # Multi-threaded builds (SharedArrayBuffer)
-    - name: Build Web WASM (threads)
-      run: ./demos/wasm-demo/build_wasm.sh --threads
+    - name: Build WASM bundles (Web/iOS/Android)
+      run: ./demos/build_wasm.sh --release
       env:
-        WASM_THREADS_TOOLCHAIN: nightly
-
-    - name: Build iOS WASM (threads)
-      run: ./demos/ios-demo/scripts/build_wasm.sh --release --threads
-      env:
-        WASM_THREADS_TOOLCHAIN: nightly
-
-    - name: Build Android WASM (threads)
-      run: ./demos/android-demo/scripts/build_wasm.sh --release --threads
-      env:
-        WASM_THREADS_TOOLCHAIN: nightly
+        RUSTUP_TOOLCHAIN: stable
+        WASM_THREADS_TOOLCHAIN: nightly-2025-09-01

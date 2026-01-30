@@ -97,6 +97,7 @@ echo "Building neo-fold WASM bundle for WKWebView (ES modules)…"
 
 rm -rf "$WEB_OUTPUT_DIR/pkg"
 mkdir -p "$WEB_OUTPUT_DIR/pkg"
+printf '*\n!.gitignore\n' >"$WEB_OUTPUT_DIR/pkg/.gitignore"
 
 WASM_PACK_WEB_ARGS=(build "$HALO3_WASM_DIR" --target web --out-dir "$WEB_OUTPUT_DIR/pkg" --out-name "$OUT_NAME")
 if [[ "$PROFILE" == "release" ]]; then
@@ -135,6 +136,7 @@ if [[ $BUILD_THREADS -eq 1 ]]; then
 
     rm -rf "$WEB_OUTPUT_DIR/pkg_threads"
     mkdir -p "$WEB_OUTPUT_DIR/pkg_threads"
+    printf '*\n!.gitignore\n' >"$WEB_OUTPUT_DIR/pkg_threads/.gitignore"
 
     export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+atomics,+bulk-memory,+mutable-globals"
 
