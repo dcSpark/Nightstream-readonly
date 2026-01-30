@@ -4,9 +4,7 @@
 //! for field conversions, K-field operations, and allocation helpers.
 
 use crate::error::{Result, SpartanBridgeError};
-use crate::gadgets::k_field::{
-    alloc_k, k_add as k_add_raw, k_mul as k_mul_raw, k_scalar_mul as k_scalar_mul_raw, KNum, KNumVar,
-};
+use crate::gadgets::k_field::{alloc_k, KNum, KNumVar};
 use crate::CircuitF;
 use bellpepper_core::{ConstraintSystem, Variable};
 use neo_ccs::Mat;
@@ -82,7 +80,24 @@ pub fn enforce_k_eq<CS: ConstraintSystem<CircuitF>>(cs: &mut CS, a: &KNumVar, b:
 /// Helper: allocate a constant K element from a base-field value.
 pub fn k_const<CS: ConstraintSystem<CircuitF>>(cs: &mut CS, c0: CircuitF, label: &str) -> Result<KNumVar> {
     let k_num = KNum::<CircuitF>::from_f(c0);
-    alloc_k(cs, Some(k_num), label).map_err(SpartanBridgeError::BellpepperError)
+    let var = alloc_k(cs, Some(k_num), label).map_err(SpartanBridgeError::BellpepperError)?;
+
+    // Enforce c0 == constant.
+    cs.enforce(
+        || format!("{}_const_c0", label),
+        |lc| lc + var.c0,
+        |lc| lc + CS::one(),
+        |lc| lc + (c0, CS::one()),
+    );
+    // Enforce c1 == 0.
+    cs.enforce(
+        || format!("{}_const_c1", label),
+        |lc| lc + var.c1,
+        |lc| lc + CS::one(),
+        |lc| lc,
+    );
+
+    Ok(var)
 }
 
 /// Helper: K zero.
@@ -93,46 +108,6 @@ pub fn k_zero<CS: ConstraintSystem<CircuitF>>(cs: &mut CS, label: &str) -> Resul
 /// Helper: K one.
 pub fn k_one<CS: ConstraintSystem<CircuitF>>(cs: &mut CS, label: &str) -> Result<KNumVar> {
     k_const(cs, CircuitF::from(1u64), label)
-}
-
-/// Helper: K addition: r = a + b.
-pub fn k_add<CS: ConstraintSystem<CircuitF>>(cs: &mut CS, a: &KNumVar, b: &KNumVar, label: &str) -> Result<KNumVar> {
-    k_add_raw(cs, a, b, None, label).map_err(SpartanBridgeError::BellpepperError)
-}
-
-/// Helper: K multiplication: r = a * b.
-pub fn k_mul<CS: ConstraintSystem<CircuitF>>(
-    cs: &mut CS,
-    a: &KNumVar,
-    b: &KNumVar,
-    delta: CircuitF,
-    label: &str,
-) -> Result<KNumVar> {
-    k_mul_raw(cs, a, b, delta, None, label).map_err(SpartanBridgeError::BellpepperError)
-}
-
-/// Helper: K scalar multiplication: r = k * a.
-pub fn k_scalar_mul<CS: ConstraintSystem<CircuitF>>(
-    cs: &mut CS,
-    k: CircuitF,
-    a: &KNumVar,
-    label: &str,
-) -> Result<KNumVar> {
-    k_scalar_mul_raw(cs, k, a, None, label).map_err(SpartanBridgeError::BellpepperError)
-}
-
-/// Helper: K subtraction: r = a - b.
-pub fn k_sub<CS: ConstraintSystem<CircuitF>>(cs: &mut CS, a: &KNumVar, b: &KNumVar, label: &str) -> Result<KNumVar> {
-    // Compute -b via scalar multiplication by -1, then add.
-    let minus_one = CircuitF::from(0u64) - CircuitF::from(1u64);
-    let neg_b = k_scalar_mul(cs, minus_one, b, &format!("{}_neg_b", label))?;
-    k_add(cs, a, &neg_b, label)
-}
-
-/// Helper: 1 - a.
-pub fn k_one_minus<CS: ConstraintSystem<CircuitF>>(cs: &mut CS, a: &KNumVar, label: &str) -> Result<KNumVar> {
-    let one = k_one(cs, &format!("{}_one", label))?;
-    k_sub(cs, &one, a, &format!("{}_1_minus", label))
 }
 
 /// Helper: K multiplication with native K hints for operands and product.
@@ -219,23 +194,4 @@ pub fn k_mul_with_hint<CS: ConstraintSystem<CircuitF>>(
     );
 
     Ok((KNumVar { c0, c1 }, prod_val))
-}
-
-/// Helper: K exponentiation by small integer exponent: base^exp.
-#[allow(dead_code)]
-pub fn k_pow<CS: ConstraintSystem<CircuitF>>(
-    cs: &mut CS,
-    base: &KNumVar,
-    exp: u32,
-    delta: CircuitF,
-    label: &str,
-) -> Result<KNumVar> {
-    if exp == 0 {
-        return k_one(cs, &format!("{}_pow0", label));
-    }
-    let mut acc = base.clone();
-    for i in 1..exp {
-        acc = k_mul(cs, &acc, base, delta, &format!("{}_pow_step_{}", label, i))?;
-    }
-    Ok(acc)
 }

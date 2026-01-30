@@ -124,8 +124,7 @@ build_web_bundle() {
       wasm-pack "${args[@]}" \
       -- \
       --features wasm-threads \
-      -Z build-std=std,panic_abort \
-      -Z build-std-features=panic_immediate_abort
+      -Z build-std=std,panic_abort
 
     # wasm-bindgen-rayon can emit either workerHelpers.no-bundler.js (preferred) or workerHelpers.js.
     # Patch the default helper if present so it can load as plain browser modules (no bundler).
@@ -173,6 +172,7 @@ for p in paths_default:
 
 for p in paths_no_bundler:
     original = p.read_text(encoding="utf-8")
+    txt = original
     txt, ok = patch_error_handler(txt, "  pkg.wbg_rayon_start_worker(data.receiver);\n});\n")
     if not ok:
         failed.append(f"{p}: could not patch error handler (pattern not found)")
@@ -213,4 +213,3 @@ fi
 echo ""
 echo "Examples copied to:"
 echo "  $ASSETS_EXAMPLES_DIR/"
-

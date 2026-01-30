@@ -19,7 +19,7 @@ use neo_spartan_bridge::circuit::fold_circuit::CircuitPolyTerm;
 use neo_spartan_bridge::circuit::witness::PiCcsChallenges;
 use neo_spartan_bridge::circuit::{FoldRunCircuit, FoldRunInstance, FoldRunWitness};
 use neo_spartan_bridge::CircuitF;
-use neo_spartan_bridge::{prove_fold_run, verify_fold_run};
+use neo_spartan_bridge::{prove_fold_run, setup_fold_run, verify_fold_run};
 use p3_field::PrimeCharacteristicRing;
 use rand_chacha::rand_core::SeedableRng;
 
@@ -144,7 +144,6 @@ fn build_trivial_fold_run_and_instance() -> (FoldRunInstance, FoldRunWitness) {
     let instance = FoldRunInstance {
         params_digest: [0u8; 32],
         ccs_digest: [0u8; 32],
-        mcs_digest: [0u8; 32],
         initial_accumulator: initial_accumulator.clone(),
         final_accumulator: run.compute_final_outputs(&initial_accumulator),
         pi_ccs_challenges: vec![dummy_pi_ccs_challenges_zero()],
@@ -154,7 +153,6 @@ fn build_trivial_fold_run_and_instance() -> (FoldRunInstance, FoldRunWitness) {
     // Z-witnesses and DEC children Z are unused by the circuit today, so we keep them empty.
     let witness = FoldRunWitness {
         fold_run: run,
-        pi_ccs_proofs: vec![proof],
         witnesses: vec![Vec::new()],
         rlc_rhos: vec![rlc_rhos_step],
         dec_children_z: vec![Vec::new()],
@@ -190,9 +188,9 @@ fn fold_run_circuit_initial_sum_mismatch_unsatisfied() {
     let (instance, mut witness) = build_trivial_fold_run_and_instance();
 
     // Tamper with sc_initial_sum to violate the T-binding constraint.
-    if let Some(first_proof) = witness.pi_ccs_proofs.get_mut(0) {
-        first_proof.sc_initial_sum = Some(K::from(F::from_u64(5)));
-        first_proof.sumcheck_final = K::from(F::from_u64(5));
+    if let Some(first_step) = witness.fold_run.steps.get_mut(0) {
+        first_step.fold.ccs_proof.sc_initial_sum = Some(K::from(F::from_u64(5)));
+        first_step.fold.ccs_proof.sumcheck_final = K::from(F::from_u64(5));
     }
 
     let delta = CircuitF::from(7u64);
@@ -346,12 +344,11 @@ fn fold_run_circuit_optimized_nontrivial_satisfied() {
 
     // --- Build FoldRunWitness for the Spartan bridge (Π-CCS proofs + RLC data) ---
     let steps_len = run.steps.len();
-    let pi_ccs_proofs: Vec<PiCcsProof> = run.steps.iter().map(|s| s.fold.ccs_proof.clone()).collect();
     let rlc_rhos: Vec<Vec<Mat<F>>> = run.steps.iter().map(|s| s.fold.rlc_rhos.clone()).collect();
     let witnesses: Vec<Vec<Mat<F>>> = vec![Vec::new(); steps_len];
     let dec_children_z: Vec<Vec<Mat<F>>> = vec![Vec::new(); steps_len];
 
-    let witness = FoldRunWitness::from_fold_run(run.clone(), pi_ccs_proofs, witnesses, rlc_rhos, dec_children_z);
+    let witness = FoldRunWitness::from_fold_run(run.clone(), witnesses, rlc_rhos, dec_children_z);
 
     // Optional: directly synthesize the FoldRun circuit into a TestConstraintSystem
     // to inspect which constraint (if any) is unsatisfied before wrapping it in Spartan2.
@@ -363,7 +360,9 @@ fn fold_run_circuit_optimized_nontrivial_satisfied() {
         let s_norm = ccs.ensure_identity_first().expect("identity-first");
         let dims = reductions_utils::build_dims_and_policy(&params, &s_norm).expect("dims");
         let ell_n = dims.ell_n;
+        let ell_m = dims.ell_m;
         let ell = dims.ell;
+        let ell_nc = dims.ell_nc;
 
         let mut pi_ccs_challenges = Vec::with_capacity(run.steps.len());
         for (step_idx, step) in run.steps.iter().enumerate() {
@@ -386,29 +385,53 @@ fn fold_run_circuit_optimized_nontrivial_satisfied() {
                 proof.sumcheck_challenges.len()
             );
 
+            assert_eq!(
+                proof.sumcheck_rounds_nc.len(),
+                ell_nc,
+                "FoldRun step {}: expected {} NC sumcheck rounds, got {}",
+                step_idx,
+                ell_nc,
+                proof.sumcheck_rounds_nc.len()
+            );
+            assert_eq!(
+                proof.sumcheck_challenges_nc.len(),
+                ell_nc,
+                "FoldRun step {}: expected {} NC sumcheck challenges, got {}",
+                step_idx,
+                ell_nc,
+                proof.sumcheck_challenges_nc.len()
+            );
+
             let alpha = proof.challenges_public.alpha.clone();
             let beta_a = proof.challenges_public.beta_a.clone();
             let beta_r = proof.challenges_public.beta_r.clone();
+            let beta_m = proof.challenges_public.beta_m.clone();
             let gamma = proof.challenges_public.gamma;
 
             let sumcheck_challenges = proof.sumcheck_challenges.clone();
             let (r_prime_slice, alpha_prime_slice) = sumcheck_challenges.split_at(ell_n);
 
+            let sumcheck_challenges_nc = proof.sumcheck_challenges_nc.clone();
+            let (s_col_prime_slice, alpha_prime_nc_slice) = sumcheck_challenges_nc.split_at(ell_m);
+
             pi_ccs_challenges.push(PiCcsChallenges {
                 alpha,
                 beta_a,
                 beta_r,
+                beta_m,
                 gamma,
                 r_prime: r_prime_slice.to_vec(),
                 alpha_prime: alpha_prime_slice.to_vec(),
                 sumcheck_challenges,
+                s_col_prime: s_col_prime_slice.to_vec(),
+                alpha_prime_nc: alpha_prime_nc_slice.to_vec(),
+                sumcheck_challenges_nc,
             });
         }
 
         let instance = FoldRunInstance {
             params_digest: [0u8; 32],
             ccs_digest: [0u8; 32],
-            mcs_digest: [0u8; 32],
             initial_accumulator: initial_accumulator.clone(),
             final_accumulator: run.compute_final_outputs(&initial_accumulator),
             pi_ccs_challenges,
@@ -446,9 +469,13 @@ fn fold_run_circuit_optimized_nontrivial_satisfied() {
     }
 
     // --- End-to-end Spartan2 proof and verification for this FoldRun ---
-    let spartan_proof = prove_fold_run(&params, &ccs, &initial_accumulator, &run, witness)
+    let keypair = setup_fold_run(&params, &ccs, &initial_accumulator, &run, witness.clone())
+        .expect("Spartan setup_fold_run should succeed");
+
+    let spartan_proof = prove_fold_run(&keypair.pk, &params, &ccs, &initial_accumulator, &run, witness)
         .expect("Spartan prove_fold_run should succeed");
 
-    let ok_spartan = verify_fold_run(&params, &ccs, &spartan_proof).expect("Spartan verify_fold_run should run");
+    let ok_spartan =
+        verify_fold_run(&keypair.vk, &params, &ccs, &spartan_proof).expect("Spartan verify_fold_run should run");
     assert!(ok_spartan, "Spartan2 verification should accept the optimized FoldRun");
 }

@@ -223,20 +223,23 @@ fn test_riscv_program_full_prove_verify() {
     let mut saw_add_only = false;
     for step in &proof.steps {
         let pre = &step.mem.shout_addr_pre;
-        if pre.active_lanes.is_empty() {
-            assert!(
-                pre.round_polys.is_empty(),
-                "active_lanes=[] must imply no Shout addr-pre rounds"
-            );
+        let active_lanes: Vec<u32> = pre
+            .groups
+            .iter()
+            .flat_map(|g| g.active_lanes.iter().copied())
+            .collect();
+        if active_lanes.is_empty() {
+            assert!(pre.groups.iter().all(|g| g.round_polys.is_empty()));
             saw_skipped = true;
             continue;
         }
         assert_eq!(
-            pre.active_lanes,
+            active_lanes,
             vec![add_lane],
             "expected ADD-only Shout addr-pre active_lanes"
         );
-        assert_eq!(pre.round_polys.len(), 1, "ADD-only step must include 1 proof");
+        let rounds_total: usize = pre.groups.iter().map(|g| g.round_polys.len()).sum();
+        assert_eq!(rounds_total, 1, "ADD-only step must include 1 proof");
         saw_add_only = true;
     }
     assert!(saw_skipped, "expected at least one no-Shout step (mask=0)");
@@ -284,10 +287,23 @@ fn test_riscv_program_full_prove_verify() {
     let tamper_step = bad_proof
         .steps
         .iter_mut()
-        .find(|s| !s.mem.shout_addr_pre.active_lanes.is_empty())
+        .find(|s| {
+            s.mem
+                .shout_addr_pre
+                .groups
+                .iter()
+                .any(|g| !g.active_lanes.is_empty())
+        })
         .expect("expected at least one active Shout addr-pre step");
-    tamper_step.mem.shout_addr_pre.active_lanes.clear();
-    tamper_step.mem.shout_addr_pre.round_polys.clear();
+    let group = tamper_step
+        .mem
+        .shout_addr_pre
+        .groups
+        .iter_mut()
+        .find(|g| !g.active_lanes.is_empty())
+        .expect("expected at least one active Shout addr-pre group");
+    group.active_lanes.clear();
+    group.round_polys.clear();
     let mut tr_bad_mask = Poseidon2Transcript::new(b"riscv-b1-full");
     assert!(
         fold_shard_verify_rv32_b1_with_statement_mem_init(

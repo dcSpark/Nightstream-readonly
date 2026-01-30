@@ -7,11 +7,18 @@ use neo_memory::output_check::OutputBindingProof;
 pub type TwistProofK = neo_memory::twist::TwistProof<K>;
 pub type ShoutProofK = neo_memory::shout::ShoutProof<K>;
 
-/// Route A Shout address pre-time proof metadata, with optional per-table skipping.
+/// Route A Shout address pre-time proof metadata, grouped by `ell_addr`.
 ///
-/// When a Shout lane is provably inactive for a step (no lookups), we can skip its
-/// address-domain sumcheck entirely. We still bind all `claimed_sums` to the transcript,
-/// but we only include sumcheck rounds for the active subset.
+/// Shout addr-pre is an address-domain sumcheck, and the number of rounds equals
+/// `ell_addr = d * ell` (the number of address-bit columns per lane under bit-addressing).
+///
+/// For performance, we batch multiple Shout lanes together using shared challenges
+/// (batched sumcheck). The batched sumcheck requires *all claims in the batch to have the same
+/// number of rounds*, so we group lanes by `ell_addr` and run one batched sumcheck per group.
+///
+/// Within each group, when a Shout lane is provably inactive for a step (no lookups), we can
+/// skip its address-domain sumcheck entirely. We still bind all `claimed_sums` to the transcript,
+/// but we include sumcheck rounds only for the active subset.
 #[derive(Clone, Debug)]
 pub struct ShoutAddrPreProof<KK> {
     /// Claimed sums per Shout lane.
@@ -19,6 +26,16 @@ pub struct ShoutAddrPreProof<KK> {
     /// Lanes are flattened in `(lut_idx, lane_idx)` order, where `lut_idx` is the
     /// index in `step.lut_instances`, and `lane_idx` ranges over `inst.lanes.max(1)`.
     pub claimed_sums: Vec<KK>,
+    /// Per-`ell_addr` batched sumcheck proofs.
+    ///
+    /// Groups must be sorted by `ell_addr` and contain at most one entry per `ell_addr`.
+    pub groups: Vec<ShoutAddrPreGroupProof<KK>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ShoutAddrPreGroupProof<KK> {
+    /// Address-bit width (sumcheck round count) for this group.
+    pub ell_addr: u32,
     /// Indices of active lanes (into `claimed_sums`) that include address sumcheck rounds.
     ///
     /// This list must be strictly increasing.
@@ -27,7 +44,7 @@ pub struct ShoutAddrPreProof<KK> {
     ///
     /// `round_polys[active_idx][round] = coeffs`, and each inner `round` vector has length `ell_addr`.
     pub round_polys: Vec<Vec<Vec<KK>>>,
-    /// Shared terminal address point `r_addr` (length = `ell_addr`).
+    /// Shared terminal address point for this group (length = `ell_addr`).
     pub r_addr: Vec<KK>,
 }
 
@@ -35,9 +52,7 @@ impl<KK> Default for ShoutAddrPreProof<KK> {
     fn default() -> Self {
         Self {
             claimed_sums: Vec::new(),
-            active_lanes: Vec::new(),
-            round_polys: Vec::new(),
-            r_addr: Vec::new(),
+            groups: Vec::new(),
         }
     }
 }

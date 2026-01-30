@@ -47,16 +47,22 @@ Proving/verifying runs in a Web Worker so the UI stays responsive while proofs a
 
 ## Quick start
 
-1) Build the wasm bundle (default: threads, writes into `demos/wasm-demo/web/pkg_threads/`):
+1) Build the wasm bundles (default: both, writes into `demos/wasm-demo/web/pkg/` and `demos/wasm-demo/web/pkg_threads/`):
 
 ```bash
 ./demos/wasm-demo/build_wasm.sh
 ```
 
-To build a single-thread bundle (writes into `demos/wasm-demo/web/pkg/`):
+To build only a single-thread bundle (writes into `demos/wasm-demo/web/pkg/`):
 
 ```bash
 ./demos/wasm-demo/build_wasm.sh --no-threads
+```
+
+To build only the threads bundle (writes into `demos/wasm-demo/web/pkg_threads/`):
+
+```bash
+./demos/wasm-demo/build_wasm.sh --threads
 ```
 
 2) Serve the static demo:
@@ -77,7 +83,7 @@ Threaded wasm requires:
 To build a threaded wasm bundle (atomics enabled) into `demos/wasm-demo/web/pkg_threads/`:
 
 ```bash
-./demos/wasm-demo/build_wasm.sh
+./demos/wasm-demo/build_wasm.sh --threads
 ```
 
 If this is your first time building threads, install the prerequisites:
@@ -112,7 +118,7 @@ To force a rebuild before serving:
 ```
 
 If the page shows a `404` for `pkg/neo_fold_demo.js`, the wasm bundle hasn’t been built yet.
-Run `./demos/wasm-demo/build_wasm.sh --no-threads` (or re-run `serve.sh`, which now auto-builds when missing).
+Run `./demos/wasm-demo/build_wasm.sh` (or `./demos/wasm-demo/build_wasm.sh --no-threads`), or re-run `serve.sh` (which now auto-builds when missing).
 
 ## Using a real circuit export
 
@@ -129,20 +135,6 @@ Then click `Prove + Verify`.
 - `poseidon2_ic_batch_1.json` (from `crates/neo-fold/poseidon2-tests/poseidon2_ic_circuit_batch_1.json`)
 - `rv32_fibonacci.asm` (RV32 “mini-asm” Fibonacci program; reads `n` from RAM[0x104], writes fib(n) to RAM[0x100])
 
-## Deploy (GitHub Pages)
-
-This repo includes a Pages workflow at `.github/workflows/wasm-demo-pages.yml`.
-
-To enable it:
-
-1) In GitHub: `Settings` → `Pages`
-2) Set `Build and deployment` → `Source` to `GitHub Actions`
-
-After that, pushes to `main` (or manual `workflow_dispatch`) will publish the demo site.
-
-Note: GitHub Pages does not allow configuring COOP/COEP headers, so the `?threads=1` mode will not work there.
-The Pages workflow builds the single-thread wasm bundle (`./demos/wasm-demo/build_wasm.sh --no-threads`).
-
 ## Deploy (Cloudflare Workers)
 
 Cloudflare Workers supports serving static assets with custom headers. This repo includes a
@@ -157,7 +149,7 @@ npx wrangler@latest deploy
 ```
 
 `wrangler deploy` runs `./build_wasm.sh` (configured in `wrangler.toml`), so your deploy environment
-needs Rust (`wasm32-unknown-unknown`) + `wasm-pack`. By default this builds the threaded bundle,
+needs Rust (`wasm32-unknown-unknown`) + `wasm-pack`. By default this builds both bundles (including threads),
 so you also need a nightly toolchain + `rust-src` (see above). You can also run
 `./demos/wasm-demo/build_wasm.sh` manually ahead of time.
 

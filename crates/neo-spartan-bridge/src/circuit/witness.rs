@@ -8,7 +8,6 @@ use neo_ajtai::Commitment as Cmt;
 use neo_ccs::{Mat, MeInstance};
 use neo_fold::shard::ShardProof as FoldRun;
 use neo_math::{F, K};
-use neo_reductions::PiCcsProof;
 
 /// Public inputs to the FoldRun circuit
 #[derive(Clone, Debug)]
@@ -18,9 +17,6 @@ pub struct FoldRunInstance {
 
     /// Hash of CCS structure
     pub ccs_digest: [u8; 32],
-
-    /// Hash of MCS instances
-    pub mcs_digest: [u8; 32],
 
     /// Initial accumulator (public)
     pub initial_accumulator: Vec<MeInstance<Cmt, F, K>>,
@@ -78,9 +74,6 @@ pub struct FoldRunWitness {
     /// The complete fold run
     pub fold_run: FoldRun,
 
-    /// Π-CCS proofs for each step
-    pub pi_ccs_proofs: Vec<PiCcsProof>,
-
     /// Z witnesses for each ME instance in each step
     /// witnesses[step_idx][me_idx] is the Z matrix for that ME instance
     pub witnesses: Vec<Vec<Mat<F>>>,
@@ -98,7 +91,6 @@ impl FoldRunInstance {
         run: &FoldRun,
         params_digest: [u8; 32],
         ccs_digest: [u8; 32],
-        mcs_digest: [u8; 32],
         initial_accumulator: Vec<MeInstance<Cmt, F, K>>,
         pi_ccs_challenges: Vec<PiCcsChallenges>,
     ) -> Self {
@@ -107,7 +99,6 @@ impl FoldRunInstance {
         Self {
             params_digest,
             ccs_digest,
-            mcs_digest,
             initial_accumulator,
             final_accumulator,
             pi_ccs_challenges,
@@ -119,14 +110,12 @@ impl FoldRunWitness {
     /// Create a witness from a FoldRun and its components
     pub fn from_fold_run(
         fold_run: FoldRun,
-        pi_ccs_proofs: Vec<PiCcsProof>,
         witnesses: Vec<Vec<Mat<F>>>,
         rlc_rhos: Vec<Vec<Mat<F>>>,
         dec_children_z: Vec<Vec<Mat<F>>>,
     ) -> Self {
         Self {
             fold_run,
-            pi_ccs_proofs,
             witnesses,
             rlc_rhos,
             dec_children_z,

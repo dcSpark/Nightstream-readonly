@@ -273,7 +273,6 @@ where
                 lanes: layout.lanes.max(1),
                 ell,
                 init,
-                _phantom: PhantomData,
             };
             let wit = MemWitness { mats: Vec::new() };
             mem_instances.push((inst, wit));
@@ -346,7 +345,6 @@ where
                 ell,
                 table_spec,
                 table,
-                _phantom: PhantomData,
             };
             let wit = LutWitness { mats: Vec::new() };
             lut_instances.push((inst, wit));

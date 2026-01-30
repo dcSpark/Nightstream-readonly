@@ -407,7 +407,6 @@ fn build_single_chunk_inputs() -> (
         lanes: mem_layout.lanes.max(1),
         ell: mem_layout.n_side.trailing_zeros() as usize,
         init: mem_init.clone(),
-        _phantom: PhantomData,
     };
     let mem_wit = neo_memory::witness::MemWitness { mats: Vec::new() };
     let lut_inst = neo_memory::witness::LutInstance::<Cmt, F> {
@@ -420,7 +419,6 @@ fn build_single_chunk_inputs() -> (
         ell: lut_table.n_side.trailing_zeros() as usize,
         table_spec: None,
         table: lut_table.content.clone(),
-        _phantom: PhantomData,
     };
     let lut_wit = neo_memory::witness::LutWitness { mats: Vec::new() };
 
@@ -576,7 +574,6 @@ fn full_folding_integration_multi_step_chunk() {
         lanes: mem_layout.lanes.max(1),
         ell: mem_layout.n_side.trailing_zeros() as usize,
         init: mem_init.clone(),
-        _phantom: PhantomData,
     };
     let mem_wit = neo_memory::witness::MemWitness { mats: Vec::new() };
     let lut_inst = neo_memory::witness::LutInstance::<Cmt, F> {
@@ -589,7 +586,6 @@ fn full_folding_integration_multi_step_chunk() {
         ell: lut_table.n_side.trailing_zeros() as usize,
         table_spec: None,
         table: lut_table.content.clone(),
-        _phantom: PhantomData,
     };
     let lut_wit = neo_memory::witness::LutWitness { mats: Vec::new() };
 
@@ -750,7 +746,14 @@ fn tamper_shout_addr_pre_round_poly_fails() {
     .expect("prove should succeed");
 
     let mem0 = proof.steps.get_mut(0).expect("one step");
-    mem0.mem.shout_addr_pre.round_polys[0][0][0] += K::ONE;
+    let group0 = mem0
+        .mem
+        .shout_addr_pre
+        .groups
+        .iter_mut()
+        .find(|g| !g.round_polys.is_empty())
+        .expect("expected at least one active Shout addr-pre group");
+    group0.round_polys[0][0][0] += K::ONE;
 
     let mut tr_verify = Poseidon2Transcript::new(b"full-fold-tamper-shout-addr-pre");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];

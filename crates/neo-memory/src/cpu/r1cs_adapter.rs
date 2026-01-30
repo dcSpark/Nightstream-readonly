@@ -377,7 +377,6 @@ where
                 ell,
                 table_spec: None,
                 table: Vec::new(),
-                _phantom: PhantomData,
             });
         }
 
@@ -397,7 +396,6 @@ where
                 lanes: layout.lanes.max(1),
                 ell,
                 init: MemInit::Zero,
-                _phantom: PhantomData,
             });
         }
 

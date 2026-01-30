@@ -272,7 +272,6 @@ fn cpu_semantic_shadow_fork_attack_should_be_rejected() {
         lanes: mem_layout.lanes.max(1),
         ell: mem_layout.n_side.trailing_zeros() as usize,
         init: mem_init,
-        _phantom: PhantomData,
     };
     let mem_wit = MemWitness { mats: Vec::new() };
 
@@ -471,7 +470,6 @@ fn cpu_semantic_fork_splice_attack_should_be_rejected() {
         lanes: mem_layout.lanes.max(1),
         ell: mem_layout.n_side.trailing_zeros() as usize,
         init: mem_init,
-        _phantom: PhantomData,
     };
     let mem_wit = MemWitness { mats: Vec::new() };
 
@@ -652,7 +650,6 @@ fn cpu_lookup_shadow_fork_attack_should_be_rejected() {
         ell: lut_table.n_side.trailing_zeros() as usize,
         table_spec: None,
         table: lut_table.content.clone(),
-        _phantom: PhantomData,
     };
     let lut_wit = LutWitness { mats: Vec::new() };
 
@@ -683,7 +680,6 @@ fn cpu_lookup_shadow_fork_attack_should_be_rejected() {
         lanes: mem_layout.lanes.max(1),
         ell: mem_layout.n_side.trailing_zeros() as usize,
         init: mem_init,
-        _phantom: PhantomData,
     };
     let mem_wit = MemWitness { mats: Vec::new() };
 

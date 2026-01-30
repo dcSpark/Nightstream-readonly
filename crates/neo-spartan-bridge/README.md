@@ -34,7 +34,7 @@ The crate is split into:
 
 3. **`api/`** – high-level `prove_fold_run` / `verify_fold_run` API:
    - Builds a `FoldRunCircuit` and uses Spartan2’s `R1CSSNARK` over `GoldilocksP3MerkleMleEngine` to produce and verify proofs.
-   - Public IO is the tuple of `(params_digest, ccs_digest, mcs_digest)` encoded as field limbs.
+   - Public IO is the tuple of `(params_digest, ccs_digest)` encoded as field limbs.
 
 4. **`engine/`** – experimental hooks for Z-polynomial layout. This is **not required** for Spartan2 integration and is gated behind the `experimental-engine` feature.
 
@@ -92,19 +92,20 @@ The crate is split into:
 
 ### Spartan2 integration
 
+- `api::setup_fold_run`:
+  - Builds the `FoldRunCircuit` shape and runs `R1CSSNARK::setup` to produce `(pk, vk)`.
+  - In production, `vk` is deployed once and reused (it is not carried per proof).
+
 - `api::prove_fold_run`:
   - Enforces host-side degree bounds on Π‑CCS sumcheck polynomials.
-  - Builds `FoldRunInstance` + `FoldRunWitness` and extracts per-step challenges.
-  - Constructs `FoldRunCircuit` and runs:
-    - `R1CSSNARK::setup`,
-    - `R1CSSNARK::prep_prove`,
-    - `R1CSSNARK::prove`,
-  - Serializes `(vk, snark)` into `SpartanProof::proof_data`.
+  - Builds `FoldRunInstance` + witness and constructs the `FoldRunCircuit`.
+  - Runs `R1CSSNARK::prep_prove` and `R1CSSNARK::prove` using the caller-provided `pk`.
+  - Serializes the SNARK into `SpartanProof::snark_data` (does not include `vk`).
 
 - `api::verify_fold_run`:
   - Recomputes `(params_digest, ccs_digest)` and checks them against the proof’s instance.
   - Reconstructs the expected public IO (digest limbs).
-  - Deserializes `(vk, snark)` and runs Spartan verification.
+  - Deserializes the SNARK and runs Spartan verification under the deployed `vk`.
   - Checks Spartan’s returned public IO matches the instance digests.
 
 ---

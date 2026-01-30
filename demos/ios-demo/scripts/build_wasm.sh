@@ -97,6 +97,7 @@ echo "Building neo-fold WASM bundle for WKWebView (ES modules)…"
 
 rm -rf "$WEB_OUTPUT_DIR/pkg"
 mkdir -p "$WEB_OUTPUT_DIR/pkg"
+printf '*\n!.gitignore\n' >"$WEB_OUTPUT_DIR/pkg/.gitignore"
 
 WASM_PACK_WEB_ARGS=(build "$HALO3_WASM_DIR" --target web --out-dir "$WEB_OUTPUT_DIR/pkg" --out-name "$OUT_NAME")
 if [[ "$PROFILE" == "release" ]]; then
@@ -135,6 +136,7 @@ if [[ $BUILD_THREADS -eq 1 ]]; then
 
     rm -rf "$WEB_OUTPUT_DIR/pkg_threads"
     mkdir -p "$WEB_OUTPUT_DIR/pkg_threads"
+    printf '*\n!.gitignore\n' >"$WEB_OUTPUT_DIR/pkg_threads/.gitignore"
 
     export RUSTFLAGS="${RUSTFLAGS:-} -C target-feature=+atomics,+bulk-memory,+mutable-globals"
 
@@ -147,34 +149,97 @@ if [[ $BUILD_THREADS -eq 1 ]]; then
         wasm-pack "${WASM_PACK_THREADS_ARGS[@]}" \
         -- \
         --features wasm-threads \
-        -Z build-std=std,panic_abort \
-        -Z build-std-features=panic_immediate_abort
+        -Z build-std=std,panic_abort
 
-    # wasm-bindgen-rayon emits a Worker helper that does `import('../../..')`, which relies on
-    # bundler-style directory resolution. Patch it to import the actual JS entrypoint so it works
-    # when served as plain browser modules.
+    # wasm-bindgen-rayon can emit either workerHelpers.no-bundler.js (preferred) or workerHelpers.js.
+    # Patch the default helper if present so it can load as plain browser modules (no bundler),
+    # and add a catch handler to avoid unhandled promise rejections if workers fail to start.
     python3 - "$WEB_OUTPUT_DIR/pkg_threads" "$OUT_NAME" <<'PY'
 import sys
 from pathlib import Path
 
 out_dir = Path(sys.argv[1])
 out_name = sys.argv[2]
-paths = list(out_dir.glob("snippets/wasm-bindgen-rayon-*/src/workerHelpers.js"))
-if not paths:
-    raise SystemExit("ERROR: wasm-bindgen-rayon workerHelpers.js not found; cannot patch for web.")
+paths_no_bundler = list(out_dir.glob("snippets/wasm-bindgen-rayon-*/src/workerHelpers.no-bundler.js"))
+paths_default = list(out_dir.glob("snippets/wasm-bindgen-rayon-*/src/workerHelpers.js"))
+if not paths_no_bundler and not paths_default:
+    raise SystemExit("ERROR: wasm-bindgen-rayon workerHelpers snippet not found; cannot patch.")
 
 target = f"../../../{out_name}.js"
-patched = 0
-for p in paths:
-    txt = p.read_text(encoding="utf-8")
-    new = txt.replace("import('../../..')", f"import('{target}')")
-    if new != txt:
-        p.write_text(new, encoding="utf-8")
-        patched += 1
+patched_import = 0
+already_import = 0
+patched_error = 0
+already_error = 0
+failed = []
 
-if patched == 0:
-    raise SystemExit("ERROR: workerHelpers.js found but no replacements made; threads may hang at init.")
-print(f"Patched {patched} workerHelpers.js file(s) for plain web module loading.")
+def patch_error_handler(txt, needle):
+    if "wasm_bindgen_worker_error" in txt:
+        return txt, False, True
+    patched = txt.replace(
+        needle,
+        needle.replace(
+            ");\n});\n",
+            ");\n}).catch((e) => {\n  console.error(e);\n  postMessage({ type: 'wasm_bindgen_worker_error', error: String(e) });\n  close();\n});\n",
+        ),
+    )
+    if patched == txt:
+        return txt, False, False
+    return patched, True, False
+
+for p in paths_default:
+    original = p.read_text(encoding="utf-8")
+    txt = original
+
+    # 1) Fix module resolution for plain (non-bundler) `--target web` usage.
+    if "import('../../..')" in txt:
+        txt = txt.replace("import('../../..')", f"import('{target}')")
+        patched_import += 1
+    elif f"import('{target}')" in txt:
+        already_import += 1
+    else:
+        failed.append(f"{p}: unexpected main-module import")
+
+    # 2) Avoid unhandled promise rejections if the worker crashes during start.
+    txt2, did_patch, did_already = patch_error_handler(
+        txt, "  pkg.wbg_rayon_start_worker(receiver);\n});\n"
+    )
+    txt = txt2
+    if did_patch:
+        patched_error += 1
+    elif did_already:
+        already_error += 1
+    else:
+        failed.append(f"{p}: could not patch error handler (pattern not found)")
+
+    if txt != original:
+        p.write_text(txt, encoding="utf-8")
+
+for p in paths_no_bundler:
+    original = p.read_text(encoding="utf-8")
+    txt = original
+
+    # Bundlerless helper already resolves the main JS entrypoint dynamically (no import patch needed).
+    txt2, did_patch, did_already = patch_error_handler(
+        txt, "  pkg.wbg_rayon_start_worker(data.receiver);\n});\n"
+    )
+    txt = txt2
+    if did_patch:
+        patched_error += 1
+    elif did_already:
+        already_error += 1
+    else:
+        failed.append(f"{p}: could not patch error handler (pattern not found)")
+
+    if txt != original:
+        p.write_text(txt, encoding="utf-8")
+
+if failed:
+    raise SystemExit("ERROR: failed to patch wasm-bindgen-rayon workerHelpers:\n- " + "\n- ".join(failed))
+
+print(
+    f"Patched wasm-bindgen-rayon helpers: import={patched_import} (already {already_import}), "
+    f"error_handler={patched_error} (already {already_error})."
+)
 PY
 fi
 

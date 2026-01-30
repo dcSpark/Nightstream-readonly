@@ -34,4 +34,4 @@ pub type CircuitF = spartan2::provider::goldi::F;
 #[cfg(feature = "experimental-engine")]
 pub use engine::{BridgeEngine, HashMleEngine, ZPolyLayout};
 
-pub use api::{prove_fold_run, verify_fold_run};
+pub use api::{prove_fold_run, setup_fold_run, verify_fold_run, SpartanKeypair, SpartanProverKey, SpartanVerifierKey};
