@@ -78,13 +78,12 @@ export class SpartanCompressedProof {
      */
     bytes_len(): number;
     /**
-     * Total bytes if you bundled `(vk, snark)` together.
+     * Size of the combined artifact (vk + snark), matching `SpartanProof::proof_data`.
+     *
+     * This is optional in the UI; when present it can be used to estimate vk size as
+     * `(vk+snark) - snark`.
      */
     vk_and_snark_bytes_len(): number;
-    /**
-     * Verifier key size (useful for understanding total proof package size).
-     */
-    vk_bytes_len(): number;
 }
 
 export function initThreadPool(num_threads: number): Promise<any>;
@@ -92,6 +91,16 @@ export function initThreadPool(num_threads: number): Promise<any>;
 export function init_panic_hook(): void;
 
 export function init_thread_pool(num_threads: number): Promise<any>;
+
+/**
+ * Prove+verify the RV32 Fibonacci program under the B1 shared-bus step circuit.
+ *
+ * Expected guest semantics:
+ * - reads `n` from RAM[0x104] (u32)
+ * - writes `fib(n)` to RAM[0x100] (u32)
+ * - halts via `ecall` (treated as `Halt` in this VM)
+ */
+export function prove_verify_rv32_b1_fibonacci_asm(asm: string, n: number, ram_bytes: number, chunk_size: number, max_steps: number, do_spartan: boolean): any;
 
 /**
  * Parse a `TestExport` JSON (same schema as `crates/neo-fold/poseidon2-tests/*.json`),
@@ -136,11 +145,11 @@ export interface InitOutput {
     readonly neofoldsession_spartan_verify: (a: number, b: number) => [number, number, number];
     readonly neofoldsession_step_count: (a: number) => number;
     readonly neofoldsession_verify: (a: number, b: number) => [number, number, number];
+    readonly prove_verify_rv32_b1_fibonacci_asm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly prove_verify_test_export_json: (a: number, b: number) => [number, number, number];
     readonly spartancompressedproof_bytes: (a: number) => [number, number, number, number];
     readonly spartancompressedproof_bytes_len: (a: number) => [number, number, number];
     readonly spartancompressedproof_vk_and_snark_bytes_len: (a: number) => number;
-    readonly spartancompressedproof_vk_bytes_len: (a: number) => [number, number, number];
     readonly __wbg_wbg_rayon_poolbuilder_free: (a: number, b: number) => void;
     readonly wbg_rayon_poolbuilder_build: (a: number) => void;
     readonly wbg_rayon_poolbuilder_mainJS: (a: number) => any;

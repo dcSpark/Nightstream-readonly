@@ -229,8 +229,7 @@ fn build_step_ccs(
     );
     let f = f_base.insert_var_at_front();
 
-    CcsStructure::new_sparse(vec![CcsMatrix::Identity { n }, a, b, c], f)
-        .expect("valid R1CS→CCS structure")
+    CcsStructure::new_sparse(vec![CcsMatrix::Identity { n }, a, b, c], f).expect("valid R1CS→CCS structure")
 }
 
 fn pad_witness_to_m(mut z: Vec<F>, m_target: usize) -> Vec<F> {

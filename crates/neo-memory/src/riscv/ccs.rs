@@ -1,9 +1,9 @@
 //! RV32 "B1" RISC-V step CCS (shared-bus compatible).
 //!
 //! This module provides a **sound, shared-bus-compatible** step circuit for a small,
-//! MVP RV32 subset. The circuit is expressed as an identity-first, square R1CS→CCS:
-//! - `M0 = I_n` (required by the Ajtai/NC pipeline)
+//! MVP RV32 subset. The circuit is expressed as an R1CS→CCS:
 //! - `A(z) * B(z) = C(z)` with `C = 0` for almost all rows
+//! - when `n == m`, we include an identity-first `M0 = I_n` to match `neo_ccs::r1cs_to_ccs`
 //!
 //! The witness `z` includes a **reserved bus tail** whose column schema matches
 //! `cpu::bus_layout::BusLayout`. The bus tail itself is written from `StepTrace`
@@ -125,7 +125,7 @@ pub const RV32_B1_SHOUT_PROFILE_FULL20: &[u32] = &[
 
 use bus_bindings::injected_bus_constraints_len;
 use config::{derive_mem_ids_and_ell_addrs, derive_shout_ids_and_ell_addrs};
-use constraint_builder::{build_identity_first_r1cs_ccs, Constraint};
+use constraint_builder::{build_r1cs_ccs, Constraint};
 use layout::build_layout_with_m;
 
 use constants::{
@@ -2712,24 +2712,29 @@ pub fn build_rv32_b1_step_ccs(
     };
     let cpu_cols_used = probe.halt_effective + chunk_size;
 
-    let semantic = semantic_constraints(&probe, mem_layouts)?;
     let injected = injected_bus_constraints_len(&probe, &table_ids, &mem_ids);
 
     let m_cols_min = cpu_cols_used + bus_region_len;
-    let m_rows_min = semantic.len() + injected;
-    let m = m_cols_min.max(m_rows_min);
 
-    let layout = build_layout_with_m(m, mem_layouts, &table_ids, chunk_size)?;
+    let mut m = m_cols_min;
+    let layout = loop {
+        match build_layout_with_m(m, mem_layouts, &table_ids, chunk_size) {
+            Ok(layout) => break layout,
+            Err(e)
+                if e.contains("need more padding columns before bus tail") || e.contains("overlaps public inputs") =>
+            {
+                m = m
+                    .checked_mul(2)
+                    .ok_or_else(|| "RV32 B1: m overflow".to_string())?;
+            }
+            Err(e) => return Err(e),
+        }
+    };
     let constraints = semantic_constraints(&layout, mem_layouts)?;
-    if constraints.len() + injected > layout.m {
-        return Err(format!(
-            "RV32 B1: internal error: constraints={} + injected={} > m={}",
-            constraints.len(),
-            injected,
-            layout.m
-        ));
-    }
-
-    let ccs = build_identity_first_r1cs_ccs(&constraints, layout.m, layout.const_one)?;
+    let n = constraints
+        .len()
+        .checked_add(injected)
+        .ok_or_else(|| "RV32 B1: n overflow".to_string())?;
+    let ccs = build_r1cs_ccs(&constraints, n, layout.m, layout.const_one)?;
     Ok((ccs, layout))
 }

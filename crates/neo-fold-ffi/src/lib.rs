@@ -16,9 +16,9 @@ fn fold_run_witness_placeholder(run: &neo_fold::shard::ShardProof) -> FoldRunWit
     let pi_ccs_proofs = run.steps.iter().map(|s| s.fold.ccs_proof.clone()).collect();
     let rlc_rhos = run.steps.iter().map(|s| s.fold.rlc_rhos.clone()).collect();
 
-    // NOTE: The current Spartan bridge circuit does not yet use these matrices.
-    // Keep them as correctly-shaped placeholders (one entry per step) so we can
-    // wire them up later without changing the FFI API.
+    // NOTE: The current Spartan bridge circuit does not yet use these matrices
+    // (they are kept as correctly-shaped placeholders so we can wire them up
+    // later without changing the FFI API).
     let per_step_empty = (0..run.steps.len()).map(|_| Vec::new()).collect::<Vec<_>>();
 
     FoldRunWitness::from_fold_run(

@@ -78,16 +78,25 @@ export class SpartanCompressedProof {
      */
     bytes_len(): number;
     /**
-     * Total bytes if you bundled `(vk, snark)` together.
+     * Size of the combined artifact (vk + snark), matching `SpartanProof::proof_data`.
+     *
+     * This is optional in the UI; when present it can be used to estimate vk size as
+     * `(vk+snark) - snark`.
      */
     vk_and_snark_bytes_len(): number;
-    /**
-     * Verifier key size (useful for understanding total proof package size).
-     */
-    vk_bytes_len(): number;
 }
 
 export function init_panic_hook(): void;
+
+/**
+ * Prove+verify the RV32 Fibonacci program under the B1 shared-bus step circuit.
+ *
+ * Expected guest semantics:
+ * - reads `n` from RAM[0x104] (u32)
+ * - writes `fib(n)` to RAM[0x100] (u32)
+ * - halts via `ecall` (treated as `Halt` in this VM)
+ */
+export function prove_verify_rv32_b1_fibonacci_asm(asm: string, n: number, ram_bytes: number, chunk_size: number, max_steps: number, do_spartan: boolean): any;
 
 /**
  * Parse a `TestExport` JSON (same schema as `crates/neo-fold/poseidon2-tests/*.json`),
@@ -101,6 +110,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly init_panic_hook: () => void;
     readonly prove_verify_test_export_json: (a: number, b: number) => [number, number, number];
+    readonly prove_verify_rv32_b1_fibonacci_asm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly __wbg_neofoldsession_free: (a: number, b: number) => void;
     readonly neofoldsession_new: (a: number, b: number) => [number, number, number];
     readonly neofoldsession_step_count: (a: number) => number;
@@ -123,11 +133,12 @@ export interface InitOutput {
     readonly __wbg_spartancompressedproof_free: (a: number, b: number) => void;
     readonly spartancompressedproof_bytes_len: (a: number) => [number, number, number];
     readonly spartancompressedproof_bytes: (a: number) => [number, number, number, number];
-    readonly spartancompressedproof_vk_bytes_len: (a: number) => [number, number, number];
     readonly spartancompressedproof_vk_and_snark_bytes_len: (a: number) => number;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
     readonly __wbindgen_free: (a: number, b: number, c: number) => void;
+    readonly __wbindgen_exn_store: (a: number) => void;
+    readonly __externref_table_alloc: () => number;
     readonly __wbindgen_externrefs: WebAssembly.Table;
     readonly __externref_table_dealloc: (a: number) => void;
     readonly __wbindgen_start: () => void;

@@ -429,6 +429,116 @@ async function runProveVerify({ id, json, doSpartan, bundle, threads }) {
   }
 }
 
+async function runRv32Fibonacci({ id, asm, riscv, doSpartan, bundle, threads }) {
+  await ensureWasm({ id, bundle, threads });
+
+  phase(id, "Preparing…");
+  const src = String(asm ?? "");
+  const n = typeof riscv?.n === "number" ? riscv.n : null;
+  const ramBytes = typeof riscv?.ram_bytes === "number" ? riscv.ram_bytes : null;
+  const chunkSize = typeof riscv?.chunk_size === "number" ? riscv.chunk_size : null;
+  const maxSteps = typeof riscv?.max_steps === "number" ? riscv.max_steps : 0;
+
+  if (!src.trim()) throw new Error("No RISC-V program provided.");
+  if (!Number.isFinite(n) || n < 0) throw new Error("Invalid riscv.n");
+  if (!Number.isFinite(ramBytes) || ramBytes <= 0) throw new Error("Invalid riscv.ram_bytes");
+  if (!Number.isFinite(chunkSize) || chunkSize <= 0) throw new Error("Invalid riscv.chunk_size");
+  if (!Number.isFinite(maxSteps) || maxSteps < 0) throw new Error("Invalid riscv.max_steps");
+
+  log(id, "Running RV32 Fibonacci prove+verify…");
+  log(id, `Input text size: ${fmtBytes(src.length)}`);
+  log(id, `Config: n=${n} ram_bytes=${ramBytes} chunk_size=${chunkSize} max_steps=${maxSteps}`);
+
+  async function runOnce() {
+    phase(id, "Proving…");
+    const totalStart = performance.now();
+    const result = wasm.prove_verify_rv32_b1_fibonacci_asm(
+      src,
+      n,
+      ramBytes,
+      chunkSize,
+      maxSteps,
+      Boolean(doSpartan),
+    );
+    const totalMs = performance.now() - totalStart;
+    return { result, totalMs };
+  }
+
+  let result;
+  let totalMs;
+  try {
+    ({ result, totalMs } = await runOnce());
+  } catch (e) {
+    const isThreadsBundle = wasmBundle === "pkg_threads";
+    const msg = String(e);
+    const isTrap =
+      msg.includes("RuntimeError: unreachable") ||
+      msg.includes("unreachable") ||
+      msg.includes("memory access out of bounds");
+
+    // If the threads bundle panics/traps at runtime, retry once in the single-thread bundle.
+    // This avoids bricking the demo when the threads build is stale or incompatible with the
+    // current browser/runtime.
+    if (isThreadsBundle && isTrap && !threadsDisabled) {
+      log(id, `Threads run crashed (${msg}). Falling back to single-thread bundle…`, "warn");
+      threadsDisabled = true;
+      threadsDisableReason = msg;
+      notifyThreadsDisabled(id, threadsDisableReason);
+
+      await ensureWasm({ id, bundle: "pkg", threads: 0 });
+      log(id, "Retrying RV32 Fibonacci prove+verify in single-thread mode…", "warn");
+      ({ result, totalMs } = await runOnce());
+    } else {
+      throw e;
+    }
+  }
+
+  if (result) {
+    log(
+      id,
+      `OK: verify_ok=${String(result.verify_ok)} expected=fib(${result.n})=${result.expected} folds=${result.folds} (total ${fmtMs(totalMs)})`,
+    );
+    log(id, `Timings: prove=${fmtMs(result.prove_ms)} verify=${fmtMs(result.verify_ms)}`);
+    if (typeof result.trace_len === "number") log(id, `Trace length: ${result.trace_len} instructions`);
+    log(
+      id,
+      `Circuit (CCS): constraints=${result.ccs_constraints} variables=${result.ccs_variables} shout_lookups=${String(result.shout_lookups ?? "?")}`,
+    );
+  }
+
+  let spartanSnarkBuf = null;
+  let spartanFilename = null;
+
+  if (result?.spartan?.snark) {
+    let snarkBytes = result.spartan.snark;
+    if (Array.isArray(snarkBytes)) snarkBytes = new Uint8Array(snarkBytes);
+    if (!(snarkBytes instanceof Uint8Array)) snarkBytes = new Uint8Array(snarkBytes);
+    spartanSnarkBuf = snarkBytes.buffer.slice(snarkBytes.byteOffset, snarkBytes.byteOffset + snarkBytes.byteLength);
+    spartanFilename = `neo_fold_spartan_snark_${Date.now()}.bin`;
+
+    log(
+      id,
+      `Spartan2: prove=${fmtMs(result.spartan.prove_ms)} verify=${fmtMs(result.spartan.verify_ms)} ok=${String(result.spartan.verify_ok)} snark=${fmtBytes(result.spartan.snark_bytes)}`,
+    );
+  }
+
+  const raw = {
+    ...result,
+    spartan: result?.spartan
+      ? {
+          ...result.spartan,
+          snark: undefined, // avoid dumping large byte arrays
+        }
+      : undefined,
+  };
+
+  log(id, "\n\nRaw result:");
+  log(id, safeStringify(raw));
+
+  phase(id, "Done.");
+  return { spartanSnarkBuf, spartanFilename };
+}
+
 self.addEventListener("message", async (ev) => {
   const msg = ev.data;
   const id = msg?.id;
@@ -437,7 +547,9 @@ self.addEventListener("message", async (ev) => {
   if (msg?.type !== "run") return;
 
   try {
-    const { spartanSnarkBuf, spartanFilename } = await runProveVerify(msg);
+    const mode = typeof msg?.mode === "string" ? msg.mode : "test_export";
+    const { spartanSnarkBuf, spartanFilename } =
+      mode === "rv32_fibonacci" ? await runRv32Fibonacci(msg) : await runProveVerify(msg);
     if (spartanSnarkBuf && spartanFilename) {
       self.postMessage(
         { type: "done", id, spartan: { filename: spartanFilename, bytes: spartanSnarkBuf } },

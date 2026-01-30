@@ -7,7 +7,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use crate::output_binding::{simple_output_config, OutputBindingConfig};
 use crate::pi_ccs::FoldingMode;
@@ -37,6 +37,41 @@ use neo_params::NeoParams;
 use neo_transcript::Poseidon2Transcript;
 use neo_vm_trace::Twist as _;
 use p3_field::PrimeCharacteristicRing;
+
+#[cfg(target_arch = "wasm32")]
+use js_sys::Date;
+#[cfg(not(target_arch = "wasm32"))]
+use std::time::Instant;
+
+#[cfg(target_arch = "wasm32")]
+type TimePoint = f64;
+#[cfg(not(target_arch = "wasm32"))]
+type TimePoint = Instant;
+
+#[inline]
+fn time_now() -> TimePoint {
+    #[cfg(target_arch = "wasm32")]
+    {
+        Date::now()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        Instant::now()
+    }
+}
+
+#[inline]
+fn elapsed_duration(start: TimePoint) -> Duration {
+    #[cfg(target_arch = "wasm32")]
+    {
+        let elapsed_ms = Date::now() - start;
+        Duration::from_secs_f64(elapsed_ms / 1_000.0)
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        start.elapsed()
+    }
+}
 
 pub fn rv32_b1_step_linking_config(layout: &Rv32B1Layout) -> StepLinkingConfig {
     StepLinkingConfig::new(rv32_b1_step_linking_pairs(layout))
@@ -510,14 +545,14 @@ impl Rv32B1 {
         let ccs = cpu.ccs.clone();
 
         // Prove phase (timed)
-        let prove_start = Instant::now();
+        let prove_start = time_now();
         let proof = if self.output_claims.is_empty() {
             session.fold_and_prove(&ccs)?
         } else {
             let ob_cfg = OutputBindingConfig::new(d_ram, self.output_claims.clone());
             session.fold_and_prove_with_output_binding_auto_simple(&ccs, &ob_cfg)?
         };
-        let prove_duration = prove_start.elapsed();
+        let prove_duration = elapsed_duration(prove_start);
 
         Ok(Rv32B1Run {
             session,
@@ -548,8 +583,16 @@ pub struct Rv32B1Run {
 }
 
 impl Rv32B1Run {
+    pub fn params(&self) -> &NeoParams {
+        self.session.params()
+    }
+
+    pub fn ccs(&self) -> &CcsStructure<F> {
+        &self.ccs
+    }
+
     pub fn verify(&mut self) -> Result<(), PiCcsError> {
-        let verify_start = Instant::now();
+        let verify_start = time_now();
         let ok = if self.output_claims.is_empty() {
             self.session.verify_collected(&self.ccs, &self.proof)?
         } else {
@@ -557,7 +600,7 @@ impl Rv32B1Run {
             self.session
                 .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, &ob_cfg)?
         };
-        self.verify_duration = Some(verify_start.elapsed());
+        self.verify_duration = Some(elapsed_duration(verify_start));
 
         if !ok {
             return Err(PiCcsError::ProtocolError("verification failed".into()));

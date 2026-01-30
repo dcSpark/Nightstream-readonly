@@ -1,9 +1,14 @@
 use wasm_bindgen::prelude::*;
 
+mod riscv_asm;
+
+use js_sys::Date;
 use neo_fold::test_export::{
     estimate_proof, folding_summary, parse_test_export_json, run_test_export, TestExportSession,
 };
+use neo_math::F;
 use neo_spartan_bridge::circuit::FoldRunWitness;
+use p3_field::PrimeCharacteristicRing;
 
 #[wasm_bindgen]
 pub fn init_panic_hook() {
@@ -30,6 +35,141 @@ pub fn prove_verify_test_export_json(json: &str) -> Result<JsValue, JsValue> {
         .map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
 }
 
+#[derive(serde::Serialize)]
+struct Rv32FibRunResult {
+    n: u32,
+    expected: u32,
+    verify_ok: bool,
+    prove_ms: f64,
+    verify_ms: f64,
+    trace_len: Option<usize>,
+    folds: usize,
+    ccs_constraints: usize,
+    ccs_variables: usize,
+    shout_lookups: Option<usize>,
+    spartan: Option<Rv32FibSpartanResult>,
+}
+
+#[derive(serde::Serialize)]
+struct Rv32FibSpartanResult {
+    prove_ms: f64,
+    verify_ms: f64,
+    verify_ok: bool,
+    snark_bytes: usize,
+    snark: Vec<u8>,
+}
+
+fn fib_u32(n: u32) -> u32 {
+    let mut n = n;
+    let mut a = 0u32;
+    let mut b = 1u32;
+    while n > 0 {
+        let next = a.wrapping_add(b);
+        a = b;
+        b = next;
+        n -= 1;
+    }
+    a
+}
+
+/// Prove+verify the RV32 Fibonacci program under the B1 shared-bus step circuit.
+///
+/// Expected guest semantics:
+/// - reads `n` from RAM[0x104] (u32)
+/// - writes `fib(n)` to RAM[0x100] (u32)
+/// - halts via `ecall` (treated as `Halt` in this VM)
+#[wasm_bindgen]
+pub fn prove_verify_rv32_b1_fibonacci_asm(
+    asm: &str,
+    n: u32,
+    ram_bytes: usize,
+    chunk_size: usize,
+    max_steps: usize,
+    do_spartan: bool,
+) -> Result<JsValue, JsValue> {
+    let program_bytes = riscv_asm::assemble_rv32_mini_asm(asm).map_err(|e| JsValue::from_str(&e))?;
+    if program_bytes.is_empty() {
+        return Err(JsValue::from_str("assembled program is empty"));
+    }
+
+    let expected = fib_u32(n);
+    let expected_f = F::from_u64(expected as u64);
+
+    let mut run = {
+        let mut b = neo_fold::riscv_shard::Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+            .xlen(32)
+            .ram_bytes(ram_bytes)
+            .ram_init_u32(/*addr=*/ 0x104, n)
+            .chunk_size(chunk_size)
+            .shout_auto_minimal()
+            .output(/*output_addr=*/ 0x100, /*expected_output=*/ expected_f);
+        if max_steps > 0 {
+            b = b.max_steps(max_steps);
+        }
+        b.prove().map_err(|e| JsValue::from_str(&format!("prove error: {e}")))?
+    };
+
+    let prove_ms = run.prove_duration().as_secs_f64() * 1000.0;
+
+    run.verify().map_err(|e| JsValue::from_str(&format!("verify error: {e}")))?;
+    let verify_ok = true;
+    let verify_ms = run
+        .verify_duration()
+        .map(|d| d.as_secs_f64() * 1000.0)
+        .unwrap_or(0.0);
+
+    let trace_len = run.riscv_trace_len().ok();
+    let folds = run.fold_count();
+    let ccs_constraints = run.ccs_num_constraints();
+    let ccs_variables = run.ccs_num_variables();
+    let shout_lookups = run.shout_lookup_count().ok();
+
+    let spartan = if do_spartan {
+        let acc_init = &[];
+        let witness = fold_run_witness_placeholder(run.proof());
+        let prove_start = Date::now();
+        let spartan = neo_spartan_bridge::prove_fold_run(run.params(), run.ccs(), acc_init, run.proof(), witness)
+            .map_err(|e| JsValue::from_str(&format!("spartan prove error: {e}")))?;
+        let prove_ms = Date::now() - prove_start;
+
+        let verify_start = Date::now();
+        let verify_ok = neo_spartan_bridge::verify_fold_run(run.params(), run.ccs(), &spartan)
+            .map_err(|e| JsValue::from_str(&format!("spartan verify error: {e}")))?;
+        let verify_ms = Date::now() - verify_start;
+
+        let snark = spartan
+            .snark_bytes()
+            .map_err(|e| JsValue::from_str(&format!("spartan snark_bytes error: {e}")))?;
+        let snark_bytes = snark.len();
+
+        Some(Rv32FibSpartanResult {
+            prove_ms,
+            verify_ms,
+            verify_ok,
+            snark_bytes,
+            snark,
+        })
+    } else {
+        None
+    };
+
+    let result = Rv32FibRunResult {
+        n,
+        expected,
+        verify_ok,
+        prove_ms,
+        verify_ms,
+        trace_len,
+        folds,
+        ccs_constraints,
+        ccs_variables,
+        shout_lookups,
+        spartan,
+    };
+
+    serde_wasm_bindgen::to_value(&result).map_err(|e| JsValue::from_str(&format!("serialize error: {e}")))
+}
+
 /// Stateful JS-facing session wrapper.
 ///
 /// Construct once from a circuit JSON, then:
@@ -42,14 +182,11 @@ pub struct NeoFoldSession {
 }
 
 fn fold_run_witness_placeholder(run: &neo_fold::shard::ShardProof) -> FoldRunWitness {
-    let pi_ccs_proofs = run.steps.iter().map(|s| s.fold.ccs_proof.clone()).collect();
-    let rlc_rhos = run.steps.iter().map(|s| s.fold.rlc_rhos.clone()).collect();
-
-    // NOTE: The current Spartan bridge circuit does not yet use these matrices.
-    // Keep them as correctly-shaped placeholders (one entry per step) so we can
-    // wire them up later without changing the JS API.
+    // NOTE: The Spartan bridge circuit currently does not require these witness matrices.
+    // Keep them as correctly-shaped placeholders (one entry per step) so we can wire them up later.
     let per_step_empty = (0..run.steps.len()).map(|_| Vec::new()).collect::<Vec<_>>();
-
+    let pi_ccs_proofs = run.steps.iter().map(|s| s.fold.ccs_proof.clone()).collect::<Vec<_>>();
+    let rlc_rhos = run.steps.iter().map(|s| s.fold.rlc_rhos.clone()).collect::<Vec<_>>();
     FoldRunWitness::from_fold_run(run.clone(), pi_ccs_proofs, per_step_empty.clone(), rlc_rhos, per_step_empty)
 }
 
@@ -135,14 +272,8 @@ impl NeoFoldSession {
             .unwrap_or(&[]);
 
         let witness = fold_run_witness_placeholder(&proof.proof);
-        let spartan = neo_spartan_bridge::prove_fold_run(
-            self.inner.params(),
-            self.inner.ccs(),
-            acc_init,
-            &proof.proof,
-            witness,
-        )
-        .map_err(|e| JsValue::from_str(&format!("spartan prove error: {e}")))?;
+        let spartan = neo_spartan_bridge::prove_fold_run(self.inner.params(), self.inner.ccs(), acc_init, &proof.proof, witness)
+            .map_err(|e| JsValue::from_str(&format!("spartan prove error: {e}")))?;
 
         Ok(SpartanCompressedProof { inner: spartan })
     }
@@ -196,24 +327,20 @@ impl SpartanCompressedProof {
     pub fn bytes_len(&self) -> Result<usize, JsValue> {
         self.inner
             .snark_bytes_len()
-            .map_err(|e| JsValue::from_str(&format!("snark_bytes_len error: {e}")))
+            .map_err(|e| JsValue::from_str(&format!("spartan snark_bytes_len error: {e}")))
     }
 
     /// Downloadable Spartan proof bytes (SNARK proof only; excludes `vk`).
     pub fn bytes(&self) -> Result<Vec<u8>, JsValue> {
         self.inner
             .snark_bytes()
-            .map_err(|e| JsValue::from_str(&format!("snark_bytes error: {e}")))
+            .map_err(|e| JsValue::from_str(&format!("spartan snark_bytes error: {e}")))
     }
 
-    /// Verifier key size (useful for understanding total proof package size).
-    pub fn vk_bytes_len(&self) -> Result<usize, JsValue> {
-        self.inner
-            .vk_bytes_len()
-            .map_err(|e| JsValue::from_str(&format!("vk_bytes_len error: {e}")))
-    }
-
-    /// Total bytes if you bundled `(vk, snark)` together.
+    /// Size of the combined artifact (vk + snark), matching `SpartanProof::proof_data`.
+    ///
+    /// This is optional in the UI; when present it can be used to estimate vk size as
+    /// `(vk+snark) - snark`.
     pub fn vk_and_snark_bytes_len(&self) -> usize {
         self.inner.proof_data.len()
     }
