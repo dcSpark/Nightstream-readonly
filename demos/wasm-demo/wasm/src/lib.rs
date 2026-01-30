@@ -128,18 +128,19 @@ pub fn prove_verify_rv32_b1_fibonacci_asm(
         let acc_init = &[];
         let witness = fold_run_witness_placeholder(run.proof());
         let prove_start = Date::now();
-        let spartan = neo_spartan_bridge::prove_fold_run(run.params(), run.ccs(), acc_init, run.proof(), witness)
-            .map_err(|e| JsValue::from_str(&format!("spartan prove error: {e}")))?;
+        let keypair = neo_spartan_bridge::setup_fold_run(run.params(), run.ccs(), acc_init, run.proof(), witness.clone())
+            .map_err(|e| JsValue::from_str(&format!("spartan setup error: {e}")))?;
+        let spartan =
+            neo_spartan_bridge::prove_fold_run(&keypair.pk, run.params(), run.ccs(), acc_init, run.proof(), witness)
+                .map_err(|e| JsValue::from_str(&format!("spartan prove error: {e}")))?;
         let prove_ms = Date::now() - prove_start;
 
         let verify_start = Date::now();
-        let verify_ok = neo_spartan_bridge::verify_fold_run(run.params(), run.ccs(), &spartan)
+        let verify_ok = neo_spartan_bridge::verify_fold_run(&keypair.vk, run.params(), run.ccs(), &spartan)
             .map_err(|e| JsValue::from_str(&format!("spartan verify error: {e}")))?;
         let verify_ms = Date::now() - verify_start;
 
-        let snark = spartan
-            .snark_bytes()
-            .map_err(|e| JsValue::from_str(&format!("spartan snark_bytes error: {e}")))?;
+        let snark = spartan.snark_data.clone();
         let snark_bytes = snark.len();
 
         Some(Rv32FibSpartanResult {
@@ -185,9 +186,8 @@ fn fold_run_witness_placeholder(run: &neo_fold::shard::ShardProof) -> FoldRunWit
     // NOTE: The Spartan bridge circuit currently does not require these witness matrices.
     // Keep them as correctly-shaped placeholders (one entry per step) so we can wire them up later.
     let per_step_empty = (0..run.steps.len()).map(|_| Vec::new()).collect::<Vec<_>>();
-    let pi_ccs_proofs = run.steps.iter().map(|s| s.fold.ccs_proof.clone()).collect::<Vec<_>>();
     let rlc_rhos = run.steps.iter().map(|s| s.fold.rlc_rhos.clone()).collect::<Vec<_>>();
-    FoldRunWitness::from_fold_run(run.clone(), pi_ccs_proofs, per_step_empty.clone(), rlc_rhos, per_step_empty)
+    FoldRunWitness::from_fold_run(run.clone(), per_step_empty.clone(), rlc_rhos, per_step_empty)
 }
 
 #[wasm_bindgen]
@@ -272,14 +272,26 @@ impl NeoFoldSession {
             .unwrap_or(&[]);
 
         let witness = fold_run_witness_placeholder(&proof.proof);
-        let spartan = neo_spartan_bridge::prove_fold_run(self.inner.params(), self.inner.ccs(), acc_init, &proof.proof, witness)
-            .map_err(|e| JsValue::from_str(&format!("spartan prove error: {e}")))?;
+        let keypair = neo_spartan_bridge::setup_fold_run(self.inner.params(), self.inner.ccs(), acc_init, &proof.proof, witness.clone())
+            .map_err(|e| JsValue::from_str(&format!("spartan setup error: {e}")))?;
+        let spartan = neo_spartan_bridge::prove_fold_run(
+            &keypair.pk,
+            self.inner.params(),
+            self.inner.ccs(),
+            acc_init,
+            &proof.proof,
+            witness,
+        )
+        .map_err(|e| JsValue::from_str(&format!("spartan prove error: {e}")))?;
 
-        Ok(SpartanCompressedProof { inner: spartan })
+        Ok(SpartanCompressedProof {
+            inner: spartan,
+            vk: keypair.vk,
+        })
     }
 
     pub fn spartan_verify(&self, proof: &SpartanCompressedProof) -> Result<bool, JsValue> {
-        neo_spartan_bridge::verify_fold_run(self.inner.params(), self.inner.ccs(), &proof.inner)
+        neo_spartan_bridge::verify_fold_run(&proof.vk, self.inner.params(), self.inner.ccs(), &proof.inner)
             .map_err(|e| JsValue::from_str(&format!("spartan verify error: {e}")))
     }
 }
@@ -319,29 +331,29 @@ impl NeoFoldProof {
 #[wasm_bindgen]
 pub struct SpartanCompressedProof {
     inner: neo_spartan_bridge::api::SpartanProof,
+    vk: neo_spartan_bridge::SpartanVerifierKey,
 }
 
 #[wasm_bindgen]
 impl SpartanCompressedProof {
     /// Size of the downloadable artifact (SNARK proof only; excludes `vk`).
-    pub fn bytes_len(&self) -> Result<usize, JsValue> {
-        self.inner
-            .snark_bytes_len()
-            .map_err(|e| JsValue::from_str(&format!("spartan snark_bytes_len error: {e}")))
+    pub fn bytes_len(&self) -> usize {
+        self.inner.snark_bytes_len()
     }
 
     /// Downloadable Spartan proof bytes (SNARK proof only; excludes `vk`).
-    pub fn bytes(&self) -> Result<Vec<u8>, JsValue> {
-        self.inner
-            .snark_bytes()
-            .map_err(|e| JsValue::from_str(&format!("spartan snark_bytes error: {e}")))
+    pub fn bytes(&self) -> Vec<u8> {
+        self.inner.snark_data.clone()
     }
 
-    /// Size of the combined artifact (vk + snark), matching `SpartanProof::proof_data`.
+    /// Size of the combined artifact (vk + snark).
     ///
     /// This is optional in the UI; when present it can be used to estimate vk size as
     /// `(vk+snark) - snark`.
     pub fn vk_and_snark_bytes_len(&self) -> usize {
-        self.inner.proof_data.len()
+        // NOTE: neo-spartan-bridge no longer carries vk bytes in the proof object; keep this
+        // helper for the demo UI by counting the serialized vk plus the snark bytes.
+        let vk_len = bincode::serialize(&self.vk).map(|b| b.len()).unwrap_or(0);
+        vk_len + self.inner.snark_data.len()
     }
 }

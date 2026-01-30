@@ -173,6 +173,7 @@ for p in paths_default:
 
 for p in paths_no_bundler:
     original = p.read_text(encoding="utf-8")
+    txt = original
     txt, ok = patch_error_handler(txt, "  pkg.wbg_rayon_start_worker(data.receiver);\n});\n")
     if not ok:
         failed.append(f"{p}: could not patch error handler (pattern not found)")
@@ -213,4 +214,3 @@ fi
 echo ""
 echo "Examples copied to:"
 echo "  $ASSETS_EXAMPLES_DIR/"
-

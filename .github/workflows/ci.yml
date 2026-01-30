@@ -62,12 +62,13 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Install Rust stable (wasm32)
+    - name: Install Rust (wasm32 + rust-src)
       uses: dtolnay/rust-toolchain@stable
       with:
         targets: wasm32-unknown-unknown
-
-    - name: Install Rust nightly (wasm32 + rust-src for threads)
+        components: rust-src
+    
+    - name: Install Rust (nightly wasm32 + rust-src)
       uses: dtolnay/rust-toolchain@nightly
       with:
         targets: wasm32-unknown-unknown
@@ -81,22 +82,28 @@ jobs:
     - name: Install wasm-pack
       uses: jetli/wasm-pack-action@v0.4.0
 
-    # Single-threaded builds (stable toolchain)
-    - name: Build Web WASM (single-threaded)
+    # Single-threaded builds
+    - name: Build Web WASM
       run: ./demos/wasm-demo/build_wasm.sh --no-threads
 
-    - name: Build iOS WASM (single-threaded)
+    - name: Build iOS WASM
       run: ./demos/ios-demo/scripts/build_wasm.sh --release
 
-    - name: Build Android WASM (single-threaded)
+    - name: Build Android WASM
       run: ./demos/android-demo/scripts/build_wasm.sh --release
 
-    # Multi-threaded builds (nightly toolchain)
+    # Multi-threaded builds (SharedArrayBuffer)
     - name: Build Web WASM (threads)
       run: ./demos/wasm-demo/build_wasm.sh --threads
+      env:
+        WASM_THREADS_TOOLCHAIN: nightly
 
     - name: Build iOS WASM (threads)
       run: ./demos/ios-demo/scripts/build_wasm.sh --release --threads
+      env:
+        WASM_THREADS_TOOLCHAIN: nightly
 
     - name: Build Android WASM (threads)
       run: ./demos/android-demo/scripts/build_wasm.sh --release --threads
+      env:
+        WASM_THREADS_TOOLCHAIN: nightly
