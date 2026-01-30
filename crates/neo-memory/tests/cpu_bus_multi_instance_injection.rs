@@ -1,7 +1,5 @@
 //! Regression test: shared CPU bus constraint injection must be multi-instance safe.
 
-use std::marker::PhantomData;
-
 use neo_ccs::matrix::Mat;
 use neo_ccs::poly::{SparsePoly, Term};
 use neo_ccs::relations::{check_ccs_rowwise_zero, CcsStructure};
@@ -47,7 +45,6 @@ fn lut_inst() -> LutInstance<(), F> {
         ell: 1,
         table_spec: None,
         table: vec![F::ZERO, F::ONE],
-        _phantom: PhantomData,
     }
 }
 
@@ -61,7 +58,6 @@ fn mem_inst() -> MemInstance<(), F> {
         lanes: 1,
         ell: 1,
         init: MemInit::Zero,
-        _phantom: PhantomData,
     }
 }
 

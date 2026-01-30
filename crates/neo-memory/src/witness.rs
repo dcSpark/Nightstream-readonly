@@ -41,8 +41,6 @@ pub struct MemInstance<C, F> {
     pub ell: usize,
     /// Public initial memory state for cells [0..k).
     pub init: MemInit<F>,
-    #[serde(skip)]
-    pub _phantom: PhantomData<F>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -119,8 +117,6 @@ pub struct LutInstance<C, F> {
     #[serde(default)]
     pub table_spec: Option<LutTableSpec>,
     pub table: Vec<F>,
-    #[serde(skip)]
-    pub _phantom: PhantomData<F>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

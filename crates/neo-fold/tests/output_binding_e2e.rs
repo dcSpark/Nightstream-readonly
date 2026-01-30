@@ -113,7 +113,6 @@ fn output_binding_e2e_wrong_claim_fails() -> Result<(), PiCcsError> {
         lanes: 1,
         ell: 2,
         init: MemInit::Zero,
-        _phantom: PhantomData,
     };
     let mem_wit = MemWitness { mats: Vec::new() };
 

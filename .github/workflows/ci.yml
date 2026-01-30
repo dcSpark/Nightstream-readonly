@@ -49,3 +49,54 @@ jobs:
           
     - name: Run tests
       run: NEO_PI_CCS_PREFLIGHT=1 NEO_SELF_VERIFY=1 NEO_STRICT_IO_PARITY=1 cargo test --release --workspace --features "testing,debug-log,fs-guard"
+
+  # ============================================================================
+  # WASM Build Checks (with Spartan)
+  # Ensures web-wasm, ios-wasm, and android-wasm builds don't break
+  # ============================================================================
+
+  wasm-builds:
+    name: WASM Builds (Web/iOS/Android)
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Install Rust stable (wasm32)
+      uses: dtolnay/rust-toolchain@stable
+      with:
+        targets: wasm32-unknown-unknown
+
+    - name: Install Rust nightly (wasm32 + rust-src for threads)
+      uses: dtolnay/rust-toolchain@nightly
+      with:
+        targets: wasm32-unknown-unknown
+        components: rust-src
+
+    - name: Cache cargo
+      uses: Swatinem/rust-cache@v2
+      with:
+        workspaces: demos/wasm-demo/wasm
+
+    - name: Install wasm-pack
+      uses: jetli/wasm-pack-action@v0.4.0
+
+    # Single-threaded builds (stable toolchain)
+    - name: Build Web WASM (single-threaded)
+      run: ./demos/wasm-demo/build_wasm.sh --no-threads
+
+    - name: Build iOS WASM (single-threaded)
+      run: ./demos/ios-demo/scripts/build_wasm.sh --release
+
+    - name: Build Android WASM (single-threaded)
+      run: ./demos/android-demo/scripts/build_wasm.sh --release
+
+    # Multi-threaded builds (nightly toolchain)
+    - name: Build Web WASM (threads)
+      run: ./demos/wasm-demo/build_wasm.sh --threads
+
+    - name: Build iOS WASM (threads)
+      run: ./demos/ios-demo/scripts/build_wasm.sh --release --threads
+
+    - name: Build Android WASM (threads)
+      run: ./demos/android-demo/scripts/build_wasm.sh --release --threads

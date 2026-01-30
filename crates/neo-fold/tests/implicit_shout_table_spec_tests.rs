@@ -132,7 +132,6 @@ fn absorb_step_memory_binds_table_spec() {
             ell: 1,
             table_spec: Some(LutTableSpec::RiscvOpcode { opcode, xlen: 32 }),
             table: vec![],
-            _phantom: PhantomData,
         }],
         mem_insts: vec![],
         _phantom: PhantomData,
@@ -175,7 +174,6 @@ fn route_a_shout_implicit_table_spec_verifies() {
         ell: 1,
         table_spec: Some(LutTableSpec::RiscvOpcode { opcode, xlen }),
         table: vec![],
-        _phantom: PhantomData,
     };
     let wit = LutWitness { mats: Vec::new() };
 
