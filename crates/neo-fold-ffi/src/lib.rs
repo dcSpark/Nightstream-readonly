@@ -21,7 +21,13 @@ fn fold_run_witness_placeholder(run: &neo_fold::shard::ShardProof) -> FoldRunWit
     // later without changing the FFI API).
     let per_step_empty = (0..run.steps.len()).map(|_| Vec::new()).collect::<Vec<_>>();
 
-    FoldRunWitness::from_fold_run(run.clone(), pi_ccs_proofs, per_step_empty.clone(), rlc_rhos, per_step_empty)
+    FoldRunWitness::from_fold_run(
+        run.clone(),
+        pi_ccs_proofs,
+        per_step_empty.clone(),
+        rlc_rhos,
+        per_step_empty,
+    )
 }
 
 fn write_null(out_ptr: *mut *mut u8, out_len: *mut usize) {
