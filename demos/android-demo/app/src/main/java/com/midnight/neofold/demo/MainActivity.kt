@@ -3,6 +3,7 @@ package com.midnight.neofold.demo
 import android.content.ClipData
 import android.content.ClipboardManager
 import android.content.Context
+import android.content.pm.PackageInfo
 import android.os.Bundle
 import android.view.View
 import android.widget.Button
@@ -60,6 +61,7 @@ class MainActivity : AppCompatActivity() {
     )
 
     private val stateContentPanelKey = "content_panel"
+    private val minRequiredWebViewMajor: Int = 80
 
     private lateinit var wasmService: WasmWebViewService
     private val nativeService = NativeService()
@@ -75,6 +77,7 @@ class MainActivity : AppCompatActivity() {
 
     private lateinit var wasmStatus: TextView
     private lateinit var threadsStatus: TextView
+    private lateinit var webViewStatus: TextView
     private lateinit var backendGroup: MaterialButtonToggleGroup
     private lateinit var backendWasm: MaterialButton
     private lateinit var backendNative: MaterialButton
@@ -91,10 +94,13 @@ class MainActivity : AppCompatActivity() {
     private lateinit var clearOutputButton: Button
     private lateinit var copyOutputButton: Button
 
+    private var nativeAvailable: Boolean = false
     private var logText: StringBuilder = StringBuilder()
     private val maxLogChars: Int = 30_000
     private var contentPanel: ContentPanel = ContentPanel.CIRCUIT
     private var suppressContentToggleListener: Boolean = false
+    private var wasmRuntimeOk: Boolean = true
+    private var wasmAssetsOk: Boolean = true
     private var lastRunInputBytes: Int = 0
     private var lastWasmSummary: RunSummary? = null
     private var lastNativeSummary: RunSummary? = null
@@ -114,6 +120,7 @@ class MainActivity : AppCompatActivity() {
 
         wasmStatus = findViewById(R.id.wasm_status)
         threadsStatus = findViewById(R.id.threads_status)
+        webViewStatus = findViewById(R.id.webview_status)
         backendGroup = findViewById(R.id.backend_group)
         backendWasm = findViewById(R.id.backend_wasm)
         backendNative = findViewById(R.id.backend_native)
@@ -156,13 +163,14 @@ class MainActivity : AppCompatActivity() {
 
         runButton.setOnClickListener { runProveVerify() }
 
-        val nativeAvailable = NeoFoldNative.isAvailable
-        backendNative.isEnabled = nativeAvailable
-        backendBoth.isEnabled = nativeAvailable
-        nativeHint.visibility = if (nativeAvailable) View.GONE else View.VISIBLE
-        if (nativeAvailable) {
-            backendGroup.check(backendBoth.id)
-        }
+        val webViewInfo = getWebViewInfo()
+        webViewStatus.text = formatWebViewStatus(webViewInfo)
+        wasmRuntimeOk =
+            webViewInfo?.major?.let { it >= minRequiredWebViewMajor } ?: true
+
+        nativeAvailable = NeoFoldNative.isAvailable
+        wasmAssetsOk = true
+        updateBackendAvailability(nativeAvailable = nativeAvailable)
 
         val restoredPanel =
             savedInstanceState
@@ -172,17 +180,34 @@ class MainActivity : AppCompatActivity() {
         applyContentPanel(restoredPanel)
 
         lifecycleScope.launch {
+            if (!wasmRuntimeOk) {
+                wasmAssetsOk = false
+                wasmStatus.text = "WASM: unavailable (update WebView)"
+                threadsStatus.text = "Threads: unavailable"
+                updateBackendAvailability(nativeAvailable = nativeAvailable)
+                return@launch
+            }
+
             try {
                 val caps = wasmService.ensureLoaded()
+                wasmAssetsOk = caps.singleBundlePresent
+                wasmRuntimeOk = wasmRuntimeOk && caps.singleBundlePresent
+
+                webViewStatus.text = formatWebViewStatus(webViewInfo, caps.userAgent)
+
                 if (!caps.singleBundlePresent) {
                     wasmStatus.text = "WASM: bundle missing (run scripts/build_wasm.sh)"
                 } else {
                     wasmStatus.text = "WASM: loaded (WebView)"
                 }
                 threadsStatus.text = formatThreadsStatus(caps)
+                updateBackendAvailability(nativeAvailable = nativeAvailable)
             } catch (e: Throwable) {
-                wasmStatus.text = "WASM: error (${e.message ?: "unknown"})"
+                wasmRuntimeOk = false
+                wasmAssetsOk = false
+                wasmStatus.text = "WASM: unavailable (WebView unsupported)"
                 threadsStatus.text = "Threads: unavailable"
+                updateBackendAvailability(nativeAvailable = nativeAvailable)
             }
         }
     }
@@ -201,6 +226,11 @@ class MainActivity : AppCompatActivity() {
         val json = circuitJsonInput.text?.toString() ?: ""
         if (json.isBlank()) {
             toast("Paste circuit JSON first.")
+            return
+        }
+
+        if (isWasmSelected() && !isWasmBackendAvailable()) {
+            toast("WASM unavailable. Update Android System WebView/Chrome and ensure the WASM bundle is present.")
             return
         }
 
@@ -288,6 +318,111 @@ class MainActivity : AppCompatActivity() {
         if (!caps.threadsBundlePresent) return "Threads: supported, bundle missing"
         if (caps.defaultThreads > 0) return "Threads: available (${caps.defaultThreads} workers)"
         return "Threads: available"
+    }
+
+    private fun isWasmBackendAvailable(): Boolean {
+        return wasmRuntimeOk && wasmAssetsOk
+    }
+
+    private fun isWasmSelected(): Boolean {
+        return backendGroup.checkedButtonId == backendWasm.id || backendGroup.checkedButtonId == backendBoth.id
+    }
+
+    private fun updateBackendAvailability(nativeAvailable: Boolean) {
+        val wasmAvailable = isWasmBackendAvailable()
+
+        backendWasm.isEnabled = wasmAvailable
+        backendNative.isEnabled = nativeAvailable
+        backendBoth.isEnabled = wasmAvailable && nativeAvailable
+        nativeHint.visibility = if (nativeAvailable) View.GONE else View.VISIBLE
+
+        val desiredChecked =
+            when {
+                backendBoth.isEnabled -> backendBoth.id
+                backendWasm.isEnabled -> backendWasm.id
+                backendNative.isEnabled -> backendNative.id
+                else -> null
+            }
+
+        if (desiredChecked != null && backendGroup.checkedButtonId != desiredChecked) {
+            backendGroup.check(desiredChecked)
+        }
+
+        runButton.isEnabled =
+            !runningProgress.isShown &&
+                when (backendGroup.checkedButtonId) {
+                    backendWasm.id -> wasmAvailable
+                    backendNative.id -> nativeAvailable
+                    backendBoth.id -> wasmAvailable && nativeAvailable
+                    else -> wasmAvailable
+                }
+    }
+
+    private data class WebViewInfo(
+        val packageName: String,
+        val versionName: String?,
+        val major: Int?,
+    )
+
+    private fun getWebViewInfo(): WebViewInfo? {
+        val pkg: PackageInfo = WebView.getCurrentWebViewPackage() ?: return null
+        val versionName = pkg.versionName
+        val major =
+            versionName
+                ?.trim()
+                ?.takeIf { it.isNotEmpty() }
+                ?.substringBefore('.', missingDelimiterValue = "")
+                ?.toIntOrNull()
+        return WebViewInfo(
+            packageName = pkg.packageName,
+            versionName = versionName,
+            major = major,
+        )
+    }
+
+    private fun formatWebViewStatus(
+        info: WebViewInfo?,
+        userAgent: String? = null,
+    ): String {
+        val versionName = info?.versionName
+        val major = info?.major
+        val label =
+            when (info?.packageName) {
+                null -> null
+                "com.google.android.webview" -> "Android System WebView"
+                "com.android.chrome" -> "Chrome"
+                else -> info.packageName
+            }
+
+        val base =
+            when {
+                versionName != null && label != null -> "WebView: $label $versionName"
+                versionName != null -> "WebView: $versionName"
+                label != null -> "WebView: $label"
+                else -> "WebView: unknown"
+            }
+
+        val tooOld = major != null && major < minRequiredWebViewMajor
+        if (tooOld) {
+            return "$base (update required)"
+        }
+
+        val uaMajor = userAgent?.let { extractChromeMajorFromUserAgent(it) }
+        if (versionName == null && uaMajor != null) {
+            return "$base (Chrome/$uaMajor)"
+        }
+
+        return base
+    }
+
+    private fun extractChromeMajorFromUserAgent(userAgent: String): Int? {
+        val match =
+            Regex("""\bChrome/(\d{2,3})\.""")
+                .find(userAgent)
+                ?.groupValues
+                ?.getOrNull(1)
+                ?: return null
+        return match.toIntOrNull()
     }
 
     private fun applyContentPanel(panel: ContentPanel, scrollTo: View? = null) {
@@ -666,8 +801,12 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun setRunning(isRunning: Boolean) {
-        runButton.isEnabled = !isRunning
         runningProgress.visibility = if (isRunning) View.VISIBLE else View.GONE
+        if (isRunning) {
+            runButton.isEnabled = false
+        } else {
+            updateBackendAvailability(nativeAvailable = nativeAvailable)
+        }
     }
 
     private fun toast(message: String) {

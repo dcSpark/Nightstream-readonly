@@ -23,7 +23,7 @@ Options:
   --release            Build with Cargo release profile (default)
   --profiling          Build with Cargo profiling profile
   --profile <name>     Explicit profile (release|profiling)
-  --all-abis           Build armv7 + arm64 + x86 + x86_64 (default: arm64 + x86_64)
+  --all-abis           Build armv7 + arm64 + x86 + x86_64 (default: arm64; also builds x86_64 on x86_64 hosts)
   --features <list>    Pass cargo features (e.g. "spartan debug-logs")
   --spartan            Convenience flag for --features spartan
   --help               Show this help message
@@ -105,10 +105,15 @@ OUT_DIR="$PROJECT_DIR/app/src/main/jniLibs"
 mkdir -p "$OUT_DIR"
 
 declare -a ABIS
+HOST_ARCH="$(uname -m)"
 if [[ "$ALL_ABIS" == "1" ]]; then
   ABIS=("armeabi-v7a" "arm64-v8a" "x86" "x86_64")
 else
-  ABIS=("arm64-v8a" "x86_64")
+  if [[ "$HOST_ARCH" == "arm64" || "$HOST_ARCH" == "aarch64" ]]; then
+    ABIS=("arm64-v8a")
+  else
+    ABIS=("arm64-v8a" "x86_64")
+  fi
 fi
 
 rust_target_for_abi() {

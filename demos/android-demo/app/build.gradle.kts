@@ -7,7 +7,7 @@ plugins {
 
 android {
     namespace = "com.midnight.neofold.demo"
-    compileSdk = 34
+    compileSdk = 35
 
     buildFeatures {
         buildConfig = true
@@ -16,7 +16,7 @@ android {
     defaultConfig {
         applicationId = "com.midnight.neofold.demo"
         minSdk = 26
-        targetSdk = 34
+        targetSdk = 35
         versionCode = 1
         versionName = "0.1"
     }
