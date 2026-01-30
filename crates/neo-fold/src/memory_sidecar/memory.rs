@@ -2,7 +2,9 @@ use crate::memory_sidecar::claim_plan::RouteATimeClaimPlan;
 use crate::memory_sidecar::sumcheck_ds::{run_batched_sumcheck_prover_ds, verify_batched_sumcheck_rounds_ds};
 use crate::memory_sidecar::transcript::{bind_batched_claim_sums, bind_twist_val_eval_claim_sums, digest_fields};
 use crate::memory_sidecar::utils::{bitness_weights, RoundOraclePrefix};
-use crate::shard_proof_types::{MemOrLutProof, MemSidecarProof, ShoutAddrPreProof, ShoutProofK, TwistProofK};
+use crate::shard_proof_types::{
+    MemOrLutProof, MemSidecarProof, ShoutAddrPreGroupProof, ShoutAddrPreProof, ShoutProofK, TwistProofK,
+};
 use crate::PiCcsError;
 use neo_ajtai::Commitment as Cmt;
 use neo_ccs::{CcsStructure, MeInstance};
@@ -571,12 +573,16 @@ pub(crate) fn prove_shout_addr_pre_time(
 
     let mut decoded_cols: Vec<ShoutDecodedColsSparse> = Vec::with_capacity(n_lut);
     let mut claimed_sums: Vec<K> = vec![K::ZERO; total_lanes];
-    let mut active_lanes: Vec<u32> = Vec::new();
 
-    let mut addr_oracles: Vec<Box<dyn RoundOracle>> = Vec::new();
-    let mut active_claimed_sums: Vec<K> = Vec::new();
+    struct AddrPreGroupBuilder {
+        active_lanes: Vec<u32>,
+        active_claimed_sums: Vec<K>,
+        addr_oracles: Vec<Box<dyn RoundOracle>>,
+    }
 
-    let mut ell_addr: Option<usize> = None;
+    // Group Shout addr-pre claims by `ell_addr` so we can run one batched sumcheck per group.
+    let mut groups: std::collections::BTreeMap<u32, AddrPreGroupBuilder> = std::collections::BTreeMap::new();
+
     let mut flat_lane_idx: usize = 0;
     for (idx, (lut_inst, _lut_wit)) in step.lut_instances.iter().enumerate() {
         neo_memory::addr::validate_shout_bit_addressing(lut_inst)?;
@@ -589,15 +595,15 @@ pub(crate) fn prove_shout_addr_pre_time(
 
         let z = &cpu_z_k;
         let inst_ell_addr = lut_inst.d * lut_inst.ell;
-        if let Some(prev) = ell_addr {
-            if prev != inst_ell_addr {
-                return Err(PiCcsError::InvalidInput(format!(
-                    "Shout(Route A): batched addr-pre requires uniform ell_addr; got {prev} (lut_idx=0) vs {inst_ell_addr} (lut_idx={idx})"
-                )));
-            }
-        } else {
-            ell_addr = Some(inst_ell_addr);
-        }
+        let inst_ell_addr_u32 = u32::try_from(inst_ell_addr)
+            .map_err(|_| PiCcsError::InvalidInput("Shout(Route A): ell_addr overflows u32".into()))?;
+        groups
+            .entry(inst_ell_addr_u32)
+            .or_insert_with(|| AddrPreGroupBuilder {
+                active_lanes: Vec::new(),
+                active_claimed_sums: Vec::new(),
+                addr_oracles: Vec::new(),
+            });
         let inst_cols = bus.shout_cols.get(idx).ok_or_else(|| {
             PiCcsError::InvalidInput(format!(
                 "shared_cpu_bus layout mismatch: missing shout_cols for lut_idx={idx}"
@@ -673,12 +679,14 @@ pub(crate) fn prove_shout_addr_pre_time(
                 };
 
                 claimed_sums[flat_lane_idx] = lane_sum;
-                active_lanes.push(
-                    u32::try_from(flat_lane_idx)
-                        .map_err(|_| PiCcsError::InvalidInput("Shout(Route A): lane index overflow".into()))?,
-                );
-                active_claimed_sums.push(lane_sum);
-                addr_oracles.push(addr_oracle);
+                let lane_idx_u32 = u32::try_from(flat_lane_idx)
+                    .map_err(|_| PiCcsError::InvalidInput("Shout(Route A): lane index overflow".into()))?;
+                let group = groups
+                    .get_mut(&inst_ell_addr_u32)
+                    .ok_or_else(|| PiCcsError::ProtocolError("Shout(Route A): missing ell_addr group".into()))?;
+                group.active_lanes.push(lane_idx_u32);
+                group.active_claimed_sums.push(lane_sum);
+                group.addr_oracles.push(addr_oracle);
             }
 
             lanes.push(ShoutLaneSparseCols {
@@ -703,47 +711,63 @@ pub(crate) fn prove_shout_addr_pre_time(
     tr.append_message(b"shout/addr_pre_time/step_idx", &(step_idx as u64).to_le_bytes());
     bind_batched_claim_sums(tr, b"shout/addr_pre_time/claimed_sums", &claimed_sums, &labels_all);
 
-    let ell_addr = ell_addr.unwrap_or(0);
-    let (r_addr, round_polys) = if active_lanes.is_empty() {
-        // No Shout lookups in this step; sample an arbitrary `r_addr` without running sumcheck.
-        tr.append_message(b"shout/addr_pre_time/no_sumcheck", &(step_idx as u64).to_le_bytes());
-        (
-            ts::sample_ext_point(
-                tr,
-                b"shout/addr_pre_time/no_sumcheck/r_addr",
-                b"shout/addr_pre_time/no_sumcheck/r_addr/0",
-                b"shout/addr_pre_time/no_sumcheck/r_addr/1",
-                ell_addr,
-            ),
-            Vec::new(),
-        )
-    } else {
-        let labels_active: Vec<&'static [u8]> = vec![b"shout/addr_pre".as_slice(); addr_oracles.len()];
-        let mut claims: Vec<BatchedClaim<'_>> = addr_oracles
-            .iter_mut()
-            .zip(active_claimed_sums.iter())
-            .zip(labels_active.iter())
-            .map(|((oracle, sum), label)| BatchedClaim {
-                oracle: oracle.as_mut(),
-                claimed_sum: *sum,
-                label: *label,
-            })
-            .collect();
-        let (r_addr, per_claim_results) =
-            run_batched_sumcheck_prover_ds(tr, b"shout/addr_pre_time", step_idx, claims.as_mut_slice())?;
-        let round_polys = per_claim_results
-            .iter()
-            .map(|r| r.round_polys.clone())
-            .collect::<Vec<_>>();
-        (r_addr, round_polys)
-    };
+    let mut group_proofs: Vec<ShoutAddrPreGroupProof<K>> = Vec::with_capacity(groups.len());
+    for (group_idx, (ell_addr, mut group)) in groups.into_iter().enumerate() {
+        tr.append_message(b"shout/addr_pre_time/group_idx", &(group_idx as u64).to_le_bytes());
+        tr.append_message(b"shout/addr_pre_time/group_ell_addr", &(ell_addr as u64).to_le_bytes());
+
+        let (r_addr, round_polys) = if group.active_lanes.is_empty() {
+            // No active lanes in this `ell_addr` group; sample an arbitrary `r_addr` without running sumcheck.
+            tr.append_message(b"shout/addr_pre_time/no_sumcheck", &(step_idx as u64).to_le_bytes());
+            tr.append_message(
+                b"shout/addr_pre_time/no_sumcheck/ell_addr",
+                &(ell_addr as u64).to_le_bytes(),
+            );
+            (
+                ts::sample_ext_point(
+                    tr,
+                    b"shout/addr_pre_time/no_sumcheck/r_addr",
+                    b"shout/addr_pre_time/no_sumcheck/r_addr/0",
+                    b"shout/addr_pre_time/no_sumcheck/r_addr/1",
+                    ell_addr as usize,
+                ),
+                Vec::new(),
+            )
+        } else {
+            let labels_active: Vec<&'static [u8]> = vec![b"shout/addr_pre".as_slice(); group.addr_oracles.len()];
+            let mut claims: Vec<BatchedClaim<'_>> = group
+                .addr_oracles
+                .iter_mut()
+                .zip(group.active_claimed_sums.iter())
+                .zip(labels_active.iter())
+                .map(|((oracle, sum), label)| BatchedClaim {
+                    oracle: oracle.as_mut(),
+                    claimed_sum: *sum,
+                    label: *label,
+                })
+                .collect();
+
+            let (r_addr, per_claim_results) =
+                run_batched_sumcheck_prover_ds(tr, b"shout/addr_pre_time", step_idx, claims.as_mut_slice())?;
+            let round_polys = per_claim_results
+                .iter()
+                .map(|r| r.round_polys.clone())
+                .collect::<Vec<_>>();
+            (r_addr, round_polys)
+        };
+
+        group_proofs.push(ShoutAddrPreGroupProof {
+            ell_addr,
+            active_lanes: group.active_lanes,
+            round_polys,
+            r_addr,
+        });
+    }
 
     Ok(ShoutAddrPreBatchProverData {
         addr_pre: ShoutAddrPreProof {
             claimed_sums,
-            active_lanes,
-            round_polys,
-            r_addr,
+            groups: group_proofs,
         },
         decoded: decoded_cols,
     })
@@ -755,12 +779,10 @@ pub fn verify_shout_addr_pre_time(
     mem_proof: &MemSidecarProof<Cmt, F, K>,
     step_idx: usize,
 ) -> Result<Vec<ShoutAddrPreVerifyData>, PiCcsError> {
+    let proof = &mem_proof.shout_addr_pre;
+
     if step.lut_insts.is_empty() {
-        if !mem_proof.shout_addr_pre.claimed_sums.is_empty()
-            || !mem_proof.shout_addr_pre.active_lanes.is_empty()
-            || !mem_proof.shout_addr_pre.round_polys.is_empty()
-            || !mem_proof.shout_addr_pre.r_addr.is_empty()
-        {
+        if !proof.claimed_sums.is_empty() || !proof.groups.is_empty() {
             return Err(PiCcsError::InvalidInput(
                 "shout_addr_pre must be empty when there are no Shout instances".into(),
             ));
@@ -769,25 +791,6 @@ pub fn verify_shout_addr_pre_time(
     }
 
     let total_lanes: usize = step.lut_insts.iter().map(|inst| inst.lanes.max(1)).sum();
-    let mut out = Vec::with_capacity(total_lanes);
-
-    let mut ell_addr: Option<usize> = None;
-    for (idx, lut_inst) in step.lut_insts.iter().enumerate() {
-        neo_memory::addr::validate_shout_bit_addressing(lut_inst)?;
-        let inst_ell_addr = lut_inst.d * lut_inst.ell;
-        if let Some(prev) = ell_addr {
-            if prev != inst_ell_addr {
-                return Err(PiCcsError::InvalidInput(format!(
-                    "Shout(Route A): batched addr-pre requires uniform ell_addr; got {prev} (lut_idx=0) vs {inst_ell_addr} (lut_idx={idx})"
-                )));
-            }
-        } else {
-            ell_addr = Some(inst_ell_addr);
-        }
-    }
-    let ell_addr = ell_addr.unwrap_or(0);
-
-    let proof = &mem_proof.shout_addr_pre;
     if proof.claimed_sums.len() != total_lanes {
         return Err(PiCcsError::InvalidInput(format!(
             "shout_addr_pre claimed_sums.len()={}, expected total_lanes={}",
@@ -795,42 +798,93 @@ pub fn verify_shout_addr_pre_time(
             total_lanes
         )));
     }
-    if proof.r_addr.len() != ell_addr {
-        return Err(PiCcsError::InvalidInput(format!(
-            "shout_addr_pre r_addr.len()={}, expected ell_addr={ell_addr}",
-            proof.r_addr.len()
-        )));
+
+    // Flatten lane->ell_addr mapping in canonical order so we can validate group membership and
+    // attach the correct `r_addr` per lane.
+    let mut lane_ell_addr: Vec<u32> = Vec::with_capacity(total_lanes);
+    let mut required_ell_addrs: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+    for lut_inst in step.lut_insts.iter() {
+        neo_memory::addr::validate_shout_bit_addressing(lut_inst)?;
+        let inst_ell_addr = lut_inst.d * lut_inst.ell;
+        let inst_ell_addr_u32 = u32::try_from(inst_ell_addr)
+            .map_err(|_| PiCcsError::InvalidInput("Shout: ell_addr overflows u32".into()))?;
+        required_ell_addrs.insert(inst_ell_addr_u32);
+        for _lane_idx in 0..lut_inst.lanes.max(1) {
+            lane_ell_addr.push(inst_ell_addr_u32);
+        }
+    }
+    if lane_ell_addr.len() != total_lanes {
+        return Err(PiCcsError::ProtocolError(
+            "shout addr-pre lane indexing drift (lane_ell_addr)".into(),
+        ));
     }
 
-    for (pos, &lane_idx) in proof.active_lanes.iter().enumerate() {
-        let lane_idx_usize = lane_idx as usize;
-        if lane_idx_usize >= total_lanes {
-            return Err(PiCcsError::InvalidInput(
-                "shout_addr_pre active_lanes has index out of range".into(),
-            ));
-        }
-        if pos > 0 && proof.active_lanes[pos - 1] >= lane_idx {
-            return Err(PiCcsError::InvalidInput(
-                "shout_addr_pre active_lanes must be strictly increasing".into(),
-            ));
-        }
-    }
-    let active_count = proof.active_lanes.len();
-    if proof.round_polys.len() != active_count {
+    // Groups must match the step's required `ell_addr` set and be sorted/unique.
+    if proof.groups.len() != required_ell_addrs.len() {
         return Err(PiCcsError::InvalidInput(format!(
-            "shout_addr_pre round_polys.len()={}, expected active_count={active_count}",
-            proof.round_polys.len()
+            "shout_addr_pre groups.len()={}, expected {} (distinct ell_addr values in step)",
+            proof.groups.len(),
+            required_ell_addrs.len()
         )));
     }
-    for (idx, rounds) in proof.round_polys.iter().enumerate() {
-        if rounds.len() != ell_addr {
+    let required_list: Vec<u32> = required_ell_addrs.into_iter().collect();
+    for (idx, group) in proof.groups.iter().enumerate() {
+        let expected_ell_addr = required_list[idx];
+        if group.ell_addr != expected_ell_addr {
             return Err(PiCcsError::InvalidInput(format!(
-                "shout_addr_pre round_polys[{idx}].len()={}, expected ell_addr={ell_addr}",
-                rounds.len()
+                "shout_addr_pre groups not sorted or mismatched: groups[{idx}].ell_addr={} but expected {expected_ell_addr}",
+                group.ell_addr
             )));
         }
+        if group.r_addr.len() != group.ell_addr as usize {
+            return Err(PiCcsError::InvalidInput(format!(
+                "shout_addr_pre group ell_addr={} has r_addr.len()={}, expected {}",
+                group.ell_addr,
+                group.r_addr.len(),
+                group.ell_addr
+            )));
+        }
+        if group.round_polys.len() != group.active_lanes.len() {
+            return Err(PiCcsError::InvalidInput(format!(
+                "shout_addr_pre group ell_addr={} round_polys.len()={}, expected active_lanes.len()={}",
+                group.ell_addr,
+                group.round_polys.len(),
+                group.active_lanes.len()
+            )));
+        }
+
+        for (pos, &lane_idx) in group.active_lanes.iter().enumerate() {
+            let lane_idx_usize = lane_idx as usize;
+            if lane_idx_usize >= total_lanes {
+                return Err(PiCcsError::InvalidInput(
+                    "shout_addr_pre active_lanes has index out of range".into(),
+                ));
+            }
+            if lane_ell_addr[lane_idx_usize] != group.ell_addr {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "shout_addr_pre active_lanes contains lane_idx={} with ell_addr={}, but group ell_addr={}",
+                    lane_idx, lane_ell_addr[lane_idx_usize], group.ell_addr
+                )));
+            }
+            if pos > 0 && group.active_lanes[pos - 1] >= lane_idx {
+                return Err(PiCcsError::InvalidInput(
+                    "shout_addr_pre active_lanes must be strictly increasing".into(),
+                ));
+            }
+        }
+        for (pos, rounds) in group.round_polys.iter().enumerate() {
+            if rounds.len() != group.ell_addr as usize {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "shout_addr_pre group ell_addr={} round_polys[{pos}].len()={}, expected {}",
+                    group.ell_addr,
+                    rounds.len(),
+                    group.ell_addr
+                )));
+            }
+        }
     }
 
+    // Bind all claimed sums (all lanes) once.
     let labels_all: Vec<&'static [u8]> = vec![b"shout/addr_pre".as_slice(); total_lanes];
     tr.append_message(b"shout/addr_pre_time/step_idx", &(step_idx as u64).to_le_bytes());
     bind_batched_claim_sums(
@@ -840,25 +894,51 @@ pub fn verify_shout_addr_pre_time(
         &labels_all,
     );
 
-    let (r_addr, finals) = if active_count == 0 {
-        // No Shout lookups: match prover's deterministic fallback `r_addr` sampling.
-        tr.append_message(b"shout/addr_pre_time/no_sumcheck", &(step_idx as u64).to_le_bytes());
-        let r_addr = ts::sample_ext_point(
-            tr,
-            b"shout/addr_pre_time/no_sumcheck/r_addr",
-            b"shout/addr_pre_time/no_sumcheck/r_addr/0",
-            b"shout/addr_pre_time/no_sumcheck/r_addr/1",
-            ell_addr,
+    // Verify each `ell_addr` group independently, collecting per-lane addr-pre finals and
+    // recording the shared `r_addr` for that group.
+    let mut lane_is_active = vec![false; total_lanes];
+    let mut lane_addr_final = vec![K::ZERO; total_lanes];
+    let mut r_addr_by_ell: std::collections::BTreeMap<u32, Vec<K>> = std::collections::BTreeMap::new();
+    let mut seen_active: std::collections::HashSet<u32> = std::collections::HashSet::new();
+
+    for (group_idx, group) in proof.groups.iter().enumerate() {
+        tr.append_message(b"shout/addr_pre_time/group_idx", &(group_idx as u64).to_le_bytes());
+        tr.append_message(
+            b"shout/addr_pre_time/group_ell_addr",
+            &(group.ell_addr as u64).to_le_bytes(),
         );
-        if r_addr != proof.r_addr {
-            return Err(PiCcsError::ProtocolError(
-                "shout_addr_pre r_addr mismatch: transcript-derived vs proof".into(),
-            ));
+
+        if group.active_lanes.is_empty() {
+            // No active lanes in this group: match prover's deterministic fallback sampling.
+            tr.append_message(b"shout/addr_pre_time/no_sumcheck", &(step_idx as u64).to_le_bytes());
+            tr.append_message(
+                b"shout/addr_pre_time/no_sumcheck/ell_addr",
+                &(group.ell_addr as u64).to_le_bytes(),
+            );
+            let r_addr = ts::sample_ext_point(
+                tr,
+                b"shout/addr_pre_time/no_sumcheck/r_addr",
+                b"shout/addr_pre_time/no_sumcheck/r_addr/0",
+                b"shout/addr_pre_time/no_sumcheck/r_addr/1",
+                group.ell_addr as usize,
+            );
+            if r_addr != group.r_addr {
+                return Err(PiCcsError::ProtocolError(
+                    "shout_addr_pre r_addr mismatch: transcript-derived vs proof".into(),
+                ));
+            }
+            r_addr_by_ell.insert(group.ell_addr, r_addr);
+            continue;
         }
-        (r_addr, Vec::new())
-    } else {
+
+        let active_count = group.active_lanes.len();
         let mut active_claimed_sums: Vec<K> = Vec::with_capacity(active_count);
-        for &lane_idx in proof.active_lanes.iter() {
+        for &lane_idx in group.active_lanes.iter() {
+            if !seen_active.insert(lane_idx) {
+                return Err(PiCcsError::InvalidInput(
+                    "shout_addr_pre active_lanes contains duplicates across groups".into(),
+                ));
+            }
             active_claimed_sums.push(
                 *proof
                     .claimed_sums
@@ -872,7 +952,7 @@ pub fn verify_shout_addr_pre_time(
             tr,
             b"shout/addr_pre_time",
             step_idx,
-            &proof.round_polys,
+            &group.round_polys,
             &active_claimed_sums,
             &labels_active,
             &degree_bounds,
@@ -882,7 +962,7 @@ pub fn verify_shout_addr_pre_time(
                 "shout addr-pre batched sumcheck invalid".into(),
             ));
         }
-        if r_addr != proof.r_addr {
+        if r_addr != group.r_addr {
             return Err(PiCcsError::ProtocolError(
                 "shout_addr_pre r_addr mismatch: transcript-derived vs proof".into(),
             ));
@@ -893,39 +973,37 @@ pub fn verify_shout_addr_pre_time(
                 finals.len()
             )));
         }
-        (r_addr, finals)
-    };
 
-    let mut active_pos = 0usize;
-    let mut next_active = proof
-        .active_lanes
-        .get(active_pos)
-        .copied()
-        .unwrap_or(u32::MAX);
-    for lut_inst in step.lut_insts.iter() {
+        for (pos, &lane_idx) in group.active_lanes.iter().enumerate() {
+            let lane_idx_usize = lane_idx as usize;
+            lane_is_active[lane_idx_usize] = true;
+            lane_addr_final[lane_idx_usize] = finals[pos];
+        }
+        r_addr_by_ell.insert(group.ell_addr, r_addr);
+    }
+
+    // Build per-lane verify data in canonical order.
+    let mut out = Vec::with_capacity(total_lanes);
+    for (lut_inst, inst_ell_addr) in step.lut_insts.iter().map(|inst| (inst, inst.d * inst.ell)) {
         let expected_lanes = lut_inst.lanes.max(1);
+        let inst_ell_addr_u32 = u32::try_from(inst_ell_addr)
+            .map_err(|_| PiCcsError::InvalidInput("Shout: ell_addr overflows u32".into()))?;
+        let r_addr = r_addr_by_ell
+            .get(&inst_ell_addr_u32)
+            .ok_or_else(|| PiCcsError::ProtocolError("missing shout addr-pre group r_addr".into()))?;
+
         for _lane_idx in 0..expected_lanes {
             let flat_lane_idx = out.len();
             let addr_claim_sum = *proof
                 .claimed_sums
                 .get(flat_lane_idx)
                 .ok_or_else(|| PiCcsError::ProtocolError("shout addr-pre lane index drift".into()))?;
-            let is_active = (flat_lane_idx as u32) == next_active;
-            let addr_final = if is_active {
-                let v = finals
-                    .get(active_pos)
-                    .copied()
-                    .ok_or_else(|| PiCcsError::ProtocolError("shout addr-pre finals index drift".into()))?;
-                active_pos += 1;
-                next_active = proof
-                    .active_lanes
-                    .get(active_pos)
-                    .copied()
-                    .unwrap_or(u32::MAX);
-                v
-            } else {
-                K::ZERO
-            };
+            let is_active = *lane_is_active
+                .get(flat_lane_idx)
+                .ok_or_else(|| PiCcsError::ProtocolError("shout addr-pre lane idx drift".into()))?;
+            let addr_final = *lane_addr_final
+                .get(flat_lane_idx)
+                .ok_or_else(|| PiCcsError::ProtocolError("shout addr-pre lane idx drift".into()))?;
 
             let table_eval_at_r_addr = if is_active {
                 match &lut_inst.table_spec {
@@ -935,13 +1013,13 @@ pub fn verify_shout_addr_pre_time(
                             .ok_or_else(|| PiCcsError::InvalidInput("Shout: 2^ell_addr overflow".into()))?;
                         let mut acc = K::ZERO;
                         for (i, &v) in lut_inst.table.iter().enumerate().take(pow2) {
-                            let w = neo_memory::mle::chi_at_index(&r_addr, i);
+                            let w = neo_memory::mle::chi_at_index(r_addr, i);
                             acc += K::from(v) * w;
                         }
                         acc
                     }
                     Some(LutTableSpec::RiscvOpcode { opcode, xlen }) => {
-                        neo_memory::riscv::lookups::evaluate_opcode_mle(*opcode, &r_addr, *xlen)
+                        neo_memory::riscv::lookups::evaluate_opcode_mle(*opcode, r_addr, *xlen)
                     }
                 }
             } else {
@@ -951,7 +1029,7 @@ pub fn verify_shout_addr_pre_time(
             out.push(ShoutAddrPreVerifyData {
                 is_active,
                 addr_claim_sum,
-                addr_final,
+                addr_final: if is_active { addr_final } else { K::ZERO },
                 r_addr: r_addr.clone(),
                 table_eval_at_r_addr,
             });
@@ -959,11 +1037,6 @@ pub fn verify_shout_addr_pre_time(
     }
     if out.len() != total_lanes {
         return Err(PiCcsError::ProtocolError("shout addr-pre lane count mismatch".into()));
-    }
-    if active_pos != active_count {
-        return Err(PiCcsError::ProtocolError(
-            "shout addr-pre finals not fully consumed".into(),
-        ));
     }
 
     Ok(out)
@@ -1080,7 +1153,10 @@ pub(crate) fn build_route_a_memory_oracles(
     }
 
     let mut shout_oracles = Vec::with_capacity(step.lut_instances.len());
-    let r_addr = &shout_pre.addr_pre.r_addr;
+    let mut r_addr_by_ell: std::collections::BTreeMap<u32, &[K]> = std::collections::BTreeMap::new();
+    for g in shout_pre.addr_pre.groups.iter() {
+        r_addr_by_ell.insert(g.ell_addr, g.r_addr.as_slice());
+    }
     for (lut_idx, ((lut_inst, _lut_wit), decoded)) in step
         .lut_instances
         .iter()
@@ -1088,6 +1164,11 @@ pub(crate) fn build_route_a_memory_oracles(
         .enumerate()
     {
         let ell_addr = lut_inst.d * lut_inst.ell;
+        let ell_addr_u32 = u32::try_from(ell_addr)
+            .map_err(|_| PiCcsError::InvalidInput("Shout(Route A): ell_addr overflows u32".into()))?;
+        let r_addr = *r_addr_by_ell
+            .get(&ell_addr_u32)
+            .ok_or_else(|| PiCcsError::ProtocolError("missing shout addr-pre group r_addr".into()))?;
         if r_addr.len() != ell_addr {
             return Err(PiCcsError::InvalidInput(format!(
                 "Shout(Route A): r_addr.len()={} != ell_addr={}",
@@ -1526,25 +1607,92 @@ pub(crate) fn finalize_route_a_memory_prover(
             shout_addr_pre.claimed_sums.len(),
         )));
     }
-    for (pos, &lane_idx) in shout_addr_pre.active_lanes.iter().enumerate() {
-        let lane_idx_usize = lane_idx as usize;
-        if lane_idx_usize >= total_lanes {
-            return Err(PiCcsError::InvalidInput(
-                "shout addr-pre active_lanes has index out of range".into(),
+    {
+        let mut lane_ell_addr: Vec<u32> = Vec::with_capacity(total_lanes);
+        let mut required_ell_addrs: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
+        for (lut_inst, _lut_wit) in step.lut_instances.iter().map(|(inst, wit)| (inst, wit)) {
+            let inst_ell_addr = lut_inst.d * lut_inst.ell;
+            let inst_ell_addr_u32 = u32::try_from(inst_ell_addr)
+                .map_err(|_| PiCcsError::InvalidInput("Shout: ell_addr overflows u32".into()))?;
+            required_ell_addrs.insert(inst_ell_addr_u32);
+            for _lane_idx in 0..lut_inst.lanes.max(1) {
+                lane_ell_addr.push(inst_ell_addr_u32);
+            }
+        }
+        if lane_ell_addr.len() != total_lanes {
+            return Err(PiCcsError::ProtocolError(
+                "shout addr-pre lane indexing drift (lane_ell_addr)".into(),
             ));
         }
-        if pos > 0 && shout_addr_pre.active_lanes[pos - 1] >= lane_idx {
-            return Err(PiCcsError::InvalidInput(
-                "shout addr-pre active_lanes must be strictly increasing".into(),
-            ));
+
+        if shout_addr_pre.groups.len() != required_ell_addrs.len() {
+            return Err(PiCcsError::InvalidInput(format!(
+                "shout addr-pre group count mismatch (expected {}, got {})",
+                required_ell_addrs.len(),
+                shout_addr_pre.groups.len()
+            )));
         }
-    }
-    let active_count = shout_addr_pre.active_lanes.len();
-    if shout_addr_pre.round_polys.len() != active_count {
-        return Err(PiCcsError::InvalidInput(format!(
-            "shout addr-pre round_polys.len()={}, expected active_count={active_count}",
-            shout_addr_pre.round_polys.len()
-        )));
+        let required_list: Vec<u32> = required_ell_addrs.into_iter().collect();
+        let mut seen_active: std::collections::HashSet<u32> = std::collections::HashSet::new();
+        for (idx, group) in shout_addr_pre.groups.iter().enumerate() {
+            let expected_ell_addr = required_list[idx];
+            if group.ell_addr != expected_ell_addr {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "shout addr-pre groups not sorted or mismatched: groups[{idx}].ell_addr={} but expected {expected_ell_addr}",
+                    group.ell_addr
+                )));
+            }
+            if group.r_addr.len() != group.ell_addr as usize {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "shout addr-pre group ell_addr={} has r_addr.len()={}, expected {}",
+                    group.ell_addr,
+                    group.r_addr.len(),
+                    group.ell_addr
+                )));
+            }
+            if group.round_polys.len() != group.active_lanes.len() {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "shout addr-pre group ell_addr={} round_polys.len()={}, expected active_lanes.len()={}",
+                    group.ell_addr,
+                    group.round_polys.len(),
+                    group.active_lanes.len()
+                )));
+            }
+            for (pos, &lane_idx) in group.active_lanes.iter().enumerate() {
+                let lane_idx_usize = lane_idx as usize;
+                if lane_idx_usize >= total_lanes {
+                    return Err(PiCcsError::InvalidInput(
+                        "shout addr-pre active_lanes has index out of range".into(),
+                    ));
+                }
+                if lane_ell_addr[lane_idx_usize] != group.ell_addr {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "shout addr-pre active_lanes contains lane_idx={} with ell_addr={}, but group ell_addr={}",
+                        lane_idx, lane_ell_addr[lane_idx_usize], group.ell_addr
+                    )));
+                }
+                if pos > 0 && group.active_lanes[pos - 1] >= lane_idx {
+                    return Err(PiCcsError::InvalidInput(
+                        "shout addr-pre active_lanes must be strictly increasing".into(),
+                    ));
+                }
+                if !seen_active.insert(lane_idx) {
+                    return Err(PiCcsError::InvalidInput(
+                        "shout addr-pre active_lanes contains duplicates across groups".into(),
+                    ));
+                }
+            }
+            for (pos, rounds) in group.round_polys.iter().enumerate() {
+                if rounds.len() != group.ell_addr as usize {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "shout addr-pre group ell_addr={} round_polys[{pos}].len()={}, expected {}",
+                        group.ell_addr,
+                        rounds.len(),
+                        group.ell_addr
+                    )));
+                }
+            }
+        }
     }
     if twist_pre.len() != step.mem_instances.len() {
         return Err(PiCcsError::InvalidInput(format!(
@@ -1782,35 +1930,10 @@ pub(crate) fn finalize_route_a_memory_prover(
     }
 
     if step.lut_instances.is_empty() {
-        if !shout_addr_pre.claimed_sums.is_empty()
-            || !shout_addr_pre.active_lanes.is_empty()
-            || !shout_addr_pre.round_polys.is_empty()
-            || !shout_addr_pre.r_addr.is_empty()
-        {
+        if !shout_addr_pre.claimed_sums.is_empty() || !shout_addr_pre.groups.is_empty() {
             return Err(PiCcsError::ProtocolError(
                 "shout_addr_pre must be empty when there are no Shout instances".into(),
             ));
-        }
-    } else {
-        let mut ell_addr: Option<usize> = None;
-        for (idx, (inst, _wit)) in step.lut_instances.iter().enumerate() {
-            let inst_ell_addr = inst.d * inst.ell;
-            if let Some(prev) = ell_addr {
-                if prev != inst_ell_addr {
-                    return Err(PiCcsError::InvalidInput(format!(
-                        "Shout(Route A): batched addr-pre requires uniform ell_addr; got {prev} (lut_idx=0) vs {inst_ell_addr} (lut_idx={idx})"
-                    )));
-                }
-            } else {
-                ell_addr = Some(inst_ell_addr);
-            }
-        }
-        let ell_addr = ell_addr.unwrap_or(0);
-        if shout_addr_pre.r_addr.len() != ell_addr {
-            return Err(PiCcsError::InvalidInput(format!(
-                "shout_addr_pre r_addr.len()={}, expected ell_addr={ell_addr}",
-                shout_addr_pre.r_addr.len()
-            )));
         }
     }
 

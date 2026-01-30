@@ -746,7 +746,14 @@ fn tamper_shout_addr_pre_round_poly_fails() {
     .expect("prove should succeed");
 
     let mem0 = proof.steps.get_mut(0).expect("one step");
-    mem0.mem.shout_addr_pre.round_polys[0][0][0] += K::ONE;
+    let group0 = mem0
+        .mem
+        .shout_addr_pre
+        .groups
+        .iter_mut()
+        .find(|g| !g.round_polys.is_empty())
+        .expect("expected at least one active Shout addr-pre group");
+    group0.round_polys[0][0][0] += K::ONE;
 
     let mut tr_verify = Poseidon2Transcript::new(b"full-fold-tamper-shout-addr-pre");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];

@@ -414,11 +414,30 @@ fn twist_shout_fibonacci_cycle_trace() {
                 step_proof.mem.proofs.len()
             );
             println!(
-                "shout_addr_pre: claimed_sums={} active_lanes={} rounds={} r_addr_len={}",
+                "shout_addr_pre: claimed_sums={} groups={} active_lanes={} rounds={} r_addr_lens={:?}",
                 step_proof.mem.shout_addr_pre.claimed_sums.len(),
-                step_proof.mem.shout_addr_pre.active_lanes.len(),
-                step_proof.mem.shout_addr_pre.round_polys.len(),
-                step_proof.mem.shout_addr_pre.r_addr.len()
+                step_proof.mem.shout_addr_pre.groups.len(),
+                step_proof
+                    .mem
+                    .shout_addr_pre
+                    .groups
+                    .iter()
+                    .map(|g| g.active_lanes.len())
+                    .sum::<usize>(),
+                step_proof
+                    .mem
+                    .shout_addr_pre
+                    .groups
+                    .iter()
+                    .map(|g| g.round_polys.len())
+                    .sum::<usize>(),
+                step_proof
+                    .mem
+                    .shout_addr_pre
+                    .groups
+                    .iter()
+                    .map(|g| g.r_addr.len())
+                    .collect::<Vec<_>>()
             );
 
             for (idx, p) in step_proof.mem.proofs.iter().enumerate() {
