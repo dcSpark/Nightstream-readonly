@@ -147,8 +147,7 @@ if [[ $BUILD_THREADS -eq 1 ]]; then
         wasm-pack "${WASM_PACK_THREADS_ARGS[@]}" \
         -- \
         --features wasm-threads \
-        -Z build-std=std,panic_abort \
-        -Z build-std-features=panic_immediate_abort
+        -Z build-std=std,panic_abort
 
     # wasm-bindgen-rayon can emit either workerHelpers.no-bundler.js (preferred) or workerHelpers.js.
     # Patch the default helper if present so it can load as plain browser modules (no bundler),

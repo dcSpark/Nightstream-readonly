@@ -124,8 +124,7 @@ build_web_bundle() {
       wasm-pack "${args[@]}" \
       -- \
       --features wasm-threads \
-      -Z build-std=std,panic_abort \
-      -Z build-std-features=panic_immediate_abort
+      -Z build-std=std,panic_abort
 
     # wasm-bindgen-rayon can emit either workerHelpers.no-bundler.js (preferred) or workerHelpers.js.
     # Patch the default helper if present so it can load as plain browser modules (no bundler).
