@@ -1,5 +1,7 @@
 use neo_ccs::matrix::Mat;
 use neo_ccs::relations::{McsInstance, McsWitness};
+use neo_math::K;
+use neo_reductions::error::PiCcsError;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::ops::Range;
@@ -21,6 +23,33 @@ pub enum LutTableSpec {
     /// - `d = 2*xlen` (one bit per dimension)
     /// - Address bits are little-endian and correspond to `interleave_bits(rs1, rs2)`.
     RiscvOpcode { opcode: RiscvOpcode, xlen: usize },
+
+    /// Implicit identity table over 32-bit addresses: `table[addr] = addr`.
+    ///
+    /// Addressing convention:
+    /// - `n_side = 2`, `ell = 1`
+    /// - `d = 32` (one bit per dimension)
+    /// - Address bits are little-endian
+    IdentityU32,
+}
+
+impl LutTableSpec {
+    pub fn eval_table_mle(&self, r_addr: &[K]) -> Result<K, PiCcsError> {
+        match self {
+            LutTableSpec::RiscvOpcode { opcode, xlen } => {
+                Ok(crate::riscv::lookups::evaluate_opcode_mle(*opcode, r_addr, *xlen))
+            }
+            LutTableSpec::IdentityU32 => {
+                if r_addr.len() != 32 {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "IdentityU32: expected r_addr.len()=32, got {}",
+                        r_addr.len()
+                    )));
+                }
+                Ok(crate::identity::eval_identity_mle_le(r_addr))
+            }
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

@@ -10,15 +10,23 @@
 //! - Nibble square (`k=16`, `n_side=16`, `ell=4`): `table[addr] = addr^2`.
 //!   Useful for 4-bit range-checks / nibble decomposition with a non-trivial mapping.
 //!
+//! We also include a small addr-pre (address-domain) sumcheck test that uses *two lanes* doing a
+//! lookup to the *same* address at the *same* time index, to corroborate that Shout lookups are
+//! multiset lookups (no “distinct key” requirement across lanes).
+//!
 //! Running:
 //! - Run this integration test binary: `cargo test -p neo-memory --test shout_byte_decomp_semantics --release`
 //! - Or filter by name (this test is prefixed accordingly): `cargo test -p neo-memory shout_byte_decomp_semantics --release`
 
-use neo_math::F;
+use neo_math::{KExtensions, F};
 use neo_memory::ajtai::encode_vector_balanced_to_mat;
 use neo_memory::shout::check_shout_semantics;
+use neo_memory::sparse_time::SparseIdxVec;
+use neo_memory::twist_oracle::AddressLookupOracle;
 use neo_memory::witness::{LutInstance, LutWitness};
 use neo_params::NeoParams;
+use neo_reductions::sumcheck::{run_batched_sumcheck_prover, verify_batched_sumcheck_rounds, BatchedClaim};
+use neo_transcript::{Poseidon2Transcript, Transcript};
 use p3_field::PrimeCharacteristicRing;
 
 fn build_single_lane_explicit_lut_witness(
@@ -91,4 +99,97 @@ fn shout_byte_decomp_semantics_explicit_tables_byte_identity_and_nibble_square()
     let (inst, wit, expected_vals) =
         build_single_lane_explicit_lut_witness(&params, /*n_side=*/ 16, /*ell=*/ 4, nibble_square, &addrs);
     check_shout_semantics(&params, &inst, &wit, &expected_vals).expect("nibble square semantics");
+}
+
+fn build_single_sparse_lookup_lane(
+    pow2_cycle: usize,
+    ell_addr: usize,
+    t: usize,
+    addr: u64,
+) -> (Vec<SparseIdxVec<neo_math::K>>, SparseIdxVec<neo_math::K>) {
+    assert!(pow2_cycle.is_power_of_two());
+    assert!(t < pow2_cycle);
+    assert!(ell_addr <= 64, "addr must fit in u64 bits");
+
+    let mut addr_bits = Vec::with_capacity(ell_addr);
+    for bit in 0..ell_addr {
+        let bit_is_one = ((addr >> bit) & 1) == 1;
+        let entries = if bit_is_one {
+            vec![(t, neo_math::K::ONE)]
+        } else {
+            Vec::new()
+        };
+        addr_bits.push(SparseIdxVec::from_entries(pow2_cycle, entries));
+    }
+    let has_lookup = SparseIdxVec::from_entries(pow2_cycle, vec![(t, neo_math::K::ONE)]);
+    (addr_bits, has_lookup)
+}
+
+#[test]
+fn shout_addr_pre_allows_duplicate_addresses_across_lanes_in_same_step() {
+    // Address domain: 8-bit table.
+    let ell_addr = 8usize;
+    let table: Vec<neo_math::K> = (0u64..256)
+        .map(|x| neo_math::K::from(F::from_u64(x)))
+        .collect();
+
+    // Time domain: one chunk with 2^ell_cycle rows.
+    let r_cycle: Vec<neo_math::K> = vec![
+        neo_math::K::from(F::from_u64(3)),
+        neo_math::K::from(F::from_u64(5)),
+        neo_math::K::from(F::from_u64(7)),
+    ];
+    let pow2_cycle = 1usize << r_cycle.len();
+
+    // Two lanes, both doing a lookup to the same byte at the same time row.
+    let t = 0usize;
+    let addr = 1u64;
+    let (lane0_addr_bits, lane0_has_lookup) = build_single_sparse_lookup_lane(pow2_cycle, ell_addr, t, addr);
+    let (lane1_addr_bits, lane1_has_lookup) = build_single_sparse_lookup_lane(pow2_cycle, ell_addr, t, addr);
+
+    let (mut lane0_oracle, lane0_sum) =
+        AddressLookupOracle::new(&lane0_addr_bits, &lane0_has_lookup, &table, &r_cycle, ell_addr);
+    let (mut lane1_oracle, lane1_sum) =
+        AddressLookupOracle::new(&lane1_addr_bits, &lane1_has_lookup, &table, &r_cycle, ell_addr);
+
+    // If “distinct keys across lanes” were required, this exact pattern would be forbidden.
+    // We instead expect both claims to be well-formed (and identical).
+    assert_eq!(lane0_sum, lane1_sum);
+    assert_ne!(lane0_sum, neo_math::K::ZERO);
+
+    let mut tr_p = Poseidon2Transcript::new(b"test/shout/addr_pre/dup_addr_across_lanes");
+    tr_p.append_message(b"ell_addr", &(ell_addr as u64).to_le_bytes());
+    tr_p.append_fields(b"claimed_sum/lane0", &lane0_sum.as_coeffs());
+    tr_p.append_fields(b"claimed_sum/lane1", &lane1_sum.as_coeffs());
+    let mut tr_v = tr_p.clone();
+
+    let mut claims = vec![
+        BatchedClaim {
+            oracle: &mut lane0_oracle,
+            claimed_sum: lane0_sum,
+            label: b"shout/addr_pre",
+        },
+        BatchedClaim {
+            oracle: &mut lane1_oracle,
+            claimed_sum: lane1_sum,
+            label: b"shout/addr_pre",
+        },
+    ];
+
+    let (r_addr_p, per_claim_results) = run_batched_sumcheck_prover(&mut tr_p, claims.as_mut_slice())
+        .expect("batched addr-pre sumcheck prover should succeed");
+    let per_claim_rounds: Vec<Vec<Vec<neo_math::K>>> = per_claim_results
+        .iter()
+        .map(|r| r.round_polys.clone())
+        .collect();
+
+    let claimed_sums = vec![lane0_sum, lane1_sum];
+    let labels: Vec<&[u8]> = vec![b"shout/addr_pre".as_slice(); 2];
+    let degree_bounds: Vec<usize> = vec![2; 2];
+    let (r_addr_v, finals, ok) =
+        verify_batched_sumcheck_rounds(&mut tr_v, &per_claim_rounds, &claimed_sums, &labels, &degree_bounds);
+    assert!(ok, "batched addr-pre sumcheck verifier should accept");
+    assert_eq!(r_addr_v, r_addr_p);
+    assert_eq!(finals.len(), 2);
+    assert_eq!(finals[0], finals[1]);
 }

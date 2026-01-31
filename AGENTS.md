@@ -1,5 +1,10 @@
 # AGENTS.md
 
+## General
+- We don't care about backwards compatibility because we are still in development. Keep the code simple and lean.
+- Avoid adding new Rust features or ENVs unless it is explicitly approved.
+- Never modify this file without explicit approval.
+
 ## Testing
 - Never add tests in the same implementation file, always prefer to add them to a file inside tests/ (current or new)
 - If you add a test to catch a problem, the test should fail if aims to confirm a problem.

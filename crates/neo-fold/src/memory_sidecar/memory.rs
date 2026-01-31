@@ -11,6 +11,7 @@ use neo_ccs::{CcsStructure, MeInstance};
 use neo_math::{F, K};
 use neo_memory::bit_ops::{eq_bit_affine, eq_bits_prod};
 use neo_memory::cpu::BusLayout;
+use neo_memory::identity::shout_oracle::IdentityAddressLookupOracleSparse;
 use neo_memory::mle::{eq_points, lt_eval};
 use neo_memory::riscv::shout_oracle::RiscvAddressLookupOracleSparse;
 use neo_memory::sparse_time::SparseIdxVec;
@@ -78,6 +79,9 @@ fn bind_shout_table_spec(tr: &mut Poseidon2Transcript, spec: &Option<LutTableSpe
             tr.append_message(b"shout/table_spec/riscv/tag", &[1u8]);
             tr.append_message(b"shout/table_spec/riscv/opcode_id", &opcode_id.to_le_bytes());
             tr.append_message(b"shout/table_spec/riscv/xlen", &(*xlen as u64).to_le_bytes());
+        }
+        LutTableSpec::IdentityU32 => {
+            tr.append_message(b"shout/table_spec/identity_u32/tag", &[1u8]);
         }
     }
 }
@@ -676,6 +680,15 @@ pub(crate) fn prove_shout_addr_pre_time(
                         )?;
                         (Box::new(o), sum)
                     }
+                    Some(LutTableSpec::IdentityU32) => {
+                        let (o, sum) = IdentityAddressLookupOracleSparse::new_sparse_time(
+                            inst_ell_addr,
+                            &addr_bits,
+                            &has_lookup,
+                            r_cycle,
+                        )?;
+                        (Box::new(o), sum)
+                    }
                 };
 
                 claimed_sums[flat_lane_idx] = lane_sum;
@@ -1018,9 +1031,7 @@ pub fn verify_shout_addr_pre_time(
                         }
                         acc
                     }
-                    Some(LutTableSpec::RiscvOpcode { opcode, xlen }) => {
-                        neo_memory::riscv::lookups::evaluate_opcode_mle(*opcode, r_addr, *xlen)
-                    }
+                    Some(spec) => spec.eval_table_mle(r_addr)?,
                 }
             } else {
                 K::ZERO

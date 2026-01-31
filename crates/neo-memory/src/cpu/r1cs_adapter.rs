@@ -116,6 +116,7 @@ where
         for (id, spec) in table_specs {
             let (d, n_side) = match spec {
                 LutTableSpec::RiscvOpcode { xlen, .. } => (xlen.saturating_mul(2), 2usize),
+                LutTableSpec::IdentityU32 => (32usize, 2usize),
             };
             match shout_meta.entry(*id) {
                 Entry::Vacant(v) => {
