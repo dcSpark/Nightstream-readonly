@@ -325,6 +325,7 @@ where
                         let ell = 1usize;
                         (0usize, d, n_side, ell, Vec::new())
                     }
+                    LutTableSpec::IdentityU32 => (0usize, 32usize, 2usize, 1usize, Vec::new()),
                 }
             } else {
                 let table = lut_tables.get(&table_id).ok_or_else(|| {

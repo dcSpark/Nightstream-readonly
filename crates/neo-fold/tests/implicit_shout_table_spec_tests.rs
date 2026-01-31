@@ -241,3 +241,90 @@ fn route_a_shout_implicit_table_spec_verifies() {
     .expect_err("verification should fail under a different opcode");
     let _ = err;
 }
+
+#[test]
+fn route_a_shout_implicit_identity_u32_table_spec_verifies() {
+    let ccs = create_identity_ccs(TEST_M);
+    let mut params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.m).expect("params");
+    params.k_rho = 16;
+
+    let l = DummyCommit;
+    let mixers = default_mixers();
+
+    let addr = 0x1234_5678u64;
+    let out = addr;
+
+    let inst = LutInstance::<Cmt, F> {
+        comms: Vec::new(),
+        k: 0,
+        d: 32,
+        n_side: 2,
+        steps: 1,
+        lanes: 1,
+        ell: 1,
+        table_spec: Some(LutTableSpec::IdentityU32),
+        table: vec![],
+    };
+    let wit = LutWitness { mats: Vec::new() };
+
+    let bus_cols_total = inst.d * inst.ell + 2;
+    let bus_base = ccs.m - bus_cols_total;
+    let mut z = vec![F::ZERO; ccs.m];
+    write_shout_bus_row(&mut z, bus_base, 1, 0, &inst, addr, F::from_u64(out), F::ONE);
+
+    let (mcs, mcs_wit) = create_mcs_from_z(&params, &l, M_IN, z);
+    let step_bundle = StepWitnessBundle {
+        mcs: (mcs, mcs_wit),
+        lut_instances: vec![(inst, wit)],
+        mem_instances: vec![],
+        _phantom: PhantomData::<K>,
+    };
+
+    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_wit_init: Vec<Mat<F>> = Vec::new();
+
+    let mut tr_prove = Poseidon2Transcript::new(b"implicit-shout-identity-u32-table-spec");
+    let proof = fold_shard_prove(
+        FoldingMode::PaperExact,
+        &mut tr_prove,
+        &params,
+        &ccs,
+        &[step_bundle.clone()],
+        &acc_init,
+        &acc_wit_init,
+        &l,
+        mixers,
+    )
+    .expect("prove should succeed for implicit IdentityU32 Shout table");
+
+    let mut tr_verify = Poseidon2Transcript::new(b"implicit-shout-identity-u32-table-spec");
+    let steps_public = [StepInstanceBundle::from(&step_bundle)];
+    let _ = fold_shard_verify(
+        FoldingMode::PaperExact,
+        &mut tr_verify,
+        &params,
+        &ccs,
+        &steps_public,
+        &acc_init,
+        &proof,
+        mixers,
+    )
+    .expect("verify should succeed for implicit IdentityU32 Shout table");
+
+    // Removing the table_spec in the public instance must break verification.
+    let mut tr_verify_bad = Poseidon2Transcript::new(b"implicit-shout-identity-u32-table-spec");
+    let mut steps_public_bad = [StepInstanceBundle::from(&step_bundle)];
+    steps_public_bad[0].lut_insts[0].table_spec = None;
+    let err = fold_shard_verify(
+        FoldingMode::PaperExact,
+        &mut tr_verify_bad,
+        &params,
+        &ccs,
+        &steps_public_bad,
+        &acc_init,
+        &proof,
+        mixers,
+    )
+    .expect_err("verification should fail if table_spec is removed");
+    let _ = err;
+}

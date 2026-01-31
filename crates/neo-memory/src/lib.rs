@@ -26,6 +26,7 @@ pub mod ajtai;
 pub mod bit_ops;
 pub mod builder;
 pub mod cpu;
+pub mod identity;
 pub mod mem_init;
 pub mod mle;
 pub mod output_check;

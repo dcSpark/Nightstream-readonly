@@ -292,6 +292,7 @@ fn shout_meta_for_bus(
                     .ok_or_else(|| "2*xlen overflow for RISC-V shout table".to_string())?;
                 Ok((d, 2usize))
             }
+            LutTableSpec::IdentityU32 => Ok((32usize, 2usize)),
         }
     } else {
         Err(format!("missing shout table metadata for table_id={table_id}"))

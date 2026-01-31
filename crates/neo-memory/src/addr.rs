@@ -109,6 +109,11 @@ pub fn validate_shout_bit_addressing<Cmt, F>(inst: &LutInstance<Cmt, F>) -> Resu
     // Virtual/implicit tables may not have a materialized `k = n_side^d` table.
     if let Some(spec) = &inst.table_spec {
         validate_pow2_bit_addressing_shape("Shout", inst.n_side, inst.ell)?;
+        if inst.k != 0 {
+            return Err(PiCcsError::InvalidInput(
+                "Shout: k must be 0 when table_spec is set (implicit table)".into(),
+            ));
+        }
         if !inst.table.is_empty() {
             return Err(PiCcsError::InvalidInput(
                 "Shout: table must be empty when table_spec is set".into(),
@@ -131,6 +136,20 @@ pub fn validate_shout_bit_addressing<Cmt, F>(inst: &LutInstance<Cmt, F>) -> Resu
                     return Err(PiCcsError::InvalidInput(format!(
                         "Shout(RISC-V): expected d=2*xlen={}, got d={}",
                         expected_d, inst.d
+                    )));
+                }
+            }
+            LutTableSpec::IdentityU32 => {
+                if inst.n_side != 2 || inst.ell != 1 {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Shout(IdentityU32): expected n_side=2, ell=1, got n_side={}, ell={}",
+                        inst.n_side, inst.ell
+                    )));
+                }
+                if inst.d != 32 {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Shout(IdentityU32): expected d=32, got d={}",
+                        inst.d
                     )));
                 }
             }
