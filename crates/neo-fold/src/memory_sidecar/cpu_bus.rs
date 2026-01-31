@@ -7,7 +7,7 @@ use neo_memory::sparse_time::SparseIdxVec;
 use neo_memory::witness::{LutInstance, MemInstance, StepInstanceBundle, StepWitnessBundle};
 use neo_params::NeoParams;
 use p3_field::PrimeCharacteristicRing;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 pub(crate) trait BusStepView<Cmt> {
     fn m_in(&self) -> usize;
@@ -792,9 +792,19 @@ fn ensure_ccs_has_bus_padding_constraints(
         ));
     }
 
-    // This validation is intentionally strict and recognizes the canonical R1CS embedding:
-    // A(z) * B(z) - C(z) = 0, with padding rows using:
-    //   A(z) = (1 - flag), B(z) = field, C(z) = 0.
+    // This validation is intentionally strict and recognizes two safe patterns in the canonical
+    // R1CS embedding:
+    //
+    // 1) Explicit padding constraints:
+    //      (1 - flag) * field = 0
+    //
+    // 2) For *bit* fields only (addr bits), padding implied by a gated-bit constraint:
+    //      bit * (bit - flag) = 0
+    //    combined with a boolean constraint on `flag`. When `flag ∈ {0,1}`, this implies:
+    //      - flag=0 => bit=0
+    //      - flag=1 => bit ∈ {0,1}
+    //
+    // We accept (2) to allow circuits to drop redundant per-bit padding rows while staying safe.
     let (a_idx, b_idx, c_idx) = if s.matrices.len() >= 4 && s.matrices[0].is_identity() {
         (1usize, 2usize, 3usize)
     } else if s.matrices.len() >= 3 {
@@ -806,11 +816,14 @@ fn ensure_ccs_has_bus_padding_constraints(
     };
 
     let n = s.n;
-    let empty = usize::MAX;
-    let multi = usize::MAX - 1;
+    let const_one_cols: HashSet<usize> = const_one_cols.iter().copied().collect();
 
     let mut c_has_nonzero = vec![false; n];
-    let mut b_col = vec![empty; n];
+    let mut b_count = vec![0u8; n];
+    let mut b_col1 = vec![0usize; n];
+    let mut b_val1 = vec![F::ZERO; n];
+    let mut b_col2 = vec![0usize; n];
+    let mut b_val2 = vec![F::ZERO; n];
 
     let mut a_count = vec![0u8; n];
     let mut a_col1 = vec![0usize; n];
@@ -834,26 +847,45 @@ fn ensure_ccs_has_bus_padding_constraints(
         }
     };
 
-    let scan_b = |mat: &CcsMatrix<F>, b_col: &mut [usize]| match mat {
-        CcsMatrix::Identity { n } => {
-            let cap = core::cmp::min(*n, b_col.len());
-            for row in 0..cap {
-                b_col[row] = row;
+    let scan_b = |mat: &CcsMatrix<F>,
+                  b_count: &mut [u8],
+                  b_col1: &mut [usize],
+                  b_val1: &mut [F],
+                  b_col2: &mut [usize],
+                  b_val2: &mut [F]| {
+        match mat {
+            CcsMatrix::Identity { n } => {
+                let cap = core::cmp::min(*n, b_count.len());
+                for row in 0..cap {
+                    b_count[row] = 1;
+                    b_col1[row] = row;
+                    b_val1[row] = F::ONE;
+                }
             }
-        }
-        CcsMatrix::Csc(csc) => {
-            for col in 0..csc.ncols {
-                let s0 = csc.col_ptr[col];
-                let e0 = csc.col_ptr[col + 1];
-                for k in s0..e0 {
-                    let row = csc.row_idx[k];
-                    if row >= b_col.len() {
-                        continue;
-                    }
-                    if b_col[row] == empty {
-                        b_col[row] = col;
-                    } else {
-                        b_col[row] = multi;
+            CcsMatrix::Csc(csc) => {
+                for col in 0..csc.ncols {
+                    let s0 = csc.col_ptr[col];
+                    let e0 = csc.col_ptr[col + 1];
+                    for k in s0..e0 {
+                        let row = csc.row_idx[k];
+                        if row >= b_count.len() {
+                            continue;
+                        }
+                        match b_count[row] {
+                            0 => {
+                                b_count[row] = 1;
+                                b_col1[row] = col;
+                                b_val1[row] = csc.vals[k];
+                            }
+                            1 => {
+                                b_count[row] = 2;
+                                b_col2[row] = col;
+                                b_val2[row] = csc.vals[k];
+                            }
+                            _ => {
+                                b_count[row] = 3;
+                            }
+                        }
                     }
                 }
             }
@@ -906,7 +938,14 @@ fn ensure_ccs_has_bus_padding_constraints(
     };
 
     scan_c(&s.matrices[c_idx], &mut c_has_nonzero);
-    scan_b(&s.matrices[b_idx], &mut b_col);
+    scan_b(
+        &s.matrices[b_idx],
+        &mut b_count,
+        &mut b_col1,
+        &mut b_val1,
+        &mut b_col2,
+        &mut b_val2,
+    );
     scan_a(
         &s.matrices[a_idx],
         &mut a_count,
@@ -916,16 +955,47 @@ fn ensure_ccs_has_bus_padding_constraints(
         &mut a_val2,
     );
 
+    // Find boolean constraints for flag columns: flag * (flag - 1) = 0.
+    let mut flag_is_boolean: HashSet<usize> = HashSet::new();
+    let mut flag_boolean_row: HashMap<usize, usize> = HashMap::new();
+    let mut selector_rows: HashSet<usize> = HashSet::new();
+    for row in 0..n {
+        if c_has_nonzero[row] {
+            continue;
+        }
+        if a_count[row] != 1 || a_val1[row] != F::ONE {
+            continue;
+        }
+        let flag_col = a_col1[row];
+        if b_count[row] != 2 {
+            continue;
+        }
+
+        let (c1, v1) = (b_col1[row], b_val1[row]);
+        let (c2, v2) = (b_col2[row], b_val2[row]);
+
+        let ok = (c1 == flag_col && v1 == F::ONE && const_one_cols.contains(&c2) && v2 == -F::ONE)
+            || (c2 == flag_col && v2 == F::ONE && const_one_cols.contains(&c1) && v1 == -F::ONE);
+        if !ok {
+            continue;
+        }
+
+        flag_is_boolean.insert(flag_col);
+        flag_boolean_row.entry(flag_col).or_insert(row);
+        selector_rows.insert(row);
+    }
+
+    // Explicit padding constraints present in CCS: (1 - flag) * field = 0.
     let mut present: HashSet<(usize, usize)> = HashSet::new();
     let mut padding_rows: HashSet<usize> = HashSet::new();
     for row in 0..n {
         if c_has_nonzero[row] {
             continue;
         }
-        let field_col = b_col[row];
-        if field_col == empty || field_col == multi {
+        if b_count[row] != 1 || b_val1[row] != F::ONE {
             continue;
         }
+        let field_col = b_col1[row];
         if a_count[row] != 2 {
             continue;
         }
@@ -950,14 +1020,67 @@ fn ensure_ccs_has_bus_padding_constraints(
         padding_rows.insert(row);
     }
 
+    // Bitness constraints that imply address-bit padding: bit * (bit - flag) = 0.
+    //
+    // We only treat these as satisfying padding when `flag` is also boolean.
+    let mut implied: HashMap<(usize, usize), usize> = HashMap::new();
+    for row in 0..n {
+        if c_has_nonzero[row] {
+            continue;
+        }
+        if a_count[row] != 1 || a_val1[row] != F::ONE {
+            continue;
+        }
+        let bit_col = a_col1[row];
+        if b_count[row] != 2 {
+            continue;
+        }
+
+        let (c1, v1) = (b_col1[row], b_val1[row]);
+        let (c2, v2) = (b_col2[row], b_val2[row]);
+
+        let flag_col = if c1 == bit_col && v1 == F::ONE && v2 == -F::ONE {
+            Some(c2)
+        } else if c2 == bit_col && v2 == F::ONE && v1 == -F::ONE {
+            Some(c1)
+        } else {
+            None
+        };
+        let Some(flag_col) = flag_col else {
+            continue;
+        };
+        if !flag_is_boolean.contains(&flag_col) {
+            continue;
+        }
+
+        implied.insert((flag_col, bit_col), row);
+    }
+
     let mut missing: Vec<&BusPaddingLabel> = Vec::new();
     for req in required {
+        if present.contains(&(req.flag_z_idx, req.field_z_idx)) {
+            continue;
+        }
+        if implied.contains_key(&(req.flag_z_idx, req.field_z_idx)) {
+            continue;
+        }
         if !present.contains(&(req.flag_z_idx, req.field_z_idx)) {
             missing.push(req);
         }
     }
 
     if missing.is_empty() {
+        // Treat selector boolean and bitness constraints as padding-only rows so they don't
+        // accidentally satisfy "binding" presence checks.
+        for row in selector_rows {
+            padding_rows.insert(row);
+        }
+        for &row in implied.values() {
+            padding_rows.insert(row);
+        }
+        for &row in flag_boolean_row.values() {
+            padding_rows.insert(row);
+        }
         return Ok(padding_rows);
     }
 

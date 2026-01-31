@@ -1689,20 +1689,20 @@ fn semantic_constraints(
             vec![(layout.alu_out(j), F::ONE), (one, -F::ONE)],
         ));
 
-        // Register update pattern for r=1..31:
-        //  - if rd_sel[r]=1 then reg_out[r] = rd_write_val
-        //  - else reg_out[r] = reg_in[r]
+        // Register update pattern for r=1..31 (single constraint per register):
+        //
+        //   reg_out = reg_in + rd_sel * (rd_write_val - reg_in)
+        //
+        // This is equivalent to the 2-constraint conditional form, but avoids duplicating
+        // the "then"/"else" constraints for every register.
         for r in 1..32 {
-            constraints.push(Constraint::terms(
-                layout.rd_sel(r, j),
-                false,
-                vec![(layout.reg_out(r, j), F::ONE), (layout.rd_write_val(j), -F::ONE)],
-            ));
-            constraints.push(Constraint::terms(
-                layout.rd_sel(r, j),
-                true,
-                vec![(layout.reg_out(r, j), F::ONE), (layout.reg_in(r, j), -F::ONE)],
-            ));
+            constraints.push(Constraint {
+                condition_col: layout.rd_sel(r, j),
+                negate_condition: false,
+                additional_condition_cols: Vec::new(),
+                b_terms: vec![(layout.rd_write_val(j), F::ONE), (layout.reg_in(r, j), -F::ONE)],
+                c_terms: vec![(layout.reg_out(r, j), F::ONE), (layout.reg_in(r, j), -F::ONE)],
+            });
         }
 
         // RAM effective address is computed via the ADD Shout lookup (mod 2^32 semantics).

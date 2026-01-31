@@ -473,28 +473,16 @@ impl<F: Field> CpuConstraintBuilder<F> {
             ));
 
             // Read address bits:
-            // - Padding: (1 - has_read) * bit = 0
             // - Bitness: bit is 0 when inactive, boolean when active
             for col_id in twist.ra_bits.clone() {
                 let bit = layout.bus_cell(col_id, j);
-                self.constraints.push(CpuConstraint::new_zero_negated(
-                    CpuConstraintLabel::ReadAddressBitsZeroPadding,
-                    bus_has_read,
-                    bit,
-                ));
                 self.add_gated_bit_constraint(CpuConstraintLabel::TwistReadAddrBitBitness, bit, bus_has_read);
             }
 
             // Write address bits:
-            // - Padding: (1 - has_write) * bit = 0
             // - Bitness: bit is 0 when inactive, boolean when active
             for col_id in twist.wa_bits.clone() {
                 let bit = layout.bus_cell(col_id, j);
-                self.constraints.push(CpuConstraint::new_zero_negated(
-                    CpuConstraintLabel::WriteAddressBitsZeroPadding,
-                    bus_has_write,
-                    bit,
-                ));
                 self.add_gated_bit_constraint(CpuConstraintLabel::TwistWriteAddrBitBitness, bit, bus_has_write);
             }
         }
@@ -570,15 +558,9 @@ impl<F: Field> CpuConstraintBuilder<F> {
             ));
 
             // Lookup key bits:
-            // - Padding: (1 - has_lookup) * bit = 0
             // - Bitness: bit is 0 when inactive, boolean when active
             for col_id in shout.addr_bits.clone() {
                 let bit = layout.bus_cell(col_id, j);
-                self.constraints.push(CpuConstraint::new_zero_negated(
-                    CpuConstraintLabel::LookupAddressBitsZeroPadding,
-                    bus_has_lookup,
-                    bit,
-                ));
                 self.add_gated_bit_constraint(CpuConstraintLabel::ShoutAddrBitBitness, bit, bus_has_lookup);
             }
         }
