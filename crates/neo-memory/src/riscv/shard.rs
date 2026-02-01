@@ -1,4 +1,3 @@
-use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as F;
 
 use crate::riscv::ccs::{rv32_b1_step_linking_pairs, Rv32B1Layout};
@@ -6,22 +5,13 @@ use crate::riscv::ccs::{rv32_b1_step_linking_pairs, Rv32B1Layout};
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Rv32BoundaryState {
     pub pc0: F,
-    pub regs0: [F; 32],
     pub pc_final: F,
-    pub regs_final: [F; 32],
     pub halted_in: F,
     pub halted_out: F,
 }
 
 pub fn extract_boundary_state(layout: &Rv32B1Layout, x: &[F]) -> Result<Rv32BoundaryState, String> {
-    let required = [
-        layout.pc0,
-        layout.regs0_start + 31,
-        layout.pc_final,
-        layout.regs_final_start + 31,
-        layout.halted_in,
-        layout.halted_out,
-    ];
+    let required = [layout.pc0, layout.pc_final, layout.halted_in, layout.halted_out];
     let max = required.into_iter().max().unwrap_or(0);
     if max >= x.len() {
         return Err(format!(
@@ -30,18 +20,9 @@ pub fn extract_boundary_state(layout: &Rv32B1Layout, x: &[F]) -> Result<Rv32Boun
         ));
     }
 
-    let mut regs0 = [F::ZERO; 32];
-    let mut regs_final = [F::ZERO; 32];
-    for r in 0..32 {
-        regs0[r] = x[layout.regs0_start + r];
-        regs_final[r] = x[layout.regs_final_start + r];
-    }
-
     Ok(Rv32BoundaryState {
         pc0: x[layout.pc0],
-        regs0,
         pc_final: x[layout.pc_final],
-        regs_final,
         halted_in: x[layout.halted_in],
         halted_out: x[layout.halted_out],
     })

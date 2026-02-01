@@ -48,13 +48,11 @@ fn test_riscv_program_crosscheck_tiny_trace() {
         .chunk_size(1)
         .max_steps(3)
         .mode(FoldingMode::OptimizedWithCrosscheck(crosscheck_cfg))
+        .reg_output_claim(/*reg=*/ 1, /*expected=*/ F::from_u64(12))
         .prove()
         .expect("prove");
 
     run.verify().expect("verify");
-
-    let end = run.final_boundary_state().expect("boundary");
-    assert_eq!(end.regs_final[1], F::from_u64(12));
 }
 
 #[test]
@@ -93,13 +91,11 @@ fn test_riscv_program_crosscheck_full_flags_one_step() {
         .chunk_size(1)
         .max_steps(1)
         .mode(FoldingMode::OptimizedWithCrosscheck(crosscheck_cfg))
+        .reg_output_claim(/*reg=*/ 1, /*expected=*/ F::from_u64(7))
         .prove()
         .expect("prove");
 
     run.verify().expect("verify");
-
-    let end = run.final_boundary_state().expect("boundary");
-    assert_eq!(end.regs_final[1], F::from_u64(7));
 }
 
 #[test]
@@ -138,11 +134,9 @@ fn test_riscv_program_crosscheck_full_flags_two_steps() {
         .chunk_size(1)
         .max_steps(2)
         .mode(FoldingMode::OptimizedWithCrosscheck(crosscheck_cfg))
+        .reg_output_claim(/*reg=*/ 1, /*expected=*/ F::from_u64(12))
         .prove()
         .expect("prove");
 
     run.verify().expect("verify");
-
-    let end = run.final_boundary_state().expect("boundary");
-    assert_eq!(end.regs_final[1], F::from_u64(12));
 }

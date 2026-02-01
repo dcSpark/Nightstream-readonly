@@ -13,6 +13,7 @@ use neo_memory::riscv::ccs::{
 use neo_memory::riscv::lookups::{
     decode_instruction, encode_program, BranchCondition, RiscvCpu, RiscvInstruction, RiscvMemOp, RiscvMemory,
     RiscvOpcode, RiscvShoutTables, JOLT_CYCLE_TRACK_ECALL_NUM, JOLT_PRINT_ECALL_NUM, PROG_ID, RAM_ID,
+    REG_ID,
 };
 use neo_memory::riscv::rom_init::prog_init_words;
 use neo_memory::witness::LutTableSpec;
@@ -44,6 +45,19 @@ fn pow2_ceil_k(min_k: usize) -> (usize, usize) {
     let k = min_k.next_power_of_two().max(2);
     let d = k.trailing_zeros() as usize;
     (k, d)
+}
+
+fn with_reg_layout(mut mem_layouts: HashMap<u32, PlainMemLayout>) -> HashMap<u32, PlainMemLayout> {
+    mem_layouts.insert(
+        REG_ID.0,
+        PlainMemLayout {
+            k: 32,
+            d: 5,
+            n_side: 2,
+            lanes: 2,
+        },
+    );
+    mem_layouts
 }
 
 fn load_u32_imm(rd: u8, value: u32) -> Vec<RiscvInstruction> {
@@ -201,7 +215,7 @@ fn rv32_b1_ccs_happy_path_small_program() {
     // mem_layouts: keep k small to reduce bus tail width.
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x200); // covers addresses up to 0x1ff
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -209,6 +223,15 @@ fn rv32_b1_ccs_happy_path_small_program() {
                 d: d_ram,
                 n_side: 2,
                 lanes: 1,
+            },
+        ),
+        (
+            2u32,
+            PlainMemLayout {
+                k: 32,
+                d: 5,
+                n_side: 2,
+                lanes: 2,
             },
         ),
         (
@@ -220,7 +243,7 @@ fn rv32_b1_ccs_happy_path_small_program() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
 
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
@@ -285,7 +308,7 @@ fn rv32_b1_ccs_happy_path_rv32i_fence_program() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x40);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -304,7 +327,7 @@ fn rv32_b1_ccs_happy_path_rv32i_fence_program() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
 
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
@@ -377,7 +400,7 @@ fn rv32_b1_ccs_happy_path_rv32i_ecall_markers_program() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x40);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -396,7 +419,7 @@ fn rv32_b1_ccs_happy_path_rv32i_ecall_markers_program() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
 
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
@@ -474,7 +497,7 @@ fn rv32_b1_ccs_happy_path_rv32m_program() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x40);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -493,7 +516,7 @@ fn rv32_b1_ccs_happy_path_rv32m_program() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     // Minimal table set for this program:
@@ -664,7 +687,7 @@ fn rv32_b1_ccs_happy_path_rv32m_signed_program() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -683,7 +706,7 @@ fn rv32_b1_ccs_happy_path_rv32m_signed_program() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let add_id = shout_tables.opcode_to_id(RiscvOpcode::Add).0;
@@ -751,7 +774,7 @@ fn rv32_b1_witness_bus_alu_step() {
     let step = trace.steps.first().expect("step").clone();
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(4);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -770,7 +793,7 @@ fn rv32_b1_witness_bus_alu_step() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (_ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
     let z = rv32_b1_chunk_to_full_witness_checked(&layout, std::slice::from_ref(&step)).expect("witness");
@@ -833,7 +856,7 @@ fn rv32_b1_witness_bus_lw_step() {
     let step = trace.steps.get(2).expect("lw step").clone();
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(4);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -852,7 +875,7 @@ fn rv32_b1_witness_bus_lw_step() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (_ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
     let z = rv32_b1_chunk_to_full_witness_checked(&layout, std::slice::from_ref(&step)).expect("witness");
@@ -933,7 +956,7 @@ fn rv32_b1_witness_bus_amoaddw_step() {
     let step = trace.steps.get(3).expect("amoaddw step").clone();
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(4);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -952,7 +975,7 @@ fn rv32_b1_witness_bus_amoaddw_step() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (_ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
     let z = rv32_b1_chunk_to_full_witness_checked(&layout, std::slice::from_ref(&step)).expect("witness");
@@ -1109,7 +1132,7 @@ fn rv32_b1_ccs_happy_path_rv32i_byte_half_load_store_program() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x200);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -1128,7 +1151,7 @@ fn rv32_b1_ccs_happy_path_rv32i_byte_half_load_store_program() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
 
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
@@ -1216,7 +1239,7 @@ fn rv32_b1_ccs_byte_store_updates_aligned_word() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x200);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -1235,7 +1258,7 @@ fn rv32_b1_ccs_byte_store_updates_aligned_word() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
 
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
@@ -1289,7 +1312,7 @@ fn rv32_b1_ccs_rejects_misaligned_lh() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x200);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -1308,7 +1331,7 @@ fn rv32_b1_ccs_rejects_misaligned_lh() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -1361,7 +1384,7 @@ fn rv32_b1_ccs_rejects_misaligned_lw() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x200);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -1380,7 +1403,7 @@ fn rv32_b1_ccs_rejects_misaligned_lw() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -1433,7 +1456,7 @@ fn rv32_b1_ccs_rejects_misaligned_sh() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x200);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -1452,7 +1475,7 @@ fn rv32_b1_ccs_rejects_misaligned_sh() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -1505,7 +1528,7 @@ fn rv32_b1_ccs_rejects_misaligned_sw() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x200);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -1524,7 +1547,7 @@ fn rv32_b1_ccs_rejects_misaligned_sw() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -1607,7 +1630,7 @@ fn rv32_b1_ccs_happy_path_rv32a_amoaddw_program() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x200);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -1626,7 +1649,7 @@ fn rv32_b1_ccs_happy_path_rv32a_amoaddw_program() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -1702,7 +1725,7 @@ fn rv32_b1_ccs_rejects_tampered_ram_write_value_for_amoaddw() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x200);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -1721,7 +1744,7 @@ fn rv32_b1_ccs_rejects_tampered_ram_write_value_for_amoaddw() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -1831,7 +1854,7 @@ fn rv32_b1_ccs_happy_path_rv32a_word_amos_program() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x200);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -1850,7 +1873,7 @@ fn rv32_b1_ccs_happy_path_rv32a_word_amos_program() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -1908,7 +1931,7 @@ fn rv32_b1_ccs_chunk_size_2_padding_carries_state() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -1927,7 +1950,7 @@ fn rv32_b1_ccs_chunk_size_2_padding_carries_state() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -2036,7 +2059,7 @@ fn rv32_b1_ccs_branches_and_jal() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x200);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -2055,7 +2078,7 @@ fn rv32_b1_ccs_branches_and_jal() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
 
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
@@ -2175,7 +2198,7 @@ fn rv32_b1_ccs_rv32i_alu_ops() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -2194,7 +2217,7 @@ fn rv32_b1_ccs_rv32i_alu_ops() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -2330,7 +2353,7 @@ fn rv32_b1_ccs_branches_blt_bge_bltu_bgeu() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -2349,7 +2372,7 @@ fn rv32_b1_ccs_branches_blt_bge_bltu_bgeu() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -2414,7 +2437,7 @@ fn rv32_b1_ccs_jalr_masks_lsb() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -2433,7 +2456,7 @@ fn rv32_b1_ccs_jalr_masks_lsb() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -2480,13 +2503,29 @@ fn rv32_b1_ccs_rejects_step_after_halt_within_chunk() {
             opcode: w0,
             regs_before: regs.clone(),
             regs_after: regs.clone(),
-            twist_events: vec![TwistEvent {
-                twist_id: PROG_ID,
-                kind: TwistOpKind::Read,
-                addr: 0,
-                value: w0 as u64,
-                lane: None,
-            }],
+            twist_events: vec![
+                TwistEvent {
+                    twist_id: PROG_ID,
+                    kind: TwistOpKind::Read,
+                    addr: 0,
+                    value: w0 as u64,
+                    lane: None,
+                },
+                TwistEvent {
+                    twist_id: REG_ID,
+                    kind: TwistOpKind::Read,
+                    addr: 0,
+                    value: 0,
+                    lane: Some(0),
+                },
+                TwistEvent {
+                    twist_id: REG_ID,
+                    kind: TwistOpKind::Read,
+                    addr: 10,
+                    value: 0,
+                    lane: Some(1),
+                },
+            ],
             shout_events: Vec::new(),
             halted: true,
         },
@@ -2497,13 +2536,29 @@ fn rv32_b1_ccs_rejects_step_after_halt_within_chunk() {
             opcode: w1,
             regs_before: regs.clone(),
             regs_after: regs.clone(),
-            twist_events: vec![TwistEvent {
-                twist_id: PROG_ID,
-                kind: TwistOpKind::Read,
-                addr: 4,
-                value: w1 as u64,
-                lane: None,
-            }],
+            twist_events: vec![
+                TwistEvent {
+                    twist_id: PROG_ID,
+                    kind: TwistOpKind::Read,
+                    addr: 4,
+                    value: w1 as u64,
+                    lane: None,
+                },
+                TwistEvent {
+                    twist_id: REG_ID,
+                    kind: TwistOpKind::Read,
+                    addr: 0,
+                    value: 0,
+                    lane: Some(0),
+                },
+                TwistEvent {
+                    twist_id: REG_ID,
+                    kind: TwistOpKind::Read,
+                    addr: 10,
+                    value: 0,
+                    lane: Some(1),
+                },
+            ],
             shout_events: Vec::new(),
             halted: true,
         },
@@ -2512,7 +2567,7 @@ fn rv32_b1_ccs_rejects_step_after_halt_within_chunk() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -2531,7 +2586,7 @@ fn rv32_b1_ccs_rejects_step_after_halt_within_chunk() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -2587,7 +2642,7 @@ fn rv32_b1_ccs_rejects_tampered_pc_out() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x200);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -2606,7 +2661,7 @@ fn rv32_b1_ccs_rejects_tampered_pc_out() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -2667,7 +2722,7 @@ fn rv32_b1_ccs_rejects_non_boolean_prog_read_addr_bit() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -2686,7 +2741,7 @@ fn rv32_b1_ccs_rejects_non_boolean_prog_read_addr_bit() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -2773,7 +2828,7 @@ fn rv32_b1_ccs_rejects_non_boolean_shout_addr_bit() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -2792,7 +2847,7 @@ fn rv32_b1_ccs_rejects_non_boolean_shout_addr_bit() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -2820,15 +2875,12 @@ fn rv32_b1_ccs_rejects_non_boolean_shout_addr_bit() {
     let (mcs_inst, mut mcs_wit) = steps.remove(add_step_idx);
 
     let instr = decode_instruction(trace.steps[add_step_idx].opcode).expect("decode");
-    let (rs1_idx, rs2_idx) = match instr {
+    match instr {
         RiscvInstruction::RAlu {
-            op: RiscvOpcode::Add,
-            rs1,
-            rs2,
-            ..
-        } => (rs1 as usize, rs2 as usize),
+            op: RiscvOpcode::Add, ..
+        } => {}
         other => panic!("expected ADD at step {add_step_idx}, got {other:?}"),
-    };
+    }
 
     // Flip one ADD shout key bit to a non-boolean value, and adjust CPU columns so that
     // all *linear* bindings still hold. Bitness constraints should still reject.
@@ -2850,34 +2902,12 @@ fn rv32_b1_ccs_rejects_non_boolean_shout_addr_bit() {
         .expect("lookup_key must be in private witness");
     mcs_wit.w[lookup_key_w_idx] += delta;
 
-    // Update rs1_val and corresponding register snapshots to match the mutated even-bit packing.
+    // Update rs1_val to match the mutated even-bit packing.
     let rs1_val_w_idx = layout
         .rs1_val(0)
         .checked_sub(layout.m_in)
         .expect("rs1_val must be in private witness");
     mcs_wit.w[rs1_val_w_idx] += delta;
-
-    let reg1_in_w_idx = layout
-        .reg_in(rs1_idx, 0)
-        .checked_sub(layout.m_in)
-        .expect("reg_in must be in private witness");
-    let reg1_out_w_idx = layout
-        .reg_out(rs1_idx, 0)
-        .checked_sub(layout.m_in)
-        .expect("reg_out must be in private witness");
-    mcs_wit.w[reg1_in_w_idx] += delta;
-    mcs_wit.w[reg1_out_w_idx] += delta;
-
-    // Keep rs2 snapshots consistent as well (defensive sanity); no bit change expected.
-    let reg2_in_w_idx = layout
-        .reg_in(rs2_idx, 0)
-        .checked_sub(layout.m_in)
-        .expect("reg_in must be in private witness");
-    let reg2_out_w_idx = layout
-        .reg_out(rs2_idx, 0)
-        .checked_sub(layout.m_in)
-        .expect("reg_out must be in private witness");
-    mcs_wit.w[reg2_out_w_idx] = mcs_wit.w[reg2_in_w_idx];
 
     assert!(
         check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
@@ -2908,7 +2938,7 @@ fn rv32_b1_ccs_rejects_rom_value_mismatch() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -2927,7 +2957,7 @@ fn rv32_b1_ccs_rejects_rom_value_mismatch() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -2987,7 +3017,7 @@ fn rv32_b1_ccs_rejects_tampered_regfile() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -3006,7 +3036,7 @@ fn rv32_b1_ccs_rejects_tampered_regfile() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -3032,13 +3062,11 @@ fn rv32_b1_ccs_rejects_tampered_regfile() {
     let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     let (mcs_inst, mut mcs_wit) = steps.remove(0);
 
-    // Tamper with a non-rd register output (x2) without updating reg_in.
-    let r = 2usize;
-    let reg_out_w_idx = layout
-        .reg_out(r, 0)
-        .checked_sub(layout.m_in)
-        .expect("reg_out in witness");
-    mcs_wit.w[reg_out_w_idx] += F::ONE;
+    // Tamper with the regfile (REG_ID) lane0 read value without updating `rs1_val`.
+    let reg_lane0 = &layout.bus.twist_cols[layout.reg_twist_idx].lanes[0];
+    let rv_z = layout.bus.bus_cell(reg_lane0.rv, 0);
+    let rv_w_idx = rv_z.checked_sub(layout.m_in).expect("regfile rv in witness");
+    mcs_wit.w[rv_w_idx] += F::ONE;
 
     assert!(
         check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
@@ -3069,7 +3097,7 @@ fn rv32_b1_ccs_rejects_tampered_x0() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -3088,7 +3116,7 @@ fn rv32_b1_ccs_rejects_tampered_x0() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -3114,11 +3142,10 @@ fn rv32_b1_ccs_rejects_tampered_x0() {
     let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     let (mcs_inst, mut mcs_wit) = steps.remove(0);
 
-    let x0_out_w_idx = layout
-        .reg_out(0, 0)
-        .checked_sub(layout.m_in)
-        .expect("x0 out in witness");
-    mcs_wit.w[x0_out_w_idx] = F::ONE;
+    let reg_lane0 = &layout.bus.twist_cols[layout.reg_twist_idx].lanes[0];
+    let rv_z = layout.bus.bus_cell(reg_lane0.rv, 0);
+    let rv_w_idx = rv_z.checked_sub(layout.m_in).expect("regfile rv in witness");
+    mcs_wit.w[rv_w_idx] = F::ONE;
 
     assert!(
         check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).is_err(),
@@ -3155,7 +3182,7 @@ fn rv32_b1_ccs_binds_public_initial_and_final_state() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -3174,7 +3201,7 @@ fn rv32_b1_ccs_binds_public_initial_and_final_state() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -3206,17 +3233,9 @@ fn rv32_b1_ccs_binds_public_initial_and_final_state() {
 
     let first = trace.steps.first().expect("trace non-empty");
     assert_eq!(mcs_inst.x[layout.pc0], F::from_u64(first.pc_before));
-    for r in 0..32 {
-        assert_eq!(mcs_inst.x[layout.regs0_start + r], F::from_u64(first.regs_before[r]));
-    }
-    assert_eq!(mcs_inst.x[layout.regs0_start], F::ZERO);
 
     let last = trace.steps.last().expect("trace non-empty");
     assert_eq!(mcs_inst.x[layout.pc_final], F::from_u64(last.pc_after));
-    for r in 0..32 {
-        assert_eq!(mcs_inst.x[layout.regs_final_start + r], F::from_u64(last.regs_after[r]));
-    }
-    assert_eq!(mcs_inst.x[layout.regs_final_start], F::ZERO);
 
     let mut x_bad = mcs_inst.x.clone();
     x_bad[layout.pc0] += F::ONE;
@@ -3256,7 +3275,7 @@ fn rv32_b1_ccs_rejects_rom_addr_mismatch() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -3275,7 +3294,7 @@ fn rv32_b1_ccs_rejects_rom_addr_mismatch() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -3337,7 +3356,7 @@ fn rv32_b1_ccs_rejects_decode_bit_mismatch() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -3356,7 +3375,7 @@ fn rv32_b1_ccs_rejects_decode_bit_mismatch() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -3430,7 +3449,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -3449,7 +3468,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -3514,7 +3533,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_lw_eff_addr() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(4);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -3533,7 +3552,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_lw_eff_addr() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -3616,7 +3635,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_amoaddw() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(4);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -3635,7 +3654,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_amoaddw() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -3712,7 +3731,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_beq() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(4);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -3731,7 +3750,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_beq() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -3814,7 +3833,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_bne() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -3833,7 +3852,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_bne() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -3904,7 +3923,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_ori() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -3923,7 +3942,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_ori() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -3994,7 +4013,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_slli() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -4013,7 +4032,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_slli() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -4090,7 +4109,7 @@ fn rv32_b1_ccs_rejects_sltu_key_bit_mismatch_divu_remainder_check() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -4109,7 +4128,7 @@ fn rv32_b1_ccs_rejects_sltu_key_bit_mismatch_divu_remainder_check() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -4168,7 +4187,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_auipc_pc_operand() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -4187,7 +4206,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_auipc_pc_operand() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -4264,7 +4283,7 @@ fn rv32_b1_ccs_rejects_cheating_mul_hi_all_ones() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -4283,7 +4302,7 @@ fn rv32_b1_ccs_rejects_cheating_mul_hi_all_ones() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -4331,11 +4350,10 @@ fn rv32_b1_ccs_rejects_cheating_mul_hi_all_ones() {
         .expect("rd_write_val in witness");
     mcs_wit.w[rd_write_w] = F::from_u64(mul_lo);
 
-    let reg_out_z = layout.reg_out(3, 0);
-    let reg_out_w = reg_out_z
-        .checked_sub(layout.m_in)
-        .expect("reg_out in witness");
-    mcs_wit.w[reg_out_w] = F::from_u64(mul_lo);
+    let reg_lane0 = &layout.bus.twist_cols[layout.reg_twist_idx].lanes[0];
+    let wv_z = layout.bus.bus_cell(reg_lane0.wv, 0);
+    let wv_w = wv_z.checked_sub(layout.m_in).expect("regfile wv in witness");
+    mcs_wit.w[wv_w] = F::from_u64(mul_lo);
 
     // Make the u32 bit decompositions consistent with the cheated values.
     for bit in 0..32 {
@@ -4407,7 +4425,7 @@ fn rv32_b1_ccs_rejects_wrong_shout_table_activation() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -4426,7 +4444,7 @@ fn rv32_b1_ccs_rejects_wrong_shout_table_activation() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -4503,7 +4521,7 @@ fn rv32_b1_ccs_rejects_ram_read_value_mismatch() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x200);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -4522,7 +4540,7 @@ fn rv32_b1_ccs_rejects_ram_read_value_mismatch() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
@@ -4589,7 +4607,7 @@ fn rv32_b1_ccs_rejects_chunk_size_2_continuity_break() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x80);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -4608,7 +4626,7 @@ fn rv32_b1_ccs_rejects_chunk_size_2_continuity_break() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;

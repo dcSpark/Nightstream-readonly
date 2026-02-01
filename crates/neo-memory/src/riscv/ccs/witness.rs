@@ -5,7 +5,7 @@ use neo_vm_trace::{StepTrace, TwistOpKind};
 
 use crate::riscv::lookups::{
     decode_instruction, BranchCondition, RiscvInstruction, RiscvMemOp, RiscvOpcode, JOLT_CYCLE_TRACK_ECALL_NUM,
-    JOLT_PRINT_ECALL_NUM, PROG_ID, RAM_ID,
+    JOLT_PRINT_ECALL_NUM, PROG_ID, RAM_ID, REG_ID,
 };
 
 use super::constants::{
@@ -137,20 +137,22 @@ fn rv32_b1_chunk_to_witness_internal(
     let add_lane = &layout.bus.shout_cols[add_shout_idx].lanes[0];
     let prog_lane = &layout.bus.twist_cols[layout.prog_twist_idx].lanes[0];
     let ram_lane = &layout.bus.twist_cols[layout.ram_twist_idx].lanes[0];
+    let reg_inst = &layout.bus.twist_cols[layout.reg_twist_idx];
+    if reg_inst.lanes.len() < 2 {
+        return Err(format!(
+            "RV32 B1 witness: REG_ID twist instance must have >=2 lanes, got {}",
+            reg_inst.lanes.len()
+        ));
+    }
+    let reg_lane0 = &reg_inst.lanes[0];
+    let reg_lane1 = &reg_inst.lanes[1];
 
     // Carry the architectural state forward through padding rows.
     // Initialize from the chunk's start state so fully-inactive chunks are well-defined.
     let mut carried_pc = 0u64;
-    let mut carried_regs = [0u64; 32];
 
     if let Some(first) = chunk.first() {
         z[layout.pc0] = F::from_u64(first.pc_before);
-        for r in 0..32 {
-            z[layout.regs0_start + r] = F::from_u64(first.regs_before[r]);
-            carried_regs[r] = first.regs_before[r];
-        }
-        z[layout.regs0_start] = F::ZERO;
-        carried_regs[0] = 0;
         carried_pc = first.pc_before;
     }
 
@@ -160,18 +162,18 @@ fn rv32_b1_chunk_to_witness_internal(
 
             z[layout.pc_in(j)] = F::from_u64(carried_pc);
             z[layout.pc_out(j)] = F::from_u64(carried_pc);
-            for r in 0..32 {
-                z[layout.reg_in(r, j)] = F::from_u64(carried_regs[r]);
-                z[layout.reg_out(r, j)] = F::from_u64(carried_regs[r]);
-            }
+            z[layout.reg_rs2_addr(j)] = F::ZERO;
+            z[layout.reg_has_write(j)] = F::ZERO;
+            z[layout.rd_is_zero_01(j)] = F::ONE;
+            z[layout.rd_is_zero_012(j)] = F::ONE;
+            z[layout.rd_is_zero_0123(j)] = F::ONE;
+            z[layout.rd_is_zero(j)] = F::ONE;
             // Columns constrained independently of `is_active` must be set consistently on padding rows.
             for bit in 0..32 {
                 z[layout.rd_write_bit(bit, j)] = F::ZERO;
                 z[layout.mem_rv_bit(bit, j)] = F::ZERO;
                 z[layout.mul_lo_bit(bit, j)] = F::ZERO;
                 z[layout.mul_hi_bit(bit, j)] = F::ZERO;
-                z[layout.div_quot_bit(bit, j)] = F::ZERO;
-                z[layout.div_rem_bit(bit, j)] = F::ZERO;
                 z[layout.rs1_bit(bit, j)] = F::ZERO;
                 z[layout.rs2_bit(bit, j)] = F::ZERO;
             }
@@ -186,7 +188,7 @@ fn rv32_b1_chunk_to_witness_internal(
             }
             z[layout.rs2_is_zero(j)] = F::ONE;
             z[layout.rs2_nonzero(j)] = F::ZERO;
-            set_ecall_helpers(&mut z, layout, j, carried_regs[10], false)?;
+            set_ecall_helpers(&mut z, layout, j, /*a0_u64=*/ 0, /*is_halt=*/ false)?;
             continue;
         }
         let step = &chunk[j];
@@ -196,6 +198,10 @@ fn rv32_b1_chunk_to_witness_internal(
         let mut prog_read: Option<(u64, u64)> = None;
         let mut ram_read: Option<(u64, u64)> = None;
         let mut ram_write: Option<(u64, u64)> = None;
+        let mut reg_lane0_read: Option<(u64, u64)> = None;
+        let mut reg_lane0_write: Option<(u64, u64)> = None;
+        let mut reg_lane1_read: Option<(u64, u64)> = None;
+        let mut reg_lane1_write: Option<(u64, u64)> = None;
         for ev in &step.twist_events {
             if ev.twist_id == PROG_ID {
                 match ev.kind {
@@ -233,6 +239,50 @@ fn rv32_b1_chunk_to_witness_internal(
                         }
                     }
                 }
+            } else if ev.twist_id == REG_ID {
+                let lane = ev
+                    .lane
+                    .ok_or_else(|| format!("RV32 B1: missing lane for REG_ID event at pc={:#x}", step.pc_before))?;
+                match (lane, ev.kind) {
+                    (0, TwistOpKind::Read) => {
+                        if reg_lane0_read.replace((ev.addr, ev.value)).is_some() {
+                            return Err(format!(
+                                "RV32 B1: multiple REG_ID lane0 reads in one step at pc={:#x} (chunk j={j})",
+                                step.pc_before
+                            ));
+                        }
+                    }
+                    (0, TwistOpKind::Write) => {
+                        if reg_lane0_write.replace((ev.addr, ev.value)).is_some() {
+                            return Err(format!(
+                                "RV32 B1: multiple REG_ID lane0 writes in one step at pc={:#x} (chunk j={j})",
+                                step.pc_before
+                            ));
+                        }
+                    }
+                    (1, TwistOpKind::Read) => {
+                        if reg_lane1_read.replace((ev.addr, ev.value)).is_some() {
+                            return Err(format!(
+                                "RV32 B1: multiple REG_ID lane1 reads in one step at pc={:#x} (chunk j={j})",
+                                step.pc_before
+                            ));
+                        }
+                    }
+                    (1, TwistOpKind::Write) => {
+                        if reg_lane1_write.replace((ev.addr, ev.value)).is_some() {
+                            return Err(format!(
+                                "RV32 B1: multiple REG_ID lane1 writes in one step at pc={:#x} (chunk j={j})",
+                                step.pc_before
+                            ));
+                        }
+                    }
+                    (lane, _) => {
+                        return Err(format!(
+                            "RV32 B1: unexpected REG_ID lane={lane} at pc={:#x} (chunk j={j}); expected lane 0 or 1",
+                            step.pc_before
+                        ));
+                    }
+                }
             } else {
                 return Err(format!(
                     "RV32 B1: unexpected twist_id={} at pc={:#x} (chunk j={j})",
@@ -252,18 +302,18 @@ fn rv32_b1_chunk_to_witness_internal(
             z[layout.is_active(j)] = F::ZERO;
             z[layout.pc_in(j)] = F::from_u64(carried_pc);
             z[layout.pc_out(j)] = F::from_u64(carried_pc);
-            for r in 0..32 {
-                z[layout.reg_in(r, j)] = F::from_u64(carried_regs[r]);
-                z[layout.reg_out(r, j)] = F::from_u64(carried_regs[r]);
-            }
+            z[layout.reg_rs2_addr(j)] = F::ZERO;
+            z[layout.reg_has_write(j)] = F::ZERO;
+            z[layout.rd_is_zero_01(j)] = F::ONE;
+            z[layout.rd_is_zero_012(j)] = F::ONE;
+            z[layout.rd_is_zero_0123(j)] = F::ONE;
+            z[layout.rd_is_zero(j)] = F::ONE;
             // Columns constrained independently of `is_active` must be set consistently on padding rows.
             for bit in 0..32 {
                 z[layout.rd_write_bit(bit, j)] = F::ZERO;
                 z[layout.mem_rv_bit(bit, j)] = F::ZERO;
                 z[layout.mul_lo_bit(bit, j)] = F::ZERO;
                 z[layout.mul_hi_bit(bit, j)] = F::ZERO;
-                z[layout.div_quot_bit(bit, j)] = F::ZERO;
-                z[layout.div_rem_bit(bit, j)] = F::ZERO;
                 z[layout.rs1_bit(bit, j)] = F::ZERO;
                 z[layout.rs2_bit(bit, j)] = F::ZERO;
             }
@@ -278,7 +328,7 @@ fn rv32_b1_chunk_to_witness_internal(
             }
             z[layout.rs2_is_zero(j)] = F::ONE;
             z[layout.rs2_nonzero(j)] = F::ZERO;
-            set_ecall_helpers(&mut z, layout, j, carried_regs[10], false)?;
+            set_ecall_helpers(&mut z, layout, j, /*a0_u64=*/ 0, /*is_halt=*/ false)?;
             continue;
         }
 
@@ -286,15 +336,7 @@ fn rv32_b1_chunk_to_witness_internal(
         z[layout.pc_in(j)] = F::from_u64(step.pc_before);
         z[layout.pc_out(j)] = F::from_u64(step.pc_after);
 
-        // Registers.
-        for r in 0..32 {
-            z[layout.reg_in(r, j)] = F::from_u64(step.regs_before[r]);
-            z[layout.reg_out(r, j)] = F::from_u64(step.regs_after[r]);
-        }
-
         carried_pc = step.pc_after;
-        carried_regs.copy_from_slice(&step.regs_after);
-        carried_regs[0] = 0;
 
         // Instruction word: read from PROG_ID Twist event (commitment-bound source).
         let (prog_addr, prog_value) = prog_read.expect("checked prog_read is present");
@@ -642,16 +684,12 @@ fn rv32_b1_chunk_to_witness_internal(
         z[layout.is_jalr(j)] = if is_jalr { F::ONE } else { F::ZERO };
         z[layout.is_fence(j)] = if is_fence { F::ONE } else { F::ZERO };
         z[layout.is_halt(j)] = if is_halt { F::ONE } else { F::ZERO };
-        set_ecall_helpers(&mut z, layout, j, step.regs_before[10], is_halt)?;
 
-        // One-hot register selectors.
         let rs1_idx = rs1 as usize;
         let rs2_idx = rs2 as usize;
         let rd_idx = rd as usize;
-        z[layout.rs1_sel(rs1_idx, j)] = F::ONE;
-        z[layout.rs2_sel(rs2_idx, j)] = F::ONE;
 
-        // rd_sel: writes set rd_sel[rd] = 1, non-writes set rd_sel[0] = 1 (x0).
+        // Regfile-as-Twist glue columns.
         let writes_rd = is_add
             || is_sub
             || is_sll
@@ -693,21 +731,142 @@ fn rv32_b1_chunk_to_witness_internal(
             || is_auipc
             || is_jal
             || is_jalr;
-        if writes_rd {
-            z[layout.rd_sel(rd_idx, j)] = F::ONE;
-        } else {
-            z[layout.rd_sel(0, j)] = F::ONE;
-        }
+        let reg_has_write = writes_rd && rd_idx != 0;
+        z[layout.reg_has_write(j)] = if reg_has_write { F::ONE } else { F::ZERO };
+
+        let rs2_addr = if is_halt { 10u64 } else { rs2_idx as u64 };
+        z[layout.reg_rs2_addr(j)] = F::from_u64(rs2_addr);
+
+        // rd_is_zero_* chain from rd bits.
+        let rd_b7 = (rd as u64) & 1;
+        let rd_b8 = ((rd as u64) >> 1) & 1;
+        let rd_b9 = ((rd as u64) >> 2) & 1;
+        let rd_b10 = ((rd as u64) >> 3) & 1;
+        let rd_b11 = ((rd as u64) >> 4) & 1;
+        let rd_is_zero_01 = (1 - rd_b7) * (1 - rd_b8);
+        let rd_is_zero_012 = rd_is_zero_01 * (1 - rd_b9);
+        let rd_is_zero_0123 = rd_is_zero_012 * (1 - rd_b10);
+        let rd_is_zero = rd_is_zero_0123 * (1 - rd_b11);
+        z[layout.rd_is_zero_01(j)] = if rd_is_zero_01 == 1 { F::ONE } else { F::ZERO };
+        z[layout.rd_is_zero_012(j)] = if rd_is_zero_012 == 1 { F::ONE } else { F::ZERO };
+        z[layout.rd_is_zero_0123(j)] = if rd_is_zero_0123 == 1 { F::ONE } else { F::ZERO };
+        z[layout.rd_is_zero(j)] = if rd_is_zero == 1 { F::ONE } else { F::ZERO };
 
         // Selected operand values.
         let rs1_u32 = u32::try_from(step.regs_before[rs1_idx])
             .map_err(|_| format!("RV32 B1: rs1 value does not fit in u32 at pc={:#x}", step.pc_before))?;
-        let rs2_u32 = u32::try_from(step.regs_before[rs2_idx])
+        let rs2_read_idx = if is_halt { 10usize } else { rs2_idx };
+        let rs2_u32 = u32::try_from(step.regs_before[rs2_read_idx])
             .map_err(|_| format!("RV32 B1: rs2 value does not fit in u32 at pc={:#x}", step.pc_before))?;
         let rs1_u64 = rs1_u32 as u64;
         let rs2_u64 = rs2_u32 as u64;
         z[layout.rs1_val(j)] = F::from_u64(rs1_u64);
         z[layout.rs2_val(j)] = F::from_u64(rs2_u64);
+        set_ecall_helpers(&mut z, layout, j, /*a0_u64=*/ rs2_u64, is_halt)?;
+
+        // Regfile Twist events (REG_ID): validate and optionally write bus lanes.
+        if reg_lane1_write.is_some() {
+            return Err(format!(
+                "RV32 B1: unexpected REG_ID lane1 write at pc={:#x} (chunk j={j})",
+                step.pc_before
+            ));
+        }
+        let (rf0_ra, rf0_rv) = reg_lane0_read.ok_or_else(|| {
+            format!(
+                "RV32 B1: missing REG_ID lane0 read at pc={:#x} (chunk j={j})",
+                step.pc_before
+            )
+        })?;
+        let (rf1_ra, rf1_rv) = reg_lane1_read.ok_or_else(|| {
+            format!(
+                "RV32 B1: missing REG_ID lane1 read at pc={:#x} (chunk j={j})",
+                step.pc_before
+            )
+        })?;
+
+        if rf0_ra != rs1_idx as u64 {
+            return Err(format!(
+                "RV32 B1: REG_ID lane0 read addr mismatch at pc={:#x} (chunk j={j}): expected rs1_addr={:#x}, got {rf0_ra:#x}",
+                step.pc_before,
+                rs1_idx as u64
+            ));
+        }
+        if rf0_rv != rs1_u64 {
+            return Err(format!(
+                "RV32 B1: REG_ID lane0 read value mismatch at pc={:#x} (chunk j={j}): expected rs1_val={:#x}, got {rf0_rv:#x}",
+                step.pc_before, rs1_u64
+            ));
+        }
+
+        if rf1_ra != rs2_addr {
+            return Err(format!(
+                "RV32 B1: REG_ID lane1 read addr mismatch at pc={:#x} (chunk j={j}): expected rs2_addr={rs2_addr:#x}, got {rf1_ra:#x}",
+                step.pc_before
+            ));
+        }
+        if rf1_rv != rs2_u64 {
+            return Err(format!(
+                "RV32 B1: REG_ID lane1 read value mismatch at pc={:#x} (chunk j={j}): expected rs2_val={rs2_u64:#x}, got {rf1_rv:#x}",
+                step.pc_before
+            ));
+        }
+
+        let rf0_write = reg_lane0_write;
+        if reg_has_write != rf0_write.is_some() {
+            return Err(format!(
+                "RV32 B1: REG_ID lane0 write presence mismatch at pc={:#x} (chunk j={j}): reg_has_write={reg_has_write}, has_write_event={}",
+                step.pc_before,
+                rf0_write.is_some()
+            ));
+        }
+
+        if fill_bus {
+            // Lane 0 (rs1 read + optional rd write).
+            set_bus_cell(&mut z, layout, reg_lane0.has_read, j, F::ONE);
+            write_bus_u64_bits(
+                &mut z,
+                layout,
+                reg_lane0.ra_bits.start,
+                reg_lane0.ra_bits.end - reg_lane0.ra_bits.start,
+                j,
+                rf0_ra,
+            );
+            set_bus_cell(&mut z, layout, reg_lane0.rv, j, F::from_u64(rf0_rv));
+
+            set_bus_cell(
+                &mut z,
+                layout,
+                reg_lane0.has_write,
+                j,
+                if rf0_write.is_some() { F::ONE } else { F::ZERO },
+            );
+            if let Some((wa, wv)) = rf0_write {
+                write_bus_u64_bits(
+                    &mut z,
+                    layout,
+                    reg_lane0.wa_bits.start,
+                    reg_lane0.wa_bits.end - reg_lane0.wa_bits.start,
+                    j,
+                    wa,
+                );
+                set_bus_cell(&mut z, layout, reg_lane0.wv, j, F::from_u64(wv));
+            }
+            set_bus_cell(&mut z, layout, reg_lane0.inc, j, F::ZERO);
+
+            // Lane 1 (rs2/a0 read).
+            set_bus_cell(&mut z, layout, reg_lane1.has_read, j, F::ONE);
+            set_bus_cell(&mut z, layout, reg_lane1.has_write, j, F::ZERO);
+            write_bus_u64_bits(
+                &mut z,
+                layout,
+                reg_lane1.ra_bits.start,
+                reg_lane1.ra_bits.end - reg_lane1.ra_bits.start,
+                j,
+                rf1_ra,
+            );
+            set_bus_cell(&mut z, layout, reg_lane1.rv, j, F::from_u64(rf1_rv));
+            set_bus_cell(&mut z, layout, reg_lane1.inc, j, F::ZERO);
+        }
 
         // Helpers used by in-circuit RV32M constraints.
         let rs1_sign = (rs1_u32 >> 31) & 1;
@@ -1186,8 +1345,6 @@ fn rv32_b1_chunk_to_witness_internal(
         let mem_rv_u64 = z[layout.mem_rv(j)].as_canonical_u64();
         let mem_rv_u32 =
             u32::try_from(mem_rv_u64).map_err(|_| format!("RV32 B1: mem_rv does not fit in u32: {mem_rv_u64}"))?;
-        let div_quot_u32 = u32::try_from(div_quot).map_err(|_| "RV32 B1: div_quot overflow".to_string())?;
-        let div_rem_u32 = u32::try_from(div_rem).map_err(|_| "RV32 B1: div_rem overflow".to_string())?;
 
         for bit in 0..32 {
             z[layout.rd_write_bit(bit, j)] = if ((rd_write_u32 >> bit) & 1) == 1 {
@@ -1210,16 +1367,6 @@ fn rv32_b1_chunk_to_witness_internal(
             } else {
                 F::ZERO
             };
-            z[layout.div_quot_bit(bit, j)] = if ((div_quot_u32 >> bit) & 1) == 1 {
-                F::ONE
-            } else {
-                F::ZERO
-            };
-            z[layout.div_rem_bit(bit, j)] = if ((div_rem_u32 >> bit) & 1) == 1 {
-                F::ONE
-            } else {
-                F::ZERO
-            };
         }
         for bit in 0..2 {
             z[layout.mul_carry_bit(bit, j)] = if ((mul_carry >> bit) & 1) == 1 { F::ONE } else { F::ZERO };
@@ -1235,10 +1382,6 @@ fn rv32_b1_chunk_to_witness_internal(
     }
 
     z[layout.pc_final] = F::from_u64(carried_pc);
-    for r in 0..32 {
-        z[layout.regs_final_start + r] = F::from_u64(carried_regs[r]);
-    }
-    z[layout.regs_final_start] = F::ZERO;
 
     // Chunk-level halting state used for cross-chunk padding semantics.
     z[layout.halted_in] = F::ONE - z[layout.is_active(0)];

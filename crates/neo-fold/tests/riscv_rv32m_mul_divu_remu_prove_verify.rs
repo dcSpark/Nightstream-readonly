@@ -49,14 +49,12 @@ fn rv32_b1_prove_verify_mul_divu_remu() {
     let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
         .chunk_size(1)
         .max_steps(program.len())
+        .reg_output_claim(/*reg=*/ 3, /*expected=*/ F::from_u64(91))
+        .reg_output_claim(/*reg=*/ 4, /*expected=*/ F::from_u64(13))
+        .reg_output_claim(/*reg=*/ 5, /*expected=*/ F::from_u64(0))
         .prove()
         .expect("prove");
     run.verify().expect("verify");
-
-    let boundary = run.final_boundary_state().expect("final boundary state");
-    assert_eq!(boundary.regs_final[3], F::from_u64(91));
-    assert_eq!(boundary.regs_final[4], F::from_u64(13));
-    assert_eq!(boundary.regs_final[5], F::from_u64(0));
 }
 
 #[test]
@@ -99,14 +97,12 @@ fn rv32_b1_prove_verify_divu_remu_by_zero() {
     let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
         .chunk_size(1)
         .max_steps(program.len())
+        .reg_output_claim(/*reg=*/ 1, /*expected=*/ F::from_u64(dividend))
+        .reg_output_claim(/*reg=*/ 3, /*expected=*/ F::from_u64(u32::MAX as u64))
+        .reg_output_claim(/*reg=*/ 4, /*expected=*/ F::from_u64(dividend))
         .prove()
         .expect("prove");
     run.verify().expect("verify");
-
-    let boundary = run.final_boundary_state().expect("final boundary state");
-    assert_eq!(boundary.regs_final[1], F::from_u64(dividend));
-    assert_eq!(boundary.regs_final[3], F::from_u64(u32::MAX as u64));
-    assert_eq!(boundary.regs_final[4], F::from_u64(dividend));
 }
 
 #[test]
@@ -151,11 +147,9 @@ fn rv32_b1_prove_verify_div_rem_signed_auto_minimal_includes_sltu() {
     let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
         .chunk_size(1)
         .max_steps(program.len())
+        .reg_output_claim(/*reg=*/ 3, /*expected=*/ F::from_u64(0xffff_fffe)) // -2
+        .reg_output_claim(/*reg=*/ 4, /*expected=*/ F::from_u64(0xffff_ffff)) // -1
         .prove()
         .expect("prove");
     run.verify().expect("verify");
-
-    let boundary = run.final_boundary_state().expect("final boundary state");
-    assert_eq!(boundary.regs_final[3], F::from_u64(0xffff_fffe)); // -2
-    assert_eq!(boundary.regs_final[4], F::from_u64(0xffff_ffff)); // -1
 }

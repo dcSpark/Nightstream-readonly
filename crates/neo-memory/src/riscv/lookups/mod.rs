@@ -101,6 +101,11 @@ pub const RAM_ID: TwistId = TwistId(0);
 /// Canonical Twist instance id for the program ROM (B1 instruction fetch).
 pub const PROG_ID: TwistId = TwistId(1);
 
+/// Canonical Twist instance id for the architectural register file (x0..x31).
+///
+/// This is used by the RV32 B1 step circuit in "regfile-as-Twist" mode.
+pub const REG_ID: TwistId = TwistId(2);
+
 /// Jolt ECALL identifiers for marker/print syscalls.
 pub const JOLT_CYCLE_TRACK_ECALL_NUM: u32 = 0xC7C1E;
 pub const JOLT_PRINT_ECALL_NUM: u32 = 0x505249;

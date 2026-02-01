@@ -32,9 +32,6 @@ fn test_riscv_program_compiled_full_prove_verify() {
     run.verify().expect("verify");
     println!("Verify duration: {:?}", run.verify_duration().expect("verify duration"));
 
-    let end = run.final_boundary_state().expect("boundary");
-    assert_eq!(end.regs_final[4], F::from_u64(0x100c));
-
     assert!(
         matches!(
             run.verify_output_claim(

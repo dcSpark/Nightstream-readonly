@@ -70,6 +70,19 @@ fn pow2_ceil_k(min_k: usize) -> (usize, usize) {
     (k, d)
 }
 
+fn with_reg_layout(mut mem_layouts: HashMap<u32, PlainMemLayout>) -> HashMap<u32, PlainMemLayout> {
+    mem_layouts.insert(
+        neo_memory::riscv::lookups::REG_ID.0,
+        PlainMemLayout {
+            k: 32,
+            d: 5,
+            n_side: 2,
+            lanes: 2,
+        },
+    );
+    mem_layouts
+}
+
 fn add_only_table_specs(xlen: usize) -> HashMap<u32, LutTableSpec> {
     HashMap::from([(
         3u32,
@@ -129,7 +142,7 @@ fn test_riscv_program_full_prove_verify() {
     // Keep k small to reduce bus tail width and proof work.
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x200);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -148,7 +161,7 @@ fn test_riscv_program_full_prove_verify() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     // Build CCS + shared-bus CPU arithmetization.
@@ -335,7 +348,7 @@ fn test_riscv_statement_mem_init_mismatch_fails() {
     // Keep k small to reduce bus tail width and proof work.
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x40);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -354,7 +367,7 @@ fn test_riscv_statement_mem_init_mismatch_fails() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     // Keep the Shout bus lean: this program uses no Shout lookups, but include ADD to keep the bus schema stable.
@@ -511,7 +524,7 @@ fn perf_rv32_b1_chunk_size_sweep() {
     // Keep k small to reduce bus tail width and proof work.
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x40);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -530,7 +543,7 @@ fn perf_rv32_b1_chunk_size_sweep() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     fn table_specs_from_ids(ids: &[u32], xlen: usize) -> HashMap<u32, LutTableSpec> {
@@ -696,7 +709,7 @@ fn test_riscv_program_chunk_size_equivalence() {
     // Keep k small to reduce bus tail width and proof work.
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x40);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -715,7 +728,7 @@ fn test_riscv_program_chunk_size_equivalence() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     // Keep the Shout bus lean: this program only needs ADD (for ADDI and effective address calculation).
@@ -850,15 +863,10 @@ fn test_riscv_program_chunk_size_equivalence() {
     let start_1 = extract_boundary_state(&layout_1, &steps_1[0].mcs_inst.x).expect("boundary");
     let start_2 = extract_boundary_state(&layout_2, &steps_2[0].mcs_inst.x).expect("boundary");
     assert_eq!(start_1.pc0, start_2.pc0, "pc0 must be chunk-size invariant");
-    assert_eq!(start_1.regs0, start_2.regs0, "regs0 must be chunk-size invariant");
 
     let end_1 = extract_boundary_state(&layout_1, &steps_1.last().expect("non-empty").mcs_inst.x).expect("boundary");
     let end_2 = extract_boundary_state(&layout_2, &steps_2.last().expect("non-empty").mcs_inst.x).expect("boundary");
     assert_eq!(end_1.pc_final, end_2.pc_final, "pc_final must be chunk-size invariant");
-    assert_eq!(
-        end_1.regs_final, end_2.regs_final,
-        "regs_final must be chunk-size invariant"
-    );
 
     // Stronger equivalence: each chunk boundary in chunk_size=2 corresponds to the same boundary
     // after the same number of steps in chunk_size=1.
@@ -875,11 +883,9 @@ fn test_riscv_program_chunk_size_equivalence() {
         let st_1e = extract_boundary_state(&layout_1, &steps_1[e].mcs_inst.x).expect("boundary");
 
         assert_eq!(st_k.pc0, st_1s.pc0, "pc0 mismatch at chunk {c}");
-        assert_eq!(st_k.regs0, st_1s.regs0, "regs0 mismatch at chunk {c}");
         assert_eq!(st_k.halted_in, st_1s.halted_in, "halted_in mismatch at chunk {c}");
 
         assert_eq!(st_k.pc_final, st_1e.pc_final, "pc_final mismatch at chunk {c}");
-        assert_eq!(st_k.regs_final, st_1e.regs_final, "regs_final mismatch at chunk {c}");
         assert_eq!(st_k.halted_out, st_1e.halted_out, "halted_out mismatch at chunk {c}");
     }
 }
@@ -924,7 +930,7 @@ fn test_riscv_program_rv32m_full_prove_verify() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x40);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -943,7 +949,7 @@ fn test_riscv_program_rv32m_full_prove_verify() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     // Minimal table set: ADD (for ADD/ADDI) + SLTU (for signed DIV/REM remainder-bound check when divisor != 0).

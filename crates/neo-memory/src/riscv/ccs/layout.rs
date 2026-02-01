@@ -1,8 +1,8 @@
 use std::collections::HashMap;
 
-use crate::cpu::bus_layout::{build_bus_layout_for_instances, BusLayout};
+use crate::cpu::bus_layout::BusLayout;
 use crate::plain::PlainMemLayout;
-use crate::riscv::lookups::{PROG_ID, RAM_ID};
+use crate::riscv::lookups::{PROG_ID, RAM_ID, REG_ID};
 
 use super::config::{derive_mem_ids_and_ell_addrs, derive_shout_ids_and_ell_addrs};
 
@@ -15,19 +15,16 @@ pub struct Rv32B1Layout {
     pub const_one: usize,
     // Public I/O (single values per chunk).
     pub pc0: usize,
-    pub regs0_start: usize, // 32 cols
     pub pc_final: usize,
-    pub regs_final_start: usize, // 32 cols
     pub halted_in: usize,
     pub halted_out: usize,
     pub is_active: usize,
+    /// A dedicated all-zero CPU column (used to safely disable bus lanes).
+    pub zero: usize,
 
     pub pc_in: usize,
     pub pc_out: usize,
     pub instr_word: usize,
-
-    pub regs_in_start: usize,
-    pub regs_out_start: usize,
 
     pub instr_bits_start: usize, // 32 bits
 
@@ -109,10 +106,6 @@ pub struct Rv32B1Layout {
     pub br_taken: usize,
     pub br_not_taken: usize,
 
-    pub rs1_sel_start: usize, // 32
-    pub rs2_sel_start: usize, // 32
-    pub rd_sel_start: usize,  // 32
-
     pub rs1_val: usize,
     pub rs2_val: usize,
 
@@ -168,8 +161,6 @@ pub struct Rv32B1Layout {
     pub div_rem_carry: usize,
     pub div_prod: usize,
     pub div_divisor: usize,
-    pub div_quot_bits_start: usize, // 32
-    pub div_rem_bits_start: usize,  // 32
     pub rs2_is_zero: usize,
     pub rs2_nonzero: usize,
     pub is_divu_or_remu: usize,
@@ -191,11 +182,20 @@ pub struct Rv32B1Layout {
     pub ecall_halts: usize,
     pub halt_effective: usize,
 
+    // Regfile-as-Twist glue.
+    pub reg_has_write: usize,
+    pub reg_rs2_addr: usize,
+    pub rd_is_zero_01: usize,
+    pub rd_is_zero_012: usize,
+    pub rd_is_zero_0123: usize,
+    pub rd_is_zero: usize,
+
     pub bus: BusLayout,
     pub mem_ids: Vec<u32>,
     pub table_ids: Vec<u32>,
     pub ram_twist_idx: usize,
     pub prog_twist_idx: usize,
+    pub reg_twist_idx: usize,
 }
 
 impl Rv32B1Layout {
@@ -225,14 +225,9 @@ impl Rv32B1Layout {
         self.cpu_cell(self.instr_word, j)
     }
 
-    pub fn reg_in(&self, r: usize, j: usize) -> usize {
-        assert!(r < 32);
-        self.regs_in_start + r * self.chunk_size + j
-    }
-
-    pub fn reg_out(&self, r: usize, j: usize) -> usize {
-        assert!(r < 32);
-        self.regs_out_start + r * self.chunk_size + j
+    #[inline]
+    pub fn zero(&self, j: usize) -> usize {
+        self.cpu_cell(self.zero, j)
     }
 
     pub fn instr_bit(&self, i: usize, j: usize) -> usize {
@@ -240,19 +235,34 @@ impl Rv32B1Layout {
         self.instr_bits_start + i * self.chunk_size + j
     }
 
-    pub fn rs1_sel(&self, r: usize, j: usize) -> usize {
-        assert!(r < 32);
-        self.rs1_sel_start + r * self.chunk_size + j
+    #[inline]
+    pub fn reg_has_write(&self, j: usize) -> usize {
+        self.cpu_cell(self.reg_has_write, j)
     }
 
-    pub fn rs2_sel(&self, r: usize, j: usize) -> usize {
-        assert!(r < 32);
-        self.rs2_sel_start + r * self.chunk_size + j
+    #[inline]
+    pub fn reg_rs2_addr(&self, j: usize) -> usize {
+        self.cpu_cell(self.reg_rs2_addr, j)
     }
 
-    pub fn rd_sel(&self, r: usize, j: usize) -> usize {
-        assert!(r < 32);
-        self.rd_sel_start + r * self.chunk_size + j
+    #[inline]
+    pub fn rd_is_zero(&self, j: usize) -> usize {
+        self.cpu_cell(self.rd_is_zero, j)
+    }
+
+    #[inline]
+    pub fn rd_is_zero_01(&self, j: usize) -> usize {
+        self.cpu_cell(self.rd_is_zero_01, j)
+    }
+
+    #[inline]
+    pub fn rd_is_zero_012(&self, j: usize) -> usize {
+        self.cpu_cell(self.rd_is_zero_012, j)
+    }
+
+    #[inline]
+    pub fn rd_is_zero_0123(&self, j: usize) -> usize {
+        self.cpu_cell(self.rd_is_zero_0123, j)
     }
 
     #[inline]
@@ -409,16 +419,6 @@ impl Rv32B1Layout {
     #[inline]
     pub fn div_divisor(&self, j: usize) -> usize {
         self.cpu_cell(self.div_divisor, j)
-    }
-
-    pub fn div_quot_bit(&self, bit: usize, j: usize) -> usize {
-        assert!(bit < 32);
-        self.div_quot_bits_start + bit * self.chunk_size + j
-    }
-
-    pub fn div_rem_bit(&self, bit: usize, j: usize) -> usize {
-        assert!(bit < 32);
-        self.div_rem_bits_start + bit * self.chunk_size + j
     }
 
     pub fn rs1_bit(&self, bit: usize, j: usize) -> usize {
@@ -953,13 +953,11 @@ pub(super) fn build_layout_with_m(
     }
     let const_one = 0usize;
 
-    // Public inputs: initial and final architectural state.
-    // Layout: [const_one, pc0, regs0[32], pc_final, regs_final[32], halted_in, halted_out]
+    // Public inputs: boundary state for chunk chaining.
+    // Layout: [const_one, pc0, pc_final, halted_in, halted_out]
     let pc0 = 1usize;
-    let regs0_start = pc0 + 1;
-    let pc_final = regs0_start + 32;
-    let regs_final_start = pc_final + 1;
-    let halted_in = regs_final_start + 32;
+    let pc_final = pc0 + 1;
+    let halted_in = pc_final + 1;
     let halted_out = halted_in + 1;
     let m_in = halted_out + 1;
 
@@ -977,12 +975,18 @@ pub(super) fn build_layout_with_m(
     };
 
     let is_active = alloc_scalar(&mut col);
+    let zero = alloc_scalar(&mut col);
     let pc_in = alloc_scalar(&mut col);
     let pc_out = alloc_scalar(&mut col);
     let instr_word = alloc_scalar(&mut col);
 
-    let regs_in_start = alloc_array(&mut col, 32);
-    let regs_out_start = alloc_array(&mut col, 32);
+    // Regfile-as-Twist glue columns.
+    let reg_has_write = alloc_scalar(&mut col);
+    let reg_rs2_addr = alloc_scalar(&mut col);
+    let rd_is_zero_01 = alloc_scalar(&mut col);
+    let rd_is_zero_012 = alloc_scalar(&mut col);
+    let rd_is_zero_0123 = alloc_scalar(&mut col);
+    let rd_is_zero = alloc_scalar(&mut col);
 
     let instr_bits_start = alloc_array(&mut col, 32);
 
@@ -1060,10 +1064,6 @@ pub(super) fn build_layout_with_m(
     let br_taken = alloc_scalar(&mut col);
     let br_not_taken = alloc_scalar(&mut col);
 
-    let rs1_sel_start = alloc_array(&mut col, 32);
-    let rs2_sel_start = alloc_array(&mut col, 32);
-    let rd_sel_start = alloc_array(&mut col, 32);
-
     let rs1_val = alloc_scalar(&mut col);
     let rs2_val = alloc_scalar(&mut col);
 
@@ -1115,8 +1115,6 @@ pub(super) fn build_layout_with_m(
     let div_rem_carry = alloc_scalar(&mut col);
     let div_prod = alloc_scalar(&mut col);
     let div_divisor = alloc_scalar(&mut col);
-    let div_quot_bits_start = alloc_array(&mut col, 32);
-    let div_rem_bits_start = alloc_array(&mut col, 32);
     let rs2_is_zero = alloc_scalar(&mut col);
     let rs2_nonzero = alloc_scalar(&mut col);
     let is_divu_or_remu = alloc_scalar(&mut col);
@@ -1142,7 +1140,24 @@ pub(super) fn build_layout_with_m(
     let (mem_ids, twist_ell_addrs) = derive_mem_ids_and_ell_addrs(mem_layouts)?;
     let (table_ids, shout_ell_addrs) = derive_shout_ids_and_ell_addrs(shout_table_ids)?;
 
-    let bus = build_bus_layout_for_instances(m, m_in, chunk_size, shout_ell_addrs, twist_ell_addrs.clone())?;
+    let twist_ell_addrs_and_lanes: Vec<(usize, usize)> = mem_ids
+        .iter()
+        .zip(twist_ell_addrs.iter())
+        .map(|(mem_id, ell_addr)| {
+            let lanes = mem_layouts
+                .get(mem_id)
+                .map(|l| l.lanes.max(1))
+                .unwrap_or(1);
+            (*ell_addr, lanes)
+        })
+        .collect();
+    let bus = crate::cpu::bus_layout::build_bus_layout_for_instances_with_twist_lanes(
+        m,
+        m_in,
+        chunk_size,
+        shout_ell_addrs,
+        twist_ell_addrs_and_lanes,
+    )?;
     if cpu_cols_used > bus.bus_base {
         return Err(format!(
             "RV32 B1 layout: CPU columns end at {cpu_cols_used}, but bus_base={} (need more padding columns before bus tail)",
@@ -1153,6 +1168,7 @@ pub(super) fn build_layout_with_m(
     // Determine which twist instance index corresponds to RAM/PROG in the sorted mem_ids order.
     let ram_id = RAM_ID.0;
     let prog_id = PROG_ID.0;
+    let reg_id = REG_ID.0;
     let ram_twist_idx = mem_ids
         .iter()
         .position(|&id| id == ram_id)
@@ -1161,6 +1177,10 @@ pub(super) fn build_layout_with_m(
         .iter()
         .position(|&id| id == prog_id)
         .ok_or_else(|| format!("mem_layouts missing PROG_ID={prog_id}"))?;
+    let reg_twist_idx = mem_ids
+        .iter()
+        .position(|&id| id == reg_id)
+        .ok_or_else(|| format!("mem_layouts missing REG_ID={reg_id}"))?;
 
     Ok(Rv32B1Layout {
         m_in,
@@ -1168,17 +1188,14 @@ pub(super) fn build_layout_with_m(
         chunk_size,
         const_one,
         pc0,
-        regs0_start,
         pc_final,
-        regs_final_start,
         halted_in,
         halted_out,
         is_active,
+        zero,
         pc_in,
         pc_out,
         instr_word,
-        regs_in_start,
-        regs_out_start,
         instr_bits_start,
         opcode,
         funct3,
@@ -1248,9 +1265,6 @@ pub(super) fn build_layout_with_m(
         is_halt,
         br_taken,
         br_not_taken,
-        rs1_sel_start,
-        rs2_sel_start,
-        rd_sel_start,
         rs1_val,
         rs2_val,
         alu_out,
@@ -1296,8 +1310,6 @@ pub(super) fn build_layout_with_m(
         div_rem_carry,
         div_prod,
         div_divisor,
-        div_quot_bits_start,
-        div_rem_bits_start,
         rs2_is_zero,
         rs2_nonzero,
         is_divu_or_remu,
@@ -1317,10 +1329,17 @@ pub(super) fn build_layout_with_m(
         ecall_is_print,
         ecall_halts,
         halt_effective,
+        reg_has_write,
+        reg_rs2_addr,
+        rd_is_zero_01,
+        rd_is_zero_012,
+        rd_is_zero_0123,
+        rd_is_zero,
         bus,
         mem_ids,
         table_ids,
         ram_twist_idx,
         prog_twist_idx,
+        reg_twist_idx,
     })
 }

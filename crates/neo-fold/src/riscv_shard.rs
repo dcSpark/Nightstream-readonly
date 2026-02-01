@@ -271,7 +271,14 @@ fn all_shout_opcodes() -> HashSet<RiscvOpcode> {
 /// - chooses parameters + Ajtai committer automatically,
 /// - infers the minimal Shout table set from the program (unless overridden),
 /// - enforces RV32 B1 step linking, and
-/// - (optionally) proves output binding against RAM.
+/// - (optionally) proves output binding against a selected Twist instance (default: RAM).
+#[derive(Clone, Copy, Debug, Default)]
+enum OutputTarget {
+    #[default]
+    Ram,
+    Reg,
+}
+
 #[derive(Clone, Debug)]
 pub struct Rv32B1 {
     program_base: u64,
@@ -284,6 +291,7 @@ pub struct Rv32B1 {
     shout_auto_minimal: bool,
     shout_ops: Option<HashSet<RiscvOpcode>>,
     output_claims: ProgramIO<F>,
+    output_target: OutputTarget,
     ram_init: HashMap<u64, u64>,
 }
 
@@ -307,6 +315,7 @@ impl Rv32B1 {
             shout_auto_minimal: true,
             shout_ops: None,
             output_claims: ProgramIO::new(),
+            output_target: OutputTarget::Ram,
             ram_init: HashMap::new(),
         }
     }
@@ -360,11 +369,31 @@ impl Rv32B1 {
 
     pub fn output(mut self, output_addr: u64, expected_output: F) -> Self {
         self.output_claims = ProgramIO::new().with_output(output_addr, expected_output);
+        self.output_target = OutputTarget::Ram;
         self
     }
 
     pub fn output_claim(mut self, addr: u64, value: F) -> Self {
+        if !matches!(self.output_target, OutputTarget::Ram) {
+            self.output_target = OutputTarget::Ram;
+            self.output_claims = ProgramIO::new();
+        }
         self.output_claims = self.output_claims.with_output(addr, value);
+        self
+    }
+
+    pub fn reg_output(mut self, reg: u64, expected: F) -> Self {
+        self.output_claims = ProgramIO::new().with_output(reg, expected);
+        self.output_target = OutputTarget::Reg;
+        self
+    }
+
+    pub fn reg_output_claim(mut self, reg: u64, expected: F) -> Self {
+        if !matches!(self.output_target, OutputTarget::Reg) {
+            self.output_target = OutputTarget::Reg;
+            self.output_claims = ProgramIO::new();
+        }
+        self.output_claims = self.output_claims.with_output(reg, expected);
         self
     }
 
@@ -450,6 +479,15 @@ impl Rv32B1 {
                     d: d_ram,
                     n_side: 2,
                     lanes: 1,
+                },
+            ),
+            (
+                neo_memory::riscv::lookups::REG_ID.0,
+                PlainMemLayout {
+                    k: 32,
+                    d: 5,
+                    n_side: 2,
+                    lanes: 2,
                 },
             ),
             (PROG_ID.0, prog_layout),
@@ -546,11 +584,37 @@ impl Rv32B1 {
 
         // Prove phase (timed)
         let prove_start = time_now();
-        let proof = if self.output_claims.is_empty() {
-            session.fold_and_prove(&ccs)?
+        let (proof, output_binding_cfg) = if self.output_claims.is_empty() {
+            (session.fold_and_prove(&ccs)?, None)
         } else {
-            let ob_cfg = OutputBindingConfig::new(d_ram, self.output_claims.clone());
-            session.fold_and_prove_with_output_binding_auto_simple(&ccs, &ob_cfg)?
+            let out_mem_id = match self.output_target {
+                OutputTarget::Ram => neo_memory::riscv::lookups::RAM_ID.0,
+                OutputTarget::Reg => neo_memory::riscv::lookups::REG_ID.0,
+            };
+            let out_layout = mem_layouts.get(&out_mem_id).ok_or_else(|| {
+                PiCcsError::InvalidInput(format!(
+                    "output binding: missing PlainMemLayout for mem_id={out_mem_id}"
+                ))
+            })?;
+            let expected_k = 1usize
+                .checked_shl(out_layout.d as u32)
+                .ok_or_else(|| PiCcsError::InvalidInput("output binding: 2^d overflow".into()))?;
+            if out_layout.k != expected_k {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "output binding: mem_id={out_mem_id} has k={}, but expected 2^d={} (d={})",
+                    out_layout.k, expected_k, out_layout.d
+                )));
+            }
+            let mut mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
+            mem_ids.sort_unstable();
+            let mem_idx = mem_ids
+                .iter()
+                .position(|&id| id == out_mem_id)
+                .ok_or_else(|| PiCcsError::InvalidInput("output binding: mem_id not in mem_layouts".into()))?;
+
+            let ob_cfg = OutputBindingConfig::new(out_layout.d, self.output_claims.clone()).with_mem_idx(mem_idx);
+            let proof = session.fold_and_prove_with_output_binding_auto_simple(&ccs, &ob_cfg)?;
+            (proof, Some(ob_cfg))
         };
         let prove_duration = elapsed_duration(prove_start);
 
@@ -561,8 +625,7 @@ impl Rv32B1 {
             layout,
             mem_layouts,
             initial_mem,
-            ram_num_bits: d_ram,
-            output_claims: self.output_claims,
+            output_binding_cfg,
             prove_duration,
             verify_duration: None,
         })
@@ -576,8 +639,7 @@ pub struct Rv32B1Run {
     layout: Rv32B1Layout,
     mem_layouts: HashMap<u32, PlainMemLayout>,
     initial_mem: HashMap<(u32, u64), F>,
-    ram_num_bits: usize,
-    output_claims: ProgramIO<F>,
+    output_binding_cfg: Option<OutputBindingConfig>,
     prove_duration: Duration,
     verify_duration: Option<Duration>,
 }
@@ -593,12 +655,11 @@ impl Rv32B1Run {
 
     pub fn verify(&mut self) -> Result<(), PiCcsError> {
         let verify_start = time_now();
-        let ok = if self.output_claims.is_empty() {
-            self.session.verify_collected(&self.ccs, &self.proof)?
-        } else {
-            let ob_cfg = OutputBindingConfig::new(self.ram_num_bits, self.output_claims.clone());
-            self.session
-                .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, &ob_cfg)?
+        let ok = match &self.output_binding_cfg {
+            None => self.session.verify_collected(&self.ccs, &self.proof)?,
+            Some(cfg) => self
+                .session
+                .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, cfg)?,
         };
         self.verify_duration = Some(elapsed_duration(verify_start));
 
@@ -633,25 +694,33 @@ impl Rv32B1Run {
     }
 
     pub fn verify_output_claim(&self, output_addr: u64, expected_output: F) -> Result<bool, PiCcsError> {
-        let ob_cfg = simple_output_config(self.ram_num_bits, output_addr, expected_output);
+        let cfg = self
+            .output_binding_cfg
+            .as_ref()
+            .ok_or_else(|| PiCcsError::InvalidInput("no output binding configured".into()))?;
+        let ob_cfg = simple_output_config(cfg.num_bits, output_addr, expected_output).with_mem_idx(cfg.mem_idx);
         self.session
             .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, &ob_cfg)
     }
 
     pub fn verify_default_output_claim(&self) -> Result<bool, PiCcsError> {
-        if self.output_claims.is_empty() {
-            return Err(PiCcsError::InvalidInput("no output claim configured".into()));
-        };
-        let ob_cfg = OutputBindingConfig::new(self.ram_num_bits, self.output_claims.clone());
+        let ob_cfg = self
+            .output_binding_cfg
+            .as_ref()
+            .ok_or_else(|| PiCcsError::InvalidInput("no output binding configured".into()))?;
         self.session
-            .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, &ob_cfg)
+            .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, ob_cfg)
     }
 
     pub fn verify_output_claims(&self, output_claims: ProgramIO<F>) -> Result<bool, PiCcsError> {
+        let cfg = self
+            .output_binding_cfg
+            .as_ref()
+            .ok_or_else(|| PiCcsError::InvalidInput("no output binding configured".into()))?;
         if output_claims.is_empty() {
             return Err(PiCcsError::InvalidInput("output_claims must be non-empty".into()));
         }
-        let ob_cfg = OutputBindingConfig::new(self.ram_num_bits, output_claims);
+        let ob_cfg = OutputBindingConfig::new(cfg.num_bits, output_claims).with_mem_idx(cfg.mem_idx);
         self.session
             .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, &ob_cfg)
     }
