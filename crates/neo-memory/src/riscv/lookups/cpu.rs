@@ -5,7 +5,6 @@ use super::decode::decode_instruction;
 use super::encode::encode_instruction;
 use super::isa::{BranchCondition, RiscvInstruction, RiscvMemOp, RiscvOpcode};
 use super::tables::RiscvShoutTables;
-use super::{JOLT_CYCLE_TRACK_ECALL_NUM, JOLT_PRINT_ECALL_NUM};
 
 /// A RISC-V CPU that can be traced using Neo's VmCpu trait.
 ///
@@ -84,10 +83,8 @@ impl RiscvCpu {
         self.program.get(index as usize)
     }
 
-    fn handle_ecall(&mut self, call_id: u32) {
-        if call_id != JOLT_CYCLE_TRACK_ECALL_NUM && call_id != JOLT_PRINT_ECALL_NUM {
-            self.halted = true;
-        }
+    fn handle_ecall(&mut self) {
+        self.halted = true;
     }
 
     fn write_reg<T: Twist<u64, u64>>(&mut self, twist: &mut T, reg: u8, value: u64) {
@@ -165,13 +162,12 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
         //
         // Lane assignment (RV32 B1 convention):
         // - lane 0: read rs1_field
-        // - lane 1: read rs2_field, except on HALT where we read a0 (x10) to support ECALL markers
+        // - lane 1: read rs2_field
         // --------------------------------------------------------------------
         let reg = super::REG_ID;
         let rs1_field = ((instr_word_u32 >> 15) & 0x1f) as u64;
         let rs2_field = ((instr_word_u32 >> 20) & 0x1f) as u64;
-        let is_halt = matches!(instr, RiscvInstruction::Halt);
-        let rs2_addr = if is_halt { 10u64 } else { rs2_field };
+        let rs2_addr = rs2_field;
 
         let rs1_val = self.mask_value(twist.load_lane(reg, rs1_field, /*lane=*/ 0));
         let rs2_val = self.mask_value(twist.load_lane(reg, rs2_addr, /*lane=*/ 1));
@@ -192,7 +188,8 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
         match instr {
             RiscvInstruction::RAlu { op, rd, rs1: _, rs2: _ } => {
                 match op {
-                    // For RV32 B1, prove all M ops in-circuit (avoid implicit Shout tables).
+                    // RV32 B1 does not use Shout tables for RV32M semantics.
+                    // (They are checked by the RV32M sidecar CCS; Shout is only used for the remainder-bound SLTU check.)
                     RiscvOpcode::Mul
                     | RiscvOpcode::Mulh
                     | RiscvOpcode::Mulhu
@@ -432,8 +429,8 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
             }
 
             RiscvInstruction::Halt => {
-                // ECALL trap semantics (Jolt-style): no architectural effects, halt unless it's a known marker/print call.
-                self.handle_ecall(rs2_val as u32);
+                // ECALL trap semantics: halt.
+                self.handle_ecall();
             }
 
             RiscvInstruction::Nop => {}
@@ -590,7 +587,7 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
             // === System Instructions ===
             RiscvInstruction::Ecall => {
                 // ECALL - environment call (syscall).
-                self.handle_ecall(self.get_reg(10) as u32);
+                self.handle_ecall();
             }
 
             RiscvInstruction::Ebreak => {

@@ -480,9 +480,24 @@ fn required_bus_binding_cols_for_layout(layout: &BusLayout) -> Vec<BusColLabel> 
         .iter()
         .flat_map(|inst| inst.lanes.iter().map(|t| t.inc))
         .collect();
+
+    // Shout key `addr_bits` are often constrained outside the *main* CPU CCS:
+    // - by a decode/semantics sidecar CCS, and/or
+    // - by VM-specific constraints that live outside the shared-bus binding gadget.
+    //
+    // The Route-A Shout argument already constrains `(addr_bits, val)` internally. The critical CPU→bus
+    // linkage requirement for Route-A is that the CPU CCS binds `has_lookup` and `val` outside padding
+    // rows; requiring `addr_bits` outside padding rows would force CPUs to materialize a packed 64-bit
+    // key scalar, which can violate Neo's Ajtai encoding bounds (d=54 with balanced base-b digits).
+    let shout_addr_cols: HashSet<usize> = layout
+        .shout_cols
+        .iter()
+        .flat_map(|inst| inst.lanes.iter().flat_map(|s| s.addr_bits.clone()))
+        .collect();
     required_bus_cols_for_layout(layout)
         .into_iter()
         .filter(|c| !inc_cols.contains(&c.col_id))
+        .filter(|c| !shout_addr_cols.contains(&c.col_id))
         .collect()
 }
 

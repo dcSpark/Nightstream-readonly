@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use neo_memory::plain::PlainMemLayout;
-use neo_memory::riscv::ccs::build_rv32_b1_step_ccs;
+use neo_memory::riscv::ccs::{build_rv32_b1_decode_sidecar_ccs, build_rv32_b1_step_ccs};
 use neo_memory::riscv::lookups::{
     encode_program, RiscvInstruction, RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID, REG_ID,
 };
@@ -51,7 +51,7 @@ fn nightstream_single_addi_constraint_counts() {
     let shout = RiscvShoutTables::new(/*xlen=*/ 32);
     let shout_table_ids = vec![shout.opcode_to_id(RiscvOpcode::Add).0];
 
-    let (ccs, _layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, /*chunk_size=*/ 1)
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, /*chunk_size=*/ 1)
         .expect("build_rv32_b1_step_ccs");
 
     let nightstream_constraints = ccs.n;
@@ -59,7 +59,14 @@ fn nightstream_single_addi_constraint_counts() {
     let nightstream_constraints_p2 = nightstream_constraints.next_power_of_two();
     let nightstream_witness_cols_p2 = nightstream_witness_cols.next_power_of_two();
 
+    let decode_ccs = build_rv32_b1_decode_sidecar_ccs(&layout, &mem_layouts).expect("build_rv32_b1_decode_sidecar_ccs");
+    let decode_constraints = decode_ccs.n;
+    let decode_witness_cols = decode_ccs.m;
+    let decode_constraints_p2 = decode_constraints.next_power_of_two();
+    let decode_witness_cols_p2 = decode_witness_cols.next_power_of_two();
+
     assert!(nightstream_constraints > 0);
+    assert!(decode_constraints > 0);
 
     println!();
     println!(
@@ -77,6 +84,16 @@ fn nightstream_single_addi_constraint_counts() {
         shout_table_ids.len(),
         nightstream_constraints_p2,
         nightstream_witness_cols_p2
+    );
+    println!(
+        "{:<36} {:>4}   {:<14} {:>11} {:>12}   constraints_p2={}, witness_cols_p2={}",
+        "Nightstream (RV32 B1 decode sidecar CCS)",
+        32,
+        "ADDI x1,x0,1",
+        decode_constraints,
+        decode_witness_cols,
+        decode_constraints_p2,
+        decode_witness_cols_p2
     );
     println!();
 }

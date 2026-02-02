@@ -60,7 +60,7 @@
 //! - Automatic detection of 16-bit vs 32-bit instructions
 //!
 //! ## System
-//! - ECALL (Jolt-style markers), FENCE
+//! - ECALL, FENCE
 //! - EBREAK and FENCE.I are not supported
 //!
 //! # Example
@@ -105,10 +105,6 @@ pub const PROG_ID: TwistId = TwistId(1);
 ///
 /// This is used by the RV32 B1 step circuit in "regfile-as-Twist" mode.
 pub const REG_ID: TwistId = TwistId(2);
-
-/// Jolt ECALL identifiers for marker/print syscalls.
-pub const JOLT_CYCLE_TRACK_ECALL_NUM: u32 = 0xC7C1E;
-pub const JOLT_PRINT_ECALL_NUM: u32 = 0x505249;
 
 pub use alu::{compute_op, lookup_entry};
 pub use bits::{interleave_bits, uninterleave_bits};

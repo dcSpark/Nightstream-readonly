@@ -15,65 +15,72 @@ use super::constants::{
 use super::Rv32B1Layout;
 
 fn shout_cpu_binding(layout: &Rv32B1Layout, table_id: u32) -> ShoutCpuBinding {
+    // NOTE: We intentionally do *not* bind Shout addr_bits to a packed CPU scalar here.
+    //
+    // In Neo, Ajtai encodes witness scalars using `params.d=54` balanced base-`b` digits. A full
+    // 64-bit packed Shout key can exceed that representable range, which breaks the MCS/DEC plumbing.
+    //
+    // Shout key correctness is enforced by the RV32 B1 decode/semantics sidecar CCS instead.
+    let addr = None;
     match table_id {
         AND_TABLE_ID => ShoutCpuBinding {
             has_lookup: layout.and_has_lookup,
-            addr: None,
+            addr,
             val: layout.alu_out,
         },
         XOR_TABLE_ID => ShoutCpuBinding {
             has_lookup: layout.xor_has_lookup,
-            addr: None,
+            addr,
             val: layout.alu_out,
         },
         OR_TABLE_ID => ShoutCpuBinding {
             has_lookup: layout.or_has_lookup,
-            addr: None,
+            addr,
             val: layout.alu_out,
         },
         ADD_TABLE_ID => ShoutCpuBinding {
             has_lookup: layout.add_has_lookup,
-            addr: None,
+            addr,
             val: layout.alu_out,
         },
         SUB_TABLE_ID => ShoutCpuBinding {
             has_lookup: layout.is_sub,
-            addr: None,
+            addr,
             val: layout.alu_out,
         },
         SLT_TABLE_ID => ShoutCpuBinding {
             has_lookup: layout.slt_has_lookup,
-            addr: None,
+            addr,
             val: layout.alu_out,
         },
         SLTU_TABLE_ID => ShoutCpuBinding {
             has_lookup: layout.sltu_has_lookup,
-            addr: None,
+            addr,
             val: layout.alu_out,
         },
         SLL_TABLE_ID => ShoutCpuBinding {
             has_lookup: layout.sll_has_lookup,
-            addr: None,
+            addr,
             val: layout.alu_out,
         },
         SRL_TABLE_ID => ShoutCpuBinding {
             has_lookup: layout.srl_has_lookup,
-            addr: None,
+            addr,
             val: layout.alu_out,
         },
         SRA_TABLE_ID => ShoutCpuBinding {
             has_lookup: layout.sra_has_lookup,
-            addr: None,
+            addr,
             val: layout.alu_out,
         },
         EQ_TABLE_ID => ShoutCpuBinding {
             has_lookup: layout.is_beq,
-            addr: None,
+            addr,
             val: layout.alu_out,
         },
         NEQ_TABLE_ID => ShoutCpuBinding {
             has_lookup: layout.is_bne,
-            addr: None,
+            addr,
             val: layout.alu_out,
         },
         _ => {
@@ -81,7 +88,7 @@ fn shout_cpu_binding(layout: &Rv32B1Layout, table_id: u32) -> ShoutCpuBinding {
             let zero = layout.zero;
             ShoutCpuBinding {
                 has_lookup: zero,
-                addr: None,
+                addr,
                 val: zero,
             }
         }
@@ -153,7 +160,7 @@ pub(super) fn injected_bus_constraints_len(layout: &Rv32B1Layout, table_ids: &[u
         if mem_id == REG_ID.0 {
             // Regfile uses two lanes:
             // - lane0: read rs1, write rd
-            // - lane1: read rs2 (or a0 on HALT), no write
+            // - lane1: read rs2, no write
             let lane0 = twist_cpu_binding(layout, mem_id);
             builder.add_twist_instance_bound(&layout.bus, &inst.lanes[0], &lane0);
 
@@ -161,7 +168,7 @@ pub(super) fn injected_bus_constraints_len(layout: &Rv32B1Layout, table_ids: &[u
             let lane1 = TwistCpuBinding {
                 has_read: layout.is_active,
                 has_write: zero,
-                read_addr: layout.reg_rs2_addr,
+                read_addr: layout.rs2_field,
                 write_addr: zero,
                 rv: layout.rs2_val,
                 wv: zero,
@@ -227,7 +234,7 @@ pub fn rv32_b1_shared_cpu_bus_config(
             let lane1 = TwistCpuBinding {
                 has_read: layout.is_active,
                 has_write: zero,
-                read_addr: layout.reg_rs2_addr,
+                read_addr: layout.rs2_field,
                 write_addr: zero,
                 rv: layout.rs2_val,
                 wv: zero,

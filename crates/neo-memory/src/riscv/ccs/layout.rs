@@ -44,6 +44,14 @@ pub struct Rv32B1Layout {
     pub imm_j_raw: usize,
     pub imm_j: usize,
 
+    // Grouped decode/control signals (derived from one-hot flags; used by the main step CCS).
+    pub is_load: usize,
+    pub is_store: usize,
+    pub is_branch: usize,
+    pub writes_rd: usize,
+    pub pc_plus4: usize,
+    pub wb_from_alu: usize,
+
     // One-hot instruction flags (sum == is_active).
     pub is_add: usize,
     pub is_sub: usize,
@@ -118,7 +126,6 @@ pub struct Rv32B1Layout {
     pub ram_has_write: usize,
     pub ram_wv: usize,
     pub rd_write_val: usize,
-    pub rd_write_bits_start: usize, // 32
 
     pub add_has_lookup: usize,
     pub and_has_lookup: usize,
@@ -173,18 +180,10 @@ pub struct Rv32B1Layout {
     pub div_sign: usize,
     pub div_rem_check: usize,
     pub div_rem_check_signed: usize,
-    // ECALL helpers (Jolt marker/print IDs).
-    pub ecall_a0_bits_start: usize,      // 32
-    pub ecall_cycle_prefix_start: usize, // 31
-    pub ecall_is_cycle: usize,
-    pub ecall_print_prefix_start: usize, // 31
-    pub ecall_is_print: usize,
-    pub ecall_halts: usize,
     pub halt_effective: usize,
 
     // Regfile-as-Twist glue.
     pub reg_has_write: usize,
-    pub reg_rs2_addr: usize,
     pub rd_is_zero_01: usize,
     pub rd_is_zero_012: usize,
     pub rd_is_zero_0123: usize,
@@ -238,11 +237,6 @@ impl Rv32B1Layout {
     #[inline]
     pub fn reg_has_write(&self, j: usize) -> usize {
         self.cpu_cell(self.reg_has_write, j)
-    }
-
-    #[inline]
-    pub fn reg_rs2_addr(&self, j: usize) -> usize {
-        self.cpu_cell(self.reg_rs2_addr, j)
     }
 
     #[inline]
@@ -315,11 +309,6 @@ impl Rv32B1Layout {
         self.cpu_cell(self.rd_write_val, j)
     }
 
-    pub fn rd_write_bit(&self, bit: usize, j: usize) -> usize {
-        assert!(bit < 32);
-        self.rd_write_bits_start + bit * self.chunk_size + j
-    }
-
     #[inline]
     pub fn lookup_key(&self, j: usize) -> usize {
         self.cpu_cell(self.lookup_key, j)
@@ -365,7 +354,6 @@ impl Rv32B1Layout {
         self.mul_hi_bits_start + bit * self.chunk_size + j
     }
 
-    #[inline]
     pub fn mul_hi_prefix(&self, k: usize, j: usize) -> usize {
         assert!(k < 31);
         self.mul_hi_prefix_start + k * self.chunk_size + j
@@ -436,9 +424,9 @@ impl Rv32B1Layout {
         self.rs2_bits_start + bit * self.chunk_size + j
     }
 
-    pub fn rs2_zero_prefix(&self, idx: usize, j: usize) -> usize {
-        assert!(idx < 31);
-        self.rs2_zero_prefix_start + idx * self.chunk_size + j
+    pub fn rs2_zero_prefix(&self, k: usize, j: usize) -> usize {
+        assert!(k < 31);
+        self.rs2_zero_prefix_start + k * self.chunk_size + j
     }
 
     #[inline]
@@ -522,39 +510,6 @@ impl Rv32B1Layout {
     }
 
     #[inline]
-    pub fn ecall_a0_bit(&self, bit: usize, j: usize) -> usize {
-        debug_assert!(bit < 32, "a0 bit out of range");
-        self.ecall_a0_bits_start + bit * self.chunk_size + j
-    }
-
-    #[inline]
-    pub fn ecall_cycle_prefix(&self, k: usize, j: usize) -> usize {
-        debug_assert!(k < 31, "ecall_cycle_prefix k out of range");
-        self.ecall_cycle_prefix_start + k * self.chunk_size + j
-    }
-
-    #[inline]
-    pub fn ecall_is_cycle(&self, j: usize) -> usize {
-        self.cpu_cell(self.ecall_is_cycle, j)
-    }
-
-    #[inline]
-    pub fn ecall_print_prefix(&self, k: usize, j: usize) -> usize {
-        debug_assert!(k < 31, "ecall_print_prefix k out of range");
-        self.ecall_print_prefix_start + k * self.chunk_size + j
-    }
-
-    #[inline]
-    pub fn ecall_is_print(&self, j: usize) -> usize {
-        self.cpu_cell(self.ecall_is_print, j)
-    }
-
-    #[inline]
-    pub fn ecall_halts(&self, j: usize) -> usize {
-        self.cpu_cell(self.ecall_halts, j)
-    }
-
-    #[inline]
     pub fn halt_effective(&self, j: usize) -> usize {
         self.cpu_cell(self.halt_effective, j)
     }
@@ -627,6 +582,36 @@ impl Rv32B1Layout {
     #[inline]
     pub fn imm_j(&self, j: usize) -> usize {
         self.cpu_cell(self.imm_j, j)
+    }
+
+    #[inline]
+    pub fn is_load(&self, j: usize) -> usize {
+        self.cpu_cell(self.is_load, j)
+    }
+
+    #[inline]
+    pub fn is_store(&self, j: usize) -> usize {
+        self.cpu_cell(self.is_store, j)
+    }
+
+    #[inline]
+    pub fn is_branch(&self, j: usize) -> usize {
+        self.cpu_cell(self.is_branch, j)
+    }
+
+    #[inline]
+    pub fn writes_rd(&self, j: usize) -> usize {
+        self.cpu_cell(self.writes_rd, j)
+    }
+
+    #[inline]
+    pub fn pc_plus4(&self, j: usize) -> usize {
+        self.cpu_cell(self.pc_plus4, j)
+    }
+
+    #[inline]
+    pub fn wb_from_alu(&self, j: usize) -> usize {
+        self.cpu_cell(self.wb_from_alu, j)
     }
 
     #[inline]
@@ -982,7 +967,6 @@ pub(super) fn build_layout_with_m(
 
     // Regfile-as-Twist glue columns.
     let reg_has_write = alloc_scalar(&mut col);
-    let reg_rs2_addr = alloc_scalar(&mut col);
     let rd_is_zero_01 = alloc_scalar(&mut col);
     let rd_is_zero_012 = alloc_scalar(&mut col);
     let rd_is_zero_0123 = alloc_scalar(&mut col);
@@ -1005,6 +989,14 @@ pub(super) fn build_layout_with_m(
     let imm_b = alloc_scalar(&mut col);
     let imm_j_raw = alloc_scalar(&mut col);
     let imm_j = alloc_scalar(&mut col);
+
+    // Grouped decode/control signals.
+    let is_load = alloc_scalar(&mut col);
+    let is_store = alloc_scalar(&mut col);
+    let is_branch = alloc_scalar(&mut col);
+    let writes_rd = alloc_scalar(&mut col);
+    let pc_plus4 = alloc_scalar(&mut col);
+    let wb_from_alu = alloc_scalar(&mut col);
 
     let is_add = alloc_scalar(&mut col);
     let is_sub = alloc_scalar(&mut col);
@@ -1075,7 +1067,6 @@ pub(super) fn build_layout_with_m(
     let ram_has_write = alloc_scalar(&mut col);
     let ram_wv = alloc_scalar(&mut col);
     let rd_write_val = alloc_scalar(&mut col);
-    let rd_write_bits_start = alloc_array(&mut col, 32);
 
     let add_has_lookup = alloc_scalar(&mut col);
     let and_has_lookup = alloc_scalar(&mut col);
@@ -1127,12 +1118,6 @@ pub(super) fn build_layout_with_m(
     let div_sign = alloc_scalar(&mut col);
     let div_rem_check = alloc_scalar(&mut col);
     let div_rem_check_signed = alloc_scalar(&mut col);
-    let ecall_a0_bits_start = alloc_array(&mut col, 32);
-    let ecall_cycle_prefix_start = alloc_array(&mut col, 31);
-    let ecall_is_cycle = alloc_scalar(&mut col);
-    let ecall_print_prefix_start = alloc_array(&mut col, 31);
-    let ecall_is_print = alloc_scalar(&mut col);
-    let ecall_halts = alloc_scalar(&mut col);
     let halt_effective = alloc_scalar(&mut col);
 
     let cpu_cols_used = col;
@@ -1211,6 +1196,12 @@ pub(super) fn build_layout_with_m(
         imm_b,
         imm_j_raw,
         imm_j,
+        is_load,
+        is_store,
+        is_branch,
+        writes_rd,
+        pc_plus4,
+        wb_from_alu,
         is_add,
         is_sub,
         is_sll,
@@ -1275,7 +1266,6 @@ pub(super) fn build_layout_with_m(
         ram_has_write,
         ram_wv,
         rd_write_val,
-        rd_write_bits_start,
         add_has_lookup,
         and_has_lookup,
         xor_has_lookup,
@@ -1322,15 +1312,8 @@ pub(super) fn build_layout_with_m(
         div_sign,
         div_rem_check,
         div_rem_check_signed,
-        ecall_a0_bits_start,
-        ecall_cycle_prefix_start,
-        ecall_is_cycle,
-        ecall_print_prefix_start,
-        ecall_is_print,
-        ecall_halts,
         halt_effective,
         reg_has_write,
-        reg_rs2_addr,
         rd_is_zero_01,
         rd_is_zero_012,
         rd_is_zero_0123,

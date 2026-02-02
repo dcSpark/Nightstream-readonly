@@ -25,8 +25,9 @@ use neo_memory::output_check::ProgramIO;
 use neo_memory::plain::LutTable;
 use neo_memory::plain::PlainMemLayout;
 use neo_memory::riscv::ccs::{
-    build_rv32_b1_step_ccs, rv32_b1_chunk_to_witness, rv32_b1_shared_cpu_bus_config, rv32_b1_step_linking_pairs,
-    Rv32B1Layout,
+    build_rv32_b1_decode_sidecar_ccs, build_rv32_b1_rv32m_sidecar_ccs, build_rv32_b1_step_ccs,
+    estimate_rv32_b1_step_ccs_counts,
+    rv32_b1_chunk_to_witness, rv32_b1_shared_cpu_bus_config, rv32_b1_step_linking_pairs, Rv32B1Layout,
 };
 use neo_memory::riscv::lookups::{decode_program, RiscvCpu, RiscvInstruction, RiscvOpcode, RiscvShoutTables, PROG_ID};
 use neo_memory::riscv::shard::{extract_boundary_state, Rv32BoundaryState};
@@ -35,6 +36,7 @@ use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
 use neo_memory::R1csCpu;
 use neo_params::NeoParams;
 use neo_transcript::Poseidon2Transcript;
+use neo_transcript::Transcript;
 use neo_vm_trace::Twist as _;
 use p3_field::PrimeCharacteristicRing;
 
@@ -206,9 +208,9 @@ fn infer_required_shout_opcodes(program: &[RiscvInstruction]) -> HashSet<RiscvOp
         match instr {
             RiscvInstruction::RAlu { op, .. } => {
                 match op {
-                    // RV32 B1 proves RV32M MUL* in-circuit (no Shout table required).
+                    // RV32 B1 proves RV32M MUL* via the RV32M sidecar CCS (no Shout table required).
                     RiscvOpcode::Mul | RiscvOpcode::Mulh | RiscvOpcode::Mulhu | RiscvOpcode::Mulhsu => {}
-                    // RV32 B1 proves RV32M DIV*/REM* in-circuit, but it requires a SLTU lookup to prove
+                    // RV32 B1 proves RV32M DIV*/REM* via the RV32M sidecar CCS, but it requires a SLTU lookup to prove
                     // the remainder bound when divisor != 0 (unsigned and signed).
                     RiscvOpcode::Div | RiscvOpcode::Divu | RiscvOpcode::Rem | RiscvOpcode::Remu => {
                         ops.insert(RiscvOpcode::Sltu);
@@ -261,7 +263,7 @@ fn infer_required_shout_opcodes(program: &[RiscvInstruction]) -> HashSet<RiscvOp
 fn all_shout_opcodes() -> HashSet<RiscvOpcode> {
     use RiscvOpcode::*;
     // RV32 B1 uses implicit Shout tables only for opcodes with a closed-form MLE implementation.
-    // RV32M ops are proven in-circuit (MUL/DIVU/REMU) or not yet supported (MULH/DIV/REM, etc.).
+    // RV32M ops are proven via a dedicated sidecar CCS argument (not via Shout tables).
     HashSet::from([And, Xor, Or, Sub, Add, Sltu, Slt, Eq, Neq, Sll, Srl, Sra])
 }
 
@@ -286,6 +288,7 @@ pub struct Rv32B1 {
     xlen: usize,
     ram_bytes: usize,
     chunk_size: usize,
+    chunk_size_auto: bool,
     max_steps: Option<usize>,
     mode: FoldingMode,
     shout_auto_minimal: bool,
@@ -293,6 +296,7 @@ pub struct Rv32B1 {
     output_claims: ProgramIO<F>,
     output_target: OutputTarget,
     ram_init: HashMap<u64, u64>,
+    reg_init: HashMap<u64, u64>,
 }
 
 /// Default instruction cap for RV32B1 runs when `max_steps` is not specified.
@@ -300,6 +304,23 @@ pub struct Rv32B1 {
 /// The runner stops early if the guest halts (e.g. via `ecall`), so this is only a safety bound
 /// against non-halting guests.
 const DEFAULT_RV32B1_MAX_STEPS: usize = 1 << 20;
+
+fn program_uses_rv32m(program: &[RiscvInstruction]) -> bool {
+    program.iter().any(|instr| match instr {
+        RiscvInstruction::RAlu { op, .. } => matches!(
+            op,
+            RiscvOpcode::Mul
+                | RiscvOpcode::Mulh
+                | RiscvOpcode::Mulhu
+                | RiscvOpcode::Mulhsu
+                | RiscvOpcode::Div
+                | RiscvOpcode::Divu
+                | RiscvOpcode::Rem
+                | RiscvOpcode::Remu
+        ),
+        _ => false,
+    })
+}
 
 impl Rv32B1 {
     /// Create a runner from ROM bytes (must be a valid RV32 program encoding).
@@ -310,6 +331,7 @@ impl Rv32B1 {
             xlen: 32,
             ram_bytes: 0x200,
             chunk_size: 1,
+            chunk_size_auto: false,
             max_steps: None,
             mode: FoldingMode::Optimized,
             shout_auto_minimal: true,
@@ -317,6 +339,7 @@ impl Rv32B1 {
             output_claims: ProgramIO::new(),
             output_target: OutputTarget::Ram,
             ram_init: HashMap::new(),
+            reg_init: HashMap::new(),
         }
     }
 
@@ -330,8 +353,25 @@ impl Rv32B1 {
         self
     }
 
+    /// Initialize a register `reg` (x0..x31) to a u32 value.
+    ///
+    /// This is applied as part of the *public statement* initial memory for the REG Twist instance.
+    pub fn reg_init_u32(mut self, reg: u64, value: u32) -> Self {
+        self.reg_init.insert(reg, value as u64);
+        self
+    }
+
     pub fn chunk_size(mut self, chunk_size: usize) -> Self {
         self.chunk_size = chunk_size;
+        self.chunk_size_auto = false;
+        self
+    }
+
+    /// Automatically pick a `chunk_size` based on an estimated trace length.
+    ///
+    /// Note: if `max_steps` is not set, the estimate defaults to the decoded program length.
+    pub fn chunk_size_auto(mut self) -> Self {
+        self.chunk_size_auto = true;
         self
     }
 
@@ -412,7 +452,7 @@ impl Rv32B1 {
         if self.program_bytes.is_empty() {
             return Err(PiCcsError::InvalidInput("program_bytes must be non-empty".into()));
         }
-        if self.chunk_size == 0 {
+        if !self.chunk_size_auto && self.chunk_size == 0 {
             return Err(PiCcsError::InvalidInput("chunk_size must be non-zero".into()));
         }
         if self.ram_bytes == 0 {
@@ -439,7 +479,17 @@ impl Rv32B1 {
 
         let program = decode_program(&self.program_bytes)
             .map_err(|e| PiCcsError::InvalidInput(format!("decode_program failed: {e}")))?;
+        let uses_rv32m = program_uses_rv32m(&program);
         let using_default_max_steps = self.max_steps.is_none();
+        let estimated_steps = match self.max_steps {
+            Some(n) => {
+                if n == 0 {
+                    return Err(PiCcsError::InvalidInput("max_steps must be non-zero".into()));
+                }
+                n
+            }
+            None => program.len().max(1),
+        };
         let max_steps = match self.max_steps {
             Some(n) => {
                 if n == 0 {
@@ -468,6 +518,21 @@ impl Rv32B1 {
             let value = value as u32 as u64;
             initial_mem.insert((neo_memory::riscv::lookups::RAM_ID.0, addr), F::from_u64(value));
             twist.store(neo_memory::riscv::lookups::RAM_ID, addr, value);
+        }
+        for (reg, value) in self.reg_init {
+            if reg >= 32 {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "reg_init_u32: register index out of range: reg={reg} (expected 0..32)"
+                )));
+            }
+            if reg == 0 && value != 0 {
+                return Err(PiCcsError::InvalidInput(
+                    "reg_init_u32: x0 must be 0 (non-zero init is forbidden)".into(),
+                ));
+            }
+            let value = value as u32 as u64;
+            initial_mem.insert((neo_memory::riscv::lookups::REG_ID.0, reg), F::from_u64(value));
+            twist.store(neo_memory::riscv::lookups::REG_ID, reg, value);
         }
 
         let (k_ram, d_ram) = pow2_ceil_k(self.ram_bytes.max(4));
@@ -516,7 +581,17 @@ impl Rv32B1 {
         let mut shout_table_ids: Vec<u32> = table_specs.keys().copied().collect();
         shout_table_ids.sort_unstable();
 
-        let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, self.chunk_size)
+        let chunk_size = if self.chunk_size_auto {
+            choose_rv32_b1_chunk_size(&mem_layouts, &shout_table_ids, estimated_steps)
+                .map_err(|e| PiCcsError::InvalidInput(format!("auto chunk_size failed: {e}")))?
+        } else {
+            self.chunk_size
+        };
+        if chunk_size == 0 {
+            return Err(PiCcsError::InvalidInput("chunk_size must be non-zero".into()));
+        }
+
+        let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, chunk_size)
             .map_err(|e| PiCcsError::InvalidInput(format!("build_rv32_b1_step_ccs failed: {e}")))?;
 
         // Session + Ajtai committer + params (auto-picked for this CCS).
@@ -534,7 +609,7 @@ impl Rv32B1 {
         let mut cpu = R1csCpu::new(
             ccs_base,
             params,
-            committer,
+            committer.clone(),
             layout.m_in,
             &empty_tables,
             &table_specs,
@@ -544,7 +619,7 @@ impl Rv32B1 {
             .with_shared_cpu_bus(
                 rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts.clone(), initial_mem.clone())
                     .map_err(|e| PiCcsError::InvalidInput(format!("rv32_b1_shared_cpu_bus_config failed: {e}")))?,
-                self.chunk_size,
+                chunk_size,
             )
             .map_err(|e| PiCcsError::InvalidInput(format!("shared bus inject failed: {e}")))?;
 
@@ -557,7 +632,7 @@ impl Rv32B1 {
             twist,
             shout,
             /*max_steps=*/ max_steps,
-            self.chunk_size,
+            chunk_size,
             &mem_layouts,
             &empty_tables,
             &table_specs,
@@ -583,7 +658,72 @@ impl Rv32B1 {
         let ccs = cpu.ccs.clone();
 
         // Prove phase (timed)
+        //
+        // Includes the decode/semantics sidecar proof (always) and the optional RV32M sidecar proof,
+        // so reported prove time matches total work.
         let prove_start = time_now();
+
+        // Decode/semantics sidecar: prove the full RV32 B1 step semantics separately so the main step CCS
+        // can stay thin (it mostly exists to host the injected shared-bus constraints).
+        let decode_sidecar = {
+            let decode_ccs = build_rv32_b1_decode_sidecar_ccs(&layout, &mem_layouts)
+                .map_err(|e| PiCcsError::InvalidInput(format!("{e}")))?;
+
+            // Batch all chunks into one sidecar proof (avoid per-chunk transcript/proof overhead).
+            let mut mcs_insts = Vec::with_capacity(session.steps_witness().len());
+            let mut mcs_wits = Vec::with_capacity(session.steps_witness().len());
+            for step in session.steps_witness() {
+                let (mcs_inst, mcs_wit) = &step.mcs;
+                mcs_insts.push(mcs_inst.clone());
+                mcs_wits.push(mcs_wit.clone());
+            }
+
+            let num_steps = mcs_insts.len();
+            let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_sidecar_batch");
+            tr.append_message(b"decode_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
+            let (me_out, proof) =
+                crate::pi_ccs_prove_simple(&mut tr, &params, &decode_ccs, &mcs_insts, &mcs_wits, &committer)
+                    .map_err(|e| PiCcsError::ProtocolError(format!("decode sidecar prove failed: {e}")))?;
+
+            Rv32DecodeSidecar {
+                ccs: decode_ccs,
+                num_steps,
+                me_out,
+                proof,
+            }
+        };
+
+        // Optional RV32M sidecar: prove MUL/DIV/REM helper constraints separately so the main step CCS
+        // stays small on non-M workloads.
+        let rv32m_sidecar = if uses_rv32m {
+            let rv32m_ccs =
+                build_rv32_b1_rv32m_sidecar_ccs(&layout).map_err(|e| PiCcsError::InvalidInput(format!("{e}")))?;
+
+            // Batch all chunks into one sidecar proof (avoid per-chunk transcript/proof overhead).
+            let mut mcs_insts = Vec::with_capacity(session.steps_witness().len());
+            let mut mcs_wits = Vec::with_capacity(session.steps_witness().len());
+            for step in session.steps_witness() {
+                let (mcs_inst, mcs_wit) = &step.mcs;
+                mcs_insts.push(mcs_inst.clone());
+                mcs_wits.push(mcs_wit.clone());
+            }
+
+            let num_steps = mcs_insts.len();
+            let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/rv32m_sidecar_batch");
+            tr.append_message(b"rv32m_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
+            let (me_out, proof) = crate::pi_ccs_prove_simple(&mut tr, &params, &rv32m_ccs, &mcs_insts, &mcs_wits, &committer)
+                .map_err(|e| PiCcsError::ProtocolError(format!("rv32m sidecar prove failed: {e}")))?;
+
+            Some(Rv32MSidecar {
+                ccs: rv32m_ccs,
+                num_steps,
+                me_out,
+                proof,
+            })
+        } else {
+            None
+        };
+
         let (proof, output_binding_cfg) = if self.output_claims.is_empty() {
             (session.fold_and_prove(&ccs)?, None)
         } else {
@@ -626,10 +766,28 @@ impl Rv32B1 {
             mem_layouts,
             initial_mem,
             output_binding_cfg,
+            decode_sidecar,
+            rv32m_sidecar,
             prove_duration,
             verify_duration: None,
         })
     }
+}
+
+#[derive(Clone, Debug)]
+struct Rv32DecodeSidecar {
+    ccs: CcsStructure<F>,
+    num_steps: usize,
+    me_out: Vec<MeInstance<Cmt, F, K>>,
+    proof: crate::PiCcsProof,
+}
+
+#[derive(Clone, Debug)]
+struct Rv32MSidecar {
+    ccs: CcsStructure<F>,
+    num_steps: usize,
+    me_out: Vec<MeInstance<Cmt, F, K>>,
+    proof: crate::PiCcsProof,
 }
 
 pub struct Rv32B1Run {
@@ -640,6 +798,8 @@ pub struct Rv32B1Run {
     mem_layouts: HashMap<u32, PlainMemLayout>,
     initial_mem: HashMap<(u32, u64), F>,
     output_binding_cfg: Option<OutputBindingConfig>,
+    decode_sidecar: Rv32DecodeSidecar,
+    rv32m_sidecar: Option<Rv32MSidecar>,
     prove_duration: Duration,
     verify_duration: Option<Duration>,
 }
@@ -661,11 +821,72 @@ impl Rv32B1Run {
                 .session
                 .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, cfg)?,
         };
-        self.verify_duration = Some(elapsed_duration(verify_start));
 
         if !ok {
             return Err(PiCcsError::ProtocolError("verification failed".into()));
         }
+
+        // Decode/semantics sidecar must always verify (it carries the full RV32 B1 semantics).
+        {
+            let steps_public = self.session.steps_public();
+            if steps_public.len() != self.decode_sidecar.num_steps {
+                return Err(PiCcsError::ProtocolError(
+                    "decode sidecar: step count mismatch".into(),
+                ));
+            }
+
+            let mut mcs_insts = Vec::with_capacity(steps_public.len());
+            for step in &steps_public {
+                mcs_insts.push(step.mcs_inst.clone());
+            }
+            let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_sidecar_batch");
+            tr.append_message(
+                b"decode_sidecar/num_steps",
+                &(mcs_insts.len() as u64).to_le_bytes(),
+            );
+            let ok = crate::pi_ccs_verify(
+                &mut tr,
+                self.session.params(),
+                &self.decode_sidecar.ccs,
+                &mcs_insts,
+                &[],
+                &self.decode_sidecar.me_out,
+                &self.decode_sidecar.proof,
+            )?;
+            if !ok {
+                return Err(PiCcsError::ProtocolError("decode sidecar: verification failed".into()));
+            }
+        }
+
+        if let Some(sidecar) = &self.rv32m_sidecar {
+            let steps_public = self.session.steps_public();
+            if steps_public.len() != sidecar.num_steps {
+                return Err(PiCcsError::ProtocolError(
+                    "rv32m sidecar: step count mismatch".into(),
+                ));
+            }
+
+            let mut mcs_insts = Vec::with_capacity(steps_public.len());
+            for step in &steps_public {
+                mcs_insts.push(step.mcs_inst.clone());
+            }
+            let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/rv32m_sidecar_batch");
+            tr.append_message(b"rv32m_sidecar/num_steps", &(mcs_insts.len() as u64).to_le_bytes());
+            let ok = crate::pi_ccs_verify(
+                &mut tr,
+                self.session.params(),
+                &sidecar.ccs,
+                &mcs_insts,
+                &[],
+                &sidecar.me_out,
+                &sidecar.proof,
+            )?;
+            if !ok {
+                return Err(PiCcsError::ProtocolError("rv32m sidecar: verification failed".into()));
+            }
+        }
+
+        self.verify_duration = Some(elapsed_duration(verify_start));
         Ok(())
     }
 
@@ -749,6 +970,11 @@ impl Rv32B1Run {
         self.proof.steps.len()
     }
 
+    /// Chunk size (steps per folding step) used for this run.
+    pub fn chunk_size(&self) -> usize {
+        self.layout.chunk_size
+    }
+
     /// Count the number of Shout lookups actually used across the executed trace (active rows only).
     pub fn shout_lookup_count(&self) -> Result<usize, PiCcsError> {
         let mut count = 0usize;
@@ -807,4 +1033,51 @@ impl Rv32B1Run {
     pub fn verify_duration(&self) -> Option<Duration> {
         self.verify_duration
     }
+}
+
+fn choose_rv32_b1_chunk_size(
+    mem_layouts: &HashMap<u32, PlainMemLayout>,
+    shout_table_ids: &[u32],
+    estimated_steps: usize,
+) -> Result<usize, String> {
+    if estimated_steps == 0 {
+        return Err("estimated_steps must be non-zero".into());
+    }
+
+    let mut candidates: Vec<usize> = Vec::new();
+    let max_candidate = estimated_steps.min(256).max(1);
+    let mut c = 1usize;
+    while c <= max_candidate {
+        candidates.push(c);
+        c = c.checked_mul(2).ok_or_else(|| "chunk_size overflow".to_string())?;
+    }
+    if estimated_steps <= 256 && !candidates.contains(&estimated_steps) {
+        candidates.push(estimated_steps);
+    }
+
+    let mut best_chunk_size = 1usize;
+    let mut best_bucket = usize::MAX;
+    let mut best_work: u128 = u128::MAX;
+
+    for chunk_size in candidates {
+        let counts = estimate_rv32_b1_step_ccs_counts(mem_layouts, shout_table_ids, chunk_size)?;
+
+        let n_pad = counts.n.next_power_of_two();
+        let m_pad = counts.m.next_power_of_two();
+        let bucket = n_pad.max(m_pad);
+        let chunks_est = estimated_steps.div_ceil(chunk_size);
+        let work = (n_pad as u128)
+            .saturating_mul(m_pad as u128)
+            .saturating_mul(chunks_est as u128);
+
+        if bucket < best_bucket
+            || (bucket == best_bucket && (work < best_work || (work == best_work && chunk_size > best_chunk_size)))
+        {
+            best_bucket = bucket;
+            best_work = work;
+            best_chunk_size = chunk_size;
+        }
+    }
+
+    Ok(best_chunk_size)
 }

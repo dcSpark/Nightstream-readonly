@@ -4,8 +4,7 @@ use p3_goldilocks::Goldilocks as F;
 use neo_vm_trace::{StepTrace, TwistOpKind};
 
 use crate::riscv::lookups::{
-    decode_instruction, BranchCondition, RiscvInstruction, RiscvMemOp, RiscvOpcode, JOLT_CYCLE_TRACK_ECALL_NUM,
-    JOLT_PRINT_ECALL_NUM, PROG_ID, RAM_ID, REG_ID,
+    decode_instruction, BranchCondition, RiscvInstruction, RiscvMemOp, RiscvOpcode, PROG_ID, RAM_ID, REG_ID,
 };
 
 use super::constants::{
@@ -44,45 +43,6 @@ fn write_bus_u64_bits<Ff: PrimeCharacteristicRing>(
             if bit == 1 { Ff::ONE } else { Ff::ZERO },
         );
     }
-}
-
-fn set_ecall_helpers(z: &mut [F], layout: &Rv32B1Layout, j: usize, a0_u64: u64, is_halt: bool) -> Result<(), String> {
-    let a0_u32 = u32::try_from(a0_u64).map_err(|_| format!("RV32 B1: a0 value does not fit in u32: {a0_u64}"))?;
-
-    for bit in 0..32 {
-        z[layout.ecall_a0_bit(bit, j)] = if ((a0_u32 >> bit) & 1) == 1 { F::ONE } else { F::ZERO };
-    }
-
-    let cycle_const = JOLT_CYCLE_TRACK_ECALL_NUM;
-    let print_const = JOLT_PRINT_ECALL_NUM;
-
-    let mut cycle_prefix = if ((a0_u32 ^ cycle_const) & 1) == 0 { 1u32 } else { 0u32 };
-    z[layout.ecall_cycle_prefix(0, j)] = if cycle_prefix == 1 { F::ONE } else { F::ZERO };
-    for k in 1..31 {
-        let bit_match = ((a0_u32 >> k) ^ (cycle_const >> k)) & 1;
-        cycle_prefix &= 1u32 ^ bit_match;
-        z[layout.ecall_cycle_prefix(k, j)] = if cycle_prefix == 1 { F::ONE } else { F::ZERO };
-    }
-    let cycle_match31 = (((a0_u32 >> 31) ^ (cycle_const >> 31)) & 1) == 0;
-    let is_cycle = cycle_prefix == 1 && cycle_match31;
-    z[layout.ecall_is_cycle(j)] = if is_cycle { F::ONE } else { F::ZERO };
-
-    let mut print_prefix = if ((a0_u32 ^ print_const) & 1) == 0 { 1u32 } else { 0u32 };
-    z[layout.ecall_print_prefix(0, j)] = if print_prefix == 1 { F::ONE } else { F::ZERO };
-    for k in 1..31 {
-        let bit_match = ((a0_u32 >> k) ^ (print_const >> k)) & 1;
-        print_prefix &= 1u32 ^ bit_match;
-        z[layout.ecall_print_prefix(k, j)] = if print_prefix == 1 { F::ONE } else { F::ZERO };
-    }
-    let print_match31 = (((a0_u32 >> 31) ^ (print_const >> 31)) & 1) == 0;
-    let is_print = print_prefix == 1 && print_match31;
-    z[layout.ecall_is_print(j)] = if is_print { F::ONE } else { F::ZERO };
-
-    let ecall_halts = !(is_cycle || is_print);
-    z[layout.ecall_halts(j)] = if ecall_halts { F::ONE } else { F::ZERO };
-    z[layout.halt_effective(j)] = if is_halt && ecall_halts { F::ONE } else { F::ZERO };
-
-    Ok(())
 }
 
 /// Build a CPU witness vector `z` for shared-bus mode.
@@ -162,7 +122,7 @@ fn rv32_b1_chunk_to_witness_internal(
 
             z[layout.pc_in(j)] = F::from_u64(carried_pc);
             z[layout.pc_out(j)] = F::from_u64(carried_pc);
-            z[layout.reg_rs2_addr(j)] = F::ZERO;
+            z[layout.halt_effective(j)] = F::ZERO;
             z[layout.reg_has_write(j)] = F::ZERO;
             z[layout.rd_is_zero_01(j)] = F::ONE;
             z[layout.rd_is_zero_012(j)] = F::ONE;
@@ -170,7 +130,6 @@ fn rv32_b1_chunk_to_witness_internal(
             z[layout.rd_is_zero(j)] = F::ONE;
             // Columns constrained independently of `is_active` must be set consistently on padding rows.
             for bit in 0..32 {
-                z[layout.rd_write_bit(bit, j)] = F::ZERO;
                 z[layout.mem_rv_bit(bit, j)] = F::ZERO;
                 z[layout.mul_lo_bit(bit, j)] = F::ZERO;
                 z[layout.mul_hi_bit(bit, j)] = F::ZERO;
@@ -188,7 +147,6 @@ fn rv32_b1_chunk_to_witness_internal(
             }
             z[layout.rs2_is_zero(j)] = F::ONE;
             z[layout.rs2_nonzero(j)] = F::ZERO;
-            set_ecall_helpers(&mut z, layout, j, /*a0_u64=*/ 0, /*is_halt=*/ false)?;
             continue;
         }
         let step = &chunk[j];
@@ -302,7 +260,7 @@ fn rv32_b1_chunk_to_witness_internal(
             z[layout.is_active(j)] = F::ZERO;
             z[layout.pc_in(j)] = F::from_u64(carried_pc);
             z[layout.pc_out(j)] = F::from_u64(carried_pc);
-            z[layout.reg_rs2_addr(j)] = F::ZERO;
+            z[layout.halt_effective(j)] = F::ZERO;
             z[layout.reg_has_write(j)] = F::ZERO;
             z[layout.rd_is_zero_01(j)] = F::ONE;
             z[layout.rd_is_zero_012(j)] = F::ONE;
@@ -310,7 +268,6 @@ fn rv32_b1_chunk_to_witness_internal(
             z[layout.rd_is_zero(j)] = F::ONE;
             // Columns constrained independently of `is_active` must be set consistently on padding rows.
             for bit in 0..32 {
-                z[layout.rd_write_bit(bit, j)] = F::ZERO;
                 z[layout.mem_rv_bit(bit, j)] = F::ZERO;
                 z[layout.mul_lo_bit(bit, j)] = F::ZERO;
                 z[layout.mul_hi_bit(bit, j)] = F::ZERO;
@@ -328,7 +285,6 @@ fn rv32_b1_chunk_to_witness_internal(
             }
             z[layout.rs2_is_zero(j)] = F::ONE;
             z[layout.rs2_nonzero(j)] = F::ZERO;
-            set_ecall_helpers(&mut z, layout, j, /*a0_u64=*/ 0, /*is_halt=*/ false)?;
             continue;
         }
 
@@ -685,6 +641,14 @@ fn rv32_b1_chunk_to_witness_internal(
         z[layout.is_fence(j)] = if is_fence { F::ONE } else { F::ZERO };
         z[layout.is_halt(j)] = if is_halt { F::ONE } else { F::ZERO };
 
+        let is_load_any = is_lb || is_lbu || is_lh || is_lhu || is_lw;
+        let is_store_any = is_sb || is_sh || is_sw;
+        let is_branch_any = is_beq || is_bne || is_blt || is_bge || is_bltu || is_bgeu;
+
+        z[layout.is_load(j)] = if is_load_any { F::ONE } else { F::ZERO };
+        z[layout.is_store(j)] = if is_store_any { F::ONE } else { F::ZERO };
+        z[layout.is_branch(j)] = if is_branch_any { F::ONE } else { F::ZERO };
+
         let rs1_idx = rs1 as usize;
         let rs2_idx = rs2 as usize;
         let rd_idx = rd as usize;
@@ -731,11 +695,39 @@ fn rv32_b1_chunk_to_witness_internal(
             || is_auipc
             || is_jal
             || is_jalr;
+        z[layout.writes_rd(j)] = if writes_rd { F::ONE } else { F::ZERO };
+
+        // pc_plus4 is true for all non-branch/non-jump active rows.
+        let pc_plus4 = !is_branch_any && !is_jal && !is_jalr;
+        z[layout.pc_plus4(j)] = if pc_plus4 { F::ONE } else { F::ZERO };
+
+        // wb_from_alu selects the ALU/shout-backed writeback path.
+        let wb_from_alu = is_add
+            || is_sub
+            || is_sll
+            || is_slt
+            || is_sltu
+            || is_xor
+            || is_srl
+            || is_sra
+            || is_or
+            || is_and
+            || is_addi
+            || is_slti
+            || is_sltiu
+            || is_xori
+            || is_ori
+            || is_andi
+            || is_slli
+            || is_srli
+            || is_srai
+            || is_auipc;
+        z[layout.wb_from_alu(j)] = if wb_from_alu { F::ONE } else { F::ZERO };
+
         let reg_has_write = writes_rd && rd_idx != 0;
         z[layout.reg_has_write(j)] = if reg_has_write { F::ONE } else { F::ZERO };
 
-        let rs2_addr = if is_halt { 10u64 } else { rs2_idx as u64 };
-        z[layout.reg_rs2_addr(j)] = F::from_u64(rs2_addr);
+        z[layout.halt_effective(j)] = if is_halt { F::ONE } else { F::ZERO };
 
         // rd_is_zero_* chain from rd bits.
         let rd_b7 = (rd as u64) & 1;
@@ -755,14 +747,12 @@ fn rv32_b1_chunk_to_witness_internal(
         // Selected operand values.
         let rs1_u32 = u32::try_from(step.regs_before[rs1_idx])
             .map_err(|_| format!("RV32 B1: rs1 value does not fit in u32 at pc={:#x}", step.pc_before))?;
-        let rs2_read_idx = if is_halt { 10usize } else { rs2_idx };
-        let rs2_u32 = u32::try_from(step.regs_before[rs2_read_idx])
+        let rs2_u32 = u32::try_from(step.regs_before[rs2_idx])
             .map_err(|_| format!("RV32 B1: rs2 value does not fit in u32 at pc={:#x}", step.pc_before))?;
         let rs1_u64 = rs1_u32 as u64;
         let rs2_u64 = rs2_u32 as u64;
         z[layout.rs1_val(j)] = F::from_u64(rs1_u64);
         z[layout.rs2_val(j)] = F::from_u64(rs2_u64);
-        set_ecall_helpers(&mut z, layout, j, /*a0_u64=*/ rs2_u64, is_halt)?;
 
         // Regfile Twist events (REG_ID): validate and optionally write bus lanes.
         if reg_lane1_write.is_some() {
@@ -798,10 +788,11 @@ fn rv32_b1_chunk_to_witness_internal(
             ));
         }
 
-        if rf1_ra != rs2_addr {
+        if rf1_ra != rs2_idx as u64 {
             return Err(format!(
-                "RV32 B1: REG_ID lane1 read addr mismatch at pc={:#x} (chunk j={j}): expected rs2_addr={rs2_addr:#x}, got {rf1_ra:#x}",
-                step.pc_before
+                "RV32 B1: REG_ID lane1 read addr mismatch at pc={:#x} (chunk j={j}): expected rs2_addr={:#x}, got {rf1_ra:#x}",
+                step.pc_before,
+                rs2_idx as u64
             ));
         }
         if rf1_rv != rs2_u64 {
@@ -1340,24 +1331,24 @@ fn rv32_b1_chunk_to_witness_internal(
         z[layout.mul_carry(j)] = F::from_u64(mul_carry);
 
         let rd_write_u64 = z[layout.rd_write_val(j)].as_canonical_u64();
-        let rd_write_u32 = u32::try_from(rd_write_u64)
+        let _ = u32::try_from(rd_write_u64)
             .map_err(|_| format!("RV32 B1: rd_write_val does not fit in u32: {rd_write_u64}"))?;
         let mem_rv_u64 = z[layout.mem_rv(j)].as_canonical_u64();
         let mem_rv_u32 =
             u32::try_from(mem_rv_u64).map_err(|_| format!("RV32 B1: mem_rv does not fit in u32: {mem_rv_u64}"))?;
 
         for bit in 0..32 {
-            z[layout.rd_write_bit(bit, j)] = if ((rd_write_u32 >> bit) & 1) == 1 {
-                F::ONE
-            } else {
-                F::ZERO
-            };
             z[layout.mem_rv_bit(bit, j)] = if ((mem_rv_u32 >> bit) & 1) == 1 {
                 F::ONE
             } else {
                 F::ZERO
             };
-            z[layout.mul_lo_bit(bit, j)] = if ((mul_lo as u32 >> bit) & 1) == 1 {
+            let mul_lo_or_div_quot = if is_div || is_divu || is_rem || is_remu {
+                div_quot as u32
+            } else {
+                mul_lo as u32
+            };
+            z[layout.mul_lo_bit(bit, j)] = if ((mul_lo_or_div_quot >> bit) & 1) == 1 {
                 F::ONE
             } else {
                 F::ZERO

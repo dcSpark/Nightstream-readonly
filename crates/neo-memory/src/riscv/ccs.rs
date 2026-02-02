@@ -33,7 +33,7 @@
 //! - Branch: `BEQ`, `BNE`, `BLT`, `BGE`, `BLTU`, `BGEU`
 //! - Jump: `JAL`, `JALR`
 //! - U-type: `LUI`, `AUIPC`
-//! - System: `FENCE`, `ECALL(imm=0)` (halts unless a0 is a Jolt marker/print id)
+//! - System: `FENCE`, `ECALL(imm=0)` (halts)
 
 use std::collections::HashMap;
 
@@ -42,7 +42,7 @@ use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as F;
 
 use crate::plain::PlainMemLayout;
-use crate::riscv::lookups::{JOLT_CYCLE_TRACK_ECALL_NUM, JOLT_PRINT_ECALL_NUM, PROG_ID, RAM_ID, REG_ID};
+use crate::riscv::lookups::{PROG_ID, RAM_ID, REG_ID};
 
 mod bus_bindings;
 mod config;
@@ -164,7 +164,530 @@ fn enforce_u32_bits(
     constraints.push(Constraint::terms(one, false, terms));
 }
 
-fn semantic_constraints(
+fn push_rv32m_sidecar_constraints(
+    constraints: &mut Vec<Constraint<F>>,
+    layout: &Rv32B1Layout,
+    j: usize,
+    sltu_enabled: bool,
+) {
+    let one = layout.const_one;
+
+    // mul_lo bits are used as scratch u32 bits:
+    // - on MUL* rows, they decompose mul_lo,
+    // - on DIV*/REM* rows, they decompose div_quot.
+    //
+    // The bits are always boolean, but the reconstruction constraint is gated by the opcode family.
+    for bit in 0..32 {
+        let b = layout.mul_lo_bit(bit, j);
+        constraints.push(Constraint {
+            condition_col: b,
+            negate_condition: false,
+            additional_condition_cols: Vec::new(),
+            b_terms: vec![(one, F::ONE), (b, -F::ONE)],
+            c_terms: Vec::new(),
+        });
+    }
+
+    // On MUL* rows: mul_lo = Σ 2^i * mul_lo_bit[i]
+    {
+        let mut terms = vec![(layout.mul_lo(j), F::ONE)];
+        for bit in 0..32 {
+            terms.push((layout.mul_lo_bit(bit, j), -F::from_u64(pow2_u64(bit))));
+        }
+        constraints.push(Constraint::terms_or(
+            &[
+                layout.is_mul(j),
+                layout.is_mulh(j),
+                layout.is_mulhu(j),
+                layout.is_mulhsu(j),
+            ],
+            false,
+            terms,
+        ));
+    }
+
+    enforce_u32_bits(
+        constraints,
+        one,
+        layout.mul_hi(j),
+        layout.mul_hi_bits_start,
+        layout.chunk_size,
+        j,
+    );
+
+    // Disambiguate the MUL decomposition in Goldilocks by ruling out `mul_hi == 0xffff_ffff`.
+    //
+    // For 32-bit operands, the true 64-bit product has `mul_hi <= 0xffff_fffe`. Without this,
+    // the field equation `rs1*rs2 = mul_lo + 2^32*mul_hi (mod p)` also admits the solution
+    // `mul_lo + 2^32*mul_hi = rs1*rs2 + p` when `rs1*rs2 <= 2^32-2`, where `p = 2^64-2^32+1`.
+    //
+    // We enforce `mul_hi != 0xffff_ffff` by constraining `∏_{i=0..31} mul_hi_bit[i] = 0`.
+    constraints.push(Constraint::terms(
+        one,
+        false,
+        vec![(layout.mul_hi_prefix(0, j), F::ONE), (layout.mul_hi_bit(0, j), -F::ONE)],
+    ));
+    for k in 1..31 {
+        constraints.push(Constraint::mul(
+            layout.mul_hi_prefix(k - 1, j),
+            layout.mul_hi_bit(k, j),
+            layout.mul_hi_prefix(k, j),
+        ));
+    }
+    constraints.push(Constraint {
+        condition_col: layout.mul_hi_prefix(30, j),
+        negate_condition: false,
+        additional_condition_cols: Vec::new(),
+        b_terms: vec![(layout.mul_hi_bit(31, j), F::ONE)],
+        c_terms: Vec::new(),
+    });
+
+    // mul_carry bits (0..3, but only 0..2 will satisfy the MULH equations).
+    for bit in 0..2 {
+        let b = layout.mul_carry_bit(bit, j);
+        constraints.push(Constraint {
+            condition_col: b,
+            negate_condition: false,
+            additional_condition_cols: Vec::new(),
+            b_terms: vec![(one, F::ONE), (b, -F::ONE)], // 1 - b
+            c_terms: Vec::new(),
+        });
+    }
+    constraints.push(Constraint::terms(
+        one,
+        false,
+        vec![
+            (layout.mul_carry(j), F::ONE),
+            (layout.mul_carry_bit(0, j), -F::ONE),
+            (layout.mul_carry_bit(1, j), -F::from_u64(2)),
+        ],
+    ));
+
+    // MUL decomposition (always enforced): rs1_val * rs2_val = mul_lo + 2^32 * mul_hi.
+    constraints.push(Constraint {
+        condition_col: layout.rs1_val(j),
+        negate_condition: false,
+        additional_condition_cols: Vec::new(),
+        b_terms: vec![(layout.rs2_val(j), F::ONE)],
+        c_terms: vec![
+            (layout.mul_lo(j), F::ONE),
+            (layout.mul_hi(j), F::from_u64(pow2_u64(32))),
+        ],
+    });
+
+    // MUL/MULHU writeback.
+    constraints.push(Constraint::terms(
+        layout.is_mul(j),
+        false,
+        vec![(layout.rd_write_val(j), F::ONE), (layout.mul_lo(j), -F::ONE)],
+    ));
+    constraints.push(Constraint::terms(
+        layout.is_mulhu(j),
+        false,
+        vec![(layout.rd_write_val(j), F::ONE), (layout.mul_hi(j), -F::ONE)],
+    ));
+
+    // rs1_bit[i] ∈ {0,1}
+    for bit in 0..32 {
+        let b = layout.rs1_bit(bit, j);
+        constraints.push(Constraint {
+            condition_col: b,
+            negate_condition: false,
+            additional_condition_cols: Vec::new(),
+            b_terms: vec![(one, F::ONE), (b, -F::ONE)], // 1 - b
+            c_terms: Vec::new(),
+        });
+    }
+
+    // rs1_val = Σ 2^i * rs1_bit[i]
+    {
+        let mut terms = vec![(layout.rs1_val(j), F::ONE)];
+        for bit in 0..32 {
+            terms.push((layout.rs1_bit(bit, j), -F::from_u64(pow2_u64(bit))));
+        }
+        constraints.push(Constraint::terms(one, false, terms));
+    }
+
+    let rs1_sign = layout.rs1_bit(31, j);
+    let rs2_sign = layout.rs2_bit(31, j);
+
+    // rs1_abs / rs2_abs from two's-complement sign bits.
+    constraints.push(Constraint::terms(
+        rs1_sign,
+        true,
+        vec![(layout.rs1_abs(j), F::ONE), (layout.rs1_val(j), -F::ONE)],
+    ));
+    constraints.push(Constraint::terms(
+        rs1_sign,
+        false,
+        vec![
+            (layout.rs1_abs(j), F::ONE),
+            (layout.rs1_val(j), F::ONE),
+            (one, -F::from_u64(pow2_u64(32))),
+        ],
+    ));
+    constraints.push(Constraint::terms(
+        rs2_sign,
+        true,
+        vec![(layout.rs2_abs(j), F::ONE), (layout.rs2_val(j), -F::ONE)],
+    ));
+    constraints.push(Constraint::terms(
+        rs2_sign,
+        false,
+        vec![
+            (layout.rs2_abs(j), F::ONE),
+            (layout.rs2_val(j), F::ONE),
+            (one, -F::from_u64(pow2_u64(32))),
+        ],
+    ));
+
+    // Sign helpers.
+    constraints.push(Constraint::mul(rs1_sign, rs2_sign, layout.rs1_rs2_sign_and(j)));
+    constraints.push(Constraint::mul(rs1_sign, layout.rs2_val(j), layout.rs1_sign_rs2_val(j)));
+    constraints.push(Constraint::mul(rs2_sign, layout.rs1_val(j), layout.rs2_sign_rs1_val(j)));
+
+    // MULH/MULHSU writeback with signed correction.
+    constraints.push(Constraint::terms(
+        layout.is_mulh(j),
+        false,
+        vec![
+            (layout.rd_write_val(j), F::ONE),
+            (layout.mul_carry(j), F::from_u64(pow2_u64(32))),
+            (layout.mul_hi(j), -F::ONE),
+            (layout.rs1_sign_rs2_val(j), F::ONE),
+            (layout.rs2_sign_rs1_val(j), F::ONE),
+            (layout.rs1_rs2_sign_and(j), -F::from_u64(pow2_u64(32))),
+            (one, -F::from_u64(pow2_u64(32))),
+        ],
+    ));
+    constraints.push(Constraint::terms(
+        layout.is_mulhsu(j),
+        false,
+        vec![
+            (layout.rd_write_val(j), F::ONE),
+            (layout.mul_carry(j), F::from_u64(pow2_u64(32))),
+            (layout.mul_hi(j), -F::ONE),
+            (layout.rs1_sign_rs2_val(j), F::ONE),
+            (one, -F::from_u64(pow2_u64(32))),
+        ],
+    ));
+
+    if !sltu_enabled {
+        return;
+    }
+
+    // On DIV*/REM* rows: div_quot = Σ 2^i * mul_lo_bit[i].
+    //
+    // This prevents mod-p wraparound witnesses in the DIV/REM equation.
+    {
+        let mut terms = vec![(layout.div_quot(j), F::ONE)];
+        for bit in 0..32 {
+            terms.push((layout.mul_lo_bit(bit, j), -F::from_u64(pow2_u64(bit))));
+        }
+        constraints.push(Constraint::terms_or(
+            &[layout.is_div(j), layout.is_divu(j), layout.is_rem(j), layout.is_remu(j)],
+            false,
+            terms,
+        ));
+    }
+
+    // Prefix product chain for Π_{i=0..31} (1 - rs2_bit[i]).
+    // prefix[0] = (1 - b0)
+    constraints.push(Constraint {
+        condition_col: one,
+        negate_condition: false,
+        additional_condition_cols: Vec::new(),
+        b_terms: vec![(one, F::ONE), (layout.rs2_bit(0, j), -F::ONE)],
+        c_terms: vec![(layout.rs2_zero_prefix(0, j), F::ONE)],
+    });
+    // prefix[k] = prefix[k-1] * (1 - b_k) for k=1..30
+    for k in 1..31 {
+        constraints.push(Constraint {
+            condition_col: layout.rs2_zero_prefix(k - 1, j),
+            negate_condition: false,
+            additional_condition_cols: Vec::new(),
+            b_terms: vec![(one, F::ONE), (layout.rs2_bit(k, j), -F::ONE)],
+            c_terms: vec![(layout.rs2_zero_prefix(k, j), F::ONE)],
+        });
+    }
+    // rs2_is_zero = prefix[30] * (1 - b_31)
+    constraints.push(Constraint {
+        condition_col: layout.rs2_zero_prefix(30, j),
+        negate_condition: false,
+        additional_condition_cols: Vec::new(),
+        b_terms: vec![(one, F::ONE), (layout.rs2_bit(31, j), -F::ONE)],
+        c_terms: vec![(layout.rs2_is_zero(j), F::ONE)],
+    });
+
+    // rs2_nonzero = 1 - rs2_is_zero.
+    constraints.push(Constraint::terms(
+        one,
+        false,
+        vec![
+            (layout.rs2_nonzero(j), F::ONE),
+            (layout.rs2_is_zero(j), F::ONE),
+            (one, -F::ONE),
+        ],
+    ));
+
+    // is_divu_or_remu = is_divu + is_remu.
+    constraints.push(Constraint::terms(
+        one,
+        false,
+        vec![
+            (layout.is_divu_or_remu(j), F::ONE),
+            (layout.is_divu(j), -F::ONE),
+            (layout.is_remu(j), -F::ONE),
+        ],
+    ));
+
+    // is_div_or_rem = is_div + is_rem.
+    constraints.push(Constraint::terms(
+        one,
+        false,
+        vec![
+            (layout.is_div_or_rem(j), F::ONE),
+            (layout.is_div(j), -F::ONE),
+            (layout.is_rem(j), -F::ONE),
+        ],
+    ));
+
+    // div_rem_check (unsigned) = is_divu_or_remu * rs2_nonzero.
+    constraints.push(Constraint::mul(
+        layout.is_divu_or_remu(j),
+        layout.rs2_nonzero(j),
+        layout.div_rem_check(j),
+    ));
+
+    // div_rem_check_signed = is_div_or_rem * rs2_nonzero.
+    constraints.push(Constraint::mul(
+        layout.is_div_or_rem(j),
+        layout.rs2_nonzero(j),
+        layout.div_rem_check_signed(j),
+    ));
+
+    // divu_by_zero = is_divu * rs2_is_zero.
+    constraints.push(Constraint::mul(
+        layout.is_divu(j),
+        layout.rs2_is_zero(j),
+        layout.divu_by_zero(j),
+    ));
+
+    // div_by_zero / div_nonzero for signed DIV.
+    constraints.push(Constraint::mul(
+        layout.is_div(j),
+        layout.rs2_is_zero(j),
+        layout.div_by_zero(j),
+    ));
+    constraints.push(Constraint::mul(
+        layout.is_div(j),
+        layout.rs2_nonzero(j),
+        layout.div_nonzero(j),
+    ));
+
+    // rem_nonzero / rem_by_zero for signed REM.
+    constraints.push(Constraint::mul(
+        layout.is_rem(j),
+        layout.rs2_nonzero(j),
+        layout.rem_nonzero(j),
+    ));
+    constraints.push(Constraint::mul(
+        layout.is_rem(j),
+        layout.rs2_is_zero(j),
+        layout.rem_by_zero(j),
+    ));
+
+    // DIVU by zero: quotient must be all 1s.
+    constraints.push(Constraint::terms(
+        layout.divu_by_zero(j),
+        false,
+        vec![(layout.div_quot(j), F::ONE), (one, -F::from_u64(u32::MAX as u64))],
+    ));
+
+    // div_divisor selects rs2_val (unsigned) or rs2_abs (signed).
+    constraints.push(Constraint::terms(
+        layout.is_divu_or_remu(j),
+        false,
+        vec![(layout.div_divisor(j), F::ONE), (layout.rs2_val(j), -F::ONE)],
+    ));
+    constraints.push(Constraint::terms(
+        layout.is_div_or_rem(j),
+        false,
+        vec![(layout.div_divisor(j), F::ONE), (layout.rs2_abs(j), -F::ONE)],
+    ));
+
+    // div_prod = div_divisor * div_quot (always computed).
+    constraints.push(Constraint::mul(
+        layout.div_divisor(j),
+        layout.div_quot(j),
+        layout.div_prod(j),
+    ));
+
+    // Unsigned: dividend = divisor * quotient + remainder.
+    constraints.push(Constraint::terms(
+        layout.is_divu_or_remu(j),
+        false,
+        vec![
+            (layout.rs1_val(j), F::ONE),
+            (layout.div_prod(j), -F::ONE),
+            (layout.div_rem(j), -F::ONE),
+        ],
+    ));
+
+    // Signed: |dividend| = |divisor| * quotient + remainder (divisor != 0).
+    constraints.push(Constraint::terms(
+        layout.div_rem_check_signed(j),
+        false,
+        vec![
+            (layout.rs1_abs(j), F::ONE),
+            (layout.div_prod(j), -F::ONE),
+            (layout.div_rem(j), -F::ONE),
+        ],
+    ));
+
+    // div_sign = rs1_sign XOR rs2_sign.
+    constraints.push(Constraint::terms(
+        one,
+        false,
+        vec![
+            (layout.div_sign(j), F::ONE),
+            (rs1_sign, -F::ONE),
+            (rs2_sign, -F::ONE),
+            (layout.rs1_rs2_sign_and(j), F::from_u64(2)),
+        ],
+    ));
+    // div_sign boolean.
+    constraints.push(Constraint::terms(
+        layout.div_sign(j),
+        false,
+        vec![(layout.div_sign(j), F::ONE), (one, -F::ONE)],
+    ));
+
+    // div_quot_carry / div_rem_carry bits (used to normalize negative zero).
+    for &carry in &[layout.div_quot_carry(j), layout.div_rem_carry(j)] {
+        constraints.push(Constraint {
+            condition_col: carry,
+            negate_condition: false,
+            additional_condition_cols: Vec::new(),
+            b_terms: vec![(one, F::ONE), (carry, -F::ONE)], // 1 - carry
+            c_terms: Vec::new(),
+        });
+    }
+    // If sign=0, carry must be 0.
+    constraints.push(Constraint::terms(
+        layout.div_sign(j),
+        true,
+        vec![(layout.div_quot_carry(j), F::ONE)],
+    ));
+    constraints.push(Constraint::terms(
+        rs1_sign,
+        true,
+        vec![(layout.div_rem_carry(j), F::ONE)],
+    ));
+
+    // Signed quotient / remainder (two's complement, with carry to allow -0 -> 0).
+    constraints.push(Constraint::terms(
+        layout.div_sign(j),
+        true,
+        vec![(layout.div_quot_signed(j), F::ONE), (layout.div_quot(j), -F::ONE)],
+    ));
+    constraints.push(Constraint::terms(
+        layout.div_sign(j),
+        false,
+        vec![
+            (layout.div_quot_signed(j), F::ONE),
+            (layout.div_quot_carry(j), F::from_u64(pow2_u64(32))),
+            (layout.div_quot(j), F::ONE),
+            (one, -F::from_u64(pow2_u64(32))),
+        ],
+    ));
+    constraints.push(Constraint::terms(
+        rs1_sign,
+        true,
+        vec![(layout.div_rem_signed(j), F::ONE), (layout.div_rem(j), -F::ONE)],
+    ));
+    constraints.push(Constraint::terms(
+        rs1_sign,
+        false,
+        vec![
+            (layout.div_rem_signed(j), F::ONE),
+            (layout.div_rem_carry(j), F::from_u64(pow2_u64(32))),
+            (layout.div_rem(j), F::ONE),
+            (one, -F::from_u64(pow2_u64(32))),
+        ],
+    ));
+
+    // Writeback for DIVU/REMU.
+    constraints.push(Constraint::terms(
+        layout.is_divu(j),
+        false,
+        vec![(layout.rd_write_val(j), F::ONE), (layout.div_quot(j), -F::ONE)],
+    ));
+    constraints.push(Constraint::terms(
+        layout.is_remu(j),
+        false,
+        vec![(layout.rd_write_val(j), F::ONE), (layout.div_rem(j), -F::ONE)],
+    ));
+
+    // Writeback for DIV (signed): divisor != 0 uses signed quotient, divisor == 0 yields -1.
+    constraints.push(Constraint::terms(
+        layout.div_nonzero(j),
+        false,
+        vec![(layout.rd_write_val(j), F::ONE), (layout.div_quot_signed(j), -F::ONE)],
+    ));
+    constraints.push(Constraint::terms(
+        layout.div_by_zero(j),
+        false,
+        vec![(layout.rd_write_val(j), F::ONE), (one, -F::from_u64(u32::MAX as u64))],
+    ));
+
+    // Writeback for REM (signed): signed remainder (dividend sign).
+    constraints.push(Constraint::terms(
+        layout.is_rem(j),
+        false,
+        vec![(layout.rd_write_val(j), F::ONE), (layout.div_rem_signed(j), -F::ONE)],
+    ));
+    constraints.push(Constraint::terms(
+        layout.rem_by_zero(j),
+        false,
+        vec![(layout.rd_write_val(j), F::ONE), (layout.rs1_val(j), -F::ONE)],
+    ));
+
+    // For divisor != 0, require remainder < divisor via a SLTU Shout lookup.
+    constraints.push(Constraint::terms(
+        layout.div_rem_check(j),
+        false,
+        vec![(layout.alu_out(j), F::ONE), (one, -F::ONE)],
+    ));
+    constraints.push(Constraint::terms(
+        layout.div_rem_check_signed(j),
+        false,
+        vec![(layout.alu_out(j), F::ONE), (one, -F::ONE)],
+    ));
+}
+
+/// Build an RV32M “sidecar” CCS for RV32 B1 chunks.
+///
+/// This CCS intentionally contains only the MUL/DIV/REM helper constraints that we no longer
+/// include in the main RV32 B1 step CCS. It is meant to be proven/verified as an **additional**
+/// argument whenever the guest program uses RV32M ops.
+pub fn build_rv32_b1_rv32m_sidecar_ccs(layout: &Rv32B1Layout) -> Result<CcsStructure<F>, String> {
+    let mut constraints: Vec<Constraint<F>> = Vec::new();
+    let sltu_enabled = layout.table_ids.binary_search(&SLTU_TABLE_ID).is_ok();
+
+    for j in 0..layout.chunk_size {
+        push_rv32m_sidecar_constraints(&mut constraints, layout, j, sltu_enabled);
+    }
+
+    let n = constraints.len();
+    build_r1cs_ccs(&constraints, n, layout.m, layout.const_one)
+}
+
+/// Build the **full** RV32 B1 semantics constraint set.
+///
+/// This is intended to be proven as a separate sidecar CCS so the main step CCS can stay small
+/// (reserved primarily for shared-bus injection and chunk composition).
+fn full_semantic_constraints(
     layout: &Rv32B1Layout,
     mem_layouts: &HashMap<u32, PlainMemLayout>,
 ) -> Result<Vec<Constraint<F>>, String> {
@@ -238,77 +761,75 @@ fn semantic_constraints(
     }
 
     // If a Shout table isn't included, forbid the corresponding instruction variants.
-    if and_cols.is_none() {
-        for j in 0..layout.chunk_size {
-            constraints.push(Constraint::zero(one, layout.is_and(j)));
-            constraints.push(Constraint::zero(one, layout.is_andi(j)));
+    //
+    // These are sound as a single linear constraint per step: all flags are boolean, so
+    // `sum(forbidden_flags)=0` implies each forbidden flag is 0 (the sum range is tiny vs field size).
+    let forbid_and = and_cols.is_none();
+    let forbid_or = or_cols.is_none();
+    let forbid_xor = xor_cols.is_none();
+    let forbid_sub = sub_cols.is_none();
+    let forbid_sll = sll_cols.is_none();
+    let forbid_srl = srl_cols.is_none();
+    let forbid_sra = sra_cols.is_none();
+    let forbid_slt = slt_cols.is_none();
+    let forbid_sltu = sltu_cols.is_none();
+    let forbid_eq = eq_cols.is_none();
+    let forbid_neq = neq_cols.is_none();
+    for j in 0..layout.chunk_size {
+        let mut forbidden = Vec::new();
+        if forbid_and {
+            forbidden.push((layout.is_and(j), F::ONE));
+            forbidden.push((layout.is_andi(j), F::ONE));
         }
-    }
-    if or_cols.is_none() {
-        for j in 0..layout.chunk_size {
-            constraints.push(Constraint::zero(one, layout.is_or(j)));
-            constraints.push(Constraint::zero(one, layout.is_ori(j)));
+        if forbid_or {
+            forbidden.push((layout.is_or(j), F::ONE));
+            forbidden.push((layout.is_ori(j), F::ONE));
         }
-    }
-    if xor_cols.is_none() {
-        for j in 0..layout.chunk_size {
-            constraints.push(Constraint::zero(one, layout.is_xor(j)));
-            constraints.push(Constraint::zero(one, layout.is_xori(j)));
+        if forbid_xor {
+            forbidden.push((layout.is_xor(j), F::ONE));
+            forbidden.push((layout.is_xori(j), F::ONE));
         }
-    }
-    if sub_cols.is_none() {
-        for j in 0..layout.chunk_size {
-            constraints.push(Constraint::zero(one, layout.is_sub(j)));
+        if forbid_sub {
+            forbidden.push((layout.is_sub(j), F::ONE));
         }
-    }
-    if sll_cols.is_none() {
-        for j in 0..layout.chunk_size {
-            constraints.push(Constraint::zero(one, layout.is_sll(j)));
-            constraints.push(Constraint::zero(one, layout.is_slli(j)));
+        if forbid_sll {
+            forbidden.push((layout.is_sll(j), F::ONE));
+            forbidden.push((layout.is_slli(j), F::ONE));
         }
-    }
-    if srl_cols.is_none() {
-        for j in 0..layout.chunk_size {
-            constraints.push(Constraint::zero(one, layout.is_srl(j)));
-            constraints.push(Constraint::zero(one, layout.is_srli(j)));
+        if forbid_srl {
+            forbidden.push((layout.is_srl(j), F::ONE));
+            forbidden.push((layout.is_srli(j), F::ONE));
         }
-    }
-    if sra_cols.is_none() {
-        for j in 0..layout.chunk_size {
-            constraints.push(Constraint::zero(one, layout.is_sra(j)));
-            constraints.push(Constraint::zero(one, layout.is_srai(j)));
+        if forbid_sra {
+            forbidden.push((layout.is_sra(j), F::ONE));
+            forbidden.push((layout.is_srai(j), F::ONE));
         }
-    }
-    if slt_cols.is_none() {
-        for j in 0..layout.chunk_size {
-            constraints.push(Constraint::zero(one, layout.is_slt(j)));
-            constraints.push(Constraint::zero(one, layout.is_slti(j)));
-            constraints.push(Constraint::zero(one, layout.is_blt(j)));
-            constraints.push(Constraint::zero(one, layout.is_bge(j)));
+        if forbid_slt {
+            forbidden.push((layout.is_slt(j), F::ONE));
+            forbidden.push((layout.is_slti(j), F::ONE));
+            forbidden.push((layout.is_blt(j), F::ONE));
+            forbidden.push((layout.is_bge(j), F::ONE));
         }
-    }
-    if sltu_cols.is_none() {
-        for j in 0..layout.chunk_size {
-            constraints.push(Constraint::zero(one, layout.is_sltu(j)));
-            constraints.push(Constraint::zero(one, layout.is_sltiu(j)));
-            constraints.push(Constraint::zero(one, layout.is_bltu(j)));
-            constraints.push(Constraint::zero(one, layout.is_bgeu(j)));
+        if forbid_sltu {
+            forbidden.push((layout.is_sltu(j), F::ONE));
+            forbidden.push((layout.is_sltiu(j), F::ONE));
+            forbidden.push((layout.is_bltu(j), F::ONE));
+            forbidden.push((layout.is_bgeu(j), F::ONE));
             // DIVU/REMU need SLTU to prove `rem < divisor` when divisor != 0.
-            constraints.push(Constraint::zero(one, layout.is_divu(j)));
-            constraints.push(Constraint::zero(one, layout.is_remu(j)));
+            forbidden.push((layout.is_divu(j), F::ONE));
+            forbidden.push((layout.is_remu(j), F::ONE));
             // DIV/REM need SLTU for the signed remainder bound check.
-            constraints.push(Constraint::zero(one, layout.is_div(j)));
-            constraints.push(Constraint::zero(one, layout.is_rem(j)));
+            forbidden.push((layout.is_div(j), F::ONE));
+            forbidden.push((layout.is_rem(j), F::ONE));
         }
-    }
-    if eq_cols.is_none() {
-        for j in 0..layout.chunk_size {
-            constraints.push(Constraint::zero(one, layout.is_beq(j)));
+        if forbid_eq {
+            forbidden.push((layout.is_beq(j), F::ONE));
         }
-    }
-    if neq_cols.is_none() {
-        for j in 0..layout.chunk_size {
-            constraints.push(Constraint::zero(one, layout.is_bne(j)));
+        if forbid_neq {
+            forbidden.push((layout.is_bne(j), F::ONE));
+        }
+        if !forbidden.is_empty() {
+            constraints.push(Constraint::terms(one, false, forbidden));
         }
     }
     let _ = (mulh_cols, mulhu_cols, mulhsu_cols, div_cols, rem_cols);
@@ -672,141 +1193,228 @@ fn semantic_constraints(
         }
 
         // Decode constraints for the supported RV32I/M core subset.
-        constraints.push(Constraint::eq_const(layout.is_add(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::zero(layout.is_add(j), layout.funct3(j)));
-        constraints.push(Constraint::zero(layout.is_add(j), layout.funct7(j)));
+        //
+        // Important: many instruction flags share the same opcode (e.g. all R-type ALU ops share 0x33).
+        // Since flags are one-hot under `is_active`, we can de-duplicate these checks by gating a single
+        // opcode constraint on the *sum* of the relevant flags. This reduces CCS size without changing
+        // semantics.
+        constraints.push(Constraint::terms_or(
+            &[
+                // R-type ALU + M (opcode=0x33)
+                layout.is_add(j),
+                layout.is_sub(j),
+                layout.is_sll(j),
+                layout.is_slt(j),
+                layout.is_sltu(j),
+                layout.is_xor(j),
+                layout.is_srl(j),
+                layout.is_sra(j),
+                layout.is_or(j),
+                layout.is_and(j),
+                layout.is_mul(j),
+                layout.is_mulh(j),
+                layout.is_mulhsu(j),
+                layout.is_mulhu(j),
+                layout.is_div(j),
+                layout.is_divu(j),
+                layout.is_rem(j),
+                layout.is_remu(j),
+            ],
+            false,
+            vec![(layout.opcode(j), F::ONE), (one, -F::from_u64(0x33))],
+        ));
+        constraints.push(Constraint::terms_or(
+            &[
+                // I-type ALU (opcode=0x13)
+                layout.is_addi(j),
+                layout.is_slti(j),
+                layout.is_sltiu(j),
+                layout.is_xori(j),
+                layout.is_ori(j),
+                layout.is_andi(j),
+                layout.is_slli(j),
+                layout.is_srli(j),
+                layout.is_srai(j),
+            ],
+            false,
+            vec![(layout.opcode(j), F::ONE), (one, -F::from_u64(0x13))],
+        ));
+        constraints.push(Constraint::terms_or(
+            &[
+                // Loads (opcode=0x03)
+                layout.is_lb(j),
+                layout.is_lh(j),
+                layout.is_lw(j),
+                layout.is_lbu(j),
+                layout.is_lhu(j),
+            ],
+            false,
+            vec![(layout.opcode(j), F::ONE), (one, -F::from_u64(0x03))],
+        ));
+        constraints.push(Constraint::terms_or(
+            &[
+                // Stores (opcode=0x23)
+                layout.is_sb(j),
+                layout.is_sh(j),
+                layout.is_sw(j),
+            ],
+            false,
+            vec![(layout.opcode(j), F::ONE), (one, -F::from_u64(0x23))],
+        ));
+        constraints.push(Constraint::terms_or(
+            &[
+                // RV32A atomics (opcode=0x2F)
+                layout.is_amoswap_w(j),
+                layout.is_amoadd_w(j),
+                layout.is_amoxor_w(j),
+                layout.is_amoor_w(j),
+                layout.is_amoand_w(j),
+            ],
+            false,
+            vec![(layout.opcode(j), F::ONE), (one, -F::from_u64(0x2f))],
+        ));
+        constraints.push(Constraint::terms_or(
+            &[
+                // Branches (opcode=0x63)
+                layout.is_beq(j),
+                layout.is_bne(j),
+                layout.is_blt(j),
+                layout.is_bge(j),
+                layout.is_bltu(j),
+                layout.is_bgeu(j),
+            ],
+            false,
+            vec![(layout.opcode(j), F::ONE), (one, -F::from_u64(0x63))],
+        ));
 
-        constraints.push(Constraint::eq_const(layout.is_sub(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::zero(layout.is_sub(j), layout.funct3(j)));
-        constraints.push(Constraint::eq_const(layout.is_sub(j), one, layout.funct7(j), 0x20));
+        // ------------------------------------------------------------
+        // Funct3/funct7 constraints (de-duplicated across one-hot flags)
+        // ------------------------------------------------------------
 
-        constraints.push(Constraint::eq_const(layout.is_sll(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::eq_const(layout.is_sll(j), one, layout.funct3(j), 0x1));
-        constraints.push(Constraint::zero(layout.is_sll(j), layout.funct7(j)));
+        // funct3 is a 3-bit field and many instruction variants share the same value.
+        // Since flags are one-hot under `is_active`, we can gate a single constraint on the sum
+        // of all flags that require a given funct3.
+        constraints.push(Constraint::terms_or(
+            &[
+                layout.is_add(j),
+                layout.is_sub(j),
+                layout.is_mul(j),
+                layout.is_addi(j),
+                layout.is_lb(j),
+                layout.is_sb(j),
+                layout.is_beq(j),
+                layout.is_jalr(j),
+                layout.is_halt(j),
+            ],
+            false,
+            vec![(layout.funct3(j), F::ONE)],
+        ));
+        constraints.push(Constraint::terms_or(
+            &[
+                layout.is_sll(j),
+                layout.is_slli(j),
+                layout.is_lh(j),
+                layout.is_sh(j),
+                layout.is_bne(j),
+                layout.is_mulh(j),
+            ],
+            false,
+            vec![(layout.funct3(j), F::ONE), (one, -F::from_u64(0x1))],
+        ));
+        constraints.push(Constraint::terms_or(
+            &[
+                layout.is_slt(j),
+                layout.is_slti(j),
+                layout.is_lw(j),
+                layout.is_sw(j),
+                layout.is_amoswap_w(j),
+                layout.is_amoadd_w(j),
+                layout.is_amoxor_w(j),
+                layout.is_amoor_w(j),
+                layout.is_amoand_w(j),
+                layout.is_mulhsu(j),
+            ],
+            false,
+            vec![(layout.funct3(j), F::ONE), (one, -F::from_u64(0x2))],
+        ));
+        constraints.push(Constraint::terms_or(
+            &[layout.is_sltu(j), layout.is_sltiu(j), layout.is_mulhu(j)],
+            false,
+            vec![(layout.funct3(j), F::ONE), (one, -F::from_u64(0x3))],
+        ));
+        constraints.push(Constraint::terms_or(
+            &[
+                layout.is_xor(j),
+                layout.is_xori(j),
+                layout.is_lbu(j),
+                layout.is_blt(j),
+                layout.is_div(j),
+            ],
+            false,
+            vec![(layout.funct3(j), F::ONE), (one, -F::from_u64(0x4))],
+        ));
+        constraints.push(Constraint::terms_or(
+            &[
+                layout.is_srl(j),
+                layout.is_sra(j),
+                layout.is_srli(j),
+                layout.is_srai(j),
+                layout.is_lhu(j),
+                layout.is_bge(j),
+                layout.is_divu(j),
+            ],
+            false,
+            vec![(layout.funct3(j), F::ONE), (one, -F::from_u64(0x5))],
+        ));
+        constraints.push(Constraint::terms_or(
+            &[layout.is_or(j), layout.is_ori(j), layout.is_bltu(j), layout.is_rem(j)],
+            false,
+            vec![(layout.funct3(j), F::ONE), (one, -F::from_u64(0x6))],
+        ));
+        constraints.push(Constraint::terms_or(
+            &[layout.is_and(j), layout.is_andi(j), layout.is_bgeu(j), layout.is_remu(j)],
+            false,
+            vec![(layout.funct3(j), F::ONE), (one, -F::from_u64(0x7))],
+        ));
 
-        constraints.push(Constraint::eq_const(layout.is_slt(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::eq_const(layout.is_slt(j), one, layout.funct3(j), 0x2));
-        constraints.push(Constraint::zero(layout.is_slt(j), layout.funct7(j)));
-
-        constraints.push(Constraint::eq_const(layout.is_sltu(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::eq_const(layout.is_sltu(j), one, layout.funct3(j), 0x3));
-        constraints.push(Constraint::zero(layout.is_sltu(j), layout.funct7(j)));
-
-        constraints.push(Constraint::eq_const(layout.is_xor(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::eq_const(layout.is_xor(j), one, layout.funct3(j), 0x4));
-        constraints.push(Constraint::zero(layout.is_xor(j), layout.funct7(j)));
-
-        constraints.push(Constraint::eq_const(layout.is_srl(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::eq_const(layout.is_srl(j), one, layout.funct3(j), 0x5));
-        constraints.push(Constraint::zero(layout.is_srl(j), layout.funct7(j)));
-
-        constraints.push(Constraint::eq_const(layout.is_sra(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::eq_const(layout.is_sra(j), one, layout.funct3(j), 0x5));
-        constraints.push(Constraint::eq_const(layout.is_sra(j), one, layout.funct7(j), 0x20));
-
-        constraints.push(Constraint::eq_const(layout.is_or(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::eq_const(layout.is_or(j), one, layout.funct3(j), 0x6));
-        constraints.push(Constraint::zero(layout.is_or(j), layout.funct7(j)));
-
-        constraints.push(Constraint::eq_const(layout.is_and(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::eq_const(layout.is_and(j), one, layout.funct3(j), 0x7));
-        constraints.push(Constraint::zero(layout.is_and(j), layout.funct7(j)));
-
-        // RV32M (funct7 = 0b0000001).
-        constraints.push(Constraint::eq_const(layout.is_mul(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::zero(layout.is_mul(j), layout.funct3(j)));
-        constraints.push(Constraint::eq_const(layout.is_mul(j), one, layout.funct7(j), 0x1));
-
-        constraints.push(Constraint::eq_const(layout.is_mulh(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::eq_const(layout.is_mulh(j), one, layout.funct3(j), 0x1));
-        constraints.push(Constraint::eq_const(layout.is_mulh(j), one, layout.funct7(j), 0x1));
-
-        constraints.push(Constraint::eq_const(layout.is_mulhsu(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::eq_const(layout.is_mulhsu(j), one, layout.funct3(j), 0x2));
-        constraints.push(Constraint::eq_const(layout.is_mulhsu(j), one, layout.funct7(j), 0x1));
-
-        constraints.push(Constraint::eq_const(layout.is_mulhu(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::eq_const(layout.is_mulhu(j), one, layout.funct3(j), 0x3));
-        constraints.push(Constraint::eq_const(layout.is_mulhu(j), one, layout.funct7(j), 0x1));
-
-        constraints.push(Constraint::eq_const(layout.is_div(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::eq_const(layout.is_div(j), one, layout.funct3(j), 0x4));
-        constraints.push(Constraint::eq_const(layout.is_div(j), one, layout.funct7(j), 0x1));
-
-        constraints.push(Constraint::eq_const(layout.is_divu(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::eq_const(layout.is_divu(j), one, layout.funct3(j), 0x5));
-        constraints.push(Constraint::eq_const(layout.is_divu(j), one, layout.funct7(j), 0x1));
-
-        constraints.push(Constraint::eq_const(layout.is_rem(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::eq_const(layout.is_rem(j), one, layout.funct3(j), 0x6));
-        constraints.push(Constraint::eq_const(layout.is_rem(j), one, layout.funct7(j), 0x1));
-
-        constraints.push(Constraint::eq_const(layout.is_remu(j), one, layout.opcode(j), 0x33));
-        constraints.push(Constraint::eq_const(layout.is_remu(j), one, layout.funct3(j), 0x7));
-        constraints.push(Constraint::eq_const(layout.is_remu(j), one, layout.funct7(j), 0x1));
-
-        constraints.push(Constraint::eq_const(layout.is_addi(j), one, layout.opcode(j), 0x13));
-        constraints.push(Constraint::zero(layout.is_addi(j), layout.funct3(j)));
-
-        constraints.push(Constraint::eq_const(layout.is_slti(j), one, layout.opcode(j), 0x13));
-        constraints.push(Constraint::eq_const(layout.is_slti(j), one, layout.funct3(j), 0x2));
-
-        constraints.push(Constraint::eq_const(layout.is_sltiu(j), one, layout.opcode(j), 0x13));
-        constraints.push(Constraint::eq_const(layout.is_sltiu(j), one, layout.funct3(j), 0x3));
-
-        constraints.push(Constraint::eq_const(layout.is_xori(j), one, layout.opcode(j), 0x13));
-        constraints.push(Constraint::eq_const(layout.is_xori(j), one, layout.funct3(j), 0x4));
-
-        constraints.push(Constraint::eq_const(layout.is_ori(j), one, layout.opcode(j), 0x13));
-        constraints.push(Constraint::eq_const(layout.is_ori(j), one, layout.funct3(j), 0x6));
-
-        constraints.push(Constraint::eq_const(layout.is_andi(j), one, layout.opcode(j), 0x13));
-        constraints.push(Constraint::eq_const(layout.is_andi(j), one, layout.funct3(j), 0x7));
-
-        constraints.push(Constraint::eq_const(layout.is_slli(j), one, layout.opcode(j), 0x13));
-        constraints.push(Constraint::eq_const(layout.is_slli(j), one, layout.funct3(j), 0x1));
-        constraints.push(Constraint::zero(layout.is_slli(j), layout.funct7(j)));
-
-        constraints.push(Constraint::eq_const(layout.is_srli(j), one, layout.opcode(j), 0x13));
-        constraints.push(Constraint::eq_const(layout.is_srli(j), one, layout.funct3(j), 0x5));
-        constraints.push(Constraint::zero(layout.is_srli(j), layout.funct7(j)));
-
-        constraints.push(Constraint::eq_const(layout.is_srai(j), one, layout.opcode(j), 0x13));
-        constraints.push(Constraint::eq_const(layout.is_srai(j), one, layout.funct3(j), 0x5));
-        constraints.push(Constraint::eq_const(layout.is_srai(j), one, layout.funct7(j), 0x20));
-
-        constraints.push(Constraint::eq_const(layout.is_lb(j), one, layout.opcode(j), 0x03));
-        constraints.push(Constraint::eq_const(layout.is_lb(j), one, layout.funct3(j), 0x0));
-
-        constraints.push(Constraint::eq_const(layout.is_lh(j), one, layout.opcode(j), 0x03));
-        constraints.push(Constraint::eq_const(layout.is_lh(j), one, layout.funct3(j), 0x1));
-
-        constraints.push(Constraint::eq_const(layout.is_lw(j), one, layout.opcode(j), 0x03));
-        constraints.push(Constraint::eq_const(layout.is_lw(j), one, layout.funct3(j), 0x2));
-
-        constraints.push(Constraint::eq_const(layout.is_lbu(j), one, layout.opcode(j), 0x03));
-        constraints.push(Constraint::eq_const(layout.is_lbu(j), one, layout.funct3(j), 0x4));
-
-        constraints.push(Constraint::eq_const(layout.is_lhu(j), one, layout.opcode(j), 0x03));
-        constraints.push(Constraint::eq_const(layout.is_lhu(j), one, layout.funct3(j), 0x5));
-
-        constraints.push(Constraint::eq_const(layout.is_sb(j), one, layout.opcode(j), 0x23));
-        constraints.push(Constraint::eq_const(layout.is_sb(j), one, layout.funct3(j), 0x0));
-
-        constraints.push(Constraint::eq_const(layout.is_sh(j), one, layout.opcode(j), 0x23));
-        constraints.push(Constraint::eq_const(layout.is_sh(j), one, layout.funct3(j), 0x1));
-
-        constraints.push(Constraint::eq_const(layout.is_sw(j), one, layout.opcode(j), 0x23));
-        constraints.push(Constraint::eq_const(layout.is_sw(j), one, layout.funct3(j), 0x2));
+        // funct7 constraints (R-type + shifts + RV32M).
+        constraints.push(Constraint::terms_or(
+            &[
+                layout.is_add(j),
+                layout.is_sll(j),
+                layout.is_slt(j),
+                layout.is_sltu(j),
+                layout.is_xor(j),
+                layout.is_srl(j),
+                layout.is_or(j),
+                layout.is_and(j),
+                layout.is_slli(j),
+                layout.is_srli(j),
+            ],
+            false,
+            vec![(layout.funct7(j), F::ONE)],
+        ));
+        constraints.push(Constraint::terms_or(
+            &[layout.is_sub(j), layout.is_sra(j), layout.is_srai(j)],
+            false,
+            vec![(layout.funct7(j), F::ONE), (one, -F::from_u64(0x20))],
+        ));
+        constraints.push(Constraint::terms_or(
+            &[
+                layout.is_mul(j),
+                layout.is_mulh(j),
+                layout.is_mulhsu(j),
+                layout.is_mulhu(j),
+                layout.is_div(j),
+                layout.is_divu(j),
+                layout.is_rem(j),
+                layout.is_remu(j),
+            ],
+            false,
+            vec![(layout.funct7(j), F::ONE), (one, -F::from_u64(0x1))],
+        ));
 
         // RV32A atomics (AMO*, word only): opcode=0x2F, funct3=010, funct5 in bits [31:27].
-        constraints.push(Constraint::eq_const(
-            layout.is_amoswap_w(j),
-            one,
-            layout.opcode(j),
-            0x2f,
-        ));
-        constraints.push(Constraint::eq_const(layout.is_amoswap_w(j), one, layout.funct3(j), 0x2));
         constraints.push(Constraint::terms(
             layout.is_amoswap_w(j),
             false,
@@ -817,16 +1425,12 @@ fn semantic_constraints(
         constraints.push(Constraint::zero(layout.is_amoswap_w(j), layout.instr_bit(30, j)));
         constraints.push(Constraint::zero(layout.is_amoswap_w(j), layout.instr_bit(31, j)));
 
-        constraints.push(Constraint::eq_const(layout.is_amoadd_w(j), one, layout.opcode(j), 0x2f));
-        constraints.push(Constraint::eq_const(layout.is_amoadd_w(j), one, layout.funct3(j), 0x2));
         constraints.push(Constraint::zero(layout.is_amoadd_w(j), layout.instr_bit(27, j)));
         constraints.push(Constraint::zero(layout.is_amoadd_w(j), layout.instr_bit(28, j)));
         constraints.push(Constraint::zero(layout.is_amoadd_w(j), layout.instr_bit(29, j)));
         constraints.push(Constraint::zero(layout.is_amoadd_w(j), layout.instr_bit(30, j)));
         constraints.push(Constraint::zero(layout.is_amoadd_w(j), layout.instr_bit(31, j)));
 
-        constraints.push(Constraint::eq_const(layout.is_amoxor_w(j), one, layout.opcode(j), 0x2f));
-        constraints.push(Constraint::eq_const(layout.is_amoxor_w(j), one, layout.funct3(j), 0x2));
         constraints.push(Constraint::zero(layout.is_amoxor_w(j), layout.instr_bit(27, j)));
         constraints.push(Constraint::zero(layout.is_amoxor_w(j), layout.instr_bit(28, j)));
         constraints.push(Constraint::terms(
@@ -837,8 +1441,6 @@ fn semantic_constraints(
         constraints.push(Constraint::zero(layout.is_amoxor_w(j), layout.instr_bit(30, j)));
         constraints.push(Constraint::zero(layout.is_amoxor_w(j), layout.instr_bit(31, j)));
 
-        constraints.push(Constraint::eq_const(layout.is_amoor_w(j), one, layout.opcode(j), 0x2f));
-        constraints.push(Constraint::eq_const(layout.is_amoor_w(j), one, layout.funct3(j), 0x2));
         constraints.push(Constraint::zero(layout.is_amoor_w(j), layout.instr_bit(27, j)));
         constraints.push(Constraint::zero(layout.is_amoor_w(j), layout.instr_bit(28, j)));
         constraints.push(Constraint::zero(layout.is_amoor_w(j), layout.instr_bit(29, j)));
@@ -849,8 +1451,6 @@ fn semantic_constraints(
         ));
         constraints.push(Constraint::zero(layout.is_amoor_w(j), layout.instr_bit(31, j)));
 
-        constraints.push(Constraint::eq_const(layout.is_amoand_w(j), one, layout.opcode(j), 0x2f));
-        constraints.push(Constraint::eq_const(layout.is_amoand_w(j), one, layout.funct3(j), 0x2));
         constraints.push(Constraint::zero(layout.is_amoand_w(j), layout.instr_bit(27, j)));
         constraints.push(Constraint::zero(layout.is_amoand_w(j), layout.instr_bit(28, j)));
         constraints.push(Constraint::terms(
@@ -868,28 +1468,9 @@ fn semantic_constraints(
         constraints.push(Constraint::eq_const(layout.is_lui(j), one, layout.opcode(j), 0x37));
         constraints.push(Constraint::eq_const(layout.is_auipc(j), one, layout.opcode(j), 0x17));
 
-        constraints.push(Constraint::eq_const(layout.is_beq(j), one, layout.opcode(j), 0x63));
-        constraints.push(Constraint::zero(layout.is_beq(j), layout.funct3(j)));
-
-        constraints.push(Constraint::eq_const(layout.is_bne(j), one, layout.opcode(j), 0x63));
-        constraints.push(Constraint::eq_const(layout.is_bne(j), one, layout.funct3(j), 0x1));
-
-        constraints.push(Constraint::eq_const(layout.is_blt(j), one, layout.opcode(j), 0x63));
-        constraints.push(Constraint::eq_const(layout.is_blt(j), one, layout.funct3(j), 0x4));
-
-        constraints.push(Constraint::eq_const(layout.is_bge(j), one, layout.opcode(j), 0x63));
-        constraints.push(Constraint::eq_const(layout.is_bge(j), one, layout.funct3(j), 0x5));
-
-        constraints.push(Constraint::eq_const(layout.is_bltu(j), one, layout.opcode(j), 0x63));
-        constraints.push(Constraint::eq_const(layout.is_bltu(j), one, layout.funct3(j), 0x6));
-
-        constraints.push(Constraint::eq_const(layout.is_bgeu(j), one, layout.opcode(j), 0x63));
-        constraints.push(Constraint::eq_const(layout.is_bgeu(j), one, layout.funct3(j), 0x7));
-
         constraints.push(Constraint::eq_const(layout.is_jal(j), one, layout.opcode(j), 0x6f));
 
         constraints.push(Constraint::eq_const(layout.is_jalr(j), one, layout.opcode(j), 0x67));
-        constraints.push(Constraint::zero(layout.is_jalr(j), layout.funct3(j)));
 
         constraints.push(Constraint::eq_const(layout.is_fence(j), one, layout.opcode(j), 0x0f));
         constraints.push(Constraint::zero(layout.is_fence(j), layout.funct3(j)));
@@ -898,26 +1479,10 @@ fn semantic_constraints(
         constraints.push(Constraint::zero(layout.is_halt(j), layout.imm12_raw(j)));
         constraints.push(Constraint::zero(layout.is_halt(j), layout.rd_field(j)));
         constraints.push(Constraint::zero(layout.is_halt(j), layout.rs1_field(j)));
-        constraints.push(Constraint::zero(layout.is_halt(j), layout.funct3(j)));
 
         // --------------------------------------------------------------------
         // Regfile-as-Twist glue
         // --------------------------------------------------------------------
-
-        // Lane 1 register read address:
-        // - for HALT (ECALL), we repurpose rs2_val to hold a0 (x10) so the ECALL marker logic can
-        //   read the call id from the regfile without adding a third read lane.
-        // - otherwise, read rs2_field as usual (even for formats where [24:20] isn't a true rs2).
-        constraints.push(Constraint::terms(
-            layout.is_halt(j),
-            false,
-            vec![(layout.reg_rs2_addr(j), F::ONE), (one, -F::from_u64(10))],
-        ));
-        constraints.push(Constraint::terms(
-            layout.is_halt(j),
-            true,
-            vec![(layout.reg_rs2_addr(j), F::ONE), (layout.rs2_field(j), -F::ONE)],
-        ));
 
         // rd_is_zero = 1 iff instr rd field bits [11:7] are all 0.
         // rd_is_zero_01   = (1-b7) * (1-b8)
@@ -1019,162 +1584,19 @@ fn semantic_constraints(
             c_terms: vec![(layout.reg_has_write(j), F::ONE)],
         });
 
-        // ECALL helpers (Jolt marker/print IDs).
-        let a0 = layout.rs2_val(j);
-        let ecall_is_cycle = layout.ecall_is_cycle(j);
-        let ecall_is_print = layout.ecall_is_print(j);
-        let ecall_halts = layout.ecall_halts(j);
-        let halt_effective = layout.halt_effective(j);
-
-        // Decompose a0 into bits.
-        for bit in 0..32 {
-            let b = layout.ecall_a0_bit(bit, j);
-            constraints.push(Constraint {
-                condition_col: b,
-                negate_condition: false,
-                additional_condition_cols: Vec::new(),
-                b_terms: vec![(one, F::ONE), (b, -F::ONE)], // 1 - b
-                c_terms: Vec::new(),
-            });
-        }
-        {
-            let mut terms = vec![(a0, F::ONE)];
-            for bit in 0..32 {
-                terms.push((layout.ecall_a0_bit(bit, j), -F::from_u64(pow2_u64(bit))));
-            }
-            constraints.push(Constraint::terms(one, false, terms));
-        }
-
-        // ecall_is_cycle = (a0 == JOLT_CYCLE_TRACK_ECALL_NUM).
-        let cycle_const = JOLT_CYCLE_TRACK_ECALL_NUM as u32;
-        {
-            let bit0 = layout.ecall_a0_bit(0, j);
-            let prefix0 = layout.ecall_cycle_prefix(0, j);
-            if (cycle_const & 1) == 1 {
-                constraints.push(Constraint::terms(one, false, vec![(prefix0, F::ONE), (bit0, -F::ONE)]));
-            } else {
-                constraints.push(Constraint::terms(
-                    one,
-                    false,
-                    vec![(prefix0, F::ONE), (bit0, F::ONE), (one, -F::ONE)],
-                ));
-            }
-        }
-        for k in 1..31 {
-            let prev = layout.ecall_cycle_prefix(k - 1, j);
-            let next = layout.ecall_cycle_prefix(k, j);
-            let bit_col = layout.ecall_a0_bit(k, j);
-            let bit_is_one = ((cycle_const >> k) & 1) == 1;
-            let b_terms = if bit_is_one {
-                vec![(bit_col, F::ONE)]
-            } else {
-                vec![(one, F::ONE), (bit_col, -F::ONE)]
-            };
-            constraints.push(Constraint {
-                condition_col: prev,
-                negate_condition: false,
-                additional_condition_cols: Vec::new(),
-                b_terms,
-                c_terms: vec![(next, F::ONE)],
-            });
-        }
-        {
-            let prev = layout.ecall_cycle_prefix(30, j);
-            let bit_col = layout.ecall_a0_bit(31, j);
-            let bit_is_one = ((cycle_const >> 31) & 1) == 1;
-            let b_terms = if bit_is_one {
-                vec![(bit_col, F::ONE)]
-            } else {
-                vec![(one, F::ONE), (bit_col, -F::ONE)]
-            };
-            constraints.push(Constraint {
-                condition_col: prev,
-                negate_condition: false,
-                additional_condition_cols: Vec::new(),
-                b_terms,
-                c_terms: vec![(ecall_is_cycle, F::ONE)],
-            });
-        }
-        constraints.push(Constraint::mul(ecall_is_cycle, ecall_is_cycle, ecall_is_cycle));
-
-        // ecall_is_print = (a0 == JOLT_PRINT_ECALL_NUM).
-        let print_const = JOLT_PRINT_ECALL_NUM as u32;
-        {
-            let bit0 = layout.ecall_a0_bit(0, j);
-            let prefix0 = layout.ecall_print_prefix(0, j);
-            if (print_const & 1) == 1 {
-                constraints.push(Constraint::terms(one, false, vec![(prefix0, F::ONE), (bit0, -F::ONE)]));
-            } else {
-                constraints.push(Constraint::terms(
-                    one,
-                    false,
-                    vec![(prefix0, F::ONE), (bit0, F::ONE), (one, -F::ONE)],
-                ));
-            }
-        }
-        for k in 1..31 {
-            let prev = layout.ecall_print_prefix(k - 1, j);
-            let next = layout.ecall_print_prefix(k, j);
-            let bit_col = layout.ecall_a0_bit(k, j);
-            let bit_is_one = ((print_const >> k) & 1) == 1;
-            let b_terms = if bit_is_one {
-                vec![(bit_col, F::ONE)]
-            } else {
-                vec![(one, F::ONE), (bit_col, -F::ONE)]
-            };
-            constraints.push(Constraint {
-                condition_col: prev,
-                negate_condition: false,
-                additional_condition_cols: Vec::new(),
-                b_terms,
-                c_terms: vec![(next, F::ONE)],
-            });
-        }
-        {
-            let prev = layout.ecall_print_prefix(30, j);
-            let bit_col = layout.ecall_a0_bit(31, j);
-            let bit_is_one = ((print_const >> 31) & 1) == 1;
-            let b_terms = if bit_is_one {
-                vec![(bit_col, F::ONE)]
-            } else {
-                vec![(one, F::ONE), (bit_col, -F::ONE)]
-            };
-            constraints.push(Constraint {
-                condition_col: prev,
-                negate_condition: false,
-                additional_condition_cols: Vec::new(),
-                b_terms,
-                c_terms: vec![(ecall_is_print, F::ONE)],
-            });
-        }
-        constraints.push(Constraint::mul(ecall_is_print, ecall_is_print, ecall_is_print));
-
+        // ECALL always halts in RV32 B1: halt_effective = is_halt.
         constraints.push(Constraint::terms(
             one,
             false,
             vec![
-                (ecall_halts, F::ONE),
-                (ecall_is_cycle, F::ONE),
-                (ecall_is_print, F::ONE),
-                (one, -F::ONE),
+                (layout.halt_effective(j), F::ONE),
+                (layout.is_halt(j), -F::ONE),
             ],
         ));
-        constraints.push(Constraint::mul(ecall_halts, ecall_halts, ecall_halts));
-        constraints.push(Constraint::mul(layout.is_halt(j), ecall_halts, halt_effective));
 
         // --------------------------------------------------------------------
-        // RV32M helpers (in-circuit MUL/DIV/REM)
+        // Always-on memory/store safety plumbing
         // --------------------------------------------------------------------
-
-        // Range-check rd_write_val to 32 bits (keeps writeback canonical).
-        enforce_u32_bits(
-            &mut constraints,
-            one,
-            layout.rd_write_val(j),
-            layout.rd_write_bits_start,
-            layout.chunk_size,
-            j,
-        );
 
         // Range-check mem_rv to 32 bits so byte/half extraction is sound.
         enforce_u32_bits(
@@ -1186,110 +1608,9 @@ fn semantic_constraints(
             j,
         );
 
-        // Range-check mul_lo / mul_hi to ensure the decomposition is unique.
-        enforce_u32_bits(
-            &mut constraints,
-            one,
-            layout.mul_lo(j),
-            layout.mul_lo_bits_start,
-            layout.chunk_size,
-            j,
-        );
-        enforce_u32_bits(
-            &mut constraints,
-            one,
-            layout.mul_hi(j),
-            layout.mul_hi_bits_start,
-            layout.chunk_size,
-            j,
-        );
-
-        // Disambiguate the MUL decomposition in Goldilocks by ruling out `mul_hi == 0xffff_ffff`.
-        //
-        // For 32-bit operands, the true 64-bit product has `mul_hi <= 0xffff_fffe`. Without this,
-        // the field equation `rs1*rs2 = mul_lo + 2^32*mul_hi (mod p)` also admits the solution
-        // `mul_lo + 2^32*mul_hi = rs1*rs2 + p` when `rs1*rs2 <= 2^32-2`, where `p = 2^64-2^32+1`.
-        //
-        // We enforce `mul_hi != 0xffff_ffff` by constraining `∏_{i=0..31} mul_hi_bit[i] = 0`.
-        constraints.push(Constraint::terms(
-            one,
-            false,
-            vec![(layout.mul_hi_prefix(0, j), F::ONE), (layout.mul_hi_bit(0, j), -F::ONE)],
-        ));
-        for k in 1..31 {
-            constraints.push(Constraint::mul(
-                layout.mul_hi_prefix(k - 1, j),
-                layout.mul_hi_bit(k, j),
-                layout.mul_hi_prefix(k, j),
-            ));
-        }
-        constraints.push(Constraint {
-            condition_col: layout.mul_hi_prefix(30, j),
-            negate_condition: false,
-            additional_condition_cols: Vec::new(),
-            b_terms: vec![(layout.mul_hi_bit(31, j), F::ONE)],
-            c_terms: Vec::new(),
-        });
-
-        // mul_carry bits (0..3, but only 0..2 will satisfy the MULH equations).
-        for bit in 0..2 {
-            let b = layout.mul_carry_bit(bit, j);
-            constraints.push(Constraint {
-                condition_col: b,
-                negate_condition: false,
-                additional_condition_cols: Vec::new(),
-                b_terms: vec![(one, F::ONE), (b, -F::ONE)], // 1 - b
-                c_terms: Vec::new(),
-            });
-        }
-        constraints.push(Constraint::terms(
-            one,
-            false,
-            vec![
-                (layout.mul_carry(j), F::ONE),
-                (layout.mul_carry_bit(0, j), -F::ONE),
-                (layout.mul_carry_bit(1, j), -F::from_u64(2)),
-            ],
-        ));
-
-        // MUL decomposition (always enforced): rs1_val * rs2_val = mul_lo + 2^32 * mul_hi.
-        constraints.push(Constraint {
-            condition_col: layout.rs1_val(j),
-            negate_condition: false,
-            additional_condition_cols: Vec::new(),
-            b_terms: vec![(layout.rs2_val(j), F::ONE)],
-            c_terms: vec![
-                (layout.mul_lo(j), F::ONE),
-                (layout.mul_hi(j), F::from_u64(pow2_u64(32))),
-            ],
-        });
-
-        // MUL/MULHU writeback.
-        constraints.push(Constraint::terms(
-            layout.is_mul(j),
-            false,
-            vec![(layout.rd_write_val(j), F::ONE), (layout.mul_lo(j), -F::ONE)],
-        ));
-        constraints.push(Constraint::terms(
-            layout.is_mulhu(j),
-            false,
-            vec![(layout.rd_write_val(j), F::ONE), (layout.mul_hi(j), -F::ONE)],
-        ));
-
         // rs2_bit[i] ∈ {0,1}
         for bit in 0..32 {
             let b = layout.rs2_bit(bit, j);
-            constraints.push(Constraint {
-                condition_col: b,
-                negate_condition: false,
-                additional_condition_cols: Vec::new(),
-                b_terms: vec![(one, F::ONE), (b, -F::ONE)], // 1 - b
-                c_terms: Vec::new(),
-            });
-        }
-        // rs1_bit[i] ∈ {0,1}
-        for bit in 0..32 {
-            let b = layout.rs1_bit(bit, j);
             constraints.push(Constraint {
                 condition_col: b,
                 negate_condition: false,
@@ -1306,354 +1627,6 @@ fn semantic_constraints(
                 terms.push((layout.rs2_bit(bit, j), -F::from_u64(pow2_u64(bit))));
             }
             constraints.push(Constraint::terms(one, false, terms));
-        }
-        // rs1_val = Σ 2^i * rs1_bit[i]
-        {
-            let mut terms = vec![(layout.rs1_val(j), F::ONE)];
-            for bit in 0..32 {
-                terms.push((layout.rs1_bit(bit, j), -F::from_u64(pow2_u64(bit))));
-            }
-            constraints.push(Constraint::terms(one, false, terms));
-        }
-
-        let rs1_sign = layout.rs1_bit(31, j);
-        let rs2_sign = layout.rs2_bit(31, j);
-
-        // rs1_abs / rs2_abs from two's-complement sign bits.
-        constraints.push(Constraint::terms(
-            rs1_sign,
-            true,
-            vec![(layout.rs1_abs(j), F::ONE), (layout.rs1_val(j), -F::ONE)],
-        ));
-        constraints.push(Constraint::terms(
-            rs1_sign,
-            false,
-            vec![
-                (layout.rs1_abs(j), F::ONE),
-                (layout.rs1_val(j), F::ONE),
-                (one, -F::from_u64(pow2_u64(32))),
-            ],
-        ));
-        constraints.push(Constraint::terms(
-            rs2_sign,
-            true,
-            vec![(layout.rs2_abs(j), F::ONE), (layout.rs2_val(j), -F::ONE)],
-        ));
-        constraints.push(Constraint::terms(
-            rs2_sign,
-            false,
-            vec![
-                (layout.rs2_abs(j), F::ONE),
-                (layout.rs2_val(j), F::ONE),
-                (one, -F::from_u64(pow2_u64(32))),
-            ],
-        ));
-
-        // Sign helpers.
-        constraints.push(Constraint::mul(rs1_sign, rs2_sign, layout.rs1_rs2_sign_and(j)));
-        constraints.push(Constraint::mul(rs1_sign, layout.rs2_val(j), layout.rs1_sign_rs2_val(j)));
-        constraints.push(Constraint::mul(rs2_sign, layout.rs1_val(j), layout.rs2_sign_rs1_val(j)));
-
-        // MULH/MULHSU writeback with signed correction.
-        constraints.push(Constraint::terms(
-            layout.is_mulh(j),
-            false,
-            vec![
-                (layout.rd_write_val(j), F::ONE),
-                (layout.mul_carry(j), F::from_u64(pow2_u64(32))),
-                (layout.mul_hi(j), -F::ONE),
-                (layout.rs1_sign_rs2_val(j), F::ONE),
-                (layout.rs2_sign_rs1_val(j), F::ONE),
-                (layout.rs1_rs2_sign_and(j), -F::from_u64(pow2_u64(32))),
-                (one, -F::from_u64(pow2_u64(32))),
-            ],
-        ));
-        constraints.push(Constraint::terms(
-            layout.is_mulhsu(j),
-            false,
-            vec![
-                (layout.rd_write_val(j), F::ONE),
-                (layout.mul_carry(j), F::from_u64(pow2_u64(32))),
-                (layout.mul_hi(j), -F::ONE),
-                (layout.rs1_sign_rs2_val(j), F::ONE),
-                (one, -F::from_u64(pow2_u64(32))),
-            ],
-        ));
-
-        if sltu_cols.is_some() {
-            // Prefix product chain for Π_{i=0..31} (1 - rs2_bit[i]).
-            // prefix[0] = (1 - b0)
-            constraints.push(Constraint {
-                condition_col: one,
-                negate_condition: false,
-                additional_condition_cols: Vec::new(),
-                b_terms: vec![(one, F::ONE), (layout.rs2_bit(0, j), -F::ONE)],
-                c_terms: vec![(layout.rs2_zero_prefix(0, j), F::ONE)],
-            });
-            // prefix[k] = prefix[k-1] * (1 - b_k) for k=1..30
-            for k in 1..31 {
-                constraints.push(Constraint {
-                    condition_col: layout.rs2_zero_prefix(k - 1, j),
-                    negate_condition: false,
-                    additional_condition_cols: Vec::new(),
-                    b_terms: vec![(one, F::ONE), (layout.rs2_bit(k, j), -F::ONE)],
-                    c_terms: vec![(layout.rs2_zero_prefix(k, j), F::ONE)],
-                });
-            }
-            // rs2_is_zero = prefix[30] * (1 - b_31)
-            constraints.push(Constraint {
-                condition_col: layout.rs2_zero_prefix(30, j),
-                negate_condition: false,
-                additional_condition_cols: Vec::new(),
-                b_terms: vec![(one, F::ONE), (layout.rs2_bit(31, j), -F::ONE)],
-                c_terms: vec![(layout.rs2_is_zero(j), F::ONE)],
-            });
-
-            // rs2_nonzero = 1 - rs2_is_zero.
-            constraints.push(Constraint::terms(
-                one,
-                false,
-                vec![
-                    (layout.rs2_nonzero(j), F::ONE),
-                    (layout.rs2_is_zero(j), F::ONE),
-                    (one, -F::ONE),
-                ],
-            ));
-
-            // is_divu_or_remu = is_divu + is_remu.
-            constraints.push(Constraint::terms(
-                one,
-                false,
-                vec![
-                    (layout.is_divu_or_remu(j), F::ONE),
-                    (layout.is_divu(j), -F::ONE),
-                    (layout.is_remu(j), -F::ONE),
-                ],
-            ));
-
-            // is_div_or_rem = is_div + is_rem.
-            constraints.push(Constraint::terms(
-                one,
-                false,
-                vec![
-                    (layout.is_div_or_rem(j), F::ONE),
-                    (layout.is_div(j), -F::ONE),
-                    (layout.is_rem(j), -F::ONE),
-                ],
-            ));
-
-            // div_rem_check (unsigned) = is_divu_or_remu * rs2_nonzero.
-            constraints.push(Constraint::mul(
-                layout.is_divu_or_remu(j),
-                layout.rs2_nonzero(j),
-                layout.div_rem_check(j),
-            ));
-
-            // div_rem_check_signed = is_div_or_rem * rs2_nonzero.
-            constraints.push(Constraint::mul(
-                layout.is_div_or_rem(j),
-                layout.rs2_nonzero(j),
-                layout.div_rem_check_signed(j),
-            ));
-
-            // divu_by_zero = is_divu * rs2_is_zero.
-            constraints.push(Constraint::mul(
-                layout.is_divu(j),
-                layout.rs2_is_zero(j),
-                layout.divu_by_zero(j),
-            ));
-
-            // div_by_zero / div_nonzero for signed DIV.
-            constraints.push(Constraint::mul(
-                layout.is_div(j),
-                layout.rs2_is_zero(j),
-                layout.div_by_zero(j),
-            ));
-            constraints.push(Constraint::mul(
-                layout.is_div(j),
-                layout.rs2_nonzero(j),
-                layout.div_nonzero(j),
-            ));
-
-            // rem_nonzero / rem_by_zero for signed REM.
-            constraints.push(Constraint::mul(
-                layout.is_rem(j),
-                layout.rs2_nonzero(j),
-                layout.rem_nonzero(j),
-            ));
-            constraints.push(Constraint::mul(
-                layout.is_rem(j),
-                layout.rs2_is_zero(j),
-                layout.rem_by_zero(j),
-            ));
-
-            // DIVU by zero: quotient must be all 1s.
-            constraints.push(Constraint::terms(
-                layout.divu_by_zero(j),
-                false,
-                vec![(layout.div_quot(j), F::ONE), (one, -F::from_u64(u32::MAX as u64))],
-            ));
-
-            // div_divisor selects rs2_val (unsigned) or rs2_abs (signed).
-            constraints.push(Constraint::terms(
-                layout.is_divu_or_remu(j),
-                false,
-                vec![(layout.div_divisor(j), F::ONE), (layout.rs2_val(j), -F::ONE)],
-            ));
-            constraints.push(Constraint::terms(
-                layout.is_div_or_rem(j),
-                false,
-                vec![(layout.div_divisor(j), F::ONE), (layout.rs2_abs(j), -F::ONE)],
-            ));
-
-            // div_prod = div_divisor * div_quot (always computed).
-            constraints.push(Constraint::mul(
-                layout.div_divisor(j),
-                layout.div_quot(j),
-                layout.div_prod(j),
-            ));
-
-            // Unsigned: dividend = divisor * quotient + remainder.
-            constraints.push(Constraint::terms(
-                layout.is_divu_or_remu(j),
-                false,
-                vec![
-                    (layout.rs1_val(j), F::ONE),
-                    (layout.div_prod(j), -F::ONE),
-                    (layout.div_rem(j), -F::ONE),
-                ],
-            ));
-
-            // Signed: |dividend| = |divisor| * quotient + remainder (divisor != 0).
-            constraints.push(Constraint::terms(
-                layout.div_rem_check_signed(j),
-                false,
-                vec![
-                    (layout.rs1_abs(j), F::ONE),
-                    (layout.div_prod(j), -F::ONE),
-                    (layout.div_rem(j), -F::ONE),
-                ],
-            ));
-
-            // div_sign = rs1_sign XOR rs2_sign.
-            constraints.push(Constraint::terms(
-                one,
-                false,
-                vec![
-                    (layout.div_sign(j), F::ONE),
-                    (rs1_sign, -F::ONE),
-                    (rs2_sign, -F::ONE),
-                    (layout.rs1_rs2_sign_and(j), F::from_u64(2)),
-                ],
-            ));
-            // div_sign boolean.
-            constraints.push(Constraint::terms(
-                layout.div_sign(j),
-                false,
-                vec![(layout.div_sign(j), F::ONE), (one, -F::ONE)],
-            ));
-
-            // div_quot_carry / div_rem_carry bits (used to normalize negative zero).
-            for &carry in &[layout.div_quot_carry(j), layout.div_rem_carry(j)] {
-                constraints.push(Constraint {
-                    condition_col: carry,
-                    negate_condition: false,
-                    additional_condition_cols: Vec::new(),
-                    b_terms: vec![(one, F::ONE), (carry, -F::ONE)], // 1 - carry
-                    c_terms: Vec::new(),
-                });
-            }
-            // If sign=0, carry must be 0.
-            constraints.push(Constraint::terms(
-                layout.div_sign(j),
-                true,
-                vec![(layout.div_quot_carry(j), F::ONE)],
-            ));
-            constraints.push(Constraint::terms(
-                rs1_sign,
-                true,
-                vec![(layout.div_rem_carry(j), F::ONE)],
-            ));
-
-            // Signed quotient / remainder (two's complement, with carry to allow -0 -> 0).
-            constraints.push(Constraint::terms(
-                layout.div_sign(j),
-                true,
-                vec![(layout.div_quot_signed(j), F::ONE), (layout.div_quot(j), -F::ONE)],
-            ));
-            constraints.push(Constraint::terms(
-                layout.div_sign(j),
-                false,
-                vec![
-                    (layout.div_quot_signed(j), F::ONE),
-                    (layout.div_quot_carry(j), F::from_u64(pow2_u64(32))),
-                    (layout.div_quot(j), F::ONE),
-                    (one, -F::from_u64(pow2_u64(32))),
-                ],
-            ));
-            constraints.push(Constraint::terms(
-                rs1_sign,
-                true,
-                vec![(layout.div_rem_signed(j), F::ONE), (layout.div_rem(j), -F::ONE)],
-            ));
-            constraints.push(Constraint::terms(
-                rs1_sign,
-                false,
-                vec![
-                    (layout.div_rem_signed(j), F::ONE),
-                    (layout.div_rem_carry(j), F::from_u64(pow2_u64(32))),
-                    (layout.div_rem(j), F::ONE),
-                    (one, -F::from_u64(pow2_u64(32))),
-                ],
-            ));
-
-            // Writeback for DIVU/REMU.
-            constraints.push(Constraint::terms(
-                layout.is_divu(j),
-                false,
-                vec![(layout.rd_write_val(j), F::ONE), (layout.div_quot(j), -F::ONE)],
-            ));
-            constraints.push(Constraint::terms(
-                layout.is_remu(j),
-                false,
-                vec![(layout.rd_write_val(j), F::ONE), (layout.div_rem(j), -F::ONE)],
-            ));
-
-            // Writeback for DIV (signed): divisor != 0 uses signed quotient, divisor == 0 yields -1.
-            constraints.push(Constraint::terms(
-                layout.div_nonzero(j),
-                false,
-                vec![(layout.rd_write_val(j), F::ONE), (layout.div_quot_signed(j), -F::ONE)],
-            ));
-            constraints.push(Constraint::terms(
-                layout.div_by_zero(j),
-                false,
-                vec![(layout.rd_write_val(j), F::ONE), (one, -F::from_u64(u32::MAX as u64))],
-            ));
-
-            // Writeback for REM (signed): signed remainder (dividend sign).
-            constraints.push(Constraint::terms(
-                layout.is_rem(j),
-                false,
-                vec![(layout.rd_write_val(j), F::ONE), (layout.div_rem_signed(j), -F::ONE)],
-            ));
-            constraints.push(Constraint::terms(
-                layout.rem_by_zero(j),
-                false,
-                vec![(layout.rd_write_val(j), F::ONE), (layout.rs1_val(j), -F::ONE)],
-            ));
-
-            // For divisor != 0, require remainder < divisor via a SLTU Shout lookup.
-            constraints.push(Constraint::terms(
-                layout.div_rem_check(j),
-                false,
-                vec![(layout.alu_out(j), F::ONE), (one, -F::ONE)],
-            ));
-            constraints.push(Constraint::terms(
-                layout.div_rem_check_signed(j),
-                false,
-                vec![(layout.alu_out(j), F::ONE), (one, -F::ONE)],
-            ));
         }
 
         // RAM effective address is computed via the ADD Shout lookup (mod 2^32 semantics).
@@ -2591,6 +2564,175 @@ fn semantic_constraints(
     Ok(constraints)
 }
 
+/// Build the RV32 B1 **main** step constraint set.
+///
+/// The main step CCS is intentionally minimal: it exists primarily to host the injected shared-bus
+/// constraints. Full RV32 B1 instruction semantics are proven in a separate sidecar CCS built from
+/// [`full_semantic_constraints`].
+fn semantic_constraints(_layout: &Rv32B1Layout, _mem_layouts: &HashMap<u32, PlainMemLayout>) -> Result<Vec<Constraint<F>>, String> {
+    Ok(Vec::new())
+}
+
+/// Build an RV32 B1 “decode/semantics” sidecar CCS.
+///
+/// This CCS contains the full RV32 B1 step semantics (including instruction decode plumbing),
+/// and is meant to be proven/verified as an **additional** argument alongside the main folded proof.
+pub fn build_rv32_b1_decode_sidecar_ccs(
+    layout: &Rv32B1Layout,
+    mem_layouts: &HashMap<u32, PlainMemLayout>,
+) -> Result<CcsStructure<F>, String> {
+    let mut constraints = full_semantic_constraints(layout, mem_layouts)?;
+
+    // Derived group signals (used by downstream code; keep them sound even if the main CCS is thin).
+    for j in 0..layout.chunk_size {
+        // is_load = sum(load flags)
+        constraints.push(Constraint::terms(
+            layout.const_one,
+            false,
+            vec![
+                (layout.is_load(j), F::ONE),
+                (layout.is_lb(j), -F::ONE),
+                (layout.is_lbu(j), -F::ONE),
+                (layout.is_lh(j), -F::ONE),
+                (layout.is_lhu(j), -F::ONE),
+                (layout.is_lw(j), -F::ONE),
+            ],
+        ));
+        // is_store = sum(store flags)
+        constraints.push(Constraint::terms(
+            layout.const_one,
+            false,
+            vec![
+                (layout.is_store(j), F::ONE),
+                (layout.is_sb(j), -F::ONE),
+                (layout.is_sh(j), -F::ONE),
+                (layout.is_sw(j), -F::ONE),
+            ],
+        ));
+        // is_branch = sum(branch flags)
+        constraints.push(Constraint::terms(
+            layout.const_one,
+            false,
+            vec![
+                (layout.is_branch(j), F::ONE),
+                (layout.is_beq(j), -F::ONE),
+                (layout.is_bne(j), -F::ONE),
+                (layout.is_blt(j), -F::ONE),
+                (layout.is_bge(j), -F::ONE),
+                (layout.is_bltu(j), -F::ONE),
+                (layout.is_bgeu(j), -F::ONE),
+            ],
+        ));
+
+        // writes_rd = sum(write flags)
+        constraints.push(Constraint::terms(
+            layout.const_one,
+            false,
+            vec![
+                (layout.writes_rd(j), F::ONE),
+                (layout.is_add(j), -F::ONE),
+                (layout.is_sub(j), -F::ONE),
+                (layout.is_sll(j), -F::ONE),
+                (layout.is_slt(j), -F::ONE),
+                (layout.is_sltu(j), -F::ONE),
+                (layout.is_xor(j), -F::ONE),
+                (layout.is_srl(j), -F::ONE),
+                (layout.is_sra(j), -F::ONE),
+                (layout.is_or(j), -F::ONE),
+                (layout.is_and(j), -F::ONE),
+                (layout.is_mul(j), -F::ONE),
+                (layout.is_mulh(j), -F::ONE),
+                (layout.is_mulhu(j), -F::ONE),
+                (layout.is_mulhsu(j), -F::ONE),
+                (layout.is_div(j), -F::ONE),
+                (layout.is_divu(j), -F::ONE),
+                (layout.is_rem(j), -F::ONE),
+                (layout.is_remu(j), -F::ONE),
+                (layout.is_addi(j), -F::ONE),
+                (layout.is_slti(j), -F::ONE),
+                (layout.is_sltiu(j), -F::ONE),
+                (layout.is_xori(j), -F::ONE),
+                (layout.is_ori(j), -F::ONE),
+                (layout.is_andi(j), -F::ONE),
+                (layout.is_slli(j), -F::ONE),
+                (layout.is_srli(j), -F::ONE),
+                (layout.is_srai(j), -F::ONE),
+                (layout.is_lb(j), -F::ONE),
+                (layout.is_lbu(j), -F::ONE),
+                (layout.is_lh(j), -F::ONE),
+                (layout.is_lhu(j), -F::ONE),
+                (layout.is_lw(j), -F::ONE),
+                (layout.is_amoswap_w(j), -F::ONE),
+                (layout.is_amoadd_w(j), -F::ONE),
+                (layout.is_amoxor_w(j), -F::ONE),
+                (layout.is_amoor_w(j), -F::ONE),
+                (layout.is_amoand_w(j), -F::ONE),
+                (layout.is_lui(j), -F::ONE),
+                (layout.is_auipc(j), -F::ONE),
+                (layout.is_jal(j), -F::ONE),
+                (layout.is_jalr(j), -F::ONE),
+            ],
+        ));
+
+        // pc_plus4 + is_branch + is_jal + is_jalr = is_active
+        constraints.push(Constraint::terms(
+            layout.const_one,
+            false,
+            vec![
+                (layout.pc_plus4(j), F::ONE),
+                (layout.is_branch(j), F::ONE),
+                (layout.is_jal(j), F::ONE),
+                (layout.is_jalr(j), F::ONE),
+                (layout.is_active(j), -F::ONE),
+            ],
+        ));
+
+        // wb_from_alu = sum(ALU writeback-from-alu flags)
+        constraints.push(Constraint::terms(
+            layout.const_one,
+            false,
+            vec![
+                (layout.wb_from_alu(j), F::ONE),
+                (layout.is_add(j), -F::ONE),
+                (layout.is_sub(j), -F::ONE),
+                (layout.is_sll(j), -F::ONE),
+                (layout.is_slt(j), -F::ONE),
+                (layout.is_sltu(j), -F::ONE),
+                (layout.is_xor(j), -F::ONE),
+                (layout.is_srl(j), -F::ONE),
+                (layout.is_sra(j), -F::ONE),
+                (layout.is_or(j), -F::ONE),
+                (layout.is_and(j), -F::ONE),
+                (layout.is_addi(j), -F::ONE),
+                (layout.is_slti(j), -F::ONE),
+                (layout.is_sltiu(j), -F::ONE),
+                (layout.is_xori(j), -F::ONE),
+                (layout.is_ori(j), -F::ONE),
+                (layout.is_andi(j), -F::ONE),
+                (layout.is_slli(j), -F::ONE),
+                (layout.is_srli(j), -F::ONE),
+                (layout.is_srai(j), -F::ONE),
+                (layout.is_auipc(j), -F::ONE),
+            ],
+        ));
+
+        // Group signals must be 0 on inactive rows and boolean on active rows.
+        for &f in &[
+            layout.is_load(j),
+            layout.is_store(j),
+            layout.is_branch(j),
+            layout.writes_rd(j),
+            layout.pc_plus4(j),
+            layout.wb_from_alu(j),
+        ] {
+            constraints.push(Constraint::terms(f, false, vec![(f, F::ONE), (layout.is_active(j), -F::ONE)]));
+        }
+    }
+
+    let n = constraints.len();
+    build_r1cs_ccs(&constraints, n, layout.m, layout.const_one)
+}
+
 /// Build the RV32 B1 step CCS and its witness layout.
 ///
 /// Requirements:
@@ -2605,6 +2747,51 @@ pub fn build_rv32_b1_step_ccs(
     shout_table_ids: &[u32],
     chunk_size: usize,
 ) -> Result<(CcsStructure<F>, Rv32B1Layout), String> {
+    let (layout, injected) = build_rv32_b1_layout_and_injected(mem_layouts, shout_table_ids, chunk_size)?;
+    let constraints = semantic_constraints(&layout, mem_layouts)?;
+    let n = constraints
+        .len()
+        .checked_add(injected)
+        .ok_or_else(|| "RV32 B1: n overflow".to_string())?;
+    let ccs = build_r1cs_ccs(&constraints, n, layout.m, layout.const_one)?;
+    Ok((ccs, layout))
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Rv32B1StepCcsCounts {
+    pub n: usize,
+    pub m: usize,
+    pub semantic: usize,
+    pub injected: usize,
+}
+
+/// Estimate the RV32 B1 step CCS shape without materializing the CCS matrices.
+///
+/// This still constructs the semantic constraint vector in order to count it, but it avoids the
+/// additional work done by `build_r1cs_ccs`.
+pub fn estimate_rv32_b1_step_ccs_counts(
+    mem_layouts: &HashMap<u32, PlainMemLayout>,
+    shout_table_ids: &[u32],
+    chunk_size: usize,
+) -> Result<Rv32B1StepCcsCounts, String> {
+    let (layout, injected) = build_rv32_b1_layout_and_injected(mem_layouts, shout_table_ids, chunk_size)?;
+    let semantic = semantic_constraints(&layout, mem_layouts)?.len();
+    let n = semantic
+        .checked_add(injected)
+        .ok_or_else(|| "RV32 B1: n overflow".to_string())?;
+    Ok(Rv32B1StepCcsCounts {
+        n,
+        m: layout.m,
+        semantic,
+        injected,
+    })
+}
+
+fn build_rv32_b1_layout_and_injected(
+    mem_layouts: &HashMap<u32, PlainMemLayout>,
+    shout_table_ids: &[u32],
+    chunk_size: usize,
+) -> Result<(Rv32B1Layout, usize), String> {
     if chunk_size == 0 {
         return Err("RV32 B1: chunk_size must be >= 1".into());
     }
@@ -2664,11 +2851,9 @@ pub fn build_rv32_b1_step_ccs(
         }
     };
     let cpu_cols_used = probe.halt_effective + chunk_size;
-
     let injected = injected_bus_constraints_len(&probe, &table_ids, &mem_ids);
 
     let m_cols_min = cpu_cols_used + bus_region_len;
-
     let mut m = m_cols_min;
     let layout = loop {
         match build_layout_with_m(m, mem_layouts, &table_ids, chunk_size) {
@@ -2683,11 +2868,6 @@ pub fn build_rv32_b1_step_ccs(
             Err(e) => return Err(e),
         }
     };
-    let constraints = semantic_constraints(&layout, mem_layouts)?;
-    let n = constraints
-        .len()
-        .checked_add(injected)
-        .ok_or_else(|| "RV32 B1: n overflow".to_string())?;
-    let ccs = build_r1cs_ccs(&constraints, n, layout.m, layout.const_one)?;
-    Ok((ccs, layout))
+
+    Ok((layout, injected))
 }
