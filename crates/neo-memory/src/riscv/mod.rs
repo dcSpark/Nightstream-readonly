@@ -9,3 +9,4 @@ pub mod lookups;
 pub mod rom_init;
 pub mod shard;
 pub mod shout_oracle;
+pub mod trace;
