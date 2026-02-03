@@ -1,97 +1,18 @@
-//! End-to-end prove+verify for a small RV32 program under the B1 shared-bus step circuit.
+//! End-to-end prove+verify for small RV32 programs under the B1 shared-bus step circuit.
 //!
 //! This exercises:
 //! - B1 instruction fetch via `PROG_ID` Twist reads
 //! - shared CPU bus tail wiring (Twist + Shout)
-//! - implicit Shout table spec (`LutTableSpec::RiscvOpcode`)
-//! - the RV32 B1 step CCS glue constraints
+//! - Shout addr-pre masking (skipping inactive lookups)
+//! - decode + semantics sidecar proofs (required for soundness)
 
 #![allow(non_snake_case)]
 
-use std::collections::HashMap;
-
-use neo_ajtai::Commitment as Cmt;
-use neo_ccs::matrix::Mat;
-use neo_ccs::traits::SModuleHomomorphism;
-use neo_fold::pi_ccs::FoldingMode;
-use neo_fold::riscv_shard::fold_shard_verify_rv32_b1_with_statement_mem_init;
-use neo_fold::shard::{fold_shard_prove, CommitMixers};
-use neo_math::{F, K};
-use neo_memory::builder::build_shard_witness_shared_cpu_bus;
-use neo_memory::plain::PlainMemLayout;
-use neo_memory::riscv::ccs::{build_rv32_b1_step_ccs, rv32_b1_chunk_to_witness, rv32_b1_shared_cpu_bus_config};
-use neo_memory::riscv::lookups::{
-    encode_program, RiscvCpu, RiscvInstruction, RiscvMemOp, RiscvMemory, RiscvOpcode, RiscvShoutTables, PROG_ID,
-};
-use neo_memory::riscv::rom_init::prog_init_words;
+use neo_fold::riscv_shard::{rv32_b1_enforce_chunk0_mem_init_matches_statement, Rv32B1};
+use neo_math::F;
+use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvMemOp, RiscvOpcode, RAM_ID};
 use neo_memory::riscv::shard::extract_boundary_state;
-use neo_memory::witness::{LutTableSpec, StepInstanceBundle};
-use neo_memory::R1csCpu;
-use neo_params::NeoParams;
-use neo_transcript::{Poseidon2Transcript, Transcript};
 use p3_field::PrimeCharacteristicRing;
-
-#[derive(Clone, Copy, Default)]
-struct DummyCommit;
-
-impl SModuleHomomorphism<F, Cmt> for DummyCommit {
-    fn commit(&self, z: &Mat<F>) -> Cmt {
-        Cmt::zeros(z.rows(), 1)
-    }
-
-    fn project_x(&self, z: &Mat<F>, m_in: usize) -> Mat<F> {
-        let rows = z.rows();
-        let mut out = Mat::zero(rows, m_in, F::ZERO);
-        for r in 0..rows {
-            for c in 0..m_in.min(z.cols()) {
-                out[(r, c)] = z[(r, c)];
-            }
-        }
-        out
-    }
-}
-
-fn default_mixers() -> CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32) -> Cmt> {
-    fn mix_rhos_commits(_rhos: &[Mat<F>], _cs: &[Cmt]) -> Cmt {
-        Cmt::zeros(neo_math::D, 1)
-    }
-    fn combine_b_pows(_cs: &[Cmt], _b: u32) -> Cmt {
-        Cmt::zeros(neo_math::D, 1)
-    }
-    CommitMixers {
-        mix_rhos_commits,
-        combine_b_pows,
-    }
-}
-
-fn pow2_ceil_k(min_k: usize) -> (usize, usize) {
-    let k = min_k.next_power_of_two().max(2);
-    let d = k.trailing_zeros() as usize;
-    (k, d)
-}
-
-fn with_reg_layout(mut mem_layouts: HashMap<u32, PlainMemLayout>) -> HashMap<u32, PlainMemLayout> {
-    mem_layouts.insert(
-        neo_memory::riscv::lookups::REG_ID.0,
-        PlainMemLayout {
-            k: 32,
-            d: 5,
-            n_side: 2,
-            lanes: 2,
-        },
-    );
-    mem_layouts
-}
-
-fn add_only_table_specs(xlen: usize) -> HashMap<u32, LutTableSpec> {
-    HashMap::from([(
-        3u32,
-        LutTableSpec::RiscvOpcode {
-            opcode: RiscvOpcode::Add,
-            xlen,
-        },
-    )])
-}
 
 #[test]
 fn test_riscv_program_full_prove_verify() {
@@ -134,107 +55,25 @@ fn test_riscv_program_full_prove_verify() {
     let max_steps = program.len();
 
     let program_bytes = encode_program(&program);
-    let mut vm = RiscvCpu::new(xlen);
-    vm.load_program(0, program);
-    let twist = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
-    let shout = RiscvShoutTables::new(xlen);
 
-    // Keep k small to reduce bus tail width and proof work.
-    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
-    let (k_ram, d_ram) = pow2_ceil_k(0x200);
-    let mem_layouts = with_reg_layout(HashMap::from([
-        (
-            0u32,
-            PlainMemLayout {
-                k: k_ram,
-                d: d_ram,
-                n_side: 2,
-                lanes: 1,
-            },
-        ),
-        (
-            1u32,
-            PlainMemLayout {
-                k: k_prog,
-                d: d_prog,
-                n_side: 2,
-                lanes: 1,
-            },
-        ),
-    ]));
-    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
-
-    // Build CCS + shared-bus CPU arithmetization.
     // Keep the Shout bus lean: this program only needs ADD (for ADD/ADDI and effective address calculation).
-    let shout_table_ids: Vec<u32> = vec![3u32];
-    let add_idx = shout_table_ids
-        .iter()
-        .position(|&id| id == 3u32)
-        .expect("ADD table id present");
-    let add_lane = u32::try_from(add_idx).expect("ADD lane index fits u32");
-    let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs_base.n).expect("params");
+    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+        .xlen(xlen)
+        .ram_bytes(0x200)
+        .chunk_size(1)
+        .max_steps(max_steps)
+        .shout_ops([RiscvOpcode::Add])
+        .prove()
+        .expect("prove");
 
-    let table_specs = add_only_table_specs(xlen);
-
-    let cpu = R1csCpu::new(
-        ccs_base,
-        params.clone(),
-        DummyCommit::default(),
-        layout.m_in,
-        &HashMap::new(),
-        &table_specs,
-        rv32_b1_chunk_to_witness(layout.clone()),
-    )
-    .with_shared_cpu_bus(
-        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts.clone(), initial_mem.clone())
-            .expect("cfg"),
-        1,
-    )
-    .expect("shared bus inject");
-
-    // Build shared-bus step bundles (includes CPU MCS + metadata-only mem/lut instances).
-    let lut_tables = HashMap::new();
-    let steps = build_shard_witness_shared_cpu_bus::<_, Cmt, K, _, _, _>(
-        vm,
-        twist,
-        shout,
-        /*max_steps=*/ max_steps,
-        /*chunk_size=*/ 1,
-        &mem_layouts,
-        &lut_tables,
-        &table_specs,
-        &HashMap::new(),
-        &initial_mem,
-        &cpu,
-    )
-    .expect("build shard witness");
-
-    let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
-
-    let mixers = default_mixers();
-    let mut tr_prove = Poseidon2Transcript::new(b"riscv-b1-full");
-    // PaperExact is intentionally slow (brute-force oracle) and can make this end-to-end
-    // test take minutes. Use the optimized engine here and keep PaperExact covered by
-    // smaller unit tests.
-    let proof = fold_shard_prove(
-        FoldingMode::Optimized,
-        &mut tr_prove,
-        &params,
-        &cpu.ccs,
-        &steps,
-        &[],
-        &[],
-        &DummyCommit::default(),
-        mixers,
-    )
-    .expect("prove");
+    run.verify().expect("verify");
 
     // Ensure the Shout addr-pre proof skips inactive tables.
     // This program uses only the ADD lookup; LUI and HALT use no Shout lookups and should skip entirely.
+    let proof = run.proof();
     let mut saw_skipped = false;
     let mut saw_add_only = false;
-    for step in &proof.steps {
+    for step in &proof.main.steps {
         let pre = &step.mem.shout_addr_pre;
         let active_lanes: Vec<u32> = pre
             .groups
@@ -246,11 +85,8 @@ fn test_riscv_program_full_prove_verify() {
             saw_skipped = true;
             continue;
         }
-        assert_eq!(
-            active_lanes,
-            vec![add_lane],
-            "expected ADD-only Shout addr-pre active_lanes"
-        );
+        // With `shout_ops([ADD])`, there is exactly one Shout lane and it is lane 0.
+        assert_eq!(active_lanes, vec![0u32], "expected ADD-only Shout addr-pre active_lanes");
         let rounds_total: usize = pre.groups.iter().map(|g| g.round_polys.len()).sum();
         assert_eq!(rounds_total, 1, "ADD-only step must include 1 proof");
         saw_add_only = true;
@@ -258,46 +94,10 @@ fn test_riscv_program_full_prove_verify() {
     assert!(saw_skipped, "expected at least one no-Shout step (mask=0)");
     assert!(saw_add_only, "expected at least one ADD-lookup step (mask=ADD)");
 
-    let mut tr_verify = Poseidon2Transcript::new(b"riscv-b1-full");
-    let _ = fold_shard_verify_rv32_b1_with_statement_mem_init(
-        FoldingMode::Optimized,
-        &mut tr_verify,
-        &params,
-        &cpu.ccs,
-        &mem_layouts,
-        &initial_mem,
-        &steps_public,
-        &[],
-        &proof,
-        mixers,
-        &layout,
-    )
-    .expect("verify");
-
-    let mut bad_steps = steps_public.clone();
-    bad_steps[1].mcs_inst.x[layout.pc0] += F::ONE;
-    let mut tr_bad = Poseidon2Transcript::new(b"riscv-b1-full");
-    assert!(
-        fold_shard_verify_rv32_b1_with_statement_mem_init(
-            FoldingMode::Optimized,
-            &mut tr_bad,
-            &params,
-            &cpu.ccs,
-            &mem_layouts,
-            &initial_mem,
-            &bad_steps,
-            &[],
-            &proof,
-            mixers,
-            &layout,
-        )
-        .is_err(),
-        "expected step linking failure"
-    );
-
     // Tamper: change Shout addr-pre active_lanes; verification must fail.
-    let mut bad_proof = proof.clone();
-    let tamper_step = bad_proof
+    let mut bad_bundle = proof.clone();
+    let tamper_step = bad_bundle
+        .main
         .steps
         .iter_mut()
         .find(|s| {
@@ -317,22 +117,8 @@ fn test_riscv_program_full_prove_verify() {
         .expect("expected at least one active Shout addr-pre group");
     group.active_lanes.clear();
     group.round_polys.clear();
-    let mut tr_bad_mask = Poseidon2Transcript::new(b"riscv-b1-full");
     assert!(
-        fold_shard_verify_rv32_b1_with_statement_mem_init(
-            FoldingMode::Optimized,
-            &mut tr_bad_mask,
-            &params,
-            &cpu.ccs,
-            &mem_layouts,
-            &initial_mem,
-            &steps_public,
-            &[],
-            &bad_proof,
-            mixers,
-            &layout,
-        )
-        .is_err(),
+        run.verify_proof_bundle(&bad_bundle).is_err(),
         "expected Shout addr-pre active_lanes mismatch failure"
     );
 }
@@ -345,128 +131,30 @@ fn test_riscv_statement_mem_init_mismatch_fails() {
 
     let program_bytes = encode_program(&program);
 
-    // Keep k small to reduce bus tail width and proof work.
-    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
-    let (k_ram, d_ram) = pow2_ceil_k(0x40);
-    let mem_layouts = with_reg_layout(HashMap::from([
-        (
-            0u32,
-            PlainMemLayout {
-                k: k_ram,
-                d: d_ram,
-                n_side: 2,
-                lanes: 1,
-            },
-        ),
-        (
-            1u32,
-            PlainMemLayout {
-                k: k_prog,
-                d: d_prog,
-                n_side: 2,
-                lanes: 1,
-            },
-        ),
-    ]));
-    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+        .xlen(xlen)
+        .ram_bytes(0x40)
+        .chunk_size(1)
+        .max_steps(max_steps)
+        // This program uses no Shout lookups, but keep ADD to keep the bus schema stable.
+        .shout_ops([RiscvOpcode::Add])
+        .prove()
+        .expect("prove");
 
-    // Keep the Shout bus lean: this program uses no Shout lookups, but include ADD to keep the bus schema stable.
-    let table_specs = add_only_table_specs(xlen);
-    let shout_table_ids: Vec<u32> = vec![3u32];
+    run.verify().expect("verify");
 
-    let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs_base.n).expect("params");
-
-    let cpu = R1csCpu::new(
-        ccs_base,
-        params.clone(),
-        DummyCommit::default(),
-        layout.m_in,
-        &HashMap::new(),
-        &table_specs,
-        rv32_b1_chunk_to_witness(layout.clone()),
-    )
-    .with_shared_cpu_bus(
-        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts.clone(), initial_mem.clone())
-            .expect("cfg"),
-        1,
-    )
-    .expect("shared bus inject");
-
-    let mut vm = RiscvCpu::new(xlen);
-    vm.load_program(0, program);
-    let twist = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
-    let shout = RiscvShoutTables::new(xlen);
-
-    let steps = build_shard_witness_shared_cpu_bus::<_, Cmt, K, _, _, _>(
-        vm,
-        twist,
-        shout,
-        max_steps,
-        1,
-        &mem_layouts,
-        &HashMap::new(),
-        &table_specs,
-        &HashMap::new(),
-        &initial_mem,
-        &cpu,
-    )
-    .expect("build shard witness");
-    let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
-
-    let mixers = default_mixers();
-    let mut tr_prove = Poseidon2Transcript::new(b"riscv-b1-stmt-mem-init");
-    let proof = fold_shard_prove(
-        FoldingMode::Optimized,
-        &mut tr_prove,
-        &params,
-        &cpu.ccs,
-        &steps,
-        &[],
-        &[],
-        &DummyCommit::default(),
-        mixers,
-    )
-    .expect("prove");
-
-    // Sanity: correct statement must verify.
-    let mut tr_verify = Poseidon2Transcript::new(b"riscv-b1-stmt-mem-init");
-    let _ = fold_shard_verify_rv32_b1_with_statement_mem_init(
-        FoldingMode::Optimized,
-        &mut tr_verify,
-        &params,
-        &cpu.ccs,
-        &mem_layouts,
-        &initial_mem,
-        &steps_public,
-        &[],
-        &proof,
-        mixers,
-        &layout,
-    )
-    .expect("verify");
+    // External verifier check: the *statement* initial memory must match chunk0's public MemInit.
+    let steps_public = run.steps_public();
+    rv32_b1_enforce_chunk0_mem_init_matches_statement(run.mem_layouts(), run.initial_mem(), &steps_public)
+        .expect("statement mem init must match");
 
     // Mismatch the *statement* initial memory (RAM starts non-zero) while keeping the proof fixed.
-    // Verification must fail at the chunk0 init check.
-    let mut bad_statement_initial_mem = initial_mem.clone();
-    bad_statement_initial_mem.insert((0u32, 0u64), F::ONE);
-
-    let mut tr_bad = Poseidon2Transcript::new(b"riscv-b1-stmt-mem-init");
+    // The statement check must fail.
+    let mut bad_statement_initial_mem = run.initial_mem().clone();
+    bad_statement_initial_mem.insert((RAM_ID.0, 0u64), F::ONE);
     assert!(
-        fold_shard_verify_rv32_b1_with_statement_mem_init(
-            FoldingMode::Optimized,
-            &mut tr_bad,
-            &params,
-            &cpu.ccs,
-            &mem_layouts,
-            &bad_statement_initial_mem,
-            &steps_public,
-            &[],
-            &proof,
-            mixers,
-            &layout,
-        )
-        .is_err(),
+        rv32_b1_enforce_chunk0_mem_init_matches_statement(run.mem_layouts(), &bad_statement_initial_mem, &steps_public)
+            .is_err(),
         "expected statement init mismatch failure"
     );
 }
@@ -475,6 +163,32 @@ fn test_riscv_statement_mem_init_mismatch_fails() {
 #[ignore = "manual benchmark sweep; run with --ignored --nocapture"]
 fn perf_rv32_b1_chunk_size_sweep() {
     use std::time::Instant;
+
+    fn opcode_from_table_id(id: u32) -> RiscvOpcode {
+        match id {
+            0 => RiscvOpcode::And,
+            1 => RiscvOpcode::Xor,
+            2 => RiscvOpcode::Or,
+            3 => RiscvOpcode::Add,
+            4 => RiscvOpcode::Sub,
+            5 => RiscvOpcode::Slt,
+            6 => RiscvOpcode::Sltu,
+            7 => RiscvOpcode::Sll,
+            8 => RiscvOpcode::Srl,
+            9 => RiscvOpcode::Sra,
+            10 => RiscvOpcode::Eq,
+            11 => RiscvOpcode::Neq,
+            12 => RiscvOpcode::Mul,
+            13 => RiscvOpcode::Mulh,
+            14 => RiscvOpcode::Mulhu,
+            15 => RiscvOpcode::Mulhsu,
+            16 => RiscvOpcode::Div,
+            17 => RiscvOpcode::Divu,
+            18 => RiscvOpcode::Rem,
+            19 => RiscvOpcode::Remu,
+            _ => panic!("unsupported RV32 B1 table_id={id}"),
+        }
+    }
 
     let xlen = 32usize;
     let program = vec![
@@ -521,158 +235,35 @@ fn perf_rv32_b1_chunk_size_sweep() {
     let program_bytes = encode_program(&program);
     let max_steps = 64usize;
 
-    // Keep k small to reduce bus tail width and proof work.
-    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
-    let (k_ram, d_ram) = pow2_ceil_k(0x40);
-    let mem_layouts = with_reg_layout(HashMap::from([
-        (
-            0u32,
-            PlainMemLayout {
-                k: k_ram,
-                d: d_ram,
-                n_side: 2,
-                lanes: 1,
-            },
-        ),
-        (
-            1u32,
-            PlainMemLayout {
-                k: k_prog,
-                d: d_prog,
-                n_side: 2,
-                lanes: 1,
-            },
-        ),
-    ]));
-    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
-
-    fn table_specs_from_ids(ids: &[u32], xlen: usize) -> HashMap<u32, LutTableSpec> {
-        ids.iter()
-            .copied()
-            .map(|id| {
-                let opcode = match id {
-                    0 => RiscvOpcode::And,
-                    1 => RiscvOpcode::Xor,
-                    2 => RiscvOpcode::Or,
-                    3 => RiscvOpcode::Add,
-                    4 => RiscvOpcode::Sub,
-                    5 => RiscvOpcode::Slt,
-                    6 => RiscvOpcode::Sltu,
-                    7 => RiscvOpcode::Sll,
-                    8 => RiscvOpcode::Srl,
-                    9 => RiscvOpcode::Sra,
-                    10 => RiscvOpcode::Eq,
-                    11 => RiscvOpcode::Neq,
-                    12 => RiscvOpcode::Mul,
-                    13 => RiscvOpcode::Mulh,
-                    14 => RiscvOpcode::Mulhu,
-                    15 => RiscvOpcode::Mulhsu,
-                    16 => RiscvOpcode::Div,
-                    17 => RiscvOpcode::Divu,
-                    18 => RiscvOpcode::Rem,
-                    19 => RiscvOpcode::Remu,
-                    _ => panic!("unsupported RV32 B1 table_id={id}"),
-                };
-                (id, LutTableSpec::RiscvOpcode { opcode, xlen })
-            })
-            .collect()
-    }
-
     let profiles: &[(&str, &[u32])] = &[
         ("min3", neo_memory::riscv::ccs::RV32_B1_SHOUT_PROFILE_MIN3),
         ("full12", neo_memory::riscv::ccs::RV32_B1_SHOUT_PROFILE_FULL12),
     ];
 
-    let mixers = default_mixers();
-
-    for (profile_name, shout_table_ids) in profiles {
-        let table_specs = table_specs_from_ids(shout_table_ids, xlen);
-        println!("\n== profile={profile_name} shout_tables={} ==", shout_table_ids.len());
+    for (profile_name, table_ids) in profiles {
+        let ops: Vec<RiscvOpcode> = table_ids.iter().copied().map(opcode_from_table_id).collect();
+        println!("\n== profile={profile_name} shout_tables={} ==", table_ids.len());
 
         for chunk_size in [1usize, 2, 4, 8, 16] {
-            let mut vm = RiscvCpu::new(xlen);
-            vm.load_program(0, program.clone());
-            let twist = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
-            let shout = RiscvShoutTables::new(xlen);
+            let t_total = Instant::now();
+            let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+                .xlen(xlen)
+                .ram_bytes(0x40)
+                .chunk_size(chunk_size)
+                .max_steps(max_steps)
+                .shout_ops(ops.iter().copied())
+                .prove()
+                .expect("prove");
+            let total_dur = t_total.elapsed();
+            let prove_dur = run.prove_duration();
 
-            let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts, shout_table_ids, chunk_size).expect("ccs");
-            let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs_base.n).expect("params");
-
-            let cpu = R1csCpu::new(
-                ccs_base,
-                params.clone(),
-                DummyCommit::default(),
-                layout.m_in,
-                &HashMap::new(),
-                &table_specs,
-                rv32_b1_chunk_to_witness(layout.clone()),
-            )
-            .with_shared_cpu_bus(
-                rv32_b1_shared_cpu_bus_config(&layout, shout_table_ids, mem_layouts.clone(), initial_mem.clone())
-                    .expect("cfg"),
-                chunk_size,
-            )
-            .expect("shared bus inject");
-
-            let t_build = Instant::now();
-            let steps = build_shard_witness_shared_cpu_bus::<_, Cmt, K, _, _, _>(
-                vm,
-                twist,
-                shout,
-                max_steps,
-                chunk_size,
-                &mem_layouts,
-                &HashMap::new(),
-                &table_specs,
-                &HashMap::new(),
-                &initial_mem,
-                &cpu,
-            )
-            .expect("build shard witness");
-            let build_dur = t_build.elapsed();
-
-            let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
-
-            let mut tr_prove = Poseidon2Transcript::new(b"riscv-b1-chunk-sweep");
-            let t_prove = Instant::now();
-            let proof = fold_shard_prove(
-                FoldingMode::Optimized,
-                &mut tr_prove,
-                &params,
-                &cpu.ccs,
-                &steps,
-                &[],
-                &[],
-                &DummyCommit::default(),
-                mixers,
-            )
-            .expect("prove");
-            let prove_dur = t_prove.elapsed();
-
-            let mut tr_verify = Poseidon2Transcript::new(b"riscv-b1-chunk-sweep");
-            let t_verify = Instant::now();
-            let _ = fold_shard_verify_rv32_b1_with_statement_mem_init(
-                FoldingMode::Optimized,
-                &mut tr_verify,
-                &params,
-                &cpu.ccs,
-                &mem_layouts,
-                &initial_mem,
-                &steps_public,
-                &[],
-                &proof,
-                mixers,
-                &layout,
-            )
-            .expect("verify");
-            let verify_dur = t_verify.elapsed();
+            run.verify().expect("verify");
+            let verify_dur = run.verify_duration().expect("verify duration");
+            let chunks = run.steps_public().len();
 
             println!(
-                "chunk_size={chunk_size:<2} chunks={:<3} build={:?} prove={:?} verify={:?}",
-                steps_public.len(),
-                build_dur,
-                prove_dur,
-                verify_dur
+                "chunk_size={chunk_size:<2} chunks={chunks:<3} prove={:?} verify={:?} total={:?}",
+                prove_dur, verify_dur, total_dur
             );
         }
     }
@@ -702,170 +293,37 @@ fn test_riscv_program_chunk_size_equivalence() {
         }, // x2 = mem[0]
         RiscvInstruction::Halt,
     ];
-
-    let program_bytes = encode_program(&program);
     let max_steps = program.len();
+    let program_bytes = encode_program(&program);
 
-    // Keep k small to reduce bus tail width and proof work.
-    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
-    let (k_ram, d_ram) = pow2_ceil_k(0x40);
-    let mem_layouts = with_reg_layout(HashMap::from([
-        (
-            0u32,
-            PlainMemLayout {
-                k: k_ram,
-                d: d_ram,
-                n_side: 2,
-                lanes: 1,
-            },
-        ),
-        (
-            1u32,
-            PlainMemLayout {
-                k: k_prog,
-                d: d_prog,
-                n_side: 2,
-                lanes: 1,
-            },
-        ),
-    ]));
-    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+    let mut run_1 = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+        .xlen(xlen)
+        .ram_bytes(0x40)
+        .chunk_size(1)
+        .max_steps(max_steps)
+        .shout_ops([RiscvOpcode::Add])
+        .prove()
+        .expect("prove chunk_size=1");
+    run_1.verify().expect("verify chunk_size=1");
+    let steps_1 = run_1.steps_public();
 
-    // Keep the Shout bus lean: this program only needs ADD (for ADDI and effective address calculation).
-    let table_specs = add_only_table_specs(xlen);
-    let shout_table_ids: Vec<u32> = vec![3u32];
+    let mut run_2 = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+        .xlen(xlen)
+        .ram_bytes(0x40)
+        .chunk_size(2)
+        .max_steps(max_steps)
+        .shout_ops([RiscvOpcode::Add])
+        .prove()
+        .expect("prove chunk_size=2");
+    run_2.verify().expect("verify chunk_size=2");
+    let steps_2 = run_2.steps_public();
 
-    let mixers = default_mixers();
-
-    let run = |chunk_size: usize| -> (neo_memory::riscv::ccs::Rv32B1Layout, Vec<StepInstanceBundle<Cmt, F, K>>) {
-        let mut vm = RiscvCpu::new(xlen);
-        vm.load_program(0, program.clone());
-        let twist = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
-        let shout = RiscvShoutTables::new(xlen);
-
-        let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, chunk_size).expect("ccs");
-        let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs_base.n).expect("params");
-
-        let cpu = R1csCpu::new(
-            ccs_base,
-            params.clone(),
-            DummyCommit::default(),
-            layout.m_in,
-            &HashMap::new(),
-            &table_specs,
-            rv32_b1_chunk_to_witness(layout.clone()),
-        )
-        .with_shared_cpu_bus(
-            rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts.clone(), initial_mem.clone())
-                .expect("cfg"),
-            chunk_size,
-        )
-        .expect("shared bus inject");
-
-        let steps = build_shard_witness_shared_cpu_bus::<_, Cmt, K, _, _, _>(
-            vm,
-            twist,
-            shout,
-            max_steps,
-            chunk_size,
-            &mem_layouts,
-            &HashMap::new(),
-            &table_specs,
-            &HashMap::new(),
-            &initial_mem,
-            &cpu,
-        )
-        .expect("build shard witness");
-        let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
-
-        let mut tr_prove = Poseidon2Transcript::new(b"riscv-b1-chunk-eq");
-        let proof = fold_shard_prove(
-            FoldingMode::Optimized,
-            &mut tr_prove,
-            &params,
-            &cpu.ccs,
-            &steps,
-            &[],
-            &[],
-            &DummyCommit::default(),
-            mixers,
-        )
-        .expect("prove");
-
-        let mut tr_verify = Poseidon2Transcript::new(b"riscv-b1-chunk-eq");
-        let _ = fold_shard_verify_rv32_b1_with_statement_mem_init(
-            FoldingMode::Optimized,
-            &mut tr_verify,
-            &params,
-            &cpu.ccs,
-            &mem_layouts,
-            &initial_mem,
-            &steps_public,
-            &[],
-            &proof,
-            mixers,
-            &layout,
-        )
-        .expect("verify");
-
-        // Tamper boundary chaining for chunk_size>1.
-        if chunk_size > 1 && steps_public.len() > 1 {
-            let mut bad_steps = steps_public.clone();
-            bad_steps[1].mcs_inst.x[layout.pc0] += F::ONE;
-            let mut tr_bad = Poseidon2Transcript::new(b"riscv-b1-chunk-eq");
-            assert!(
-                fold_shard_verify_rv32_b1_with_statement_mem_init(
-                    FoldingMode::Optimized,
-                    &mut tr_bad,
-                    &params,
-                    &cpu.ccs,
-                    &mem_layouts,
-                    &initial_mem,
-                    &bad_steps,
-                    &[],
-                    &proof,
-                    mixers,
-                    &layout,
-                )
-                .is_err(),
-                "expected step linking failure for chunk_size={chunk_size}"
-            );
-
-            // Also ensure the `halted_out -> halted_in` step linking is enforced (even when both are 0).
-            let mut bad_steps = steps_public.clone();
-            bad_steps[1].mcs_inst.x[layout.halted_in] = F::ONE;
-            let mut tr_bad_halt = Poseidon2Transcript::new(b"riscv-b1-chunk-eq");
-            assert!(
-                fold_shard_verify_rv32_b1_with_statement_mem_init(
-                    FoldingMode::Optimized,
-                    &mut tr_bad_halt,
-                    &params,
-                    &cpu.ccs,
-                    &mem_layouts,
-                    &initial_mem,
-                    &bad_steps,
-                    &[],
-                    &proof,
-                    mixers,
-                    &layout,
-                )
-                .is_err(),
-                "expected halted_in/out step linking failure for chunk_size={chunk_size}"
-            );
-        }
-
-        (layout, steps_public)
-    };
-
-    let (layout_1, steps_1) = run(1);
-    let (layout_2, steps_2) = run(2);
-
-    let start_1 = extract_boundary_state(&layout_1, &steps_1[0].mcs_inst.x).expect("boundary");
-    let start_2 = extract_boundary_state(&layout_2, &steps_2[0].mcs_inst.x).expect("boundary");
+    let start_1 = extract_boundary_state(run_1.layout(), &steps_1[0].mcs_inst.x).expect("boundary");
+    let start_2 = extract_boundary_state(run_2.layout(), &steps_2[0].mcs_inst.x).expect("boundary");
     assert_eq!(start_1.pc0, start_2.pc0, "pc0 must be chunk-size invariant");
 
-    let end_1 = extract_boundary_state(&layout_1, &steps_1.last().expect("non-empty").mcs_inst.x).expect("boundary");
-    let end_2 = extract_boundary_state(&layout_2, &steps_2.last().expect("non-empty").mcs_inst.x).expect("boundary");
+    let end_1 = extract_boundary_state(run_1.layout(), &steps_1.last().expect("non-empty").mcs_inst.x).expect("boundary");
+    let end_2 = extract_boundary_state(run_2.layout(), &steps_2.last().expect("non-empty").mcs_inst.x).expect("boundary");
     assert_eq!(end_1.pc_final, end_2.pc_final, "pc_final must be chunk-size invariant");
 
     // Stronger equivalence: each chunk boundary in chunk_size=2 corresponds to the same boundary
@@ -878,9 +336,9 @@ fn test_riscv_program_chunk_size_equivalence() {
     for c in 0..steps_2.len() {
         let s = c * k;
         let e = ((c + 1) * k).min(n) - 1;
-        let st_k = extract_boundary_state(&layout_2, &steps_2[c].mcs_inst.x).expect("boundary");
-        let st_1s = extract_boundary_state(&layout_1, &steps_1[s].mcs_inst.x).expect("boundary");
-        let st_1e = extract_boundary_state(&layout_1, &steps_1[e].mcs_inst.x).expect("boundary");
+        let st_k = extract_boundary_state(run_2.layout(), &steps_2[c].mcs_inst.x).expect("boundary");
+        let st_1s = extract_boundary_state(run_1.layout(), &steps_1[s].mcs_inst.x).expect("boundary");
+        let st_1e = extract_boundary_state(run_1.layout(), &steps_1[e].mcs_inst.x).expect("boundary");
 
         assert_eq!(st_k.pc0, st_1s.pc0, "pc0 mismatch at chunk {c}");
         assert_eq!(st_k.halted_in, st_1s.halted_in, "halted_in mismatch at chunk {c}");
@@ -921,123 +379,41 @@ fn test_riscv_program_rv32m_full_prove_verify() {
         RiscvInstruction::Halt,
     ];
     let max_steps = program.len();
-
     let program_bytes = encode_program(&program);
-    let mut vm = RiscvCpu::new(xlen);
-    vm.load_program(0, program);
-    let twist = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
-    let shout = RiscvShoutTables::new(xlen);
-
-    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
-    let (k_ram, d_ram) = pow2_ceil_k(0x40);
-    let mem_layouts = with_reg_layout(HashMap::from([
-        (
-            0u32,
-            PlainMemLayout {
-                k: k_ram,
-                d: d_ram,
-                n_side: 2,
-                lanes: 1,
-            },
-        ),
-        (
-            1u32,
-            PlainMemLayout {
-                k: k_prog,
-                d: d_prog,
-                n_side: 2,
-                lanes: 1,
-            },
-        ),
-    ]));
-    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     // Minimal table set:
     // - ADD (for ADD/ADDI and address/PC wiring),
     // - SLTU (for signed DIV/REM remainder-bound check when divisor != 0).
     //
-    // Note: RV32 B1 proves RV32M MUL* in the dedicated RV32M sidecar CCS (no Shout table required).
-    let shout_table_ids: Vec<u32> = vec![3, 6];
-    let table_specs = HashMap::from([
-        (
-            3u32,
-            LutTableSpec::RiscvOpcode {
-                opcode: RiscvOpcode::Add,
-                xlen,
-            },
-        ),
-        (
-            6u32,
-            LutTableSpec::RiscvOpcode {
-                opcode: RiscvOpcode::Sltu,
-                xlen,
-            },
-        ),
-    ]);
+    // Note: RV32 B1 proves RV32M MUL* via the RV32M event sidecar CCS (no Shout table required).
+    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+        .xlen(xlen)
+        .ram_bytes(0x40)
+        .chunk_size(1)
+        .max_steps(max_steps)
+        .shout_ops([RiscvOpcode::Add, RiscvOpcode::Sltu])
+        .prove()
+        .expect("prove");
 
-    let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs_base.n).expect("params");
+    run.verify().expect("verify");
 
-    let cpu = R1csCpu::new(
-        ccs_base,
-        params.clone(),
-        DummyCommit::default(),
-        layout.m_in,
-        &HashMap::new(),
-        &table_specs,
-        rv32_b1_chunk_to_witness(layout.clone()),
-    )
-    .with_shared_cpu_bus(
-        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts.clone(), initial_mem.clone())
-            .expect("cfg"),
-        1,
-    )
-    .expect("shared bus inject");
+    let steps = run.steps_public();
+    let mut rv32m_chunks: Vec<usize> = steps
+        .iter()
+        .enumerate()
+        .filter_map(|(chunk_idx, step)| {
+            let count = step.mcs_inst.x[run.layout().rv32m_count];
+            (count != F::ZERO).then_some(chunk_idx)
+        })
+        .collect();
+    rv32m_chunks.sort_unstable();
+    assert_eq!(rv32m_chunks, vec![2, 3], "expected RV32M rows on the MUL/DIV chunks");
 
-    let steps = build_shard_witness_shared_cpu_bus::<_, Cmt, K, _, _, _>(
-        vm,
-        twist,
-        shout,
-        /*max_steps=*/ max_steps,
-        /*chunk_size=*/ 1,
-        &mem_layouts,
-        &HashMap::new(),
-        &table_specs,
-        &HashMap::new(),
-        &initial_mem,
-        &cpu,
-    )
-    .expect("build shard witness");
-    let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
-
-    let mixers = default_mixers();
-    let mut tr_prove = Poseidon2Transcript::new(b"riscv-b1-rv32m-full");
-    let proof = fold_shard_prove(
-        FoldingMode::Optimized,
-        &mut tr_prove,
-        &params,
-        &cpu.ccs,
-        &steps,
-        &[],
-        &[],
-        &DummyCommit::default(),
-        mixers,
-    )
-    .expect("prove");
-
-    let mut tr_verify = Poseidon2Transcript::new(b"riscv-b1-rv32m-full");
-    let _ = fold_shard_verify_rv32_b1_with_statement_mem_init(
-        FoldingMode::Optimized,
-        &mut tr_verify,
-        &params,
-        &cpu.ccs,
-        &mem_layouts,
-        &initial_mem,
-        &steps_public,
-        &[],
-        &proof,
-        mixers,
-        &layout,
-    )
-    .expect("verify");
+    let rv32m = run.proof().rv32m.as_ref().expect("expected RV32M sidecar proofs");
+    let mut proof_chunks: Vec<usize> = rv32m.iter().map(|p| p.chunk_idx).collect();
+    proof_chunks.sort_unstable();
+    assert_eq!(proof_chunks, vec![2, 3], "expected one RV32M proof per M chunk");
+    for p in rv32m {
+        assert_eq!(p.lanes, vec![0u32], "chunk_size=1 => M op must be lane 0");
+    }
 }

@@ -26,10 +26,12 @@ use neo_memory::plain::LutTable;
 use neo_memory::plain::PlainMemLayout;
 use neo_memory::riscv::ccs::{
     build_rv32_b1_decode_plumbing_sidecar_ccs, build_rv32_b1_rv32m_event_sidecar_ccs,
-    build_rv32_b1_semantics_sidecar_ccs, build_rv32_b1_step_ccs, estimate_rv32_b1_step_ccs_counts,
+    build_rv32_b1_semantics_sidecar_ccs, build_rv32_b1_step_ccs, estimate_rv32_b1_all_ccs_counts,
     rv32_b1_chunk_to_witness, rv32_b1_shared_cpu_bus_config, rv32_b1_step_linking_pairs, Rv32B1Layout,
 };
-use neo_memory::riscv::lookups::{decode_program, RiscvCpu, RiscvInstruction, RiscvOpcode, RiscvShoutTables, PROG_ID};
+use neo_memory::riscv::lookups::{
+    decode_program, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID, REG_ID,
+};
 use neo_memory::riscv::shard::{extract_boundary_state, Rv32BoundaryState};
 use neo_memory::witness::LutTableSpec;
 use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
@@ -860,6 +862,9 @@ impl Rv32B1 {
         };
 
         Ok(Rv32B1Run {
+            program_base: self.program_base,
+            program_bytes: self.program_bytes,
+            xlen: self.xlen,
             session,
             ccs,
             layout,
@@ -899,6 +904,9 @@ pub struct Rv32B1ProofBundle {
 }
 
 pub struct Rv32B1Run {
+    program_base: u64,
+    program_bytes: Vec<u8>,
+    xlen: usize,
     session: FoldingSession<AjtaiSModule>,
     ccs: CcsStructure<F>,
     layout: Rv32B1Layout,
@@ -925,6 +933,67 @@ impl Rv32B1Run {
 
     pub fn layout(&self) -> &Rv32B1Layout {
         &self.layout
+    }
+
+    /// Deterministically re-run the VM to recover the executed trace.
+    ///
+    /// This is intended for Tier 2.1 "time-in-rows" work (execution-table extraction and
+    /// event-table arguments). It replays the program using the *public statement* initial memory
+    /// (`initial_mem`) and the same `xlen`.
+    ///
+    /// Note: this is not used by proving/verification today; it's a debugging/scaffolding API.
+    pub fn vm_trace(&self) -> Result<neo_vm_trace::VmTrace<u64, u64>, PiCcsError> {
+        let aux = self.session.shared_bus_aux().ok_or_else(|| {
+            PiCcsError::InvalidInput(
+                "vm_trace requires shared-bus aux (this run was not produced by shared-bus execution)".into(),
+            )
+        })?;
+
+        let program = decode_program(&self.program_bytes)
+            .map_err(|e| PiCcsError::InvalidInput(format!("decode_program failed: {e}")))?;
+        let mut vm = RiscvCpu::new(self.xlen);
+        vm.load_program(self.program_base, program);
+
+        let mut twist = RiscvMemory::with_program_in_twist(self.xlen, PROG_ID, self.program_base, &self.program_bytes);
+        for ((mem_id, addr), value) in &self.initial_mem {
+            let value_u64 = value.as_canonical_u64();
+            match *mem_id {
+                id if id == RAM_ID.0 => twist.store(RAM_ID, *addr, value_u64),
+                id if id == REG_ID.0 => twist.store(REG_ID, *addr, value_u64),
+                _ => {}
+            }
+        }
+
+        let shout = RiscvShoutTables::new(self.xlen);
+        let trace = neo_vm_trace::trace_program(vm, twist, shout, aux.original_len)
+            .map_err(|e| PiCcsError::InvalidInput(format!("trace_program failed: {e}")))?;
+
+        if trace.steps.len() != aux.original_len {
+            return Err(PiCcsError::InvalidInput(format!(
+                "vm_trace length mismatch: retrace_len={} expected_len={}",
+                trace.steps.len(),
+                aux.original_len
+            )));
+        }
+        if trace.did_halt() != aux.did_halt {
+            return Err(PiCcsError::InvalidInput(format!(
+                "vm_trace halt mismatch: retrace_did_halt={} expected_did_halt={}",
+                trace.did_halt(),
+                aux.did_halt
+            )));
+        }
+
+        Ok(trace)
+    }
+
+    /// Build a padded-to-power-of-two RV32 execution table from the replayed trace.
+    pub fn exec_table_padded_pow2(
+        &self,
+        min_len: usize,
+    ) -> Result<neo_memory::riscv::exec_table::Rv32ExecTable, PiCcsError> {
+        let trace = self.vm_trace()?;
+        neo_memory::riscv::exec_table::Rv32ExecTable::from_trace_padded_pow2(&trace, min_len)
+            .map_err(|e| PiCcsError::InvalidInput(format!("Rv32ExecTable::from_trace_padded_pow2 failed: {e}")))
     }
 
     fn verify_bundle_inner(&self, bundle: &Rv32B1ProofBundle) -> Result<(), PiCcsError> {
@@ -1288,15 +1357,23 @@ fn choose_rv32_b1_chunk_size(
     let mut best_work: u128 = u128::MAX;
 
     for chunk_size in candidates {
-        let counts = estimate_rv32_b1_step_ccs_counts(mem_layouts, shout_table_ids, chunk_size)?;
+        let counts = estimate_rv32_b1_all_ccs_counts(mem_layouts, shout_table_ids, chunk_size)?;
 
-        let n_pad = counts.n.next_power_of_two();
-        let m_pad = counts.m.next_power_of_two();
-        let bucket = n_pad.max(m_pad);
         let chunks_est = estimated_steps.div_ceil(chunk_size);
-        let work = (n_pad as u128)
-            .saturating_mul(m_pad as u128)
-            .saturating_mul(chunks_est as u128);
+
+        let m_pad = counts.step.m.next_power_of_two();
+        let step_n_pad = counts.step.n.next_power_of_two();
+        let decode_n_pad = counts.decode_plumbing_n.next_power_of_two();
+        let semantics_n_pad = counts.semantics_n.next_power_of_two();
+
+        let bucket = m_pad.max(step_n_pad.max(decode_n_pad).max(semantics_n_pad));
+        let work = (m_pad as u128)
+            .saturating_mul(chunks_est as u128)
+            .saturating_mul(
+                (step_n_pad as u128)
+                    .saturating_add(decode_n_pad as u128)
+                    .saturating_add(semantics_n_pad as u128),
+            );
 
         if bucket < best_bucket
             || (bucket == best_bucket && (work < best_work || (work == best_work && chunk_size > best_chunk_size)))

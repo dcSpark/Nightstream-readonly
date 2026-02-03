@@ -1,6 +1,7 @@
 use neo_vm_trace::{ShoutEvent, StepTrace, TwistEvent, TwistOpKind, VmTrace};
 
 use crate::riscv::lookups::{compute_op, decode_instruction, RiscvInstruction, RiscvOpcode, PROG_ID, RAM_ID, REG_ID};
+use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rv32InstrFields {
@@ -162,6 +163,187 @@ impl Rv32ExecTable {
                 ));
             }
         }
+        Ok(())
+    }
+
+    /// Validate that cycles are consecutive (`cycle[t+1] = cycle[t] + 1`).
+    pub fn validate_cycle_chain(&self) -> Result<(), String> {
+        for w in self.rows.windows(2) {
+            let a = &w[0];
+            let b = &w[1];
+            if b.cycle != a.cycle + 1 {
+                return Err(format!(
+                    "cycle chain mismatch: cycle {} then {} (expected {})",
+                    a.cycle,
+                    b.cycle,
+                    a.cycle + 1
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate that inactive rows contain no events and no decoded instruction.
+    pub fn validate_inactive_rows_are_empty(&self) -> Result<(), String> {
+        for r in &self.rows {
+            if r.active {
+                continue;
+            }
+            if r.decoded.is_some()
+                || r.prog_read.is_some()
+                || r.reg_read_lane0.is_some()
+                || r.reg_read_lane1.is_some()
+                || r.reg_write_lane0.is_some()
+                || !r.ram_events.is_empty()
+                || !r.shout_events.is_empty()
+            {
+                return Err(format!("inactive row has events/decoded at cycle {}", r.cycle));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate that once `halted` becomes true, it stays true and the PC stops changing.
+    pub fn validate_halted_tail(&self) -> Result<(), String> {
+        let mut saw_halt = false;
+        let mut halt_pc: Option<u64> = None;
+        for r in &self.rows {
+            if !saw_halt {
+                if r.halted {
+                    saw_halt = true;
+                    // In our trace semantics, the HALT row itself can advance the PC (default +4),
+                    // but after that the machine is halted and PC should stop changing.
+                    halt_pc = Some(r.pc_after);
+                }
+                continue;
+            }
+
+            if !r.halted {
+                return Err(format!(
+                    "halted tail violated: halted dropped to false at cycle {} (pc_before={:#x})",
+                    r.cycle, r.pc_before
+                ));
+            }
+
+            let pc0 = halt_pc.expect("halt_pc set");
+            if r.pc_before != pc0 || r.pc_after != pc0 {
+                return Err(format!(
+                    "halted tail violated: pc changed after halt at cycle {} (pc_before={:#x} pc_after={:#x}, expected {:#x})",
+                    r.cycle, r.pc_before, r.pc_after, pc0
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Validate REG lane semantics by replaying the register file from an initial state.
+    ///
+    /// - `init_regs` maps `reg_idx (0..31)` → value (u32 stored in u64).
+    /// - Unspecified registers default to 0.
+    /// - Reads happen before the optional lane0 write in each cycle.
+    pub fn validate_regfile_semantics(&self, init_regs: &HashMap<u64, u64>) -> Result<(), String> {
+        let mut regs = [0u64; 32];
+        for (&addr, &value) in init_regs {
+            if addr >= 32 {
+                return Err(format!("reg init addr out of range: addr={addr}"));
+            }
+            if addr == 0 && value != 0 {
+                return Err("reg init must keep x0 == 0".into());
+            }
+            regs[addr as usize] = value;
+        }
+
+        for r in &self.rows {
+            if !r.active {
+                continue;
+            }
+
+            let Some(rs1) = &r.reg_read_lane0 else {
+                return Err(format!("missing REG lane0 read at cycle {}", r.cycle));
+            };
+            let Some(rs2) = &r.reg_read_lane1 else {
+                return Err(format!("missing REG lane1 read at cycle {}", r.cycle));
+            };
+            if rs1.addr >= 32 || rs2.addr >= 32 {
+                return Err(format!(
+                    "REG read addr out of range at cycle {}: lane0={} lane1={}",
+                    r.cycle, rs1.addr, rs2.addr
+                ));
+            }
+
+            let exp_rs1 = regs[rs1.addr as usize];
+            let exp_rs2 = regs[rs2.addr as usize];
+            if rs1.value != exp_rs1 {
+                return Err(format!(
+                    "REG lane0 read value mismatch at cycle {} pc={:#x}: addr={} got={:#x} expected={:#x}",
+                    r.cycle, r.pc_before, rs1.addr, rs1.value, exp_rs1
+                ));
+            }
+            if rs2.value != exp_rs2 {
+                return Err(format!(
+                    "REG lane1 read value mismatch at cycle {} pc={:#x}: addr={} got={:#x} expected={:#x}",
+                    r.cycle, r.pc_before, rs2.addr, rs2.value, exp_rs2
+                ));
+            }
+
+            if let Some(w) = &r.reg_write_lane0 {
+                if w.addr >= 32 {
+                    return Err(format!("REG write addr out of range at cycle {}: addr={}", r.cycle, w.addr));
+                }
+                if w.addr == 0 {
+                    return Err(format!("unexpected x0 write at cycle {} pc={:#x}", r.cycle, r.pc_before));
+                }
+                regs[w.addr as usize] = w.value;
+            }
+
+            // x0 is always 0.
+            regs[0] = 0;
+        }
+
+        Ok(())
+    }
+
+    /// Validate RAM twist semantics by replaying the RAM state from an initial state.
+    ///
+    /// - `init_ram` maps `byte_addr` → word value (u32 stored in u64) under the RV32 B1 convention.
+    /// - Unspecified addresses default to 0.
+    /// - Multiple RAM events in a cycle are applied in trace order (e.g. SB/SH read-modify-write).
+    pub fn validate_ram_semantics(&self, init_ram: &HashMap<u64, u64>) -> Result<(), String> {
+        let mut mem: HashMap<u64, u64> = HashMap::new();
+        for (&addr, &value) in init_ram {
+            if value == 0 {
+                continue;
+            }
+            mem.insert(addr, value);
+        }
+
+        for r in &self.rows {
+            if !r.active {
+                continue;
+            }
+
+            for e in &r.ram_events {
+                match e.kind {
+                    TwistOpKind::Read => {
+                        let exp = mem.get(&e.addr).copied().unwrap_or(0);
+                        if e.value != exp {
+                            return Err(format!(
+                                "RAM read value mismatch at cycle {} pc={:#x}: addr={:#x} got={:#x} expected={:#x}",
+                                r.cycle, r.pc_before, e.addr, e.value, exp
+                            ));
+                        }
+                    }
+                    TwistOpKind::Write => {
+                        if e.value == 0 {
+                            mem.remove(&e.addr);
+                        } else {
+                            mem.insert(e.addr, e.value);
+                        }
+                    }
+                }
+            }
+        }
+
         Ok(())
     }
 
@@ -551,6 +733,203 @@ impl Rv32MEventTable {
                 rd_write_val,
                 expected_rd_val: expected,
             });
+        }
+
+        Ok(Self { rows })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rv32RegEventKind {
+    ReadLane0,
+    ReadLane1,
+    WriteLane0,
+}
+
+#[derive(Clone, Debug)]
+pub struct Rv32RegEventRow {
+    pub cycle: u64,
+    pub pc: u64,
+    pub kind: Rv32RegEventKind,
+    pub addr: u8,
+    pub prev_val: u64,
+    pub next_val: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct Rv32RegEventTable {
+    pub rows: Vec<Rv32RegEventRow>,
+}
+
+impl Rv32RegEventTable {
+    pub fn from_exec_table(exec: &Rv32ExecTable, init_regs: &HashMap<u64, u64>) -> Result<Self, String> {
+        let mut regs = [0u64; 32];
+        for (&addr, &value) in init_regs {
+            if addr >= 32 {
+                return Err(format!("reg init addr out of range: addr={addr}"));
+            }
+            if addr == 0 && value != 0 {
+                return Err("reg init must keep x0 == 0".into());
+            }
+            regs[addr as usize] = value;
+        }
+
+        let mut rows: Vec<Rv32RegEventRow> = Vec::new();
+        for r in &exec.rows {
+            if !r.active {
+                continue;
+            }
+
+            let Some(rs1) = &r.reg_read_lane0 else {
+                return Err(format!("missing REG lane0 read at cycle {}", r.cycle));
+            };
+            let Some(rs2) = &r.reg_read_lane1 else {
+                return Err(format!("missing REG lane1 read at cycle {}", r.cycle));
+            };
+            if rs1.addr >= 32 || rs2.addr >= 32 {
+                return Err(format!(
+                    "REG read addr out of range at cycle {}: lane0={} lane1={}",
+                    r.cycle, rs1.addr, rs2.addr
+                ));
+            }
+
+            // Reads happen before the optional write.
+            let rs1_prev = regs[rs1.addr as usize];
+            let rs2_prev = regs[rs2.addr as usize];
+            if rs1.value != rs1_prev {
+                return Err(format!(
+                    "REG lane0 read value mismatch at cycle {} pc={:#x}: addr={} got={:#x} expected={:#x}",
+                    r.cycle, r.pc_before, rs1.addr, rs1.value, rs1_prev
+                ));
+            }
+            if rs2.value != rs2_prev {
+                return Err(format!(
+                    "REG lane1 read value mismatch at cycle {} pc={:#x}: addr={} got={:#x} expected={:#x}",
+                    r.cycle, r.pc_before, rs2.addr, rs2.value, rs2_prev
+                ));
+            }
+
+            rows.push(Rv32RegEventRow {
+                cycle: r.cycle,
+                pc: r.pc_before,
+                kind: Rv32RegEventKind::ReadLane0,
+                addr: rs1.addr as u8,
+                prev_val: rs1_prev,
+                next_val: rs1_prev,
+            });
+            rows.push(Rv32RegEventRow {
+                cycle: r.cycle,
+                pc: r.pc_before,
+                kind: Rv32RegEventKind::ReadLane1,
+                addr: rs2.addr as u8,
+                prev_val: rs2_prev,
+                next_val: rs2_prev,
+            });
+
+            if let Some(w) = &r.reg_write_lane0 {
+                if w.addr >= 32 {
+                    return Err(format!("REG write addr out of range at cycle {}: addr={}", r.cycle, w.addr));
+                }
+                if w.addr == 0 {
+                    return Err(format!("unexpected x0 write at cycle {} pc={:#x}", r.cycle, r.pc_before));
+                }
+
+                let prev = regs[w.addr as usize];
+                let next = w.value;
+                regs[w.addr as usize] = next;
+                regs[0] = 0;
+
+                rows.push(Rv32RegEventRow {
+                    cycle: r.cycle,
+                    pc: r.pc_before,
+                    kind: Rv32RegEventKind::WriteLane0,
+                    addr: w.addr as u8,
+                    prev_val: prev,
+                    next_val: next,
+                });
+            }
+        }
+
+        Ok(Self { rows })
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rv32RamEventKind {
+    Read,
+    Write,
+}
+
+#[derive(Clone, Debug)]
+pub struct Rv32RamEventRow {
+    pub cycle: u64,
+    pub pc: u64,
+    pub kind: Rv32RamEventKind,
+    pub addr: u64,
+    pub prev_val: u64,
+    pub next_val: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct Rv32RamEventTable {
+    pub rows: Vec<Rv32RamEventRow>,
+}
+
+impl Rv32RamEventTable {
+    pub fn from_exec_table(exec: &Rv32ExecTable, init_ram: &HashMap<u64, u64>) -> Result<Self, String> {
+        let mut mem: HashMap<u64, u64> = HashMap::new();
+        for (&addr, &value) in init_ram {
+            if value == 0 {
+                continue;
+            }
+            mem.insert(addr, value);
+        }
+
+        let mut rows: Vec<Rv32RamEventRow> = Vec::new();
+        for r in &exec.rows {
+            if !r.active {
+                continue;
+            }
+
+            for e in &r.ram_events {
+                match e.kind {
+                    TwistOpKind::Read => {
+                        let prev = mem.get(&e.addr).copied().unwrap_or(0);
+                        let next = prev;
+                        if e.value != prev {
+                            return Err(format!(
+                                "RAM read value mismatch at cycle {} pc={:#x}: addr={:#x} got={:#x} expected={:#x}",
+                                r.cycle, r.pc_before, e.addr, e.value, prev
+                            ));
+                        }
+                        rows.push(Rv32RamEventRow {
+                            cycle: r.cycle,
+                            pc: r.pc_before,
+                            kind: Rv32RamEventKind::Read,
+                            addr: e.addr,
+                            prev_val: prev,
+                            next_val: next,
+                        });
+                    }
+                    TwistOpKind::Write => {
+                        let prev = mem.get(&e.addr).copied().unwrap_or(0);
+                        let next = e.value;
+                        if next == 0 {
+                            mem.remove(&e.addr);
+                        } else {
+                            mem.insert(e.addr, next);
+                        }
+                        rows.push(Rv32RamEventRow {
+                            cycle: r.cycle,
+                            pc: r.pc_before,
+                            kind: Rv32RamEventKind::Write,
+                            addr: e.addr,
+                            prev_val: prev,
+                            next_val: next,
+                        });
+                    }
+                }
+            }
         }
 
         Ok(Self { rows })

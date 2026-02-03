@@ -3279,6 +3279,13 @@ pub struct Rv32B1StepCcsCounts {
     pub injected: usize,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct Rv32B1AllCcsCounts {
+    pub step: Rv32B1StepCcsCounts,
+    pub decode_plumbing_n: usize,
+    pub semantics_n: usize,
+}
+
 /// Estimate the RV32 B1 step CCS shape without materializing the CCS matrices.
 ///
 /// This still constructs the semantic constraint vector in order to count it, but it avoids the
@@ -3298,6 +3305,121 @@ pub fn estimate_rv32_b1_step_ccs_counts(
         m: layout.m,
         semantic,
         injected,
+    })
+}
+
+/// Estimate the RV32 B1 step + sidecar CCS shapes without materializing CCS matrices.
+///
+/// This is intended for frontend heuristics (e.g. `chunk_size_auto`) that should consider the
+/// *full proving workload*:
+/// - the main step CCS (shared-bus host), plus
+/// - the decode plumbing sidecar CCS, plus
+/// - the semantics sidecar CCS.
+pub fn estimate_rv32_b1_all_ccs_counts(
+    mem_layouts: &HashMap<u32, PlainMemLayout>,
+    shout_table_ids: &[u32],
+    chunk_size: usize,
+) -> Result<Rv32B1AllCcsCounts, String> {
+    let (layout, injected) = build_rv32_b1_layout_and_injected(mem_layouts, shout_table_ids, chunk_size)?;
+
+    let semantic = semantic_constraints(&layout, mem_layouts)?.len();
+    let n = semantic
+        .checked_add(injected)
+        .ok_or_else(|| "RV32 B1: n overflow".to_string())?;
+    let step = Rv32B1StepCcsCounts {
+        n,
+        m: layout.m,
+        semantic,
+        injected,
+    };
+
+    // Decode plumbing sidecar count (same constraints as `build_rv32_b1_decode_plumbing_sidecar_ccs`,
+    // but without building CCS matrices).
+    let decode_plumbing_n = {
+        let one = layout.const_one;
+        let mut constraints: Vec<Constraint<F>> = Vec::new();
+
+        for j in 0..layout.chunk_size {
+            push_rv32_b1_decode_constraints(&mut constraints, &layout, j)?;
+
+            // Derived group/control signals (kept sound even if the main CCS is thin).
+            //
+            // writes_rd = OR over op-classes that write rd (one-hot => sum).
+            constraints.push(Constraint::terms(
+                one,
+                false,
+                vec![
+                    (layout.writes_rd(j), F::ONE),
+                    (layout.is_alu_reg(j), -F::ONE),
+                    (layout.is_alu_imm(j), -F::ONE),
+                    (layout.is_load(j), -F::ONE),
+                    (layout.is_amo(j), -F::ONE),
+                    (layout.is_lui(j), -F::ONE),
+                    (layout.is_auipc(j), -F::ONE),
+                    (layout.is_jal(j), -F::ONE),
+                    (layout.is_jalr(j), -F::ONE),
+                ],
+            ));
+
+            // pc_plus4 + is_branch + is_jal + is_jalr = is_active
+            constraints.push(Constraint::terms(
+                one,
+                false,
+                vec![
+                    (layout.pc_plus4(j), F::ONE),
+                    (layout.is_branch(j), F::ONE),
+                    (layout.is_jal(j), F::ONE),
+                    (layout.is_jalr(j), F::ONE),
+                    (layout.is_active(j), -F::ONE),
+                ],
+            ));
+
+            // wb_from_alu selects the Shout-backed writeback path:
+            // wb_from_alu = is_alu_imm + is_alu_reg - is_rv32m + is_auipc
+            constraints.push(Constraint::terms(
+                one,
+                false,
+                vec![
+                    (layout.wb_from_alu(j), F::ONE),
+                    (layout.is_alu_imm(j), -F::ONE),
+                    (layout.is_alu_reg(j), -F::ONE),
+                    (layout.is_mul(j), F::ONE),
+                    (layout.is_mulh(j), F::ONE),
+                    (layout.is_mulhu(j), F::ONE),
+                    (layout.is_mulhsu(j), F::ONE),
+                    (layout.is_div(j), F::ONE),
+                    (layout.is_divu(j), F::ONE),
+                    (layout.is_rem(j), F::ONE),
+                    (layout.is_remu(j), F::ONE),
+                    (layout.is_auipc(j), -F::ONE),
+                ],
+            ));
+        }
+
+        // Public RV32M activity: number of RV32M ops in this chunk (sum over one-hot flags).
+        let mut terms = vec![(layout.rv32m_count, F::ONE)];
+        for j in 0..layout.chunk_size {
+            terms.push((layout.is_mul(j), -F::ONE));
+            terms.push((layout.is_mulh(j), -F::ONE));
+            terms.push((layout.is_mulhu(j), -F::ONE));
+            terms.push((layout.is_mulhsu(j), -F::ONE));
+            terms.push((layout.is_div(j), -F::ONE));
+            terms.push((layout.is_divu(j), -F::ONE));
+            terms.push((layout.is_rem(j), -F::ONE));
+            terms.push((layout.is_remu(j), -F::ONE));
+        }
+        constraints.push(Constraint::terms(one, false, terms));
+
+        constraints.len()
+    };
+
+    // Semantics sidecar count (decode excluded).
+    let semantics_n = semantic_constraints_without_decode(&layout, mem_layouts)?.len();
+
+    Ok(Rv32B1AllCcsCounts {
+        step,
+        decode_plumbing_n,
+        semantics_n,
     })
 }
 
