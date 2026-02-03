@@ -30,4 +30,3 @@ fn rv32_b1_chunk_size_auto_prove_verify() {
     assert!(run.chunk_size() <= 256);
     assert!(run.fold_count() > 0);
 }
-

@@ -1,6 +1,6 @@
 use neo_memory::riscv::exec_table::Rv32ExecTable;
 use neo_memory::riscv::lookups::{
-    encode_program, interleave_bits, decode_program, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode,
+    decode_program, encode_program, interleave_bits, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode,
     RiscvShoutTables, PROG_ID,
 };
 use neo_vm_trace::trace_program;

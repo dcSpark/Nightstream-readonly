@@ -221,7 +221,10 @@ pub fn rv32_b1_shared_cpu_bus_config(
     let (mem_ids, _ell_addrs) = derive_mem_ids_and_ell_addrs(&mem_layouts)?;
     let mut twist_cpu = HashMap::new();
     for mem_id in mem_ids {
-        let lanes = mem_layouts.get(&mem_id).map(|l| l.lanes.max(1)).unwrap_or(1);
+        let lanes = mem_layouts
+            .get(&mem_id)
+            .map(|l| l.lanes.max(1))
+            .unwrap_or(1);
 
         if mem_id == REG_ID.0 {
             if lanes < 2 {

@@ -1129,10 +1129,7 @@ pub(super) fn build_layout_with_m(
         .iter()
         .zip(twist_ell_addrs.iter())
         .map(|(mem_id, ell_addr)| {
-            let lanes = mem_layouts
-                .get(mem_id)
-                .map(|l| l.lanes.max(1))
-                .unwrap_or(1);
+            let lanes = mem_layouts.get(mem_id).map(|l| l.lanes.max(1)).unwrap_or(1);
             (*ell_addr, lanes)
         })
         .collect();
