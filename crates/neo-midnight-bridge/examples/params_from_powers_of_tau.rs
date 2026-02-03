@@ -34,23 +34,21 @@ fn main() {
         .next()
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("powers_of_tau"));
-    let out_dir = args.next().map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    let k_max_arg = args.next().map(|s| s.parse::<u32>().expect("k_max must be an integer"));
+    let out_dir = args
+        .next()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."));
+    let k_max_arg = args
+        .next()
+        .map(|s| s.parse::<u32>().expect("k_max must be an integer"));
 
     let bytes = std::fs::read(&pot_path).expect("read powers_of_tau");
     let g1_size = G1Affine::uncompressed_size();
     let g2_size = G2Affine::uncompressed_size();
 
-    assert!(
-        bytes.len() >= 2 * g2_size,
-        "powers_of_tau too short: need >= 2*G2"
-    );
+    assert!(bytes.len() >= 2 * g2_size, "powers_of_tau too short: need >= 2*G2");
     let offset = bytes.len() - 2 * g2_size;
-    assert_eq!(
-        offset % g1_size,
-        0,
-        "powers_of_tau length not aligned to G1 size"
-    );
+    assert_eq!(offset % g1_size, 0, "powers_of_tau length not aligned to G1 size");
 
     let g1_count = offset / g1_size;
     let k_max_default = floor_log2(g1_count);
@@ -74,8 +72,7 @@ fn main() {
 
     // Read trailing G2 points (beta_g2, g2).
     let g2_0 = G2Affine::from_raw_bytes(&bytes[offset..offset + g2_size]).expect("decode G2[0]");
-    let g2_1 =
-        G2Affine::from_raw_bytes(&bytes[offset + g2_size..offset + 2 * g2_size]).expect("decode G2[1]");
+    let g2_1 = G2Affine::from_raw_bytes(&bytes[offset + g2_size..offset + 2 * g2_size]).expect("decode G2[1]");
 
     std::fs::create_dir_all(&out_dir).expect("create out_dir");
 

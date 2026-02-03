@@ -19,8 +19,7 @@ use serde::{Deserialize, Serialize};
 use std::io::{Read, Write};
 
 fn write_relation_len_prefixed<W: Write, T: Serialize>(writer: &mut W, value: &T) -> std::io::Result<()> {
-    let bytes =
-        bincode::serialize(value).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
+    let bytes = bincode::serialize(value).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let len = u32::try_from(bytes.len())
         .map_err(|_| std::io::Error::new(std::io::ErrorKind::InvalidData, "relation too large"))?;
     writer.write_all(&len.to_le_bytes())?;

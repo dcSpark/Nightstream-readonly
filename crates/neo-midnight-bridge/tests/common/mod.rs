@@ -108,11 +108,7 @@ impl KzgParamsCache {
     }
 }
 
-fn choose_max_count(
-    max_count: usize,
-    label: &str,
-    mut model_for_count: impl FnMut(usize) -> (u32, usize),
-) -> usize {
+fn choose_max_count(max_count: usize, label: &str, mut model_for_count: impl FnMut(usize) -> (u32, usize)) -> usize {
     let (k, rows) = model_for_count(max_count);
     println!("{label}: count={max_count} min_k={k} rows={rows}");
     max_count
@@ -909,8 +905,10 @@ pub fn prove_step1_full_bundle_poseidon2_batch_40() {
         fe_bundle_bytes += proof.len();
 
         let params_v = params.verifier_params();
-        midnight_zk_stdlib::verify::<PiCcsFeChunkAggSumcheckRelation, TranscriptHash>(&params_v, &vk, &instance, None, &proof)
-            .expect("verify fe chunk+agg+sumcheck");
+        midnight_zk_stdlib::verify::<PiCcsFeChunkAggSumcheckRelation, TranscriptHash>(
+            &params_v, &vk, &instance, None, &proof,
+        )
+        .expect("verify fe chunk+agg+sumcheck");
         did_one_shot_fe = true;
     }
 
