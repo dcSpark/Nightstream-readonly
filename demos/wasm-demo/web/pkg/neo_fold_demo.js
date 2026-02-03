@@ -264,9 +264,6 @@ export class SpartanCompressedProof {
      */
     bytes() {
         const ret = wasm.spartancompressedproof_bytes(this.__wbg_ptr);
-        if (ret[3]) {
-            throw takeFromExternrefTable0(ret[2]);
-        }
         var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
         wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
         return v1;
@@ -277,13 +274,10 @@ export class SpartanCompressedProof {
      */
     bytes_len() {
         const ret = wasm.spartancompressedproof_bytes_len(this.__wbg_ptr);
-        if (ret[2]) {
-            throw takeFromExternrefTable0(ret[1]);
-        }
-        return ret[0] >>> 0;
+        return ret >>> 0;
     }
     /**
-     * Size of the combined artifact (vk + snark), matching `SpartanProof::proof_data`.
+     * Size of the combined artifact (vk + snark).
      *
      * This is optional in the UI; when present it can be used to estimate vk size as
      * `(vk+snark) - snark`.

@@ -78,7 +78,7 @@ export class SpartanCompressedProof {
      */
     bytes_len(): number;
     /**
-     * Size of the combined artifact (vk + snark), matching `SpartanProof::proof_data`.
+     * Size of the combined artifact (vk + snark).
      *
      * This is optional in the UI; when present it can be used to estimate vk size as
      * `(vk+snark) - snark`.
@@ -147,8 +147,8 @@ export interface InitOutput {
     readonly neofoldsession_verify: (a: number, b: number) => [number, number, number];
     readonly prove_verify_rv32_b1_fibonacci_asm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly prove_verify_test_export_json: (a: number, b: number) => [number, number, number];
-    readonly spartancompressedproof_bytes: (a: number) => [number, number, number, number];
-    readonly spartancompressedproof_bytes_len: (a: number) => [number, number, number];
+    readonly spartancompressedproof_bytes: (a: number) => [number, number];
+    readonly spartancompressedproof_bytes_len: (a: number) => number;
     readonly spartancompressedproof_vk_and_snark_bytes_len: (a: number) => number;
     readonly __wbg_wbg_rayon_poolbuilder_free: (a: number, b: number) => void;
     readonly wbg_rayon_poolbuilder_build: (a: number) => void;
