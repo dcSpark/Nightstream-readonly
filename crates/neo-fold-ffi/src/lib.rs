@@ -13,7 +13,6 @@ fn elapsed_ms(start: Instant) -> f64 {
 
 #[cfg(feature = "spartan")]
 fn fold_run_witness_placeholder(run: &neo_fold::shard::ShardProof) -> FoldRunWitness {
-    let pi_ccs_proofs = run.steps.iter().map(|s| s.fold.ccs_proof.clone()).collect();
     let rlc_rhos = run.steps.iter().map(|s| s.fold.rlc_rhos.clone()).collect();
 
     // NOTE: The current Spartan bridge circuit does not yet use these matrices
@@ -23,7 +22,6 @@ fn fold_run_witness_placeholder(run: &neo_fold::shard::ShardProof) -> FoldRunWit
 
     FoldRunWitness::from_fold_run(
         run.clone(),
-        pi_ccs_proofs,
         per_step_empty.clone(),
         rlc_rhos,
         per_step_empty,

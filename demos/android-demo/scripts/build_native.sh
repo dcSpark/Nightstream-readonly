@@ -14,6 +14,7 @@ HALO3_DIR="${HALO3_DIR:-$HALO3_DIR_DEFAULT}"
 PROFILE="release"
 FEATURES=""
 ALL_ABIS=0
+ENABLE_SPARTAN=1
 
 usage() {
   cat <<EOF
@@ -24,8 +25,9 @@ Options:
   --profiling          Build with Cargo profiling profile
   --profile <name>     Explicit profile (release|profiling)
   --all-abis           Build armv7 + arm64 + x86 + x86_64 (default: arm64; also builds x86_64 on x86_64 hosts)
-  --features <list>    Pass cargo features (e.g. "spartan debug-logs")
-  --spartan            Convenience flag for --features spartan
+  --features <list>    Extra cargo features (e.g. "debug-logs" or "spartan,debug-logs")
+  --spartan            Enable Spartan (default)
+  --no-spartan         Disable Spartan
   --help               Show this help message
 
 Environment:
@@ -53,15 +55,19 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --features)
-      FEATURES="$2"
+      if [[ -z "$FEATURES" ]]; then
+        FEATURES="$2"
+      else
+        FEATURES="$FEATURES,$2"
+      fi
       shift 2
       ;;
     --spartan)
-      if [[ -z "$FEATURES" ]]; then
-        FEATURES="spartan"
-      else
-        FEATURES="$FEATURES spartan"
-      fi
+      ENABLE_SPARTAN=1
+      shift
+      ;;
+    --no-spartan)
+      ENABLE_SPARTAN=0
       shift
       ;;
     -h|--help)
@@ -75,6 +81,45 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+normalize_features_csv() {
+  local input="${1:-}"
+  input="${input//[[:space:]]/,}"
+  input="$(printf '%s' "${input}" | tr -s ',')"
+  input="${input#,}"
+  input="${input%,}"
+  printf '%s' "${input}"
+}
+
+csv_has_feature() {
+  local csv="${1:-}"
+  local feature="${2:-}"
+  [[ ",${csv}," == *",${feature},"* ]]
+}
+
+csv_add_feature() {
+  local csv="${1:-}"
+  local feature="${2:-}"
+  if [[ -z "${csv}" ]]; then
+    printf '%s' "${feature}"
+    return
+  fi
+  if csv_has_feature "${csv}" "${feature}"; then
+    printf '%s' "${csv}"
+    return
+  fi
+  printf '%s,%s' "${csv}" "${feature}"
+}
+
+FEATURES="$(normalize_features_csv "${FEATURES}")"
+if [[ "${ENABLE_SPARTAN}" == "1" ]]; then
+  FEATURES="$(csv_add_feature "${FEATURES}" "spartan")"
+else
+  if csv_has_feature "${FEATURES}" "spartan" || csv_has_feature "${FEATURES}" "spartan-debug-logs"; then
+    echo "Conflicting options: --no-spartan cannot be combined with --features including \"spartan\"." >&2
+    exit 2
+  fi
+fi
 
 case "${PROFILE}" in
   release|profiling) ;;
@@ -139,7 +184,7 @@ echo "  Profile:  $PROFILE"
 echo "  Source:   $HALO3_DIR"
 echo "  Output:   $OUT_DIR"
 echo "  ABIs:     ${ABIS[*]}"
-if [[ -n "$FEATURES" ]]; then
+if [[ -n "${FEATURES}" ]]; then
   echo "  Features: $FEATURES"
 fi
 

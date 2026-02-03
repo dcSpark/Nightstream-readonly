@@ -78,7 +78,7 @@ export class SpartanCompressedProof {
      */
     bytes_len(): number;
     /**
-     * Size of the combined artifact (vk + snark), matching `SpartanProof::proof_data`.
+     * Size of the combined artifact (vk + snark).
      *
      * This is optional in the UI; when present it can be used to estimate vk size as
      * `(vk+snark) - snark`.
@@ -131,8 +131,8 @@ export interface InitOutput {
     readonly neofoldproof_proof_estimate: (a: number) => [number, number, number];
     readonly neofoldproof_folding_summary: (a: number) => [number, number, number];
     readonly __wbg_spartancompressedproof_free: (a: number, b: number) => void;
-    readonly spartancompressedproof_bytes_len: (a: number) => [number, number, number];
-    readonly spartancompressedproof_bytes: (a: number) => [number, number, number, number];
+    readonly spartancompressedproof_bytes_len: (a: number) => number;
+    readonly spartancompressedproof_bytes: (a: number) => [number, number];
     readonly spartancompressedproof_vk_and_snark_bytes_len: (a: number) => number;
     readonly __wbindgen_malloc: (a: number, b: number) => number;
     readonly __wbindgen_realloc: (a: number, b: number, c: number, d: number) => number;
