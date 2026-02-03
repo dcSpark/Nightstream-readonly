@@ -337,7 +337,12 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 self.write_reg(twist, rd, result);
             }
 
-            RiscvInstruction::Store { op, rs1: _, rs2: _, imm } => {
+            RiscvInstruction::Store {
+                op,
+                rs1: _,
+                rs2: _,
+                imm,
+            } => {
                 let base = rs1_val;
                 let imm_val = self.sign_extend_imm(imm);
                 let index = interleave_bits(base, imm_val) as u64;
@@ -383,8 +388,12 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 }
 
                 let taken = match cond {
-                    BranchCondition::Eq | BranchCondition::Ne | BranchCondition::Lt | BranchCondition::Ltu => cmp == 1,
-                    BranchCondition::Ge | BranchCondition::Geu => cmp == 0,
+                    // EQ/SLT/SLTU return 1 when the predicate holds.
+                    BranchCondition::Eq | BranchCondition::Lt | BranchCondition::Ltu => cmp == 1,
+                    // Inverted predicates:
+                    // - Ne uses Eq lookup: taken = !(rs1 == rs2)
+                    // - Ge/Geu use Slt/Sltu lookup: taken = !(rs1 < rs2)
+                    BranchCondition::Ne | BranchCondition::Ge | BranchCondition::Geu => cmp == 0,
                 };
                 if taken {
                     let imm_u = self.sign_extend_imm(imm);
@@ -479,12 +488,7 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 // Note: In a real implementation, we'd reserve the address here
             }
 
-            RiscvInstruction::StoreConditional {
-                op,
-                rd,
-                rs1: _,
-                rs2: _,
-            } => {
+            RiscvInstruction::StoreConditional { op, rd, rs1: _, rs2: _ } => {
                 let addr = rs1_val;
                 let value = rs2_val;
 

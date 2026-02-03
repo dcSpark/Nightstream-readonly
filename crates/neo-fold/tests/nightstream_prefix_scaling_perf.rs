@@ -57,7 +57,9 @@ fn nightstream_prefix_lengths_1_to_10_and_256() {
 
         ns_run.verify().expect("Nightstream verify");
         let ns_prove_time = ns_run.prove_duration();
-        let ns_verify_time = ns_run.verify_duration().expect("Nightstream verify duration");
+        let ns_verify_time = ns_run
+            .verify_duration()
+            .expect("Nightstream verify duration");
         let ns_total_time = ns_total_start.elapsed();
 
         rows.push(ScaleRow {
@@ -196,4 +198,3 @@ fn div_duration(d: Duration, denom: usize) -> Duration {
     }
     Duration::from_secs_f64(d.as_secs_f64() / denom as f64)
 }
-

@@ -394,7 +394,8 @@ impl BranchCondition {
     pub fn to_shout_opcode(&self) -> RiscvOpcode {
         match self {
             BranchCondition::Eq => RiscvOpcode::Eq,
-            BranchCondition::Ne => RiscvOpcode::Neq,
+            // Represent BNE as EQ + invert (avoids a dedicated NEQ table/lane).
+            BranchCondition::Ne => RiscvOpcode::Eq,
             BranchCondition::Lt => RiscvOpcode::Slt,
             BranchCondition::Ge => RiscvOpcode::Slt, // BGE = !(rs1 < rs2)
             BranchCondition::Ltu => RiscvOpcode::Sltu,

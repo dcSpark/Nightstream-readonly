@@ -952,7 +952,11 @@ fn test_riscv_program_rv32m_full_prove_verify() {
     ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
-    // Minimal table set: ADD (for ADD/ADDI) + SLTU (for signed DIV/REM remainder-bound check when divisor != 0).
+    // Minimal table set:
+    // - ADD (for ADD/ADDI and address/PC wiring),
+    // - SLTU (for signed DIV/REM remainder-bound check when divisor != 0).
+    //
+    // Note: RV32 B1 proves RV32M MUL* in the dedicated RV32M sidecar CCS (no Shout table required).
     let shout_table_ids: Vec<u32> = vec![3, 6];
     let table_specs = HashMap::from([
         (

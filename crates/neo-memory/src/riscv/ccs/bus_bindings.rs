@@ -44,7 +44,7 @@ fn shout_cpu_binding(layout: &Rv32B1Layout, table_id: u32) -> ShoutCpuBinding {
             val: layout.alu_out,
         },
         SUB_TABLE_ID => ShoutCpuBinding {
-            has_lookup: layout.is_sub,
+            has_lookup: layout.sub_has_lookup,
             addr,
             val: layout.alu_out,
         },
@@ -74,14 +74,15 @@ fn shout_cpu_binding(layout: &Rv32B1Layout, table_id: u32) -> ShoutCpuBinding {
             val: layout.alu_out,
         },
         EQ_TABLE_ID => ShoutCpuBinding {
-            has_lookup: layout.is_beq,
+            has_lookup: layout.eq_has_lookup,
             addr,
             val: layout.alu_out,
         },
         NEQ_TABLE_ID => ShoutCpuBinding {
-            has_lookup: layout.is_bne,
+            // Nightstream encodes BNE as EQ + invert, so NEQ is unused.
+            has_lookup: layout.zero,
             addr,
-            val: layout.alu_out,
+            val: layout.zero,
         },
         _ => {
             // Bind unused tables to fixed-zero CPU columns so they are provably inactive.
@@ -221,7 +222,10 @@ pub fn rv32_b1_shared_cpu_bus_config(
     let (mem_ids, _ell_addrs) = derive_mem_ids_and_ell_addrs(&mem_layouts)?;
     let mut twist_cpu = HashMap::new();
     for mem_id in mem_ids {
-        let lanes = mem_layouts.get(&mem_id).map(|l| l.lanes.max(1)).unwrap_or(1);
+        let lanes = mem_layouts
+            .get(&mem_id)
+            .map(|l| l.lanes.max(1))
+            .unwrap_or(1);
 
         if mem_id == REG_ID.0 {
             if lanes < 2 {

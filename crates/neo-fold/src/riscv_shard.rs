@@ -25,8 +25,8 @@ use neo_memory::output_check::ProgramIO;
 use neo_memory::plain::LutTable;
 use neo_memory::plain::PlainMemLayout;
 use neo_memory::riscv::ccs::{
-    build_rv32_b1_decode_sidecar_ccs, build_rv32_b1_rv32m_sidecar_ccs, build_rv32_b1_step_ccs,
-    estimate_rv32_b1_step_ccs_counts,
+    build_rv32_b1_decode_plumbing_sidecar_ccs, build_rv32_b1_rv32m_event_sidecar_ccs,
+    build_rv32_b1_semantics_sidecar_ccs, build_rv32_b1_step_ccs, estimate_rv32_b1_step_ccs_counts,
     rv32_b1_chunk_to_witness, rv32_b1_shared_cpu_bus_config, rv32_b1_step_linking_pairs, Rv32B1Layout,
 };
 use neo_memory::riscv::lookups::{decode_program, RiscvCpu, RiscvInstruction, RiscvOpcode, RiscvShoutTables, PROG_ID};
@@ -39,6 +39,7 @@ use neo_transcript::Poseidon2Transcript;
 use neo_transcript::Transcript;
 use neo_vm_trace::Twist as _;
 use p3_field::PrimeCharacteristicRing;
+use p3_field::PrimeField64;
 
 #[cfg(target_arch = "wasm32")]
 use js_sys::Date;
@@ -659,34 +660,54 @@ impl Rv32B1 {
 
         // Prove phase (timed)
         //
-        // Includes the decode/semantics sidecar proof (always) and the optional RV32M sidecar proof,
+        // Includes the decode+semantics sidecar proofs (always) and the optional RV32M sidecar proof,
         // so reported prove time matches total work.
         let prove_start = time_now();
 
-        // Decode/semantics sidecar: prove the full RV32 B1 step semantics separately so the main step CCS
-        // can stay thin (it mostly exists to host the injected shared-bus constraints).
-        let decode_sidecar = {
-            let decode_ccs = build_rv32_b1_decode_sidecar_ccs(&layout, &mem_layouts)
+        // Batch all chunks into one sidecar proof (avoid per-chunk transcript/proof overhead).
+        let mut mcs_insts = Vec::with_capacity(session.steps_witness().len());
+        let mut mcs_wits = Vec::with_capacity(session.steps_witness().len());
+        for step in session.steps_witness() {
+            let (mcs_inst, mcs_wit) = &step.mcs;
+            mcs_insts.push(mcs_inst.clone());
+            mcs_wits.push(mcs_wit.clone());
+        }
+        let num_steps = mcs_insts.len();
+
+        // Decode plumbing sidecar: prove instruction bits/fields/immediates and one-hot flags separately
+        // so other proofs can assume decoded signals are sound without paying the padding knee.
+        let decode_plumbing = {
+            let decode_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout)
                 .map_err(|e| PiCcsError::InvalidInput(format!("{e}")))?;
 
-            // Batch all chunks into one sidecar proof (avoid per-chunk transcript/proof overhead).
-            let mut mcs_insts = Vec::with_capacity(session.steps_witness().len());
-            let mut mcs_wits = Vec::with_capacity(session.steps_witness().len());
-            for step in session.steps_witness() {
-                let (mcs_inst, mcs_wit) = &step.mcs;
-                mcs_insts.push(mcs_inst.clone());
-                mcs_wits.push(mcs_wit.clone());
-            }
-
-            let num_steps = mcs_insts.len();
-            let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_sidecar_batch");
-            tr.append_message(b"decode_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
+            let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_plumbing_sidecar_batch");
+            tr.append_message(b"decode_plumbing_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
             let (me_out, proof) =
                 crate::pi_ccs_prove_simple(&mut tr, &params, &decode_ccs, &mcs_insts, &mcs_wits, &committer)
-                    .map_err(|e| PiCcsError::ProtocolError(format!("decode sidecar prove failed: {e}")))?;
+                    .map_err(|e| PiCcsError::ProtocolError(format!("decode plumbing sidecar prove failed: {e}")))?;
 
-            Rv32DecodeSidecar {
+            PiCcsProofBundle {
                 ccs: decode_ccs,
+                num_steps,
+                me_out,
+                proof,
+            }
+        };
+
+        // Semantics sidecar: prove full RV32 B1 step semantics separately so the main step CCS can stay thin
+        // (it mostly exists to host the injected shared-bus constraints).
+        let semantics = {
+            let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts)
+                .map_err(|e| PiCcsError::InvalidInput(format!("{e}")))?;
+
+            let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/semantics_sidecar_batch");
+            tr.append_message(b"semantics_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
+            let (me_out, proof) =
+                crate::pi_ccs_prove_simple(&mut tr, &params, &semantics_ccs, &mcs_insts, &mcs_wits, &committer)
+                    .map_err(|e| PiCcsError::ProtocolError(format!("semantics sidecar prove failed: {e}")))?;
+
+            PiCcsProofBundle {
+                ccs: semantics_ccs,
                 num_steps,
                 me_out,
                 proof,
@@ -695,36 +716,109 @@ impl Rv32B1 {
 
         // Optional RV32M sidecar: prove MUL/DIV/REM helper constraints separately so the main step CCS
         // stays small on non-M workloads.
-        let rv32m_sidecar = if uses_rv32m {
-            let rv32m_ccs =
-                build_rv32_b1_rv32m_sidecar_ccs(&layout).map_err(|e| PiCcsError::InvalidInput(format!("{e}")))?;
+        //
+        // Jolt-ish direction: charge RV32M only on lanes that actually execute an M op in a chunk.
+        // We do this by proving an RV32M sidecar CCS that includes constraints only for the selected lanes.
+        let rv32m = {
+            if !uses_rv32m {
+                None
+            } else {
+                fn z_at(
+                    inst: &neo_ccs::relations::McsInstance<Cmt, F>,
+                    wit: &neo_ccs::relations::McsWitness<F>,
+                    idx: usize,
+                ) -> F {
+                    if idx < inst.m_in {
+                        inst.x[idx]
+                    } else {
+                        wit.w[idx - inst.m_in]
+                    }
+                }
 
-            // Batch all chunks into one sidecar proof (avoid per-chunk transcript/proof overhead).
-            let mut mcs_insts = Vec::with_capacity(session.steps_witness().len());
-            let mut mcs_wits = Vec::with_capacity(session.steps_witness().len());
-            for step in session.steps_witness() {
-                let (mcs_inst, mcs_wit) = &step.mcs;
-                mcs_insts.push(mcs_inst.clone());
-                mcs_wits.push(mcs_wit.clone());
+                let mut out: Vec<Rv32B1Rv32mEventSidecarChunkProof> = Vec::new();
+                for (chunk_idx, step) in session.steps_witness().iter().enumerate() {
+                    let (inst, wit) = &step.mcs;
+                    let count = inst.x.get(layout.rv32m_count).copied().ok_or_else(|| {
+                        PiCcsError::InvalidInput(format!(
+                            "rv32m_count not present in public x: need idx {} but x.len()={}",
+                            layout.rv32m_count,
+                            inst.x.len()
+                        ))
+                    })?;
+                    if count == F::ZERO {
+                        continue;
+                    }
+
+                    let expected = count.as_canonical_u64() as usize;
+                    let mut lanes: Vec<u32> = Vec::with_capacity(expected);
+
+                    for j in 0..layout.chunk_size {
+                        let mut is_m = false;
+                        for &col in &[
+                            layout.is_mul(j),
+                            layout.is_mulh(j),
+                            layout.is_mulhu(j),
+                            layout.is_mulhsu(j),
+                            layout.is_div(j),
+                            layout.is_divu(j),
+                            layout.is_rem(j),
+                            layout.is_remu(j),
+                        ] {
+                            if z_at(inst, wit, col) != F::ZERO {
+                                is_m = true;
+                                break;
+                            }
+                        }
+                        if is_m {
+                            lanes.push(j as u32);
+                        }
+                    }
+
+                    if lanes.len() != expected {
+                        return Err(PiCcsError::InvalidInput(format!(
+                            "rv32m_count mismatch in chunk {chunk_idx}: public rv32m_count={expected}, but decoded {} RV32M lanes",
+                            lanes.len()
+                        )));
+                    }
+
+                    let lanes_usize: Vec<usize> = lanes.iter().map(|&j| j as usize).collect();
+                    let rv32m_ccs = build_rv32_b1_rv32m_event_sidecar_ccs(&layout, &lanes_usize)
+                        .map_err(|e| PiCcsError::InvalidInput(format!("{e}")))?;
+
+                    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/rv32m_event_sidecar_chunk");
+                    tr.append_message(b"rv32m_event_sidecar/chunk_idx", &(chunk_idx as u64).to_le_bytes());
+                    tr.append_message(b"rv32m_event_sidecar/lanes_len", &(lanes.len() as u64).to_le_bytes());
+                    for &lane in &lanes {
+                        tr.append_message(b"rv32m_event_sidecar/lane", &(lane as u64).to_le_bytes());
+                    }
+
+                    let (me_out, proof) = crate::pi_ccs_prove_simple(
+                        &mut tr,
+                        &params,
+                        &rv32m_ccs,
+                        core::slice::from_ref(inst),
+                        core::slice::from_ref(wit),
+                        &committer,
+                    )
+                    .map_err(|e| PiCcsError::ProtocolError(format!("rv32m event sidecar prove failed: {e}")))?;
+
+                    out.push(Rv32B1Rv32mEventSidecarChunkProof {
+                        chunk_idx,
+                        lanes,
+                        me_out,
+                        proof,
+                    });
+                }
+
+                if out.is_empty() {
+                    None
+                } else {
+                    Some(out)
+                }
             }
-
-            let num_steps = mcs_insts.len();
-            let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/rv32m_sidecar_batch");
-            tr.append_message(b"rv32m_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
-            let (me_out, proof) = crate::pi_ccs_prove_simple(&mut tr, &params, &rv32m_ccs, &mcs_insts, &mcs_wits, &committer)
-                .map_err(|e| PiCcsError::ProtocolError(format!("rv32m sidecar prove failed: {e}")))?;
-
-            Some(Rv32MSidecar {
-                ccs: rv32m_ccs,
-                num_steps,
-                me_out,
-                proof,
-            })
-        } else {
-            None
         };
 
-        let (proof, output_binding_cfg) = if self.output_claims.is_empty() {
+        let (main, output_binding_cfg) = if self.output_claims.is_empty() {
             (session.fold_and_prove(&ccs)?, None)
         } else {
             let out_mem_id = match self.output_target {
@@ -758,16 +852,21 @@ impl Rv32B1 {
         };
         let prove_duration = elapsed_duration(prove_start);
 
+        let proof_bundle = Rv32B1ProofBundle {
+            main,
+            decode_plumbing,
+            semantics,
+            rv32m,
+        };
+
         Ok(Rv32B1Run {
             session,
-            proof,
             ccs,
             layout,
             mem_layouts,
             initial_mem,
             output_binding_cfg,
-            decode_sidecar,
-            rv32m_sidecar,
+            proof_bundle,
             prove_duration,
             verify_duration: None,
         })
@@ -775,31 +874,38 @@ impl Rv32B1 {
 }
 
 #[derive(Clone, Debug)]
-struct Rv32DecodeSidecar {
-    ccs: CcsStructure<F>,
-    num_steps: usize,
-    me_out: Vec<MeInstance<Cmt, F, K>>,
-    proof: crate::PiCcsProof,
+pub struct PiCcsProofBundle {
+    pub ccs: CcsStructure<F>,
+    pub num_steps: usize,
+    pub me_out: Vec<MeInstance<Cmt, F, K>>,
+    pub proof: crate::PiCcsProof,
 }
 
 #[derive(Clone, Debug)]
-struct Rv32MSidecar {
-    ccs: CcsStructure<F>,
-    num_steps: usize,
-    me_out: Vec<MeInstance<Cmt, F, K>>,
-    proof: crate::PiCcsProof,
+pub struct Rv32B1Rv32mEventSidecarChunkProof {
+    pub chunk_idx: usize,
+    /// Lane indices `j` (within this chunk) that execute an RV32M instruction.
+    pub lanes: Vec<u32>,
+    pub me_out: Vec<MeInstance<Cmt, F, K>>,
+    pub proof: crate::PiCcsProof,
+}
+
+#[derive(Clone, Debug)]
+pub struct Rv32B1ProofBundle {
+    pub main: ShardProof,
+    pub decode_plumbing: PiCcsProofBundle,
+    pub semantics: PiCcsProofBundle,
+    pub rv32m: Option<Vec<Rv32B1Rv32mEventSidecarChunkProof>>,
 }
 
 pub struct Rv32B1Run {
     session: FoldingSession<AjtaiSModule>,
-    proof: ShardProof,
     ccs: CcsStructure<F>,
     layout: Rv32B1Layout,
     mem_layouts: HashMap<u32, PlainMemLayout>,
     initial_mem: HashMap<(u32, u64), F>,
     output_binding_cfg: Option<OutputBindingConfig>,
-    decode_sidecar: Rv32DecodeSidecar,
-    rv32m_sidecar: Option<Rv32MSidecar>,
+    proof_bundle: Rv32B1ProofBundle,
     prove_duration: Duration,
     verify_duration: Option<Duration>,
 }
@@ -809,89 +915,209 @@ impl Rv32B1Run {
         self.session.params()
     }
 
+    pub fn committer(&self) -> &AjtaiSModule {
+        self.session.committer()
+    }
+
     pub fn ccs(&self) -> &CcsStructure<F> {
         &self.ccs
     }
 
-    pub fn verify(&mut self) -> Result<(), PiCcsError> {
-        let verify_start = time_now();
+    pub fn layout(&self) -> &Rv32B1Layout {
+        &self.layout
+    }
+
+    fn verify_bundle_inner(&self, bundle: &Rv32B1ProofBundle) -> Result<(), PiCcsError> {
         let ok = match &self.output_binding_cfg {
-            None => self.session.verify_collected(&self.ccs, &self.proof)?,
+            None => self.session.verify_collected(&self.ccs, &bundle.main)?,
             Some(cfg) => self
                 .session
-                .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, cfg)?,
+                .verify_with_output_binding_collected_simple(&self.ccs, &bundle.main, cfg)?,
         };
-
         if !ok {
             return Err(PiCcsError::ProtocolError("verification failed".into()));
         }
 
-        // Decode/semantics sidecar must always verify (it carries the full RV32 B1 semantics).
-        {
-            let steps_public = self.session.steps_public();
-            if steps_public.len() != self.decode_sidecar.num_steps {
-                return Err(PiCcsError::ProtocolError(
-                    "decode sidecar: step count mismatch".into(),
-                ));
-            }
+        let steps_public = self.session.steps_public();
+        if steps_public.len() != bundle.decode_plumbing.num_steps {
+            return Err(PiCcsError::ProtocolError(
+                "decode plumbing sidecar: step count mismatch".into(),
+            ));
+        }
+        if steps_public.len() != bundle.semantics.num_steps {
+            return Err(PiCcsError::ProtocolError(
+                "semantics sidecar: step count mismatch".into(),
+            ));
+        }
 
-            let mut mcs_insts = Vec::with_capacity(steps_public.len());
-            for step in &steps_public {
-                mcs_insts.push(step.mcs_inst.clone());
-            }
-            let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_sidecar_batch");
+        let mut mcs_insts = Vec::with_capacity(steps_public.len());
+        for step in &steps_public {
+            let inst = step.mcs_inst.clone();
+            mcs_insts.push(inst);
+        }
+
+        // Decode plumbing sidecar must always verify (it carries instruction decode signals).
+        {
+            let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_plumbing_sidecar_batch");
             tr.append_message(
-                b"decode_sidecar/num_steps",
+                b"decode_plumbing_sidecar/num_steps",
                 &(mcs_insts.len() as u64).to_le_bytes(),
             );
             let ok = crate::pi_ccs_verify(
                 &mut tr,
                 self.session.params(),
-                &self.decode_sidecar.ccs,
+                &bundle.decode_plumbing.ccs,
                 &mcs_insts,
                 &[],
-                &self.decode_sidecar.me_out,
-                &self.decode_sidecar.proof,
+                &bundle.decode_plumbing.me_out,
+                &bundle.decode_plumbing.proof,
             )?;
             if !ok {
-                return Err(PiCcsError::ProtocolError("decode sidecar: verification failed".into()));
+                return Err(PiCcsError::ProtocolError(
+                    "decode plumbing sidecar: verification failed".into(),
+                ));
             }
         }
 
-        if let Some(sidecar) = &self.rv32m_sidecar {
-            let steps_public = self.session.steps_public();
-            if steps_public.len() != sidecar.num_steps {
-                return Err(PiCcsError::ProtocolError(
-                    "rv32m sidecar: step count mismatch".into(),
-                ));
-            }
-
-            let mut mcs_insts = Vec::with_capacity(steps_public.len());
-            for step in &steps_public {
-                mcs_insts.push(step.mcs_inst.clone());
-            }
-            let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/rv32m_sidecar_batch");
-            tr.append_message(b"rv32m_sidecar/num_steps", &(mcs_insts.len() as u64).to_le_bytes());
+        // Semantics sidecar must always verify (it carries the full RV32 B1 step semantics).
+        {
+            let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/semantics_sidecar_batch");
+            tr.append_message(b"semantics_sidecar/num_steps", &(mcs_insts.len() as u64).to_le_bytes());
             let ok = crate::pi_ccs_verify(
                 &mut tr,
                 self.session.params(),
-                &sidecar.ccs,
+                &bundle.semantics.ccs,
                 &mcs_insts,
                 &[],
-                &sidecar.me_out,
-                &sidecar.proof,
+                &bundle.semantics.me_out,
+                &bundle.semantics.proof,
             )?;
             if !ok {
-                return Err(PiCcsError::ProtocolError("rv32m sidecar: verification failed".into()));
+                return Err(PiCcsError::ProtocolError(
+                    "semantics sidecar: verification failed".into(),
+                ));
             }
         }
 
+        match &bundle.rv32m {
+            None => {
+                // If the statement contains any RV32M rows, a proof must be present.
+                for (chunk_idx, inst) in mcs_insts.iter().enumerate() {
+                    let count = inst
+                        .x
+                        .get(self.layout.rv32m_count)
+                        .copied()
+                        .ok_or_else(|| {
+                            PiCcsError::ProtocolError(format!(
+                                "rv32m_count not present in public x: need idx {} but x.len()={}",
+                                self.layout.rv32m_count,
+                                inst.x.len()
+                            ))
+                        })?;
+                    if count != F::ZERO {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "rv32m sidecar: missing proof for chunk {chunk_idx} with rv32m_count != 0"
+                        )));
+                    }
+                }
+            }
+            Some(chunks) => {
+                let mut by_chunk: HashMap<usize, &Rv32B1Rv32mEventSidecarChunkProof> = HashMap::new();
+                for p in chunks {
+                    if p.chunk_idx >= mcs_insts.len() {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "rv32m sidecar: proof chunk_idx {} out of range (num_chunks={})",
+                            p.chunk_idx,
+                            mcs_insts.len()
+                        )));
+                    }
+                    if by_chunk.insert(p.chunk_idx, p).is_some() {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "rv32m sidecar: duplicate proof for chunk_idx {}",
+                            p.chunk_idx
+                        )));
+                    }
+                }
+
+                for (chunk_idx, inst) in mcs_insts.iter().enumerate() {
+                    let count = inst
+                        .x
+                        .get(self.layout.rv32m_count)
+                        .copied()
+                        .ok_or_else(|| {
+                            PiCcsError::ProtocolError(format!(
+                                "rv32m_count not present in public x: need idx {} but x.len()={}",
+                                self.layout.rv32m_count,
+                                inst.x.len()
+                            ))
+                        })?;
+                    let expected = count.as_canonical_u64() as usize;
+                    match (expected == 0, by_chunk.get(&chunk_idx)) {
+                        (true, None) => {}
+                        (true, Some(_)) => {
+                            return Err(PiCcsError::ProtocolError(format!(
+                                "rv32m sidecar: proof present for chunk {chunk_idx} but rv32m_count == 0"
+                            )));
+                        }
+                        (false, None) => {
+                            return Err(PiCcsError::ProtocolError(format!(
+                                "rv32m sidecar: missing proof for chunk {chunk_idx} with rv32m_count={expected}"
+                            )));
+                        }
+                        (false, Some(p)) => {
+                            if p.lanes.len() != expected {
+                                return Err(PiCcsError::ProtocolError(format!(
+                                    "rv32m sidecar: lane count mismatch for chunk {chunk_idx} (expected {expected}, got {})",
+                                    p.lanes.len()
+                                )));
+                            }
+                            let lanes_usize: Vec<usize> = p.lanes.iter().map(|&j| j as usize).collect();
+                            let rv32m_ccs = build_rv32_b1_rv32m_event_sidecar_ccs(&self.layout, &lanes_usize)
+                                .map_err(|e| PiCcsError::ProtocolError(format!("{e}")))?;
+
+                            let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/rv32m_event_sidecar_chunk");
+                            tr.append_message(b"rv32m_event_sidecar/chunk_idx", &(chunk_idx as u64).to_le_bytes());
+                            tr.append_message(b"rv32m_event_sidecar/lanes_len", &(p.lanes.len() as u64).to_le_bytes());
+                            for &lane in &p.lanes {
+                                tr.append_message(b"rv32m_event_sidecar/lane", &(lane as u64).to_le_bytes());
+                            }
+
+                            let ok = crate::pi_ccs_verify(
+                                &mut tr,
+                                self.session.params(),
+                                &rv32m_ccs,
+                                core::slice::from_ref(inst),
+                                &[],
+                                &p.me_out,
+                                &p.proof,
+                            )?;
+                            if !ok {
+                                return Err(PiCcsError::ProtocolError(format!(
+                                    "rv32m sidecar: verification failed for chunk {chunk_idx}"
+                                )));
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(())
+    }
+
+    pub fn verify_proof_bundle(&self, bundle: &Rv32B1ProofBundle) -> Result<(), PiCcsError> {
+        self.verify_bundle_inner(bundle)
+    }
+
+    pub fn verify(&mut self) -> Result<(), PiCcsError> {
+        let verify_start = time_now();
+        self.verify_proof_bundle(&self.proof_bundle)?;
         self.verify_duration = Some(elapsed_duration(verify_start));
         Ok(())
     }
 
-    pub fn proof(&self) -> &ShardProof {
-        &self.proof
+    pub fn proof(&self) -> &Rv32B1ProofBundle {
+        &self.proof_bundle
     }
 
     /// Access the collected per-step witness bundles (includes private witness).
@@ -921,7 +1147,7 @@ impl Rv32B1Run {
             .ok_or_else(|| PiCcsError::InvalidInput("no output binding configured".into()))?;
         let ob_cfg = simple_output_config(cfg.num_bits, output_addr, expected_output).with_mem_idx(cfg.mem_idx);
         self.session
-            .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, &ob_cfg)
+            .verify_with_output_binding_collected_simple(&self.ccs, &self.proof_bundle.main, &ob_cfg)
     }
 
     pub fn verify_default_output_claim(&self) -> Result<bool, PiCcsError> {
@@ -930,7 +1156,7 @@ impl Rv32B1Run {
             .as_ref()
             .ok_or_else(|| PiCcsError::InvalidInput("no output binding configured".into()))?;
         self.session
-            .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, ob_cfg)
+            .verify_with_output_binding_collected_simple(&self.ccs, &self.proof_bundle.main, ob_cfg)
     }
 
     pub fn verify_output_claims(&self, output_claims: ProgramIO<F>) -> Result<bool, PiCcsError> {
@@ -943,7 +1169,7 @@ impl Rv32B1Run {
         }
         let ob_cfg = OutputBindingConfig::new(cfg.num_bits, output_claims).with_mem_idx(cfg.mem_idx);
         self.session
-            .verify_with_output_binding_collected_simple(&self.ccs, &self.proof, &ob_cfg)
+            .verify_with_output_binding_collected_simple(&self.ccs, &self.proof_bundle.main, &ob_cfg)
     }
 
     /// Original unpadded RV32 trace length (instruction count), if this run was built via shared-bus execution.
@@ -967,7 +1193,7 @@ impl Rv32B1Run {
 
     /// Number of folding steps proven (one per collected chunk).
     pub fn fold_count(&self) -> usize {
-        self.proof.steps.len()
+        self.proof_bundle.main.steps.len()
     }
 
     /// Chunk size (steps per folding step) used for this run.
@@ -1049,7 +1275,9 @@ fn choose_rv32_b1_chunk_size(
     let mut c = 1usize;
     while c <= max_candidate {
         candidates.push(c);
-        c = c.checked_mul(2).ok_or_else(|| "chunk_size overflow".to_string())?;
+        c = c
+            .checked_mul(2)
+            .ok_or_else(|| "chunk_size overflow".to_string())?;
     }
     if estimated_steps <= 256 && !candidates.contains(&estimated_steps) {
         candidates.push(estimated_steps);

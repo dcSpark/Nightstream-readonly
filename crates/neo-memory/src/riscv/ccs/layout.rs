@@ -18,6 +18,11 @@ pub struct Rv32B1Layout {
     pub pc_final: usize,
     pub halted_in: usize,
     pub halted_out: usize,
+    /// Number of RV32M (M-extension) instructions in this chunk.
+    ///
+    /// This is a public scalar so higher-level proof logic can choose to verify the RV32M sidecar
+    /// only when needed (sparse over time).
+    pub rv32m_count: usize,
     pub is_active: usize,
     /// A dedicated all-zero CPU column (used to safely disable bus lanes).
     pub zero: usize,
@@ -26,8 +31,6 @@ pub struct Rv32B1Layout {
     pub pc_out: usize,
     pub instr_word: usize,
 
-    pub instr_bits_start: usize, // 32 bits
-
     pub opcode: usize,
     pub funct3: usize,
     pub funct7: usize,
@@ -35,34 +38,52 @@ pub struct Rv32B1Layout {
     pub rs1_field: usize,
     pub rs2_field: usize,
 
-    pub imm12_raw: usize,
+    // Bit decompositions for decode plumbing (avoid 32 full instr bits).
+    pub rd_bits_start: usize,     // 5
+    pub funct7_bits_start: usize, // 7
+
     pub imm_i: usize,
     pub imm_s: usize,
     pub imm_u: usize,
-    pub imm_b_raw: usize,
     pub imm_b: usize,
-    pub imm_j_raw: usize,
     pub imm_j: usize,
 
-    // Grouped decode/control signals (derived from one-hot flags; used by the main step CCS).
+    // Opcode-class flags (one-hot on active rows).
+    pub is_alu_reg: usize,
+    pub is_alu_imm: usize,
     pub is_load: usize,
     pub is_store: usize,
+    pub is_amo: usize,
     pub is_branch: usize,
+    pub is_lui: usize,
+    pub is_auipc: usize,
+    pub is_jal: usize,
+    pub is_jalr: usize,
+    pub is_fence: usize,
+    pub is_halt: usize,
+
+    // Branch control (only meaningful when `is_branch=1`).
+    pub br_cmp_eq: usize,
+    pub br_cmp_lt: usize,
+    pub br_cmp_ltu: usize,
+    pub br_invert: usize,
+    /// Product helper for branch decision: `br_invert_alu = br_invert * alu_out`.
+    pub br_invert_alu: usize,
+
+    // Derived group/control signals.
     pub writes_rd: usize,
     pub pc_plus4: usize,
     pub wb_from_alu: usize,
 
-    // One-hot instruction flags (sum == is_active).
-    pub is_add: usize,
-    pub is_sub: usize,
-    pub is_sll: usize,
-    pub is_slt: usize,
-    pub is_sltu: usize,
-    pub is_xor: usize,
-    pub is_srl: usize,
-    pub is_sra: usize,
-    pub is_or: usize,
-    pub is_and: usize,
+    // ALU / Shout selector helpers.
+    pub add_alu: usize,
+    pub and_alu: usize,
+    pub xor_alu: usize,
+    pub or_alu: usize,
+    pub slt_alu: usize,
+    pub sltu_alu: usize,
+    pub sub_has_lookup: usize,
+    pub eq_has_lookup: usize,
 
     // RV32M (R-type, funct7=0b0000001).
     pub is_mul: usize,
@@ -74,16 +95,7 @@ pub struct Rv32B1Layout {
     pub is_rem: usize,
     pub is_remu: usize,
 
-    pub is_addi: usize,
-    pub is_slti: usize,
-    pub is_sltiu: usize,
-    pub is_xori: usize,
-    pub is_ori: usize,
-    pub is_andi: usize,
-    pub is_slli: usize,
-    pub is_srli: usize,
-    pub is_srai: usize,
-
+    // Loads/stores (only meaningful when is_load/is_store are set).
     pub is_lb: usize,
     pub is_lbu: usize,
     pub is_lh: usize,
@@ -92,30 +104,33 @@ pub struct Rv32B1Layout {
     pub is_sb: usize,
     pub is_sh: usize,
     pub is_sw: usize,
+
     // RV32A (atomics, word only).
     pub is_amoswap_w: usize,
     pub is_amoadd_w: usize,
     pub is_amoxor_w: usize,
     pub is_amoor_w: usize,
     pub is_amoand_w: usize,
-    pub is_lui: usize,
-    pub is_auipc: usize,
-    pub is_beq: usize,
-    pub is_bne: usize,
-    pub is_blt: usize,
-    pub is_bge: usize,
-    pub is_bltu: usize,
-    pub is_bgeu: usize,
-    pub is_jal: usize,
-    pub is_jalr: usize,
-    pub is_fence: usize,
-    pub is_halt: usize,
 
     pub br_taken: usize,
     pub br_not_taken: usize,
 
     pub rs1_val: usize,
     pub rs2_val: usize,
+    /// Sparse-in-time copies of `(rs1_val, rs2_val, rd_write_val)` for RV32M event arguments.
+    ///
+    /// These must be 0 on non-RV32M rows, and equal the corresponding full column on RV32M rows.
+    pub rv32m_rs1_val: usize,
+    pub rv32m_rs2_val: usize,
+    pub rv32m_rd_write_val: usize,
+
+    // Packed RHS used for most Shout opcode tables (ALU/branches).
+    pub alu_rhs: usize,
+    // Packed RHS used for shift Shout tables (reg: rs2_val, imm: rs2_field).
+    pub shift_rhs: usize,
+    // Packed LHS/RHS used for ADD-table Shout key wiring.
+    pub add_lhs: usize,
+    pub add_rhs: usize,
 
     pub alu_out: usize,
     pub mem_rv: usize,
@@ -136,7 +151,6 @@ pub struct Rv32B1Layout {
     pub sra_has_lookup: usize,
     pub slt_has_lookup: usize,
     pub sltu_has_lookup: usize,
-    pub lookup_key: usize,
     pub add_a0b0: usize,
 
     // In-circuit RV32M helpers (avoid requiring implicit Shout tables).
@@ -229,11 +243,6 @@ impl Rv32B1Layout {
         self.cpu_cell(self.zero, j)
     }
 
-    pub fn instr_bit(&self, i: usize, j: usize) -> usize {
-        assert!(i < 32);
-        self.instr_bits_start + i * self.chunk_size + j
-    }
-
     #[inline]
     pub fn reg_has_write(&self, j: usize) -> usize {
         self.cpu_cell(self.reg_has_write, j)
@@ -267,6 +276,41 @@ impl Rv32B1Layout {
     #[inline]
     pub fn rs2_val(&self, j: usize) -> usize {
         self.cpu_cell(self.rs2_val, j)
+    }
+
+    #[inline]
+    pub fn rv32m_rs1_val(&self, j: usize) -> usize {
+        self.cpu_cell(self.rv32m_rs1_val, j)
+    }
+
+    #[inline]
+    pub fn rv32m_rs2_val(&self, j: usize) -> usize {
+        self.cpu_cell(self.rv32m_rs2_val, j)
+    }
+
+    #[inline]
+    pub fn rv32m_rd_write_val(&self, j: usize) -> usize {
+        self.cpu_cell(self.rv32m_rd_write_val, j)
+    }
+
+    #[inline]
+    pub fn alu_rhs(&self, j: usize) -> usize {
+        self.cpu_cell(self.alu_rhs, j)
+    }
+
+    #[inline]
+    pub fn shift_rhs(&self, j: usize) -> usize {
+        self.cpu_cell(self.shift_rhs, j)
+    }
+
+    #[inline]
+    pub fn add_lhs(&self, j: usize) -> usize {
+        self.cpu_cell(self.add_lhs, j)
+    }
+
+    #[inline]
+    pub fn add_rhs(&self, j: usize) -> usize {
+        self.cpu_cell(self.add_rhs, j)
     }
 
     #[inline]
@@ -307,11 +351,6 @@ impl Rv32B1Layout {
     #[inline]
     pub fn rd_write_val(&self, j: usize) -> usize {
         self.cpu_cell(self.rd_write_val, j)
-    }
-
-    #[inline]
-    pub fn lookup_key(&self, j: usize) -> usize {
-        self.cpu_cell(self.lookup_key, j)
     }
 
     #[inline]
@@ -545,11 +584,6 @@ impl Rv32B1Layout {
     }
 
     #[inline]
-    pub fn imm12_raw(&self, j: usize) -> usize {
-        self.cpu_cell(self.imm12_raw, j)
-    }
-
-    #[inline]
     pub fn imm_i(&self, j: usize) -> usize {
         self.cpu_cell(self.imm_i, j)
     }
@@ -565,23 +599,23 @@ impl Rv32B1Layout {
     }
 
     #[inline]
-    pub fn imm_b_raw(&self, j: usize) -> usize {
-        self.cpu_cell(self.imm_b_raw, j)
-    }
-
-    #[inline]
     pub fn imm_b(&self, j: usize) -> usize {
         self.cpu_cell(self.imm_b, j)
     }
 
     #[inline]
-    pub fn imm_j_raw(&self, j: usize) -> usize {
-        self.cpu_cell(self.imm_j_raw, j)
+    pub fn imm_j(&self, j: usize) -> usize {
+        self.cpu_cell(self.imm_j, j)
     }
 
     #[inline]
-    pub fn imm_j(&self, j: usize) -> usize {
-        self.cpu_cell(self.imm_j, j)
+    pub fn is_alu_reg(&self, j: usize) -> usize {
+        self.cpu_cell(self.is_alu_reg, j)
+    }
+
+    #[inline]
+    pub fn is_alu_imm(&self, j: usize) -> usize {
+        self.cpu_cell(self.is_alu_imm, j)
     }
 
     #[inline]
@@ -595,8 +629,78 @@ impl Rv32B1Layout {
     }
 
     #[inline]
+    pub fn is_amo(&self, j: usize) -> usize {
+        self.cpu_cell(self.is_amo, j)
+    }
+
+    #[inline]
     pub fn is_branch(&self, j: usize) -> usize {
         self.cpu_cell(self.is_branch, j)
+    }
+
+    #[inline]
+    pub fn br_cmp_eq(&self, j: usize) -> usize {
+        self.cpu_cell(self.br_cmp_eq, j)
+    }
+
+    #[inline]
+    pub fn br_cmp_lt(&self, j: usize) -> usize {
+        self.cpu_cell(self.br_cmp_lt, j)
+    }
+
+    #[inline]
+    pub fn br_cmp_ltu(&self, j: usize) -> usize {
+        self.cpu_cell(self.br_cmp_ltu, j)
+    }
+
+    #[inline]
+    pub fn br_invert(&self, j: usize) -> usize {
+        self.cpu_cell(self.br_invert, j)
+    }
+
+    #[inline]
+    pub fn br_invert_alu(&self, j: usize) -> usize {
+        self.cpu_cell(self.br_invert_alu, j)
+    }
+
+    #[inline]
+    pub fn add_alu(&self, j: usize) -> usize {
+        self.cpu_cell(self.add_alu, j)
+    }
+
+    #[inline]
+    pub fn and_alu(&self, j: usize) -> usize {
+        self.cpu_cell(self.and_alu, j)
+    }
+
+    #[inline]
+    pub fn xor_alu(&self, j: usize) -> usize {
+        self.cpu_cell(self.xor_alu, j)
+    }
+
+    #[inline]
+    pub fn or_alu(&self, j: usize) -> usize {
+        self.cpu_cell(self.or_alu, j)
+    }
+
+    #[inline]
+    pub fn slt_alu(&self, j: usize) -> usize {
+        self.cpu_cell(self.slt_alu, j)
+    }
+
+    #[inline]
+    pub fn sltu_alu(&self, j: usize) -> usize {
+        self.cpu_cell(self.sltu_alu, j)
+    }
+
+    #[inline]
+    pub fn sub_has_lookup(&self, j: usize) -> usize {
+        self.cpu_cell(self.sub_has_lookup, j)
+    }
+
+    #[inline]
+    pub fn eq_has_lookup(&self, j: usize) -> usize {
+        self.cpu_cell(self.eq_has_lookup, j)
     }
 
     #[inline]
@@ -640,6 +744,11 @@ impl Rv32B1Layout {
         self.cpu_cell(self.rd_field, j)
     }
 
+    pub fn rd_bit(&self, bit: usize, j: usize) -> usize {
+        assert!(bit < 5);
+        self.rd_bits_start + bit * self.chunk_size + j
+    }
+
     #[inline]
     pub fn rs1_field(&self, j: usize) -> usize {
         self.cpu_cell(self.rs1_field, j)
@@ -650,54 +759,9 @@ impl Rv32B1Layout {
         self.cpu_cell(self.rs2_field, j)
     }
 
-    #[inline]
-    pub fn is_add(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_add, j)
-    }
-
-    #[inline]
-    pub fn is_sub(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_sub, j)
-    }
-
-    #[inline]
-    pub fn is_sll(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_sll, j)
-    }
-
-    #[inline]
-    pub fn is_slt(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_slt, j)
-    }
-
-    #[inline]
-    pub fn is_sltu(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_sltu, j)
-    }
-
-    #[inline]
-    pub fn is_xor(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_xor, j)
-    }
-
-    #[inline]
-    pub fn is_srl(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_srl, j)
-    }
-
-    #[inline]
-    pub fn is_sra(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_sra, j)
-    }
-
-    #[inline]
-    pub fn is_or(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_or, j)
-    }
-
-    #[inline]
-    pub fn is_and(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_and, j)
+    pub fn funct7_bit(&self, bit: usize, j: usize) -> usize {
+        assert!(bit < 7);
+        self.funct7_bits_start + bit * self.chunk_size + j
     }
 
     #[inline]
@@ -738,51 +802,6 @@ impl Rv32B1Layout {
     #[inline]
     pub fn is_remu(&self, j: usize) -> usize {
         self.cpu_cell(self.is_remu, j)
-    }
-
-    #[inline]
-    pub fn is_addi(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_addi, j)
-    }
-
-    #[inline]
-    pub fn is_slti(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_slti, j)
-    }
-
-    #[inline]
-    pub fn is_sltiu(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_sltiu, j)
-    }
-
-    #[inline]
-    pub fn is_xori(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_xori, j)
-    }
-
-    #[inline]
-    pub fn is_ori(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_ori, j)
-    }
-
-    #[inline]
-    pub fn is_andi(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_andi, j)
-    }
-
-    #[inline]
-    pub fn is_slli(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_slli, j)
-    }
-
-    #[inline]
-    pub fn is_srli(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_srli, j)
-    }
-
-    #[inline]
-    pub fn is_srai(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_srai, j)
     }
 
     #[inline]
@@ -861,36 +880,6 @@ impl Rv32B1Layout {
     }
 
     #[inline]
-    pub fn is_beq(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_beq, j)
-    }
-
-    #[inline]
-    pub fn is_bne(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_bne, j)
-    }
-
-    #[inline]
-    pub fn is_blt(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_blt, j)
-    }
-
-    #[inline]
-    pub fn is_bge(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_bge, j)
-    }
-
-    #[inline]
-    pub fn is_bltu(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_bltu, j)
-    }
-
-    #[inline]
-    pub fn is_bgeu(&self, j: usize) -> usize {
-        self.cpu_cell(self.is_bgeu, j)
-    }
-
-    #[inline]
     pub fn is_jal(&self, j: usize) -> usize {
         self.cpu_cell(self.is_jal, j)
     }
@@ -939,12 +928,13 @@ pub(super) fn build_layout_with_m(
     let const_one = 0usize;
 
     // Public inputs: boundary state for chunk chaining.
-    // Layout: [const_one, pc0, pc_final, halted_in, halted_out]
+    // Layout: [const_one, pc0, pc_final, halted_in, halted_out, rv32m_count]
     let pc0 = 1usize;
     let pc_final = pc0 + 1;
     let halted_in = pc_final + 1;
     let halted_out = halted_in + 1;
-    let m_in = halted_out + 1;
+    let rv32m_count = halted_out + 1;
+    let m_in = rv32m_count + 1;
 
     // Fixed CPU column allocation (CPU region only). All indices must be < bus.bus_base.
     let mut col = m_in;
@@ -972,8 +962,6 @@ pub(super) fn build_layout_with_m(
     let rd_is_zero_0123 = alloc_scalar(&mut col);
     let rd_is_zero = alloc_scalar(&mut col);
 
-    let instr_bits_start = alloc_array(&mut col, 32);
-
     let opcode = alloc_scalar(&mut col);
     let funct3 = alloc_scalar(&mut col);
     let funct7 = alloc_scalar(&mut col);
@@ -981,34 +969,52 @@ pub(super) fn build_layout_with_m(
     let rs1_field = alloc_scalar(&mut col);
     let rs2_field = alloc_scalar(&mut col);
 
-    let imm12_raw = alloc_scalar(&mut col);
+    let rd_bits_start = alloc_array(&mut col, 5);
+    let funct7_bits_start = alloc_array(&mut col, 7);
+
     let imm_i = alloc_scalar(&mut col);
     let imm_s = alloc_scalar(&mut col);
     let imm_u = alloc_scalar(&mut col);
-    let imm_b_raw = alloc_scalar(&mut col);
     let imm_b = alloc_scalar(&mut col);
-    let imm_j_raw = alloc_scalar(&mut col);
     let imm_j = alloc_scalar(&mut col);
 
-    // Grouped decode/control signals.
+    // Opcode-class flags (one-hot on active rows).
+    let is_alu_reg = alloc_scalar(&mut col);
+    let is_alu_imm = alloc_scalar(&mut col);
     let is_load = alloc_scalar(&mut col);
     let is_store = alloc_scalar(&mut col);
+    let is_amo = alloc_scalar(&mut col);
     let is_branch = alloc_scalar(&mut col);
+    let is_lui = alloc_scalar(&mut col);
+    let is_auipc = alloc_scalar(&mut col);
+    let is_jal = alloc_scalar(&mut col);
+    let is_jalr = alloc_scalar(&mut col);
+    let is_fence = alloc_scalar(&mut col);
+    let is_halt = alloc_scalar(&mut col);
+
+    // Branch control (only meaningful when `is_branch=1`).
+    let br_cmp_eq = alloc_scalar(&mut col);
+    let br_cmp_lt = alloc_scalar(&mut col);
+    let br_cmp_ltu = alloc_scalar(&mut col);
+    let br_invert = alloc_scalar(&mut col);
+    let br_invert_alu = alloc_scalar(&mut col);
+
+    // Derived group/control signals.
     let writes_rd = alloc_scalar(&mut col);
     let pc_plus4 = alloc_scalar(&mut col);
     let wb_from_alu = alloc_scalar(&mut col);
 
-    let is_add = alloc_scalar(&mut col);
-    let is_sub = alloc_scalar(&mut col);
-    let is_sll = alloc_scalar(&mut col);
-    let is_slt = alloc_scalar(&mut col);
-    let is_sltu = alloc_scalar(&mut col);
-    let is_xor = alloc_scalar(&mut col);
-    let is_srl = alloc_scalar(&mut col);
-    let is_sra = alloc_scalar(&mut col);
-    let is_or = alloc_scalar(&mut col);
-    let is_and = alloc_scalar(&mut col);
+    // ALU / Shout selector helpers.
+    let add_alu = alloc_scalar(&mut col);
+    let and_alu = alloc_scalar(&mut col);
+    let xor_alu = alloc_scalar(&mut col);
+    let or_alu = alloc_scalar(&mut col);
+    let slt_alu = alloc_scalar(&mut col);
+    let sltu_alu = alloc_scalar(&mut col);
+    let sub_has_lookup = alloc_scalar(&mut col);
+    let eq_has_lookup = alloc_scalar(&mut col);
 
+    // RV32M (R-type, funct7=0b0000001).
     let is_mul = alloc_scalar(&mut col);
     let is_mulh = alloc_scalar(&mut col);
     let is_mulhu = alloc_scalar(&mut col);
@@ -1018,15 +1024,7 @@ pub(super) fn build_layout_with_m(
     let is_rem = alloc_scalar(&mut col);
     let is_remu = alloc_scalar(&mut col);
 
-    let is_addi = alloc_scalar(&mut col);
-    let is_slti = alloc_scalar(&mut col);
-    let is_sltiu = alloc_scalar(&mut col);
-    let is_xori = alloc_scalar(&mut col);
-    let is_ori = alloc_scalar(&mut col);
-    let is_andi = alloc_scalar(&mut col);
-    let is_slli = alloc_scalar(&mut col);
-    let is_srli = alloc_scalar(&mut col);
-    let is_srai = alloc_scalar(&mut col);
+    // Loads/stores.
     let is_lb = alloc_scalar(&mut col);
     let is_lbu = alloc_scalar(&mut col);
     let is_lh = alloc_scalar(&mut col);
@@ -1035,29 +1033,26 @@ pub(super) fn build_layout_with_m(
     let is_sb = alloc_scalar(&mut col);
     let is_sh = alloc_scalar(&mut col);
     let is_sw = alloc_scalar(&mut col);
+
+    // RV32A (atomics, word only).
     let is_amoswap_w = alloc_scalar(&mut col);
     let is_amoadd_w = alloc_scalar(&mut col);
     let is_amoxor_w = alloc_scalar(&mut col);
     let is_amoor_w = alloc_scalar(&mut col);
     let is_amoand_w = alloc_scalar(&mut col);
-    let is_lui = alloc_scalar(&mut col);
-    let is_auipc = alloc_scalar(&mut col);
-    let is_beq = alloc_scalar(&mut col);
-    let is_bne = alloc_scalar(&mut col);
-    let is_blt = alloc_scalar(&mut col);
-    let is_bge = alloc_scalar(&mut col);
-    let is_bltu = alloc_scalar(&mut col);
-    let is_bgeu = alloc_scalar(&mut col);
-    let is_jal = alloc_scalar(&mut col);
-    let is_jalr = alloc_scalar(&mut col);
-    let is_fence = alloc_scalar(&mut col);
-    let is_halt = alloc_scalar(&mut col);
 
     let br_taken = alloc_scalar(&mut col);
     let br_not_taken = alloc_scalar(&mut col);
 
     let rs1_val = alloc_scalar(&mut col);
     let rs2_val = alloc_scalar(&mut col);
+    let rv32m_rs1_val = alloc_scalar(&mut col);
+    let rv32m_rs2_val = alloc_scalar(&mut col);
+    let rv32m_rd_write_val = alloc_scalar(&mut col);
+    let alu_rhs = alloc_scalar(&mut col);
+    let shift_rhs = alloc_scalar(&mut col);
+    let add_lhs = alloc_scalar(&mut col);
+    let add_rhs = alloc_scalar(&mut col);
 
     let alu_out = alloc_scalar(&mut col);
     let mem_rv = alloc_scalar(&mut col);
@@ -1077,7 +1072,6 @@ pub(super) fn build_layout_with_m(
     let sra_has_lookup = alloc_scalar(&mut col);
     let slt_has_lookup = alloc_scalar(&mut col);
     let sltu_has_lookup = alloc_scalar(&mut col);
-    let lookup_key = alloc_scalar(&mut col);
     let add_a0b0 = alloc_scalar(&mut col);
 
     // In-circuit RV32M helpers.
@@ -1129,10 +1123,7 @@ pub(super) fn build_layout_with_m(
         .iter()
         .zip(twist_ell_addrs.iter())
         .map(|(mem_id, ell_addr)| {
-            let lanes = mem_layouts
-                .get(mem_id)
-                .map(|l| l.lanes.max(1))
-                .unwrap_or(1);
+            let lanes = mem_layouts.get(mem_id).map(|l| l.lanes.max(1)).unwrap_or(1);
             (*ell_addr, lanes)
         })
         .collect();
@@ -1176,42 +1167,53 @@ pub(super) fn build_layout_with_m(
         pc_final,
         halted_in,
         halted_out,
+        rv32m_count,
         is_active,
         zero,
         pc_in,
         pc_out,
         instr_word,
-        instr_bits_start,
         opcode,
         funct3,
         funct7,
         rd_field,
         rs1_field,
         rs2_field,
-        imm12_raw,
+        rd_bits_start,
+        funct7_bits_start,
         imm_i,
         imm_s,
         imm_u,
-        imm_b_raw,
         imm_b,
-        imm_j_raw,
         imm_j,
+        is_alu_reg,
+        is_alu_imm,
         is_load,
         is_store,
+        is_amo,
         is_branch,
+        is_lui,
+        is_auipc,
+        is_jal,
+        is_jalr,
+        is_fence,
+        is_halt,
+        br_cmp_eq,
+        br_cmp_lt,
+        br_cmp_ltu,
+        br_invert,
+        br_invert_alu,
         writes_rd,
         pc_plus4,
         wb_from_alu,
-        is_add,
-        is_sub,
-        is_sll,
-        is_slt,
-        is_sltu,
-        is_xor,
-        is_srl,
-        is_sra,
-        is_or,
-        is_and,
+        add_alu,
+        and_alu,
+        xor_alu,
+        or_alu,
+        slt_alu,
+        sltu_alu,
+        sub_has_lookup,
+        eq_has_lookup,
         is_mul,
         is_mulh,
         is_mulhu,
@@ -1220,15 +1222,6 @@ pub(super) fn build_layout_with_m(
         is_divu,
         is_rem,
         is_remu,
-        is_addi,
-        is_slti,
-        is_sltiu,
-        is_xori,
-        is_ori,
-        is_andi,
-        is_slli,
-        is_srli,
-        is_srai,
         is_lb,
         is_lbu,
         is_lh,
@@ -1242,22 +1235,17 @@ pub(super) fn build_layout_with_m(
         is_amoxor_w,
         is_amoor_w,
         is_amoand_w,
-        is_lui,
-        is_auipc,
-        is_beq,
-        is_bne,
-        is_blt,
-        is_bge,
-        is_bltu,
-        is_bgeu,
-        is_jal,
-        is_jalr,
-        is_fence,
-        is_halt,
         br_taken,
         br_not_taken,
         rs1_val,
         rs2_val,
+        rv32m_rs1_val,
+        rv32m_rs2_val,
+        rv32m_rd_write_val,
+        alu_rhs,
+        shift_rhs,
+        add_lhs,
+        add_rhs,
         alu_out,
         mem_rv,
         mem_rv_bits_start,
@@ -1275,7 +1263,6 @@ pub(super) fn build_layout_with_m(
         sra_has_lookup,
         slt_has_lookup,
         sltu_has_lookup,
-        lookup_key,
         add_a0b0,
         mul_lo,
         mul_hi,

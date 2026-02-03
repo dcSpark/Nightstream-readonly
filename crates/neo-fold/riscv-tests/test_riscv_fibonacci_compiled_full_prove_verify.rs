@@ -134,9 +134,10 @@ fn test_riscv_fibonacci_compiled_full_prove_verify() {
     // Print proof size estimate
     {
         let proof = run.proof();
-        let num_steps = proof.steps.len();
+        let num_steps = proof.main.steps.len();
         // Each MeInstance has exactly one commitment
         let num_commitments: usize = proof
+            .main
             .steps
             .iter()
             .map(|s| {
@@ -148,6 +149,7 @@ fn test_riscv_fibonacci_compiled_full_prove_verify() {
         // Commitment size: d * kappa * 8 bytes (d=54, kappa varies)
         // Get d and kappa from the first commitment in the proof
         let (d, kappa) = proof
+            .main
             .steps
             .first()
             .map(|s| (s.fold.rlc_parent.c.d, s.fold.rlc_parent.c.kappa))

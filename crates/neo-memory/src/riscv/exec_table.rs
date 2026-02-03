@@ -1,6 +1,6 @@
 use neo_vm_trace::{ShoutEvent, StepTrace, TwistEvent, TwistOpKind, VmTrace};
 
-use crate::riscv::lookups::{decode_instruction, PROG_ID, RAM_ID, REG_ID};
+use crate::riscv::lookups::{compute_op, decode_instruction, RiscvInstruction, RiscvOpcode, PROG_ID, RAM_ID, REG_ID};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Rv32InstrFields {
@@ -33,6 +33,9 @@ pub struct Rv32RegLaneIo {
 
 #[derive(Clone, Debug)]
 pub struct Rv32ExecRow {
+    /// True for real trace rows; false for padded/inactive rows.
+    pub active: bool,
+
     pub cycle: u64,
     pub pc_before: u64,
     pub pc_after: u64,
@@ -41,16 +44,16 @@ pub struct Rv32ExecRow {
     pub halted: bool,
 
     /// Decoded instruction (for semantic context; derived from `instr_word`).
-    pub decoded: crate::riscv::lookups::RiscvInstruction,
+    pub decoded: Option<crate::riscv::lookups::RiscvInstruction>,
 
     /// PROG ROM fetch (`PROG_ID`) for this step.
-    pub prog_read: TwistEvent<u64, u64>,
+    pub prog_read: Option<TwistEvent<u64, u64>>,
 
     /// REG lane 0 read (`REG_ID`, lane=0): rs1_field → rs1_val.
-    pub reg_read_lane0: Rv32RegLaneIo,
+    pub reg_read_lane0: Option<Rv32RegLaneIo>,
 
     /// REG lane 1 read (`REG_ID`, lane=1): rs2_field → rs2_val.
-    pub reg_read_lane1: Rv32RegLaneIo,
+    pub reg_read_lane1: Option<Rv32RegLaneIo>,
 
     /// Optional REG lane 0 write (`REG_ID`, lane=0): rd_field → rd_write_val.
     pub reg_write_lane0: Option<Rv32RegLaneIo>,
@@ -60,6 +63,37 @@ pub struct Rv32ExecRow {
 
     /// Shout events for this step.
     pub shout_events: Vec<ShoutEvent<u64>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Rv32ExecColumns {
+    pub active: Vec<bool>,
+    pub cycle: Vec<u64>,
+    pub pc_before: Vec<u64>,
+    pub pc_after: Vec<u64>,
+    pub instr_word: Vec<u32>,
+    pub opcode: Vec<u32>,
+    pub rd: Vec<u8>,
+    pub funct3: Vec<u32>,
+    pub rs1: Vec<u8>,
+    pub rs2: Vec<u8>,
+    pub funct7: Vec<u32>,
+    pub halted: Vec<bool>,
+    pub prog_addr: Vec<u64>,
+    pub prog_value: Vec<u64>,
+    pub rs1_addr: Vec<u64>,
+    pub rs1_val: Vec<u64>,
+    pub rs2_addr: Vec<u64>,
+    pub rs2_val: Vec<u64>,
+    pub rd_has_write: Vec<bool>,
+    pub rd_addr: Vec<u64>,
+    pub rd_val: Vec<u64>,
+}
+
+impl Rv32ExecColumns {
+    pub fn len(&self) -> usize {
+        self.cycle.len()
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -76,6 +110,47 @@ impl Rv32ExecTable {
         Ok(Self { rows })
     }
 
+    pub fn from_trace_padded(trace: &VmTrace<u64, u64>, padded_len: usize) -> Result<Self, String> {
+        if padded_len < trace.steps.len() {
+            return Err(format!(
+                "padded_len must be >= trace length (padded_len={} trace_len={})",
+                padded_len,
+                trace.steps.len()
+            ));
+        }
+
+        let mut rows = Vec::with_capacity(padded_len);
+        for step in &trace.steps {
+            rows.push(Rv32ExecRow::from_step(step)?);
+        }
+        if rows.is_empty() {
+            if padded_len == 0 {
+                return Ok(Self { rows });
+            }
+            return Err("cannot pad empty trace without an initial pc".into());
+        }
+
+        let last = rows.last().expect("rows non-empty");
+        let mut cycle = last.cycle;
+        let pad_pc = last.pc_after;
+        let pad_halted = last.halted;
+
+        while rows.len() < padded_len {
+            cycle = cycle
+                .checked_add(1)
+                .ok_or_else(|| "cycle overflow while padding".to_string())?;
+            rows.push(Rv32ExecRow::inactive(cycle, pad_pc, pad_halted));
+        }
+
+        Ok(Self { rows })
+    }
+
+    pub fn from_trace_padded_pow2(trace: &VmTrace<u64, u64>, min_len: usize) -> Result<Self, String> {
+        let steps = trace.steps.len();
+        let target = steps.max(min_len).next_power_of_two();
+        Self::from_trace_padded(trace, target)
+    }
+
     pub fn validate_pc_chain(&self) -> Result<(), String> {
         for w in self.rows.windows(2) {
             let a = &w[0];
@@ -88,6 +163,97 @@ impl Rv32ExecTable {
             }
         }
         Ok(())
+    }
+
+    pub fn to_columns(&self) -> Rv32ExecColumns {
+        let n = self.rows.len();
+
+        let mut out = Rv32ExecColumns {
+            active: Vec::with_capacity(n),
+            cycle: Vec::with_capacity(n),
+            pc_before: Vec::with_capacity(n),
+            pc_after: Vec::with_capacity(n),
+            instr_word: Vec::with_capacity(n),
+            opcode: Vec::with_capacity(n),
+            rd: Vec::with_capacity(n),
+            funct3: Vec::with_capacity(n),
+            rs1: Vec::with_capacity(n),
+            rs2: Vec::with_capacity(n),
+            funct7: Vec::with_capacity(n),
+            halted: Vec::with_capacity(n),
+            prog_addr: Vec::with_capacity(n),
+            prog_value: Vec::with_capacity(n),
+            rs1_addr: Vec::with_capacity(n),
+            rs1_val: Vec::with_capacity(n),
+            rs2_addr: Vec::with_capacity(n),
+            rs2_val: Vec::with_capacity(n),
+            rd_has_write: Vec::with_capacity(n),
+            rd_addr: Vec::with_capacity(n),
+            rd_val: Vec::with_capacity(n),
+        };
+
+        for r in &self.rows {
+            out.active.push(r.active);
+            out.cycle.push(r.cycle);
+            out.pc_before.push(r.pc_before);
+            out.pc_after.push(r.pc_after);
+            out.instr_word.push(r.instr_word);
+            out.opcode.push(r.fields.opcode);
+            out.rd.push(r.fields.rd);
+            out.funct3.push(r.fields.funct3);
+            out.rs1.push(r.fields.rs1);
+            out.rs2.push(r.fields.rs2);
+            out.funct7.push(r.fields.funct7);
+            out.halted.push(r.halted);
+
+            match &r.prog_read {
+                Some(e) => {
+                    out.prog_addr.push(e.addr);
+                    out.prog_value.push(e.value);
+                }
+                None => {
+                    out.prog_addr.push(0);
+                    out.prog_value.push(0);
+                }
+            }
+
+            match &r.reg_read_lane0 {
+                Some(io) => {
+                    out.rs1_addr.push(io.addr);
+                    out.rs1_val.push(io.value);
+                }
+                None => {
+                    out.rs1_addr.push(0);
+                    out.rs1_val.push(0);
+                }
+            }
+
+            match &r.reg_read_lane1 {
+                Some(io) => {
+                    out.rs2_addr.push(io.addr);
+                    out.rs2_val.push(io.value);
+                }
+                None => {
+                    out.rs2_addr.push(0);
+                    out.rs2_val.push(0);
+                }
+            }
+
+            match &r.reg_write_lane0 {
+                Some(io) => {
+                    out.rd_has_write.push(true);
+                    out.rd_addr.push(io.addr);
+                    out.rd_val.push(io.value);
+                }
+                None => {
+                    out.rd_has_write.push(false);
+                    out.rd_addr.push(0);
+                    out.rd_val.push(0);
+                }
+            }
+        }
+
+        out
     }
 }
 
@@ -259,19 +425,134 @@ impl Rv32ExecRow {
         let shout_events = step.shout_events.clone();
 
         Ok(Self {
+            active: true,
             cycle: step.cycle,
             pc_before: step.pc_before,
             pc_after: step.pc_after,
             instr_word,
             fields,
             halted: step.halted,
-            decoded,
-            prog_read,
-            reg_read_lane0,
-            reg_read_lane1,
+            decoded: Some(decoded),
+            prog_read: Some(prog_read),
+            reg_read_lane0: Some(reg_read_lane0),
+            reg_read_lane1: Some(reg_read_lane1),
             reg_write_lane0,
             ram_events,
             shout_events,
         })
+    }
+
+    pub fn inactive(cycle: u64, pc: u64, halted: bool) -> Self {
+        Self {
+            active: false,
+            cycle,
+            pc_before: pc,
+            pc_after: pc,
+            instr_word: 0,
+            fields: Rv32InstrFields::from_word(0),
+            halted,
+            decoded: None,
+            prog_read: None,
+            reg_read_lane0: None,
+            reg_read_lane1: None,
+            reg_write_lane0: None,
+            ram_events: Vec::new(),
+            shout_events: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Rv32MEventRow {
+    pub cycle: u64,
+    pub pc: u64,
+    pub opcode: RiscvOpcode,
+    pub rs1: u8,
+    pub rs2: u8,
+    pub rd: u8,
+    pub rs1_val: u64,
+    pub rs2_val: u64,
+    pub rd_write_val: Option<u64>,
+    pub expected_rd_val: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct Rv32MEventTable {
+    pub rows: Vec<Rv32MEventRow>,
+}
+
+impl Rv32MEventTable {
+    pub fn from_exec_table(exec: &Rv32ExecTable) -> Result<Self, String> {
+        let mut rows = Vec::new();
+
+        for r in &exec.rows {
+            if !r.active {
+                continue;
+            }
+            let Some(decoded) = &r.decoded else {
+                continue;
+            };
+            let (op, rd, rs1, rs2) = match decoded {
+                RiscvInstruction::RAlu { op, rd, rs1, rs2 } => (*op, *rd, *rs1, *rs2),
+                _ => continue,
+            };
+
+            let is_rv32m = matches!(
+                op,
+                RiscvOpcode::Mul
+                    | RiscvOpcode::Mulh
+                    | RiscvOpcode::Mulhu
+                    | RiscvOpcode::Mulhsu
+                    | RiscvOpcode::Div
+                    | RiscvOpcode::Divu
+                    | RiscvOpcode::Rem
+                    | RiscvOpcode::Remu
+            );
+            if !is_rv32m {
+                continue;
+            }
+
+            let rs1_val = r
+                .reg_read_lane0
+                .as_ref()
+                .ok_or_else(|| format!("missing REG lane0 read on RV32M row at cycle {}", r.cycle))?
+                .value;
+            let rs2_val = r
+                .reg_read_lane1
+                .as_ref()
+                .ok_or_else(|| format!("missing REG lane1 read on RV32M row at cycle {}", r.cycle))?
+                .value;
+            let expected = compute_op(op, rs1_val, rs2_val, /*xlen=*/ 32);
+            let rd_write_val = r.reg_write_lane0.as_ref().map(|w| w.value);
+
+            // The trace should not write to x0; keep the event row but require no write event.
+            if rd == 0 && rd_write_val.is_some() {
+                return Err(format!(
+                    "unexpected x0 write event on RV32M row at cycle {} pc={:#x}",
+                    r.cycle, r.pc_before
+                ));
+            }
+            if rd != 0 && rd_write_val.is_none() {
+                return Err(format!(
+                    "missing rd write event on RV32M row at cycle {} pc={:#x} (rd={rd})",
+                    r.cycle, r.pc_before
+                ));
+            }
+
+            rows.push(Rv32MEventRow {
+                cycle: r.cycle,
+                pc: r.pc_before,
+                opcode: op,
+                rs1,
+                rs2,
+                rd,
+                rs1_val,
+                rs2_val,
+                rd_write_val,
+                expected_rd_val: expected,
+            });
+        }
+
+        Ok(Self { rows })
     }
 }

@@ -8,8 +8,8 @@ use crate::riscv::lookups::{
 };
 
 use super::constants::{
-    ADD_TABLE_ID, AND_TABLE_ID, EQ_TABLE_ID, NEQ_TABLE_ID, OR_TABLE_ID, SLL_TABLE_ID, SLTU_TABLE_ID, SLT_TABLE_ID,
-    SRA_TABLE_ID, SRL_TABLE_ID, SUB_TABLE_ID, XOR_TABLE_ID,
+    ADD_TABLE_ID, AND_TABLE_ID, EQ_TABLE_ID, OR_TABLE_ID, SLL_TABLE_ID, SLTU_TABLE_ID, SLT_TABLE_ID, SRA_TABLE_ID,
+    SRL_TABLE_ID, SUB_TABLE_ID, XOR_TABLE_ID,
 };
 use super::Rv32B1Layout;
 
@@ -116,6 +116,7 @@ fn rv32_b1_chunk_to_witness_internal(
         carried_pc = first.pc_before;
     }
 
+    let mut rv32m_count = 0u64;
     for j in 0..layout.chunk_size {
         if j >= chunk.len() {
             z[layout.is_active(j)] = F::ZERO;
@@ -325,15 +326,6 @@ fn rv32_b1_chunk_to_witness_internal(
             set_bus_cell(&mut z, layout, prog_lane.inc, j, F::ZERO);
         }
 
-        // Bits.
-        for i in 0..32 {
-            z[layout.instr_bit(i, j)] = if ((instr_word_u32 >> i) & 1) == 1 {
-                F::ONE
-            } else {
-                F::ZERO
-            };
-        }
-
         // Decode fields.
         let opcode = instr_word_u32 & 0x7f;
         let rd = (instr_word_u32 >> 7) & 0x1f;
@@ -349,6 +341,14 @@ fn rv32_b1_chunk_to_witness_internal(
         z[layout.rs1_field(j)] = F::from_u64(rs1 as u64);
         z[layout.rs2_field(j)] = F::from_u64(rs2 as u64);
 
+        // Minimal decode bit plumbing (matches `push_rv32_b1_decode_constraints`).
+        for bit in 0..5 {
+            z[layout.rd_bit(bit, j)] = if ((rd >> bit) & 1) == 1 { F::ONE } else { F::ZERO };
+        }
+        for bit in 0..7 {
+            z[layout.funct7_bit(bit, j)] = if ((funct7 >> bit) & 1) == 1 { F::ONE } else { F::ZERO };
+        }
+
         // Helpers for immediate representations:
         // - `sx_u32` matches the CCS u32-style encoding used for imm_i / imm_s.
         // - `from_i32` matches the CCS signed encoding used for imm_b / imm_j.
@@ -363,7 +363,6 @@ fn rv32_b1_chunk_to_witness_internal(
 
         // Immediate raw fields.
         let imm12_raw = ((instr_word_u32 >> 20) & 0xfff) as u32;
-        z[layout.imm12_raw(j)] = F::from_u64(imm12_raw as u64);
 
         // I-type immediate (sign-extended 12-bit).
         let imm_i = ((imm12_raw as i32) << 20) >> 20;
@@ -383,7 +382,6 @@ fn rv32_b1_chunk_to_witness_internal(
             | (((instr_word_u32 >> 8) & 0xf) << 1)
             | (((instr_word_u32 >> 25) & 0x3f) << 5)
             | (((instr_word_u32 >> 31) & 0x1) << 12);
-        z[layout.imm_b_raw(j)] = F::from_u64(imm_b_raw as u64);
         let imm_b = ((imm_b_raw as i32) << 19) >> 19;
         z[layout.imm_b(j)] = from_i32(imm_b);
 
@@ -392,24 +390,15 @@ fn rv32_b1_chunk_to_witness_internal(
             | (((instr_word_u32 >> 20) & 0x1) << 11)
             | (((instr_word_u32 >> 12) & 0xff) << 12)
             | (((instr_word_u32 >> 31) & 0x1) << 20);
-        z[layout.imm_j_raw(j)] = F::from_u64(imm_j_raw as u64);
         let imm_j = ((imm_j_raw as i32) << 11) >> 11;
         z[layout.imm_j(j)] = from_i32(imm_j);
 
-        // One-hot flags: use the shared decoder as the single source of truth.
+        // Decode into a compact representation:
+        // - opcode-class one-hot flags
+        // - a few control signals for branches and ALU op selection
         let decoded = decode_instruction(instr_word_u32)
             .map_err(|e| format!("RV32 B1: decode failed at pc={:#x}: {e}", step.pc_before))?;
 
-        let mut is_add = false;
-        let mut is_sub = false;
-        let mut is_sll = false;
-        let mut is_slt = false;
-        let mut is_sltu = false;
-        let mut is_xor = false;
-        let mut is_srl = false;
-        let mut is_sra = false;
-        let mut is_or = false;
-        let mut is_and = false;
         let mut is_mul = false;
         let mut is_mulh = false;
         let mut is_mulhu = false;
@@ -419,15 +408,40 @@ fn rv32_b1_chunk_to_witness_internal(
         let mut is_rem = false;
         let mut is_remu = false;
 
-        let mut is_addi = false;
-        let mut is_slti = false;
-        let mut is_sltiu = false;
-        let mut is_xori = false;
-        let mut is_ori = false;
-        let mut is_andi = false;
-        let mut is_slli = false;
-        let mut is_srli = false;
-        let mut is_srai = false;
+        // Opcode-class flags.
+        let mut is_alu_reg = false;
+        let mut is_alu_imm = false;
+        let mut is_load = false;
+        let mut is_store = false;
+        let mut is_amo = false;
+        let mut is_branch = false;
+        let mut is_lui = false;
+        let mut is_auipc = false;
+        let mut is_jal = false;
+        let mut is_jalr = false;
+        let mut is_fence = false;
+        let mut is_halt = false;
+
+        // Branch control.
+        let mut br_cmp_eq = false;
+        let mut br_cmp_lt = false;
+        let mut br_cmp_ltu = false;
+        let mut br_invert = false;
+
+        // Shout selector helpers.
+        let mut add_alu = false;
+        let mut and_alu = false;
+        let mut xor_alu = false;
+        let mut or_alu = false;
+        let mut slt_alu = false;
+        let mut sltu_alu = false;
+        let mut sub_has_lookup = false;
+        let mut eq_has_lookup = false;
+        let mut sll_has_lookup = false;
+        let mut srl_has_lookup = false;
+        let mut sra_has_lookup = false;
+        let mut slt_has_lookup = false;
+        let mut sltu_has_lookup_base = false;
 
         let mut is_lb = false;
         let mut is_lbu = false;
@@ -442,31 +456,53 @@ fn rv32_b1_chunk_to_witness_internal(
         let mut is_amoxor_w = false;
         let mut is_amoor_w = false;
         let mut is_amoand_w = false;
-        let mut is_lui = false;
-        let mut is_auipc = false;
-        let mut is_beq = false;
-        let mut is_bne = false;
-        let mut is_blt = false;
-        let mut is_bge = false;
-        let mut is_bltu = false;
-        let mut is_bgeu = false;
-        let mut is_jal = false;
-        let mut is_jalr = false;
-        let mut is_fence = false;
-        let mut is_halt = false;
 
         match decoded {
             RiscvInstruction::RAlu { op, .. } => match op {
-                RiscvOpcode::Add => is_add = true,
-                RiscvOpcode::Sub => is_sub = true,
-                RiscvOpcode::Sll => is_sll = true,
-                RiscvOpcode::Slt => is_slt = true,
-                RiscvOpcode::Sltu => is_sltu = true,
-                RiscvOpcode::Xor => is_xor = true,
-                RiscvOpcode::Srl => is_srl = true,
-                RiscvOpcode::Sra => is_sra = true,
-                RiscvOpcode::Or => is_or = true,
-                RiscvOpcode::And => is_and = true,
+                // RV32I ALU (R-type).
+                RiscvOpcode::Add => {
+                    is_alu_reg = true;
+                    add_alu = true;
+                }
+                RiscvOpcode::Sub => {
+                    is_alu_reg = true;
+                    sub_has_lookup = true;
+                }
+                RiscvOpcode::Sll => {
+                    is_alu_reg = true;
+                    sll_has_lookup = true;
+                }
+                RiscvOpcode::Slt => {
+                    is_alu_reg = true;
+                    slt_alu = true;
+                    slt_has_lookup = true;
+                }
+                RiscvOpcode::Sltu => {
+                    is_alu_reg = true;
+                    sltu_alu = true;
+                    sltu_has_lookup_base = true;
+                }
+                RiscvOpcode::Xor => {
+                    is_alu_reg = true;
+                    xor_alu = true;
+                }
+                RiscvOpcode::Srl => {
+                    is_alu_reg = true;
+                    srl_has_lookup = true;
+                }
+                RiscvOpcode::Sra => {
+                    is_alu_reg = true;
+                    sra_has_lookup = true;
+                }
+                RiscvOpcode::Or => {
+                    is_alu_reg = true;
+                    or_alu = true;
+                }
+                RiscvOpcode::And => {
+                    is_alu_reg = true;
+                    and_alu = true;
+                }
+                // RV32M (R-type, funct7=0b0000001).
                 RiscvOpcode::Mul => is_mul = true,
                 RiscvOpcode::Mulh => is_mulh = true,
                 RiscvOpcode::Mulhu => is_mulhu = true,
@@ -478,49 +514,115 @@ fn rv32_b1_chunk_to_witness_internal(
                 _ => {}
             },
             RiscvInstruction::IAlu { op, .. } => match op {
-                RiscvOpcode::Add => is_addi = true,
-                RiscvOpcode::Slt => is_slti = true,
-                RiscvOpcode::Sltu => is_sltiu = true,
-                RiscvOpcode::Xor => is_xori = true,
-                RiscvOpcode::Or => is_ori = true,
-                RiscvOpcode::And => is_andi = true,
-                RiscvOpcode::Sll => is_slli = true,
-                RiscvOpcode::Srl => is_srli = true,
-                RiscvOpcode::Sra => is_srai = true,
+                RiscvOpcode::Add => {
+                    is_alu_imm = true;
+                    add_alu = true;
+                }
+                RiscvOpcode::Slt => {
+                    is_alu_imm = true;
+                    slt_alu = true;
+                    slt_has_lookup = true;
+                }
+                RiscvOpcode::Sltu => {
+                    is_alu_imm = true;
+                    sltu_alu = true;
+                    sltu_has_lookup_base = true;
+                }
+                RiscvOpcode::Xor => {
+                    is_alu_imm = true;
+                    xor_alu = true;
+                }
+                RiscvOpcode::Or => {
+                    is_alu_imm = true;
+                    or_alu = true;
+                }
+                RiscvOpcode::And => {
+                    is_alu_imm = true;
+                    and_alu = true;
+                }
+                RiscvOpcode::Sll => {
+                    is_alu_imm = true;
+                    sll_has_lookup = true;
+                }
+                RiscvOpcode::Srl => {
+                    is_alu_imm = true;
+                    srl_has_lookup = true;
+                }
+                RiscvOpcode::Sra => {
+                    is_alu_imm = true;
+                    sra_has_lookup = true;
+                }
                 _ => {}
             },
-            RiscvInstruction::Load { op, .. } => match op {
-                RiscvMemOp::Lb => is_lb = true,
-                RiscvMemOp::Lbu => is_lbu = true,
-                RiscvMemOp::Lh => is_lh = true,
-                RiscvMemOp::Lhu => is_lhu = true,
-                RiscvMemOp::Lw => is_lw = true,
-                _ => {}
-            },
-            RiscvInstruction::Store { op, .. } => match op {
-                RiscvMemOp::Sb => is_sb = true,
-                RiscvMemOp::Sh => is_sh = true,
-                RiscvMemOp::Sw => is_sw = true,
-                _ => {}
-            },
-            RiscvInstruction::Amo { op, .. } => match op {
-                RiscvMemOp::AmoswapW => is_amoswap_w = true,
-                RiscvMemOp::AmoaddW => is_amoadd_w = true,
-                RiscvMemOp::AmoxorW => is_amoxor_w = true,
-                RiscvMemOp::AmoorW => is_amoor_w = true,
-                RiscvMemOp::AmoandW => is_amoand_w = true,
-                _ => {}
-            },
+            RiscvInstruction::Load { op, .. } => {
+                is_load = true;
+                match op {
+                    RiscvMemOp::Lb => is_lb = true,
+                    RiscvMemOp::Lbu => is_lbu = true,
+                    RiscvMemOp::Lh => is_lh = true,
+                    RiscvMemOp::Lhu => is_lhu = true,
+                    RiscvMemOp::Lw => is_lw = true,
+                    _ => {}
+                }
+            }
+            RiscvInstruction::Store { op, .. } => {
+                is_store = true;
+                match op {
+                    RiscvMemOp::Sb => is_sb = true,
+                    RiscvMemOp::Sh => is_sh = true,
+                    RiscvMemOp::Sw => is_sw = true,
+                    _ => {}
+                }
+            }
+            RiscvInstruction::Amo { op, .. } => {
+                is_amo = true;
+                match op {
+                    RiscvMemOp::AmoswapW => is_amoswap_w = true,
+                    RiscvMemOp::AmoaddW => is_amoadd_w = true,
+                    RiscvMemOp::AmoxorW => is_amoxor_w = true,
+                    RiscvMemOp::AmoorW => is_amoor_w = true,
+                    RiscvMemOp::AmoandW => is_amoand_w = true,
+                    _ => {}
+                }
+            }
             RiscvInstruction::Lui { .. } => is_lui = true,
             RiscvInstruction::Auipc { .. } => is_auipc = true,
-            RiscvInstruction::Branch { cond, .. } => match cond {
-                BranchCondition::Eq => is_beq = true,
-                BranchCondition::Ne => is_bne = true,
-                BranchCondition::Lt => is_blt = true,
-                BranchCondition::Ge => is_bge = true,
-                BranchCondition::Ltu => is_bltu = true,
-                BranchCondition::Geu => is_bgeu = true,
-            },
+            RiscvInstruction::Branch { cond, .. } => {
+                is_branch = true;
+                match cond {
+                    BranchCondition::Eq => {
+                        br_cmp_eq = true;
+                        br_invert = false;
+                        eq_has_lookup = true;
+                    }
+                    BranchCondition::Ne => {
+                        // Represent BNE as EQ + invert.
+                        br_cmp_eq = true;
+                        br_invert = true;
+                        eq_has_lookup = true;
+                    }
+                    BranchCondition::Lt => {
+                        br_cmp_lt = true;
+                        br_invert = false;
+                        slt_has_lookup = true;
+                    }
+                    BranchCondition::Ge => {
+                        br_cmp_lt = true;
+                        br_invert = true;
+                        slt_has_lookup = true;
+                    }
+                    BranchCondition::Ltu => {
+                        br_cmp_ltu = true;
+                        br_invert = false;
+                        sltu_has_lookup_base = true;
+                    }
+                    BranchCondition::Geu => {
+                        br_cmp_ltu = true;
+                        br_invert = true;
+                        sltu_has_lookup_base = true;
+                    }
+                }
+            }
             RiscvInstruction::Jal { .. } => is_jal = true,
             RiscvInstruction::Jalr { .. } => is_jalr = true,
             RiscvInstruction::Fence { .. } => is_fence = true,
@@ -528,55 +630,19 @@ fn rv32_b1_chunk_to_witness_internal(
             _ => {}
         }
 
+        if is_mul || is_mulh || is_mulhu || is_mulhsu || is_div || is_divu || is_rem || is_remu {
+            is_alu_reg = true;
+        }
+
         // Reject unsupported instructions.
-        if !(is_add
-            || is_sub
-            || is_sll
-            || is_slt
-            || is_sltu
-            || is_xor
-            || is_srl
-            || is_sra
-            || is_or
-            || is_and
-            || is_mul
-            || is_mulh
-            || is_mulhu
-            || is_mulhsu
-            || is_div
-            || is_divu
-            || is_rem
-            || is_remu
-            || is_addi
-            || is_slti
-            || is_sltiu
-            || is_xori
-            || is_ori
-            || is_andi
-            || is_slli
-            || is_srli
-            || is_srai
-            || is_lb
-            || is_lbu
-            || is_lh
-            || is_lhu
-            || is_lw
-            || is_sb
-            || is_sh
-            || is_sw
-            || is_amoswap_w
-            || is_amoadd_w
-            || is_amoxor_w
-            || is_amoor_w
-            || is_amoand_w
+        if !(is_alu_reg
+            || is_alu_imm
+            || is_load
+            || is_store
+            || is_amo
+            || is_branch
             || is_lui
             || is_auipc
-            || is_beq
-            || is_bne
-            || is_blt
-            || is_bge
-            || is_bltu
-            || is_bgeu
             || is_jal
             || is_jalr
             || is_fence
@@ -588,16 +654,33 @@ fn rv32_b1_chunk_to_witness_internal(
             ));
         }
 
-        z[layout.is_add(j)] = if is_add { F::ONE } else { F::ZERO };
-        z[layout.is_sub(j)] = if is_sub { F::ONE } else { F::ZERO };
-        z[layout.is_sll(j)] = if is_sll { F::ONE } else { F::ZERO };
-        z[layout.is_slt(j)] = if is_slt { F::ONE } else { F::ZERO };
-        z[layout.is_sltu(j)] = if is_sltu { F::ONE } else { F::ZERO };
-        z[layout.is_xor(j)] = if is_xor { F::ONE } else { F::ZERO };
-        z[layout.is_srl(j)] = if is_srl { F::ONE } else { F::ZERO };
-        z[layout.is_sra(j)] = if is_sra { F::ONE } else { F::ZERO };
-        z[layout.is_or(j)] = if is_or { F::ONE } else { F::ZERO };
-        z[layout.is_and(j)] = if is_and { F::ONE } else { F::ZERO };
+        z[layout.is_alu_reg(j)] = if is_alu_reg { F::ONE } else { F::ZERO };
+        z[layout.is_alu_imm(j)] = if is_alu_imm { F::ONE } else { F::ZERO };
+        z[layout.is_load(j)] = if is_load { F::ONE } else { F::ZERO };
+        z[layout.is_store(j)] = if is_store { F::ONE } else { F::ZERO };
+        z[layout.is_amo(j)] = if is_amo { F::ONE } else { F::ZERO };
+        z[layout.is_branch(j)] = if is_branch { F::ONE } else { F::ZERO };
+        z[layout.is_lui(j)] = if is_lui { F::ONE } else { F::ZERO };
+        z[layout.is_auipc(j)] = if is_auipc { F::ONE } else { F::ZERO };
+        z[layout.is_jal(j)] = if is_jal { F::ONE } else { F::ZERO };
+        z[layout.is_jalr(j)] = if is_jalr { F::ONE } else { F::ZERO };
+        z[layout.is_fence(j)] = if is_fence { F::ONE } else { F::ZERO };
+        z[layout.is_halt(j)] = if is_halt { F::ONE } else { F::ZERO };
+
+        z[layout.br_cmp_eq(j)] = if br_cmp_eq { F::ONE } else { F::ZERO };
+        z[layout.br_cmp_lt(j)] = if br_cmp_lt { F::ONE } else { F::ZERO };
+        z[layout.br_cmp_ltu(j)] = if br_cmp_ltu { F::ONE } else { F::ZERO };
+        z[layout.br_invert(j)] = if br_invert { F::ONE } else { F::ZERO };
+
+        z[layout.add_alu(j)] = if add_alu { F::ONE } else { F::ZERO };
+        z[layout.and_alu(j)] = if and_alu { F::ONE } else { F::ZERO };
+        z[layout.xor_alu(j)] = if xor_alu { F::ONE } else { F::ZERO };
+        z[layout.or_alu(j)] = if or_alu { F::ONE } else { F::ZERO };
+        z[layout.slt_alu(j)] = if slt_alu { F::ONE } else { F::ZERO };
+        z[layout.sltu_alu(j)] = if sltu_alu { F::ONE } else { F::ZERO };
+        z[layout.sub_has_lookup(j)] = if sub_has_lookup { F::ONE } else { F::ZERO };
+        z[layout.eq_has_lookup(j)] = if eq_has_lookup { F::ONE } else { F::ZERO };
+
         z[layout.is_mul(j)] = if is_mul { F::ONE } else { F::ZERO };
         z[layout.is_mulh(j)] = if is_mulh { F::ONE } else { F::ZERO };
         z[layout.is_mulhu(j)] = if is_mulhu { F::ONE } else { F::ZERO };
@@ -606,15 +689,6 @@ fn rv32_b1_chunk_to_witness_internal(
         z[layout.is_divu(j)] = if is_divu { F::ONE } else { F::ZERO };
         z[layout.is_rem(j)] = if is_rem { F::ONE } else { F::ZERO };
         z[layout.is_remu(j)] = if is_remu { F::ONE } else { F::ZERO };
-        z[layout.is_addi(j)] = if is_addi { F::ONE } else { F::ZERO };
-        z[layout.is_slti(j)] = if is_slti { F::ONE } else { F::ZERO };
-        z[layout.is_sltiu(j)] = if is_sltiu { F::ONE } else { F::ZERO };
-        z[layout.is_xori(j)] = if is_xori { F::ONE } else { F::ZERO };
-        z[layout.is_ori(j)] = if is_ori { F::ONE } else { F::ZERO };
-        z[layout.is_andi(j)] = if is_andi { F::ONE } else { F::ZERO };
-        z[layout.is_slli(j)] = if is_slli { F::ONE } else { F::ZERO };
-        z[layout.is_srli(j)] = if is_srli { F::ONE } else { F::ZERO };
-        z[layout.is_srai(j)] = if is_srai { F::ONE } else { F::ZERO };
         z[layout.is_lb(j)] = if is_lb { F::ONE } else { F::ZERO };
         z[layout.is_lbu(j)] = if is_lbu { F::ONE } else { F::ZERO };
         z[layout.is_lh(j)] = if is_lh { F::ONE } else { F::ZERO };
@@ -628,100 +702,27 @@ fn rv32_b1_chunk_to_witness_internal(
         z[layout.is_amoxor_w(j)] = if is_amoxor_w { F::ONE } else { F::ZERO };
         z[layout.is_amoor_w(j)] = if is_amoor_w { F::ONE } else { F::ZERO };
         z[layout.is_amoand_w(j)] = if is_amoand_w { F::ONE } else { F::ZERO };
-        z[layout.is_lui(j)] = if is_lui { F::ONE } else { F::ZERO };
-        z[layout.is_auipc(j)] = if is_auipc { F::ONE } else { F::ZERO };
-        z[layout.is_beq(j)] = if is_beq { F::ONE } else { F::ZERO };
-        z[layout.is_bne(j)] = if is_bne { F::ONE } else { F::ZERO };
-        z[layout.is_blt(j)] = if is_blt { F::ONE } else { F::ZERO };
-        z[layout.is_bge(j)] = if is_bge { F::ONE } else { F::ZERO };
-        z[layout.is_bltu(j)] = if is_bltu { F::ONE } else { F::ZERO };
-        z[layout.is_bgeu(j)] = if is_bgeu { F::ONE } else { F::ZERO };
-        z[layout.is_jal(j)] = if is_jal { F::ONE } else { F::ZERO };
-        z[layout.is_jalr(j)] = if is_jalr { F::ONE } else { F::ZERO };
-        z[layout.is_fence(j)] = if is_fence { F::ONE } else { F::ZERO };
-        z[layout.is_halt(j)] = if is_halt { F::ONE } else { F::ZERO };
-
-        let is_load_any = is_lb || is_lbu || is_lh || is_lhu || is_lw;
-        let is_store_any = is_sb || is_sh || is_sw;
-        let is_branch_any = is_beq || is_bne || is_blt || is_bge || is_bltu || is_bgeu;
-
-        z[layout.is_load(j)] = if is_load_any { F::ONE } else { F::ZERO };
-        z[layout.is_store(j)] = if is_store_any { F::ONE } else { F::ZERO };
-        z[layout.is_branch(j)] = if is_branch_any { F::ONE } else { F::ZERO };
 
         let rs1_idx = rs1 as usize;
         let rs2_idx = rs2 as usize;
         let rd_idx = rd as usize;
 
-        // Regfile-as-Twist glue columns.
-        let writes_rd = is_add
-            || is_sub
-            || is_sll
-            || is_slt
-            || is_sltu
-            || is_xor
-            || is_srl
-            || is_sra
-            || is_or
-            || is_and
-            || is_mul
-            || is_mulh
-            || is_mulhu
-            || is_mulhsu
-            || is_div
-            || is_divu
-            || is_rem
-            || is_remu
-            || is_addi
-            || is_slti
-            || is_sltiu
-            || is_xori
-            || is_ori
-            || is_andi
-            || is_slli
-            || is_srli
-            || is_srai
-            || is_lb
-            || is_lbu
-            || is_lh
-            || is_lhu
-            || is_lw
-            || is_amoswap_w
-            || is_amoadd_w
-            || is_amoxor_w
-            || is_amoor_w
-            || is_amoand_w
-            || is_lui
-            || is_auipc
-            || is_jal
-            || is_jalr;
+        // Derived group/control signals.
+        let writes_rd = is_alu_reg || is_alu_imm || is_load || is_amo || is_lui || is_auipc || is_jal || is_jalr;
         z[layout.writes_rd(j)] = if writes_rd { F::ONE } else { F::ZERO };
 
         // pc_plus4 is true for all non-branch/non-jump active rows.
-        let pc_plus4 = !is_branch_any && !is_jal && !is_jalr;
+        let pc_plus4 = !is_branch && !is_jal && !is_jalr;
         z[layout.pc_plus4(j)] = if pc_plus4 { F::ONE } else { F::ZERO };
 
         // wb_from_alu selects the ALU/shout-backed writeback path.
-        let wb_from_alu = is_add
-            || is_sub
-            || is_sll
-            || is_slt
-            || is_sltu
-            || is_xor
-            || is_srl
-            || is_sra
-            || is_or
-            || is_and
-            || is_addi
-            || is_slti
-            || is_sltiu
-            || is_xori
-            || is_ori
-            || is_andi
-            || is_slli
-            || is_srli
-            || is_srai
-            || is_auipc;
+        let is_rv32m = is_mul || is_mulh || is_mulhu || is_mulhsu || is_div || is_divu || is_rem || is_remu;
+        if is_rv32m {
+            rv32m_count = rv32m_count
+                .checked_add(1)
+                .ok_or_else(|| "RV32 B1: rv32m_count overflow".to_string())?;
+        }
+        let wb_from_alu = is_alu_imm || (is_alu_reg && !is_rv32m) || is_auipc;
         z[layout.wb_from_alu(j)] = if wb_from_alu { F::ONE } else { F::ZERO };
 
         let reg_has_write = writes_rd && rd_idx != 0;
@@ -753,6 +754,18 @@ fn rv32_b1_chunk_to_witness_internal(
         let rs2_u64 = rs2_u32 as u64;
         z[layout.rs1_val(j)] = F::from_u64(rs1_u64);
         z[layout.rs2_val(j)] = F::from_u64(rs2_u64);
+        if is_rv32m {
+            z[layout.rv32m_rs1_val(j)] = z[layout.rs1_val(j)];
+            z[layout.rv32m_rs2_val(j)] = z[layout.rs2_val(j)];
+        }
+
+        // Shift rhs helper (see semantics sidecar): select rs2_val for reg shifts and rs2_field for imm shifts.
+        // This value is only used when a shift Shout table is active, but we set it unconditionally.
+        z[layout.shift_rhs(j)] = if is_alu_imm {
+            F::from_u64(rs2 as u64)
+        } else {
+            F::from_u64(rs2_u64)
+        };
 
         // Regfile Twist events (REG_ID): validate and optionally write bus lanes.
         if reg_lane1_write.is_some() {
@@ -949,48 +962,39 @@ fn rv32_b1_chunk_to_witness_internal(
         z[layout.div_quot_carry(j)] = F::from_u64(div_quot_carry);
         z[layout.div_rem_carry(j)] = F::from_u64(div_rem_carry);
 
-        // Shared-bus bound values: lookup_key / alu_out / mem_rv / eff_addr.
-        let add_has_lookup = is_add
-            || is_addi
-            || is_lb
-            || is_lbu
-            || is_lh
-            || is_lhu
-            || is_lw
-            || is_sb
-            || is_sh
-            || is_sw
-            || is_amoadd_w
-            || is_auipc
-            || is_jalr;
+        // Shared-bus bound values: Shout selectors + Twist mirrors.
+        let imm_i_u64 = sx_u32(imm_i);
+        let imm_s_u64 = sx_u32(imm_s);
+
+        let alu_rhs_u64 = if is_alu_imm { imm_i_u64 } else { rs2_u64 };
+        z[layout.alu_rhs(j)] = F::from_u64(alu_rhs_u64);
+
+        let add_has_lookup = add_alu || is_load || is_store || is_amoadd_w || is_auipc || is_jalr;
         z[layout.add_has_lookup(j)] = if add_has_lookup { F::ONE } else { F::ZERO };
-        let and_has_lookup = is_and || is_andi || is_amoand_w;
+        let and_has_lookup = and_alu || is_amoand_w;
         z[layout.and_has_lookup(j)] = if and_has_lookup { F::ONE } else { F::ZERO };
-        let xor_has_lookup = is_xor || is_xori || is_amoxor_w;
+        let xor_has_lookup = xor_alu || is_amoxor_w;
         z[layout.xor_has_lookup(j)] = if xor_has_lookup { F::ONE } else { F::ZERO };
-        let or_has_lookup = is_or || is_ori || is_amoor_w;
+        let or_has_lookup = or_alu || is_amoor_w;
         z[layout.or_has_lookup(j)] = if or_has_lookup { F::ONE } else { F::ZERO };
-        let sll_has_lookup = is_sll || is_slli;
         z[layout.sll_has_lookup(j)] = if sll_has_lookup { F::ONE } else { F::ZERO };
-        let srl_has_lookup = is_srl || is_srli;
         z[layout.srl_has_lookup(j)] = if srl_has_lookup { F::ONE } else { F::ZERO };
-        let sra_has_lookup = is_sra || is_srai;
         z[layout.sra_has_lookup(j)] = if sra_has_lookup { F::ONE } else { F::ZERO };
-        let slt_has_lookup = is_slt || is_slti || is_blt || is_bge;
         z[layout.slt_has_lookup(j)] = if slt_has_lookup { F::ONE } else { F::ZERO };
-        let sltu_has_lookup = is_sltu || is_sltiu || is_bltu || is_bgeu || do_rem_check || do_rem_check_signed;
+        let sltu_has_lookup = sltu_has_lookup_base || do_rem_check || do_rem_check_signed;
         z[layout.sltu_has_lookup(j)] = if sltu_has_lookup { F::ONE } else { F::ZERO };
 
-        let is_amo = is_amoswap_w || is_amoadd_w || is_amoxor_w || is_amoor_w || is_amoand_w;
-        let ram_has_read = is_lb || is_lbu || is_lh || is_lhu || is_lw || is_sb || is_sh || is_amo;
-        let ram_has_write = is_sb || is_sh || is_sw || is_amo;
+        let ram_has_read = is_load || is_sb || is_sh || is_amo;
+        let ram_has_write = is_store || is_amo;
         z[layout.ram_has_read(j)] = if ram_has_read { F::ONE } else { F::ZERO };
         z[layout.ram_has_write(j)] = if ram_has_write { F::ONE } else { F::ZERO };
 
         // Default zeros.
-        z[layout.lookup_key(j)] = F::ZERO;
         z[layout.alu_out(j)] = F::ZERO;
+        z[layout.br_invert_alu(j)] = F::ZERO;
         z[layout.add_a0b0(j)] = F::ZERO;
+        z[layout.add_lhs(j)] = F::ZERO;
+        z[layout.add_rhs(j)] = F::ZERO;
         z[layout.mem_rv(j)] = F::ZERO;
         z[layout.eff_addr(j)] = F::ZERO;
         z[layout.ram_wv(j)] = F::ZERO;
@@ -999,7 +1003,6 @@ fn rv32_b1_chunk_to_witness_internal(
         z[layout.br_not_taken(j)] = F::ZERO;
 
         // RAM events: validate shape and fill the RAM twist lane + CPU mirrors.
-        let is_load = is_lb || is_lbu || is_lh || is_lhu || is_lw;
         let is_store_rmw = is_sb || is_sh;
         if is_load {
             if ram_read.is_none() || ram_write.is_some() {
@@ -1096,6 +1099,35 @@ fn rv32_b1_chunk_to_witness_internal(
             set_bus_cell(&mut z, layout, ram_lane.inc, j, F::ZERO);
         }
 
+        // ADD-table operand selection (for semantics sidecar key wiring).
+        //
+        // NOTE: For AMOADD.W, the ADD Shout lookup is used for the *memory update* (mem_rv + rs2),
+        // not for the effective address (which is rs1).
+        if add_has_lookup {
+            let (lhs, rhs) = if add_alu {
+                if is_alu_imm {
+                    (rs1_u64, imm_i_u64)
+                } else {
+                    (rs1_u64, rs2_u64)
+                }
+            } else if is_load {
+                (rs1_u64, imm_i_u64)
+            } else if is_store {
+                (rs1_u64, imm_s_u64)
+            } else if is_auipc {
+                (step.pc_before, imm_u)
+            } else if is_jalr {
+                (rs1_u64, imm_i_u64)
+            } else if is_amoadd_w {
+                let mem_rv_u64 = z[layout.mem_rv(j)].as_canonical_u64();
+                (mem_rv_u64, rs2_u64)
+            } else {
+                (0u64, 0u64)
+            };
+            z[layout.add_lhs(j)] = F::from_u64(lhs);
+            z[layout.add_rhs(j)] = F::from_u64(rhs);
+        }
+
         // Shout events: expect at most one lookup and bind it to a single lane.
         let shout_ev = match step.shout_events.as_slice() {
             [] => None,
@@ -1138,9 +1170,8 @@ fn rv32_b1_chunk_to_witness_internal(
         expect_table(sra_has_lookup, SRA_TABLE_ID, "SRA")?;
         expect_table(slt_has_lookup, SLT_TABLE_ID, "SLT")?;
         expect_table(sltu_has_lookup, SLTU_TABLE_ID, "SLTU")?;
-        expect_table(is_sub, SUB_TABLE_ID, "SUB")?;
-        expect_table(is_beq, EQ_TABLE_ID, "EQ")?;
-        expect_table(is_bne, NEQ_TABLE_ID, "NEQ")?;
+        expect_table(sub_has_lookup, SUB_TABLE_ID, "SUB")?;
+        expect_table(eq_has_lookup, EQ_TABLE_ID, "EQ")?;
 
         match (expected_table_id, shout_ev) {
             (None, None) => {}
@@ -1184,6 +1215,9 @@ fn rv32_b1_chunk_to_witness_internal(
             }
         }
 
+        // Branch decision helper product (used by the semantics CCS): br_invert_alu = br_invert * alu_out.
+        z[layout.br_invert_alu(j)] = z[layout.br_invert(j)] * z[layout.alu_out(j)];
+
         if fill_bus {
             let add_a0 = z[layout.bus.bus_cell(add_lane.addr_bits.start + 0, j)];
             let add_b0 = z[layout.bus.bus_cell(add_lane.addr_bits.start + 1, j)];
@@ -1210,27 +1244,7 @@ fn rv32_b1_chunk_to_witness_internal(
         };
 
         // Writeback value.
-        if is_add
-            || is_sub
-            || is_sll
-            || is_slt
-            || is_sltu
-            || is_xor
-            || is_srl
-            || is_sra
-            || is_or
-            || is_and
-            || is_addi
-            || is_slti
-            || is_sltiu
-            || is_xori
-            || is_ori
-            || is_andi
-            || is_slli
-            || is_srli
-            || is_srai
-            || is_auipc
-        {
+        if wb_from_alu {
             z[layout.rd_write_val(j)] = z[layout.alu_out(j)];
         }
         if is_mul {
@@ -1293,13 +1307,14 @@ fn rv32_b1_chunk_to_witness_internal(
         if is_jal || is_jalr {
             z[layout.rd_write_val(j)] = F::from_u64(step.pc_before.wrapping_add(4));
         }
-        if is_beq || is_bne || is_blt || is_bltu {
-            z[layout.br_taken(j)] = z[layout.alu_out(j)];
-            z[layout.br_not_taken(j)] = F::ONE - z[layout.br_taken(j)];
-        }
-        if is_bge || is_bgeu {
-            z[layout.br_taken(j)] = F::ONE - z[layout.alu_out(j)];
-            z[layout.br_not_taken(j)] = F::ONE - z[layout.br_taken(j)];
+        if is_branch {
+            let taken = if br_invert {
+                F::ONE - z[layout.alu_out(j)]
+            } else {
+                z[layout.alu_out(j)]
+            };
+            z[layout.br_taken(j)] = taken;
+            z[layout.br_not_taken(j)] = F::ONE - taken;
         }
 
         let mul_carry = if is_mulh {
@@ -1370,9 +1385,14 @@ fn rv32_b1_chunk_to_witness_internal(
             prefix *= if bit { F::ONE } else { F::ZERO };
             z[layout.mul_hi_prefix(k, j)] = prefix;
         }
+
+        if is_rv32m {
+            z[layout.rv32m_rd_write_val(j)] = z[layout.rd_write_val(j)];
+        }
     }
 
     z[layout.pc_final] = F::from_u64(carried_pc);
+    z[layout.rv32m_count] = F::from_u64(rv32m_count);
 
     // Chunk-level halting state used for cross-chunk padding semantics.
     z[layout.halted_in] = F::ONE - z[layout.is_active(0)];

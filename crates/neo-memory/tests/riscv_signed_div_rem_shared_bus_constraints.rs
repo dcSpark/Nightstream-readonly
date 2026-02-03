@@ -6,7 +6,10 @@ use neo_memory::cpu::extend_ccs_with_shared_cpu_bus_constraints;
 use neo_memory::mem_init::MemInit;
 use neo_memory::plain::PlainMemLayout;
 use neo_memory::riscv::ccs::{build_rv32_b1_step_ccs, rv32_b1_chunk_to_witness_checked, rv32_b1_shared_cpu_bus_config};
-use neo_memory::riscv::lookups::{encode_instruction, encode_program, RiscvCpu, RiscvInstruction, RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID, REG_ID};
+use neo_memory::riscv::lookups::{
+    encode_instruction, encode_program, RiscvCpu, RiscvInstruction, RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID,
+    REG_ID,
+};
 use neo_memory::riscv::rom_init::prog_rom_layout_and_init_words;
 use neo_memory::witness::{LutInstance, MemInstance};
 use neo_vm_trace::{trace_program, Twist, TwistId};
@@ -79,7 +82,9 @@ fn fill_bus_tail_from_step_events(
     }
 
     for (i, &mem_id) in mem_ids.iter().enumerate() {
-        let layout = mem_layouts.get(&mem_id).expect("mem_layouts missing mem_id");
+        let layout = mem_layouts
+            .get(&mem_id)
+            .expect("mem_layouts missing mem_id");
         let ell = layout.n_side.trailing_zeros() as usize;
         for (lane_idx, cols) in bus.twist_cols[i].lanes.iter().enumerate() {
             if let Some((addr, val)) = reads[i][lane_idx] {
@@ -175,7 +180,10 @@ fn rv32_b1_signed_div_rem_shared_bus_constraints_satisfy() {
     ]);
 
     let shout = RiscvShoutTables::new(/*xlen=*/ 32);
-    let mut shout_table_ids = vec![shout.opcode_to_id(RiscvOpcode::Add).0, shout.opcode_to_id(RiscvOpcode::Sltu).0];
+    let mut shout_table_ids = vec![
+        shout.opcode_to_id(RiscvOpcode::Add).0,
+        shout.opcode_to_id(RiscvOpcode::Sltu).0,
+    ];
     shout_table_ids.sort_unstable();
 
     let (ccs_base, layout) =

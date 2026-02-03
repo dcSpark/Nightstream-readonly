@@ -4,13 +4,13 @@ use std::collections::HashMap;
 
 use neo_ccs::matrix::Mat;
 use neo_ccs::relations::check_ccs_rowwise_zero;
-use neo_ccs::CcsStructure;
 use neo_ccs::traits::SModuleHomomorphism;
+use neo_ccs::CcsStructure;
 use neo_memory::plain::PlainMemLayout;
 use neo_memory::riscv::ccs::{
-    build_rv32_b1_decode_sidecar_ccs, build_rv32_b1_rv32m_sidecar_ccs, build_rv32_b1_step_ccs,
-    rv32_b1_chunk_to_full_witness_checked,
-    rv32_b1_chunk_to_witness, rv32_b1_shared_cpu_bus_config,
+    build_rv32_b1_decode_sidecar_ccs, build_rv32_b1_rv32m_sidecar_ccs, build_rv32_b1_semantics_sidecar_ccs,
+    build_rv32_b1_step_ccs, rv32_b1_chunk_to_full_witness_checked, rv32_b1_chunk_to_witness,
+    rv32_b1_shared_cpu_bus_config,
 };
 use neo_memory::riscv::lookups::{
     decode_instruction, encode_program, BranchCondition, RiscvCpu, RiscvInstruction, RiscvMemOp, RiscvMemory,
@@ -42,12 +42,7 @@ impl SModuleHomomorphism<F, ()> for NoopCommit {
     }
 }
 
-fn check_named_ccs_rowwise_zero(
-    name: &str,
-    ccs: &CcsStructure<F>,
-    x: &[F],
-    w: &[F],
-) -> Result<(), String> {
+fn check_named_ccs_rowwise_zero(name: &str, ccs: &CcsStructure<F>, x: &[F], w: &[F]) -> Result<(), String> {
     check_ccs_rowwise_zero(ccs, x, w).map_err(|e| format!("{name}: CCS not satisfied: {e:?}"))
 }
 
@@ -458,11 +453,13 @@ fn rv32_b1_ccs_happy_path_rv32m_program() {
 
     // Minimal table set for this program:
     // - ADD (address/ALU wiring + ADDI),
+    // - MUL (MUL is Shout-backed),
     // - SLTU (DIVU/REMU remainder bound check).
     let shout_tables = RiscvShoutTables::new(xlen);
     let add_id = shout_tables.opcode_to_id(RiscvOpcode::Add).0;
+    let mul_id = shout_tables.opcode_to_id(RiscvOpcode::Mul).0;
     let sltu_id = shout_tables.opcode_to_id(RiscvOpcode::Sltu).0;
-    let shout_table_ids: [u32; 2] = [add_id, sltu_id];
+    let shout_table_ids: [u32; 3] = [add_id, sltu_id, mul_id];
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
     let decode_ccs = build_rv32_b1_decode_sidecar_ccs(&layout, &mem_layouts).expect("decode sidecar ccs");
     let rv32m_ccs = build_rv32_b1_rv32m_sidecar_ccs(&layout).expect("rv32m sidecar ccs");
@@ -473,6 +470,13 @@ fn rv32_b1_ccs_happy_path_rv32m_program() {
             add_id,
             LutTableSpec::RiscvOpcode {
                 opcode: RiscvOpcode::Add,
+                xlen,
+            },
+        ),
+        (
+            mul_id,
+            LutTableSpec::RiscvOpcode {
+                opcode: RiscvOpcode::Mul,
                 xlen,
             },
         ),
@@ -502,14 +506,8 @@ fn rv32_b1_ccs_happy_path_rv32m_program() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(
-            &cpu.ccs,
-            &decode_ccs,
-            Some(&rv32m_ccs),
-            &mcs_inst.x,
-            &mcs_wit.w,
-        )
-        .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_ccs, Some(&rv32m_ccs), &mcs_inst.x, &mcs_wit.w)
+            .expect("CCS satisfied");
     }
 }
 
@@ -656,7 +654,8 @@ fn rv32_b1_ccs_happy_path_rv32m_signed_program() {
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
     let add_id = shout_tables.opcode_to_id(RiscvOpcode::Add).0;
-    let shout_table_ids: [u32; 2] = [add_id, sltu_id];
+    let mulhu_id = shout_tables.opcode_to_id(RiscvOpcode::Mulhu).0;
+    let shout_table_ids: [u32; 3] = [add_id, sltu_id, mulhu_id];
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
     let decode_ccs = build_rv32_b1_decode_sidecar_ccs(&layout, &mem_layouts).expect("decode sidecar ccs");
     let rv32m_ccs = build_rv32_b1_rv32m_sidecar_ccs(&layout).expect("rv32m sidecar ccs");
@@ -674,6 +673,13 @@ fn rv32_b1_ccs_happy_path_rv32m_signed_program() {
             sltu_id,
             LutTableSpec::RiscvOpcode {
                 opcode: RiscvOpcode::Sltu,
+                xlen,
+            },
+        ),
+        (
+            mulhu_id,
+            LutTableSpec::RiscvOpcode {
+                opcode: RiscvOpcode::Mulhu,
                 xlen,
             },
         ),
@@ -696,14 +702,8 @@ fn rv32_b1_ccs_happy_path_rv32m_signed_program() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(
-            &cpu.ccs,
-            &decode_ccs,
-            Some(&rv32m_ccs),
-            &mcs_inst.x,
-            &mcs_wit.w,
-        )
-        .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_ccs, Some(&rv32m_ccs), &mcs_inst.x, &mcs_wit.w)
+            .expect("CCS satisfied");
     }
 }
 
@@ -768,7 +768,6 @@ fn rv32_b1_witness_bus_alu_step() {
 
     let shout_ev = step.shout_events.first().expect("shout event");
     assert_eq!(z[layout.bus.bus_cell(add_lane.val, 0)], F::from_u64(shout_ev.value));
-    assert_eq!(z[layout.lookup_key(0)], F::ZERO);
     assert_eq!(z[layout.alu_out(0)], F::from_u64(shout_ev.value));
     for (bit_idx, col_id) in add_lane.addr_bits.clone().enumerate() {
         let bit = if bit_idx < 64 { (shout_ev.key >> bit_idx) & 1 } else { 0 };
@@ -850,7 +849,6 @@ fn rv32_b1_witness_bus_lw_step() {
 
     assert_eq!(z[layout.bus.bus_cell(add_lane.has_lookup, 0)], F::ONE);
     assert_eq!(z[layout.bus.bus_cell(add_lane.val, 0)], F::from_u64(shout_ev.value));
-    assert_eq!(z[layout.lookup_key(0)], F::ZERO);
     assert_eq!(z[layout.alu_out(0)], F::from_u64(shout_ev.value));
     assert_eq!(z[layout.bus.bus_cell(ram_lane.has_read, 0)], F::ONE);
     assert_eq!(z[layout.bus.bus_cell(ram_lane.has_write, 0)], F::ZERO);
@@ -866,6 +864,86 @@ fn rv32_b1_witness_bus_lw_step() {
         };
         let expected = if bit == 1 { F::ONE } else { F::ZERO };
         assert_eq!(z[layout.bus.bus_cell(col_id, 0)], expected);
+    }
+}
+
+#[test]
+fn rv32_b1_semantics_sidecar_rejects_reg_write_on_non_write_or_inactive_rows() {
+    let xlen = 32usize;
+    // Program: ADDI x1, x0, 5; HALT
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 5,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 8).expect("trace");
+    assert_eq!(trace.steps.len(), 2, "expected ADDI + HALT trace");
+
+    // Build a chunk layout with padding rows.
+    let chunk_size = 4usize;
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(4);
+    let mem_layouts = with_reg_layout(HashMap::from([
+        (
+            0u32,
+            PlainMemLayout {
+                k: k_ram,
+                d: d_ram,
+                n_side: 2,
+                lanes: 1,
+            },
+        ),
+        (
+            1u32,
+            PlainMemLayout {
+                k: k_prog,
+                d: d_prog,
+                n_side: 2,
+                lanes: 1,
+            },
+        ),
+    ]));
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (_ccs_main, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, chunk_size).expect("ccs");
+    let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar");
+
+    // Build a witness for an undersized chunk: steps 0..1 are active, rows 2..3 are inactive padding.
+    let z = rv32_b1_chunk_to_full_witness_checked(&layout, &trace.steps).expect("witness");
+    let x = &z[..layout.m_in];
+    let w = &z[layout.m_in..];
+
+    check_named_ccs_rowwise_zero("semantics_sidecar", &semantics_ccs, x, w).expect("baseline satisfied");
+
+    // Tamper: force reg_has_write=1 on:
+    // - the HALT row (writes_rd=0), and
+    // - an inactive padding row (is_active=0 => writes_rd=0).
+    for j in [1usize, 2usize] {
+        let idx = layout.reg_has_write(j);
+        assert!(
+            idx >= layout.m_in,
+            "expected reg_has_write to be in the private witness region (idx={idx}, m_in={})",
+            layout.m_in
+        );
+
+        let mut w_bad = w.to_vec();
+        let w_idx = idx - layout.m_in;
+        assert_eq!(w_bad[w_idx], F::ZERO, "expected baseline reg_has_write=0 at j={j}");
+        w_bad[w_idx] = F::ONE;
+
+        assert!(
+            check_ccs_rowwise_zero(&semantics_ccs, x, &w_bad).is_err(),
+            "semantics sidecar unexpectedly accepted reg_has_write=1 at j={j}"
+        );
     }
 }
 
@@ -953,7 +1031,6 @@ fn rv32_b1_witness_bus_amoaddw_step() {
 
     assert_eq!(z[layout.bus.bus_cell(add_lane.has_lookup, 0)], F::ONE);
     assert_eq!(z[layout.bus.bus_cell(add_lane.val, 0)], F::from_u64(shout_ev.value));
-    assert_eq!(z[layout.lookup_key(0)], F::ZERO);
     assert_eq!(z[layout.alu_out(0)], F::from_u64(shout_ev.value));
     for (bit_idx, col_id) in add_lane.addr_bits.clone().enumerate() {
         let bit = if bit_idx < 64 { (shout_ev.key >> bit_idx) & 1 } else { 0 };
@@ -3040,7 +3117,9 @@ fn rv32_b1_ccs_rejects_tampered_regfile() {
     // Tamper with the regfile (REG_ID) lane0 read value without updating `rs1_val`.
     let reg_lane0 = &layout.bus.twist_cols[layout.reg_twist_idx].lanes[0];
     let rv_z = layout.bus.bus_cell(reg_lane0.rv, 0);
-    let rv_w_idx = rv_z.checked_sub(layout.m_in).expect("regfile rv in witness");
+    let rv_w_idx = rv_z
+        .checked_sub(layout.m_in)
+        .expect("regfile rv in witness");
     mcs_wit.w[rv_w_idx] += F::ONE;
 
     assert!(
@@ -3120,7 +3199,9 @@ fn rv32_b1_ccs_rejects_tampered_x0() {
 
     let reg_lane0 = &layout.bus.twist_cols[layout.reg_twist_idx].lanes[0];
     let rv_z = layout.bus.bus_cell(reg_lane0.rv, 0);
-    let rv_w_idx = rv_z.checked_sub(layout.m_in).expect("regfile rv in witness");
+    let rv_w_idx = rv_z
+        .checked_sub(layout.m_in)
+        .expect("regfile rv in witness");
     mcs_wit.w[rv_w_idx] = F::ONE;
 
     assert!(
@@ -3206,8 +3287,7 @@ fn rv32_b1_ccs_binds_public_initial_and_final_state() {
     assert_eq!(chunks.len(), 1, "chunk_size>N should create one chunk");
     let (mcs_inst, mcs_wit) = chunks.remove(0);
 
-    check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_ccs, None, &mcs_inst.x, &mcs_wit.w)
-        .expect("CCS satisfied");
+    check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_ccs, None, &mcs_inst.x, &mcs_wit.w).expect("CCS satisfied");
 
     let first = trace.steps.first().expect("trace non-empty");
     assert_eq!(mcs_inst.x[layout.pc0], F::from_u64(first.pc_before));
@@ -3381,10 +3461,8 @@ fn rv32_b1_ccs_rejects_decode_bit_mismatch() {
     let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     let (mcs_inst, mut mcs_wit) = steps.remove(0);
 
-    let bit_z = layout.instr_bit(0, 0);
-    let bit_w_idx = bit_z
-        .checked_sub(layout.m_in)
-        .expect("instr_bit in witness");
+    let bit_z = layout.rd_bit(0, 0);
+    let bit_w_idx = bit_z.checked_sub(layout.m_in).expect("rd_bit in witness");
     let old_bit = mcs_wit.w[bit_w_idx];
     mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
 
@@ -4295,11 +4373,18 @@ fn rv32_b1_ccs_rejects_cheating_mul_hi_all_ones() {
     ]));
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
-    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let shout_table_ids: [u32; 13] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12];
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
     let rv32m_ccs = build_rv32_b1_rv32m_sidecar_ccs(&layout).expect("rv32m sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
-    let table_specs = rv32i_table_specs(xlen);
+    let mut table_specs = rv32i_table_specs(xlen);
+    table_specs.insert(
+        12u32,
+        LutTableSpec::RiscvOpcode {
+            opcode: RiscvOpcode::Mul,
+            xlen,
+        },
+    );
 
     let cpu = R1csCpu::new(
         ccs,
@@ -4343,7 +4428,9 @@ fn rv32_b1_ccs_rejects_cheating_mul_hi_all_ones() {
 
     let reg_lane0 = &layout.bus.twist_cols[layout.reg_twist_idx].lanes[0];
     let wv_z = layout.bus.bus_cell(reg_lane0.wv, 0);
-    let wv_w = wv_z.checked_sub(layout.m_in).expect("regfile wv in witness");
+    let wv_w = wv_z
+        .checked_sub(layout.m_in)
+        .expect("regfile wv in witness");
     mcs_wit.w[wv_w] = F::from_u64(mul_lo);
 
     // Make the u32 bit decompositions consistent with the cheated values.
@@ -4360,7 +4447,6 @@ fn rv32_b1_ccs_rejects_cheating_mul_hi_all_ones() {
             .checked_sub(layout.m_in)
             .expect("mul_lo_bit in witness");
         mcs_wit.w[lo_bit_w] = if lo_bit == 1 { F::ONE } else { F::ZERO };
-
     }
     for k in 0..31 {
         let prefix_z = layout.mul_hi_prefix(k, 0);
@@ -4470,7 +4556,9 @@ fn rv32_b1_rv32m_sidecar_rejects_divu_modp_wrap_quotient() {
     );
 
     let mut set_w = |z_idx: usize, val: F| {
-        let w_idx = z_idx.checked_sub(layout.m_in).expect("expected witness col");
+        let w_idx = z_idx
+            .checked_sub(layout.m_in)
+            .expect("expected witness col");
         mcs_wit.w[w_idx] = val;
     };
 

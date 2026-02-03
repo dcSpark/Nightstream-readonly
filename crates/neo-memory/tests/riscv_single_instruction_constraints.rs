@@ -1,7 +1,9 @@
 use std::collections::HashMap;
 
 use neo_memory::plain::PlainMemLayout;
-use neo_memory::riscv::ccs::{build_rv32_b1_decode_sidecar_ccs, build_rv32_b1_step_ccs};
+use neo_memory::riscv::ccs::{
+    build_rv32_b1_decode_plumbing_sidecar_ccs, build_rv32_b1_semantics_sidecar_ccs, build_rv32_b1_step_ccs,
+};
 use neo_memory::riscv::lookups::{
     encode_program, RiscvInstruction, RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID, REG_ID,
 };
@@ -22,9 +24,8 @@ fn nightstream_single_addi_constraint_counts() {
     ];
     let program_bytes = encode_program(&program);
 
-    let (prog_layout, _prog_init) =
-        prog_rom_layout_and_init_words::<F>(PROG_ID, /*base_addr=*/ 0, &program_bytes)
-            .expect("prog_rom_layout_and_init_words");
+    let (prog_layout, _prog_init) = prog_rom_layout_and_init_words::<F>(PROG_ID, /*base_addr=*/ 0, &program_bytes)
+        .expect("prog_rom_layout_and_init_words");
 
     let mem_layouts = HashMap::from([
         (
@@ -51,22 +52,31 @@ fn nightstream_single_addi_constraint_counts() {
     let shout = RiscvShoutTables::new(/*xlen=*/ 32);
     let shout_table_ids = vec![shout.opcode_to_id(RiscvOpcode::Add).0];
 
-    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, /*chunk_size=*/ 1)
-        .expect("build_rv32_b1_step_ccs");
+    let (ccs, layout) =
+        build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, /*chunk_size=*/ 1).expect("build_rv32_b1_step_ccs");
 
     let nightstream_constraints = ccs.n;
     let nightstream_witness_cols = ccs.m;
     let nightstream_constraints_p2 = nightstream_constraints.next_power_of_two();
     let nightstream_witness_cols_p2 = nightstream_witness_cols.next_power_of_two();
 
-    let decode_ccs = build_rv32_b1_decode_sidecar_ccs(&layout, &mem_layouts).expect("build_rv32_b1_decode_sidecar_ccs");
+    let decode_ccs =
+        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("build_rv32_b1_decode_plumbing_sidecar_ccs");
     let decode_constraints = decode_ccs.n;
     let decode_witness_cols = decode_ccs.m;
     let decode_constraints_p2 = decode_constraints.next_power_of_two();
     let decode_witness_cols_p2 = decode_witness_cols.next_power_of_two();
 
+    let semantics_ccs =
+        build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("build_rv32_b1_semantics_sidecar_ccs");
+    let semantics_constraints = semantics_ccs.n;
+    let semantics_witness_cols = semantics_ccs.m;
+    let semantics_constraints_p2 = semantics_constraints.next_power_of_two();
+    let semantics_witness_cols_p2 = semantics_witness_cols.next_power_of_two();
+
     assert!(nightstream_constraints > 0);
     assert!(decode_constraints > 0);
+    assert!(semantics_constraints > 0);
 
     println!();
     println!(
@@ -87,13 +97,23 @@ fn nightstream_single_addi_constraint_counts() {
     );
     println!(
         "{:<36} {:>4}   {:<14} {:>11} {:>12}   constraints_p2={}, witness_cols_p2={}",
-        "Nightstream (RV32 B1 decode sidecar CCS)",
+        "Nightstream (RV32 B1 decode plumbing sidecar CCS)",
         32,
         "ADDI x1,x0,1",
         decode_constraints,
         decode_witness_cols,
         decode_constraints_p2,
         decode_witness_cols_p2
+    );
+    println!(
+        "{:<36} {:>4}   {:<14} {:>11} {:>12}   constraints_p2={}, witness_cols_p2={}",
+        "Nightstream (RV32 B1 semantics sidecar CCS)",
+        32,
+        "ADDI x1,x0,1",
+        semantics_constraints,
+        semantics_witness_cols,
+        semantics_constraints_p2,
+        semantics_witness_cols_p2
     );
     println!();
 }

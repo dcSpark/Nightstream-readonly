@@ -84,15 +84,7 @@ fn nightstream_prefix_lengths_1_to_10_and_256_halt_terminated() {
     println!("{:-<110}", "");
     println!(
         "{:>4}  {:>14} {:>10} {:>10} {:>10}  {:>9} {:>9} {:>9}  {:>9}",
-        "n",
-        "NS rows/chunk",
-        "NS rowsTot",
-        "NS cols",
-        "NS cols(p2)",
-        "chunks",
-        "prove",
-        "verify",
-        "total",
+        "n", "NS rows/chunk", "NS rowsTot", "NS cols", "NS cols(p2)", "chunks", "prove", "verify", "total",
     );
     println!("{:-<110}", "");
     for r in &rows {
