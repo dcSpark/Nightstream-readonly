@@ -95,4 +95,3 @@ fn rv32_b1_cpu_vs_bus_shout_val_mismatch_must_fail() {
 
     prove_main_shard_proof_or_verify_fails(&run, steps_bad);
 }
-

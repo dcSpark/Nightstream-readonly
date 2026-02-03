@@ -3,9 +3,7 @@ use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::riscv_shard::{rv32_b1_step_linking_config, Rv32B1, Rv32B1Run};
 use neo_fold::session::FoldingSession;
 use neo_math::K;
-use neo_memory::riscv::lookups::{
-    encode_program, RiscvInstruction, RiscvMemOp, RiscvOpcode, RAM_ID,
-};
+use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvMemOp, RiscvOpcode, RAM_ID};
 use neo_memory::witness::LutTableSpec;
 use neo_memory::MemInit;
 use p3_goldilocks::Goldilocks as F;
@@ -183,4 +181,3 @@ fn rv32_b1_ram_init_statement_tamper_must_fail() {
         "tampering RAM Twist init in public input must fail verification"
     );
 }
-

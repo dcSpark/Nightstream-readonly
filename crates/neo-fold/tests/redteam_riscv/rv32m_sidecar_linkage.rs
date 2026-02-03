@@ -63,19 +63,25 @@ fn rv32m_sidecar_is_bound_to_main_witness_commitment() {
     mcs_wits[0].Z = z0_tampered;
 
     let num_steps = mcs_insts.len();
-    let mut tr = Poseidon2Transcript::new(b"neo.fold/tests/rv32m_sidecar_linkage");
-    tr.append_message(b"num_steps", &(num_steps as u64).to_le_bytes());
+    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/rv32m_sidecar_batch");
+    tr.append_message(b"rv32m_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
 
     // The prover may either:
     // - reject because the witness no longer matches the commitment, or
     // - produce a proof that fails verification.
-    let Ok((me_out, proof)) = pi_ccs_prove_simple(&mut tr, run.params(), &rv32m_ccs, &mcs_insts, &mcs_wits, run.committer())
-    else {
+    let Ok((me_out, proof)) = pi_ccs_prove_simple(
+        &mut tr,
+        run.params(),
+        &rv32m_ccs,
+        &mcs_insts,
+        &mcs_wits,
+        run.committer(),
+    ) else {
         return;
     };
 
-    let mut tr = Poseidon2Transcript::new(b"neo.fold/tests/rv32m_sidecar_linkage");
-    tr.append_message(b"num_steps", &(num_steps as u64).to_le_bytes());
+    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/rv32m_sidecar_batch");
+    tr.append_message(b"rv32m_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
     let ok = pi_ccs_verify(&mut tr, run.params(), &rv32m_ccs, &mcs_insts, &[], &me_out, &proof)
         .expect("rv32m sidecar verify");
     assert!(

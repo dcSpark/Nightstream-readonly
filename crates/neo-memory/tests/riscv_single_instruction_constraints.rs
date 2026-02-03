@@ -22,9 +22,8 @@ fn nightstream_single_addi_constraint_counts() {
     ];
     let program_bytes = encode_program(&program);
 
-    let (prog_layout, _prog_init) =
-        prog_rom_layout_and_init_words::<F>(PROG_ID, /*base_addr=*/ 0, &program_bytes)
-            .expect("prog_rom_layout_and_init_words");
+    let (prog_layout, _prog_init) = prog_rom_layout_and_init_words::<F>(PROG_ID, /*base_addr=*/ 0, &program_bytes)
+        .expect("prog_rom_layout_and_init_words");
 
     let mem_layouts = HashMap::from([
         (
@@ -51,8 +50,8 @@ fn nightstream_single_addi_constraint_counts() {
     let shout = RiscvShoutTables::new(/*xlen=*/ 32);
     let shout_table_ids = vec![shout.opcode_to_id(RiscvOpcode::Add).0];
 
-    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, /*chunk_size=*/ 1)
-        .expect("build_rv32_b1_step_ccs");
+    let (ccs, layout) =
+        build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, /*chunk_size=*/ 1).expect("build_rv32_b1_step_ccs");
 
     let nightstream_constraints = ccs.n;
     let nightstream_witness_cols = ccs.m;

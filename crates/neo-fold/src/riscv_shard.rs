@@ -26,8 +26,8 @@ use neo_memory::plain::LutTable;
 use neo_memory::plain::PlainMemLayout;
 use neo_memory::riscv::ccs::{
     build_rv32_b1_decode_sidecar_ccs, build_rv32_b1_rv32m_sidecar_ccs, build_rv32_b1_step_ccs,
-    estimate_rv32_b1_step_ccs_counts,
-    rv32_b1_chunk_to_witness, rv32_b1_shared_cpu_bus_config, rv32_b1_step_linking_pairs, Rv32B1Layout,
+    estimate_rv32_b1_step_ccs_counts, rv32_b1_chunk_to_witness, rv32_b1_shared_cpu_bus_config,
+    rv32_b1_step_linking_pairs, Rv32B1Layout,
 };
 use neo_memory::riscv::lookups::{decode_program, RiscvCpu, RiscvInstruction, RiscvOpcode, RiscvShoutTables, PROG_ID};
 use neo_memory::riscv::shard::{extract_boundary_state, Rv32BoundaryState};
@@ -711,8 +711,9 @@ impl Rv32B1 {
             let num_steps = mcs_insts.len();
             let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/rv32m_sidecar_batch");
             tr.append_message(b"rv32m_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
-            let (me_out, proof) = crate::pi_ccs_prove_simple(&mut tr, &params, &rv32m_ccs, &mcs_insts, &mcs_wits, &committer)
-                .map_err(|e| PiCcsError::ProtocolError(format!("rv32m sidecar prove failed: {e}")))?;
+            let (me_out, proof) =
+                crate::pi_ccs_prove_simple(&mut tr, &params, &rv32m_ccs, &mcs_insts, &mcs_wits, &committer)
+                    .map_err(|e| PiCcsError::ProtocolError(format!("rv32m sidecar prove failed: {e}")))?;
 
             Some(Rv32MSidecar {
                 ccs: rv32m_ccs,
@@ -809,8 +810,16 @@ impl Rv32B1Run {
         self.session.params()
     }
 
+    pub fn committer(&self) -> &AjtaiSModule {
+        self.session.committer()
+    }
+
     pub fn ccs(&self) -> &CcsStructure<F> {
         &self.ccs
+    }
+
+    pub fn layout(&self) -> &Rv32B1Layout {
+        &self.layout
     }
 
     pub fn verify(&mut self) -> Result<(), PiCcsError> {
@@ -830,9 +839,7 @@ impl Rv32B1Run {
         {
             let steps_public = self.session.steps_public();
             if steps_public.len() != self.decode_sidecar.num_steps {
-                return Err(PiCcsError::ProtocolError(
-                    "decode sidecar: step count mismatch".into(),
-                ));
+                return Err(PiCcsError::ProtocolError("decode sidecar: step count mismatch".into()));
             }
 
             let mut mcs_insts = Vec::with_capacity(steps_public.len());
@@ -840,10 +847,7 @@ impl Rv32B1Run {
                 mcs_insts.push(step.mcs_inst.clone());
             }
             let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_sidecar_batch");
-            tr.append_message(
-                b"decode_sidecar/num_steps",
-                &(mcs_insts.len() as u64).to_le_bytes(),
-            );
+            tr.append_message(b"decode_sidecar/num_steps", &(mcs_insts.len() as u64).to_le_bytes());
             let ok = crate::pi_ccs_verify(
                 &mut tr,
                 self.session.params(),
@@ -861,9 +865,7 @@ impl Rv32B1Run {
         if let Some(sidecar) = &self.rv32m_sidecar {
             let steps_public = self.session.steps_public();
             if steps_public.len() != sidecar.num_steps {
-                return Err(PiCcsError::ProtocolError(
-                    "rv32m sidecar: step count mismatch".into(),
-                ));
+                return Err(PiCcsError::ProtocolError("rv32m sidecar: step count mismatch".into()));
             }
 
             let mut mcs_insts = Vec::with_capacity(steps_public.len());
@@ -1049,7 +1051,9 @@ fn choose_rv32_b1_chunk_size(
     let mut c = 1usize;
     while c <= max_candidate {
         candidates.push(c);
-        c = c.checked_mul(2).ok_or_else(|| "chunk_size overflow".to_string())?;
+        c = c
+            .checked_mul(2)
+            .ok_or_else(|| "chunk_size overflow".to_string())?;
     }
     if estimated_steps <= 256 && !candidates.contains(&estimated_steps) {
         candidates.push(estimated_steps);

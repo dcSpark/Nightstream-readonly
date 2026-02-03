@@ -1372,7 +1372,12 @@ fn full_semantic_constraints(
             vec![(layout.funct3(j), F::ONE), (one, -F::from_u64(0x6))],
         ));
         constraints.push(Constraint::terms_or(
-            &[layout.is_and(j), layout.is_andi(j), layout.is_bgeu(j), layout.is_remu(j)],
+            &[
+                layout.is_and(j),
+                layout.is_andi(j),
+                layout.is_bgeu(j),
+                layout.is_remu(j),
+            ],
             false,
             vec![(layout.funct3(j), F::ONE), (one, -F::from_u64(0x7))],
         ));
@@ -1588,10 +1593,7 @@ fn full_semantic_constraints(
         constraints.push(Constraint::terms(
             one,
             false,
-            vec![
-                (layout.halt_effective(j), F::ONE),
-                (layout.is_halt(j), -F::ONE),
-            ],
+            vec![(layout.halt_effective(j), F::ONE), (layout.is_halt(j), -F::ONE)],
         ));
 
         // --------------------------------------------------------------------
@@ -2569,7 +2571,10 @@ fn full_semantic_constraints(
 /// The main step CCS is intentionally minimal: it exists primarily to host the injected shared-bus
 /// constraints. Full RV32 B1 instruction semantics are proven in a separate sidecar CCS built from
 /// [`full_semantic_constraints`].
-fn semantic_constraints(_layout: &Rv32B1Layout, _mem_layouts: &HashMap<u32, PlainMemLayout>) -> Result<Vec<Constraint<F>>, String> {
+fn semantic_constraints(
+    _layout: &Rv32B1Layout,
+    _mem_layouts: &HashMap<u32, PlainMemLayout>,
+) -> Result<Vec<Constraint<F>>, String> {
     Ok(Vec::new())
 }
 
@@ -2725,7 +2730,11 @@ pub fn build_rv32_b1_decode_sidecar_ccs(
             layout.pc_plus4(j),
             layout.wb_from_alu(j),
         ] {
-            constraints.push(Constraint::terms(f, false, vec![(f, F::ONE), (layout.is_active(j), -F::ONE)]));
+            constraints.push(Constraint::terms(
+                f,
+                false,
+                vec![(f, F::ONE), (layout.is_active(j), -F::ONE)],
+            ));
         }
     }
 
@@ -2820,10 +2829,7 @@ fn build_rv32_b1_layout_and_injected(
         .iter()
         .zip(twist_ell_addrs.iter())
         .map(|(mem_id, &ell_addr)| {
-            let lanes = mem_layouts
-                .get(mem_id)
-                .map(|l| l.lanes.max(1))
-                .unwrap_or(1);
+            let lanes = mem_layouts.get(mem_id).map(|l| l.lanes.max(1)).unwrap_or(1);
             lanes * (2 * ell_addr + 5)
         })
         .sum::<usize>();

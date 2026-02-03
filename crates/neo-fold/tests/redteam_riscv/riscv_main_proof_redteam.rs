@@ -2,9 +2,9 @@ use neo_ajtai::AjtaiSModule;
 use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::riscv_shard::{rv32_b1_step_linking_config, Rv32B1, Rv32B1Run};
 use neo_fold::session::FoldingSession;
+use neo_math::K;
 use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvOpcode, PROG_ID, REG_ID};
 use neo_memory::MemInit;
-use neo_math::K;
 use p3_goldilocks::Goldilocks as F;
 
 type StepWit = neo_memory::witness::StepWitnessBundle<neo_ajtai::Commitment, F, K>;
@@ -65,10 +65,7 @@ fn rv32_b1_main_proof_truncated_steps_must_fail() {
     let steps_bad: Vec<StepWit> = run.steps_witness().iter().cloned().take(1).collect();
     let sess_bad = verifier_only_session_for_steps(&run, steps_bad);
     let res = sess_bad.verify_collected(run.ccs(), run.proof());
-    assert!(
-        matches!(res, Err(_) | Ok(false)),
-        "truncated steps must not verify"
-    );
+    assert!(matches!(res, Err(_) | Ok(false)), "truncated steps must not verify");
 }
 
 #[test]

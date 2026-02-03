@@ -4,13 +4,12 @@ use std::collections::HashMap;
 
 use neo_ccs::matrix::Mat;
 use neo_ccs::relations::check_ccs_rowwise_zero;
-use neo_ccs::CcsStructure;
 use neo_ccs::traits::SModuleHomomorphism;
+use neo_ccs::CcsStructure;
 use neo_memory::plain::PlainMemLayout;
 use neo_memory::riscv::ccs::{
     build_rv32_b1_decode_sidecar_ccs, build_rv32_b1_rv32m_sidecar_ccs, build_rv32_b1_step_ccs,
-    rv32_b1_chunk_to_full_witness_checked,
-    rv32_b1_chunk_to_witness, rv32_b1_shared_cpu_bus_config,
+    rv32_b1_chunk_to_full_witness_checked, rv32_b1_chunk_to_witness, rv32_b1_shared_cpu_bus_config,
 };
 use neo_memory::riscv::lookups::{
     decode_instruction, encode_program, BranchCondition, RiscvCpu, RiscvInstruction, RiscvMemOp, RiscvMemory,
@@ -42,12 +41,7 @@ impl SModuleHomomorphism<F, ()> for NoopCommit {
     }
 }
 
-fn check_named_ccs_rowwise_zero(
-    name: &str,
-    ccs: &CcsStructure<F>,
-    x: &[F],
-    w: &[F],
-) -> Result<(), String> {
+fn check_named_ccs_rowwise_zero(name: &str, ccs: &CcsStructure<F>, x: &[F], w: &[F]) -> Result<(), String> {
     check_ccs_rowwise_zero(ccs, x, w).map_err(|e| format!("{name}: CCS not satisfied: {e:?}"))
 }
 
@@ -502,14 +496,8 @@ fn rv32_b1_ccs_happy_path_rv32m_program() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(
-            &cpu.ccs,
-            &decode_ccs,
-            Some(&rv32m_ccs),
-            &mcs_inst.x,
-            &mcs_wit.w,
-        )
-        .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_ccs, Some(&rv32m_ccs), &mcs_inst.x, &mcs_wit.w)
+            .expect("CCS satisfied");
     }
 }
 
@@ -696,14 +684,8 @@ fn rv32_b1_ccs_happy_path_rv32m_signed_program() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(
-            &cpu.ccs,
-            &decode_ccs,
-            Some(&rv32m_ccs),
-            &mcs_inst.x,
-            &mcs_wit.w,
-        )
-        .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_ccs, Some(&rv32m_ccs), &mcs_inst.x, &mcs_wit.w)
+            .expect("CCS satisfied");
     }
 }
 
@@ -3040,7 +3022,9 @@ fn rv32_b1_ccs_rejects_tampered_regfile() {
     // Tamper with the regfile (REG_ID) lane0 read value without updating `rs1_val`.
     let reg_lane0 = &layout.bus.twist_cols[layout.reg_twist_idx].lanes[0];
     let rv_z = layout.bus.bus_cell(reg_lane0.rv, 0);
-    let rv_w_idx = rv_z.checked_sub(layout.m_in).expect("regfile rv in witness");
+    let rv_w_idx = rv_z
+        .checked_sub(layout.m_in)
+        .expect("regfile rv in witness");
     mcs_wit.w[rv_w_idx] += F::ONE;
 
     assert!(
@@ -3120,7 +3104,9 @@ fn rv32_b1_ccs_rejects_tampered_x0() {
 
     let reg_lane0 = &layout.bus.twist_cols[layout.reg_twist_idx].lanes[0];
     let rv_z = layout.bus.bus_cell(reg_lane0.rv, 0);
-    let rv_w_idx = rv_z.checked_sub(layout.m_in).expect("regfile rv in witness");
+    let rv_w_idx = rv_z
+        .checked_sub(layout.m_in)
+        .expect("regfile rv in witness");
     mcs_wit.w[rv_w_idx] = F::ONE;
 
     assert!(
@@ -3206,8 +3192,7 @@ fn rv32_b1_ccs_binds_public_initial_and_final_state() {
     assert_eq!(chunks.len(), 1, "chunk_size>N should create one chunk");
     let (mcs_inst, mcs_wit) = chunks.remove(0);
 
-    check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_ccs, None, &mcs_inst.x, &mcs_wit.w)
-        .expect("CCS satisfied");
+    check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_ccs, None, &mcs_inst.x, &mcs_wit.w).expect("CCS satisfied");
 
     let first = trace.steps.first().expect("trace non-empty");
     assert_eq!(mcs_inst.x[layout.pc0], F::from_u64(first.pc_before));
@@ -4343,7 +4328,9 @@ fn rv32_b1_ccs_rejects_cheating_mul_hi_all_ones() {
 
     let reg_lane0 = &layout.bus.twist_cols[layout.reg_twist_idx].lanes[0];
     let wv_z = layout.bus.bus_cell(reg_lane0.wv, 0);
-    let wv_w = wv_z.checked_sub(layout.m_in).expect("regfile wv in witness");
+    let wv_w = wv_z
+        .checked_sub(layout.m_in)
+        .expect("regfile wv in witness");
     mcs_wit.w[wv_w] = F::from_u64(mul_lo);
 
     // Make the u32 bit decompositions consistent with the cheated values.
@@ -4360,7 +4347,6 @@ fn rv32_b1_ccs_rejects_cheating_mul_hi_all_ones() {
             .checked_sub(layout.m_in)
             .expect("mul_lo_bit in witness");
         mcs_wit.w[lo_bit_w] = if lo_bit == 1 { F::ONE } else { F::ZERO };
-
     }
     for k in 0..31 {
         let prefix_z = layout.mul_hi_prefix(k, 0);
@@ -4470,7 +4456,9 @@ fn rv32_b1_rv32m_sidecar_rejects_divu_modp_wrap_quotient() {
     );
 
     let mut set_w = |z_idx: usize, val: F| {
-        let w_idx = z_idx.checked_sub(layout.m_in).expect("expected witness col");
+        let w_idx = z_idx
+            .checked_sub(layout.m_in)
+            .expect("expected witness col");
         mcs_wit.w[w_idx] = val;
     };
 

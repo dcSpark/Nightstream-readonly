@@ -337,7 +337,12 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 self.write_reg(twist, rd, result);
             }
 
-            RiscvInstruction::Store { op, rs1: _, rs2: _, imm } => {
+            RiscvInstruction::Store {
+                op,
+                rs1: _,
+                rs2: _,
+                imm,
+            } => {
                 let base = rs1_val;
                 let imm_val = self.sign_extend_imm(imm);
                 let index = interleave_bits(base, imm_val) as u64;
@@ -479,12 +484,7 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 // Note: In a real implementation, we'd reserve the address here
             }
 
-            RiscvInstruction::StoreConditional {
-                op,
-                rd,
-                rs1: _,
-                rs2: _,
-            } => {
+            RiscvInstruction::StoreConditional { op, rd, rs1: _, rs2: _ } => {
                 let addr = rs1_val;
                 let value = rs2_val;
 
