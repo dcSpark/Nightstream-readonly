@@ -116,6 +116,12 @@ where
         for (id, spec) in table_specs {
             let (d, n_side) = match spec {
                 LutTableSpec::RiscvOpcode { xlen, .. } => (xlen.saturating_mul(2), 2usize),
+                LutTableSpec::RiscvOpcodePacked { .. } => {
+                    panic!("RiscvOpcodePacked is not supported in the shared-bus R1csCpu path");
+                }
+                LutTableSpec::RiscvOpcodeEventTablePacked { .. } => {
+                    panic!("RiscvOpcodeEventTablePacked is not supported in the shared-bus R1csCpu path");
+                }
                 LutTableSpec::IdentityU32 => (32usize, 2usize),
             };
             match shout_meta.entry(*id) {

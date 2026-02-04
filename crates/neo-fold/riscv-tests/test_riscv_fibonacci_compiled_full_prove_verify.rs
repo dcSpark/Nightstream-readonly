@@ -142,8 +142,10 @@ fn test_riscv_fibonacci_compiled_full_prove_verify() {
             .iter()
             .map(|s| {
                 s.fold.ccs_out.len() + s.fold.dec_children.len() + 1 // +1 for rlc_parent
-                + s.mem.cpu_me_claims_val.len()
-                + s.val_fold.as_ref().map(|v| v.dec_children.len() + 1).unwrap_or(0)
+                + s.mem.val_me_claims.len()
+                + s.mem.twist_me_claims_time.len()
+                + s.val_fold.iter().map(|v| v.dec_children.len() + 1).sum::<usize>()
+                + s.twist_time_fold.iter().map(|v| v.dec_children.len() + 1).sum::<usize>()
             })
             .sum();
         // Commitment size: d * kappa * 8 bytes (d=54, kappa varies)

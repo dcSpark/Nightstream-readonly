@@ -3,6 +3,7 @@ use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as F;
 
 use crate::riscv::exec_table::Rv32ExecTable;
+use crate::riscv::lookups::{uninterleave_bits, RiscvOpcode, RiscvShoutTables};
 
 use super::layout::Rv32TraceLayout;
 
@@ -137,6 +138,39 @@ impl Rv32TraceWitness {
                     wit.cols[layout.ram_wv][i] = F::from_u64(wv);
                 }
                 (None, None) => {}
+            }
+        }
+
+        // Normalize Shout events per row: at most one lookup event.
+        for (i, r) in exec.rows.iter().enumerate() {
+            if !r.active {
+                continue;
+            }
+            match r.shout_events.as_slice() {
+                [] => {}
+                [ev] => {
+                    wit.cols[layout.shout_has_lookup][i] = F::ONE;
+                    wit.cols[layout.shout_val][i] = F::from_u64(ev.value);
+                    let (lhs, rhs) = uninterleave_bits(ev.key as u128);
+                    wit.cols[layout.shout_lhs][i] = F::from_u64(lhs);
+                    // Canonicalize shift keys: RISC-V shifts use only the low 5 bits of `rhs`.
+                    let rhs = if let Some(op) = RiscvShoutTables::new(/*xlen=*/ 32).id_to_opcode(ev.shout_id) {
+                        if matches!(op, RiscvOpcode::Sll | RiscvOpcode::Srl | RiscvOpcode::Sra) {
+                            rhs & 0x1F
+                        } else {
+                            rhs
+                        }
+                    } else {
+                        rhs
+                    };
+                    wit.cols[layout.shout_rhs][i] = F::from_u64(rhs);
+                }
+                _ => {
+                    return Err(format!(
+                        "multiple Shout events in one cycle={} (fixed-lane trace view only supports 1)",
+                        r.cycle
+                    ));
+                }
             }
         }
 

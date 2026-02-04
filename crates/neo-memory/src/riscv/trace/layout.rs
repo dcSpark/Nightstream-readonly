@@ -39,6 +39,12 @@ pub struct Rv32TraceLayout {
     pub ram_rv: usize,
     pub ram_wv: usize,
 
+    // Shout view (single fixed-lane per row; output-only for now)
+    pub shout_has_lookup: usize,
+    pub shout_val: usize,
+    pub shout_lhs: usize,
+    pub shout_rhs: usize,
+
     // Small rd-bit plumbing (enables sound `rd_has_write => rd != 0`).
     pub rd_bit: [usize; 5],
     pub rd_is_zero_01: usize,
@@ -88,6 +94,11 @@ impl Rv32TraceLayout {
         let ram_rv = take();
         let ram_wv = take();
 
+        let shout_has_lookup = take();
+        let shout_val = take();
+        let shout_lhs = take();
+        let shout_rhs = take();
+
         let rd_b0 = take();
         let rd_b1 = take();
         let rd_b2 = take();
@@ -133,6 +144,11 @@ impl Rv32TraceLayout {
             ram_rv,
             ram_wv,
 
+            shout_has_lookup,
+            shout_val,
+            shout_lhs,
+            shout_rhs,
+
             rd_bit: [rd_b0, rd_b1, rd_b2, rd_b3, rd_b4],
             rd_is_zero_01,
             rd_is_zero_012,
@@ -141,4 +157,3 @@ impl Rv32TraceLayout {
         }
     }
 }
-

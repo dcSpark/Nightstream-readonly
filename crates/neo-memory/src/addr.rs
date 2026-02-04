@@ -108,6 +108,38 @@ pub fn validate_pow2_bit_addressing_shape(proto: &'static str, n_side: usize, el
 pub fn validate_shout_bit_addressing<Cmt, F>(inst: &LutInstance<Cmt, F>) -> Result<(), PiCcsError> {
     // Virtual/implicit tables may not have a materialized `k = n_side^d` table.
     if let Some(spec) = &inst.table_spec {
+        let rv32_packed_expected_d =
+            |opcode: crate::riscv::lookups::RiscvOpcode| -> Result<usize, PiCcsError> {
+                Ok(match opcode {
+                    crate::riscv::lookups::RiscvOpcode::And
+                    | crate::riscv::lookups::RiscvOpcode::Andn
+                    | crate::riscv::lookups::RiscvOpcode::Xor
+                    | crate::riscv::lookups::RiscvOpcode::Or => 34usize,
+                    crate::riscv::lookups::RiscvOpcode::Add
+                    | crate::riscv::lookups::RiscvOpcode::Sub
+                    | crate::riscv::lookups::RiscvOpcode::Eq
+                    | crate::riscv::lookups::RiscvOpcode::Neq => 3usize,
+                    crate::riscv::lookups::RiscvOpcode::Slt => 37usize,
+                    crate::riscv::lookups::RiscvOpcode::Sll => 38usize,
+                    crate::riscv::lookups::RiscvOpcode::Srl => 38usize,
+                    crate::riscv::lookups::RiscvOpcode::Sra => 38usize,
+                    crate::riscv::lookups::RiscvOpcode::Sltu => 35usize,
+                    crate::riscv::lookups::RiscvOpcode::Mul => 34usize,
+                    crate::riscv::lookups::RiscvOpcode::Mulh => 38usize,
+                    crate::riscv::lookups::RiscvOpcode::Mulhu => 34usize,
+                    crate::riscv::lookups::RiscvOpcode::Mulhsu => 37usize,
+                    crate::riscv::lookups::RiscvOpcode::Div => 43usize,
+                    crate::riscv::lookups::RiscvOpcode::Divu => 38usize,
+                    crate::riscv::lookups::RiscvOpcode::Rem => 43usize,
+                    crate::riscv::lookups::RiscvOpcode::Remu => 38usize,
+                    _ => {
+                        return Err(PiCcsError::InvalidInput(format!(
+                            "Shout(RISC-V packed): unsupported opcode={opcode:?}"
+                        )));
+                    }
+                })
+            };
+
         validate_pow2_bit_addressing_shape("Shout", inst.n_side, inst.ell)?;
         if inst.k != 0 {
             return Err(PiCcsError::InvalidInput(
@@ -136,6 +168,68 @@ pub fn validate_shout_bit_addressing<Cmt, F>(inst: &LutInstance<Cmt, F>) -> Resu
                     return Err(PiCcsError::InvalidInput(format!(
                         "Shout(RISC-V): expected d=2*xlen={}, got d={}",
                         expected_d, inst.d
+                    )));
+                }
+            }
+            LutTableSpec::RiscvOpcodePacked { opcode, xlen } => {
+                if *xlen != 32 {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Shout(RISC-V packed): expected xlen=32, got xlen={xlen}"
+                    )));
+                }
+                let expected_d = rv32_packed_expected_d(*opcode)?;
+                // Packed-key Shout lanes are not bit-addressed: we repurpose the addr-bit slice as
+                // `[lhs_u32, rhs_u32, aux...]` and keep `[has_lookup, val_u32]`.
+                if inst.n_side != 2 || inst.ell != 1 {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Shout(RISC-V packed): expected n_side=2, ell=1, got n_side={}, ell={}",
+                        inst.n_side, inst.ell
+                    )));
+                }
+                if inst.d != expected_d {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Shout(RISC-V packed): expected d={expected_d}, got d={}",
+                        inst.d,
+                    )));
+                }
+            }
+            LutTableSpec::RiscvOpcodeEventTablePacked {
+                opcode,
+                xlen,
+                time_bits,
+            } => {
+                if *xlen != 32 {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Shout(RISC-V event-table packed): expected xlen=32, got xlen={xlen}"
+                    )));
+                }
+                if *time_bits == 0 {
+                    return Err(PiCcsError::InvalidInput(
+                        "Shout(RISC-V event-table packed): time_bits must be >= 1".into(),
+                    ));
+                }
+                if *time_bits > 64 {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Shout(RISC-V event-table packed): time_bits={time_bits} too large (max 64)"
+                    )));
+                }
+                let base_d = rv32_packed_expected_d(*opcode)?;
+                let expected_d = time_bits
+                    .checked_add(base_d)
+                    .ok_or_else(|| PiCcsError::InvalidInput("Shout(RISC-V event-table packed): d overflow".into()))?;
+
+                // Event-table packed Shout lanes are not bit-addressed: addr_bits is repurposed as
+                // `[time_bits_le, lhs_u32, rhs_u32, aux...]` and we keep `[has_lookup, val_u32]`.
+                if inst.n_side != 2 || inst.ell != 1 {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Shout(RISC-V event-table packed): expected n_side=2, ell=1, got n_side={}, ell={}",
+                        inst.n_side, inst.ell
+                    )));
+                }
+                if inst.d != expected_d {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Shout(RISC-V event-table packed): expected d={expected_d} (= time_bits({time_bits}) + base_d({base_d})), got d={}",
+                        inst.d,
                     )));
                 }
             }

@@ -49,10 +49,16 @@ mod config;
 mod constants;
 mod constraint_builder;
 mod layout;
+mod trace;
 mod witness;
 
 pub use bus_bindings::rv32_b1_shared_cpu_bus_config;
 pub use layout::Rv32B1Layout;
+pub use trace::{
+    build_rv32_trace_wiring_ccs, build_rv32_trace_wiring_ccs_with_prog_reg_ram_twist,
+    rv32_trace_ccs_witness_from_exec_table, rv32_trace_ccs_witness_from_trace_witness,
+    rv32_trace_twist_ccs_witness_from_exec_table, Rv32TraceCcsLayout, Rv32TraceTwistCcsLayout,
+};
 pub use witness::{
     rv32_b1_chunk_to_full_witness, rv32_b1_chunk_to_full_witness_checked, rv32_b1_chunk_to_witness,
     rv32_b1_chunk_to_witness_checked,

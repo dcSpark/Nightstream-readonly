@@ -68,6 +68,7 @@ impl Rv32TraceAir {
             let rd_has_write = col(l.rd_has_write, i);
             let ram_has_read = col(l.ram_has_read, i);
             let ram_has_write = col(l.ram_has_write, i);
+            let shout_has_lookup = col(l.shout_has_lookup, i);
 
             // Booleans.
             for (name, v) in [
@@ -76,6 +77,7 @@ impl Rv32TraceAir {
                 ("rd_has_write", rd_has_write),
                 ("ram_has_read", ram_has_read),
                 ("ram_has_write", ram_has_write),
+                ("shout_has_lookup", shout_has_lookup),
             ] {
                 let e = Self::bool_check(v);
                 if !Self::is_zero(e) {
@@ -113,6 +115,10 @@ impl Rv32TraceAir {
                 ("ram_addr", l.ram_addr),
                 ("ram_rv", l.ram_rv),
                 ("ram_wv", l.ram_wv),
+                ("shout_has_lookup", l.shout_has_lookup),
+                ("shout_val", l.shout_val),
+                ("shout_lhs", l.shout_lhs),
+                ("shout_rhs", l.shout_rhs),
             ] {
                 let e = Self::gated_zero(inv_active, col(c, i));
                 if !Self::is_zero(e) {
@@ -190,6 +196,25 @@ impl Rv32TraceAir {
                 }
                 if !Self::is_zero(Self::gated_zero(F::ONE - ram_has_write, col(l.ram_wv, i))) {
                     return Err(format!("row {i}: ram_wv must be 0 when ram_has_write=0"));
+                }
+            }
+
+            // Shout padding: if no lookup, the lookup output must be 0.
+            {
+                if !Self::is_zero(Self::gated_zero(F::ONE - shout_has_lookup, col(l.shout_val, i))) {
+                    return Err(format!(
+                        "row {i}: shout_val must be 0 when shout_has_lookup=0"
+                    ));
+                }
+                if !Self::is_zero(Self::gated_zero(F::ONE - shout_has_lookup, col(l.shout_lhs, i))) {
+                    return Err(format!(
+                        "row {i}: shout_lhs must be 0 when shout_has_lookup=0"
+                    ));
+                }
+                if !Self::is_zero(Self::gated_zero(F::ONE - shout_has_lookup, col(l.shout_rhs, i))) {
+                    return Err(format!(
+                        "row {i}: shout_rhs must be 0 when shout_has_lookup=0"
+                    ));
                 }
             }
 

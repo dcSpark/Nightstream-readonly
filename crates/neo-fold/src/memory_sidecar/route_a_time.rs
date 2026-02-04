@@ -67,6 +67,24 @@ pub fn prove_route_a_batched_time(
         &mut claims,
     );
 
+    // Optional: event-table Shout linkage trace hash claim (no-shared-bus only).
+    let shout_event_trace_hash_claim = mem_oracles.shout_event_trace_hash.as_ref().map(|o| o.claim);
+    let mut shout_event_trace_hash_prefix = mem_oracles
+        .shout_event_trace_hash
+        .as_mut()
+        .map(|o| RoundOraclePrefix::new(o.oracle.as_mut(), ell_n));
+    if let (Some(claim), Some(prefix)) = (shout_event_trace_hash_claim, shout_event_trace_hash_prefix.as_mut()) {
+        claimed_sums.push(claim);
+        degree_bounds.push(prefix.degree_bound());
+        labels.push(b"shout/event_trace_hash");
+        claim_is_dynamic.push(true);
+        claims.push(BatchedClaim {
+            oracle: prefix,
+            claimed_sum: claim,
+            label: b"shout/event_trace_hash",
+        });
+    }
+
     let mut twist_protocol =
         TwistRouteAProtocol::new(&mut mem_oracles.twist, ell_n, twist_read_claims, twist_write_claims);
     twist_protocol.append_time_claims(

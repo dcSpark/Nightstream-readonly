@@ -133,11 +133,28 @@ pub enum MemOrLutProof {
 
 #[derive(Clone, Debug)]
 pub struct MemSidecarProof<C, FF, KK> {
-    /// CPU ME claims evaluated at `r_val` (Twist val-eval terminal point).
+    /// Shout bus openings evaluated at the shared `r_time`.
     ///
-    /// In shared-CPU-bus-only mode, Twist reads val-lane openings from these claims
-    /// (current step + optional previous step for rollover).
-    pub cpu_me_claims_val: Vec<MeInstance<C, FF, KK>>,
+    /// - In **shared CPU bus** mode, Shout time-lane openings are read from the CPU ME output
+    ///   (the bus tail lives inside the CPU witness), so this is empty.
+    /// - In **no shared CPU bus** mode, Shout instances carry their own committed witnesses and
+    ///   this stores the ME openings (including appended Shout bus openings) needed to verify the
+    ///   Route-A time-lane terminal identities and trace linkage checks.
+    pub shout_me_claims_time: Vec<MeInstance<C, FF, KK>>,
+    /// Twist bus openings evaluated at the shared `r_time`.
+    ///
+    /// - In **shared CPU bus** mode, Twist/Shout time-lane openings are read from the CPU ME output
+    ///   (the bus tail lives inside the CPU witness), so this is empty.
+    /// - In **no shared CPU bus** mode, Twist instances carry their own committed witnesses and
+    ///   this stores the ME openings (including appended Twist bus openings) needed to verify the
+    ///   Route-A time-lane terminal identities.
+    pub twist_me_claims_time: Vec<MeInstance<C, FF, KK>>,
+    /// ME claims evaluated at `r_val` (Twist val-eval terminal point).
+    ///
+    /// - In **shared CPU bus** mode, these are CPU ME openings at `r_val` that include appended bus openings.
+    /// - In **no shared CPU bus** mode, these are Twist ME openings at `r_val` for each Twist instance
+    ///   (and optionally the previous step's instances for rollover).
+    pub val_me_claims: Vec<MeInstance<C, FF, KK>>,
     /// Route A Shout address pre-time proofs batched across all Shout instances in the step.
     pub shout_addr_pre: ShoutAddrPreProof<KK>,
     pub proofs: Vec<MemOrLutProof>,
@@ -175,8 +192,18 @@ pub struct StepProof {
     pub fold: FoldStep,
     pub mem: MemSidecarProof<Cmt, F, K>,
     pub batched_time: BatchedTimeProof,
-    /// Optional second folding lane for Twist val-eval ME claims at `r_val`.
-    pub val_fold: Option<RlcDecProof>,
+    /// Optional folding lane(s) for ME claims evaluated at `r_val`.
+    ///
+    /// Each proof is an independent Π_RLC→Π_DEC lane (k=1 in current usage).
+    pub val_fold: Vec<RlcDecProof>,
+    /// Optional folding lane(s) for Twist ME openings at the shared `r_time` when not using a shared CPU bus.
+    ///
+    /// Each proof is an independent Π_RLC→Π_DEC lane (k=1 in current usage).
+    pub twist_time_fold: Vec<RlcDecProof>,
+    /// Optional folding lane(s) for Shout ME openings at the shared `r_time` when not using a shared CPU bus.
+    ///
+    /// Each proof is an independent Π_RLC→Π_DEC lane (k=1 in current usage).
+    pub shout_time_fold: Vec<RlcDecProof>,
 }
 
 #[derive(Clone, Debug)]
@@ -216,8 +243,14 @@ impl ShardProof {
 
         let mut val = Vec::new();
         for step in &self.steps {
-            if let Some(val_fold) = &step.val_fold {
-                val.extend_from_slice(&val_fold.dec_children);
+            for p in &step.val_fold {
+                val.extend_from_slice(&p.dec_children);
+            }
+            for p in &step.twist_time_fold {
+                val.extend_from_slice(&p.dec_children);
+            }
+            for p in &step.shout_time_fold {
+                val.extend_from_slice(&p.dec_children);
             }
         }
 

@@ -1,6 +1,7 @@
 use neo_ajtai::Commitment as Cmt;
 use neo_math::{F, K};
-use neo_memory::witness::{LutInstance, MemInstance, StepInstanceBundle};
+use neo_memory::riscv::lookups::RiscvOpcode;
+use neo_memory::witness::{LutInstance, LutTableSpec, MemInstance, StepInstanceBundle};
 
 use crate::PiCcsError;
 
@@ -15,6 +16,7 @@ pub struct TimeClaimMeta {
 pub struct ShoutLaneTimeClaimIdx {
     pub value: usize,
     pub adapter: usize,
+    pub event_table_hash: Option<usize>,
 }
 
 #[derive(Clone, Debug)]
@@ -41,6 +43,7 @@ pub struct RouteATimeClaimPlan {
     pub claim_idx_start: usize,
     pub claim_idx_end: usize,
     pub shout: Vec<ShoutTimeClaimIdx>,
+    pub shout_event_trace_hash: Option<usize>,
     pub twist: Vec<TwistTimeClaimIdx>,
 }
 
@@ -55,6 +58,15 @@ impl RouteATimeClaimPlan {
         LI: IntoIterator<Item = &'a LutInstance<Cmt, F>>,
         MI: IntoIterator<Item = &'a MemInstance<Cmt, F>>,
     {
+        let lut_insts: Vec<&LutInstance<Cmt, F>> = lut_insts.into_iter().collect();
+        let mem_insts: Vec<&MemInstance<Cmt, F>> = mem_insts.into_iter().collect();
+        let any_event_table_shout = lut_insts.iter().any(|inst| {
+            matches!(
+                inst.table_spec,
+                Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })
+            )
+        });
+
         let mut out = Vec::new();
 
         out.push(TimeClaimMeta {
@@ -66,24 +78,65 @@ impl RouteATimeClaimPlan {
         for lut_inst in lut_insts {
             let ell_addr = lut_inst.d * lut_inst.ell;
             let lanes = lut_inst.lanes.max(1);
+            let (packed_opcode, packed_base_ell_addr) = match &lut_inst.table_spec {
+                Some(LutTableSpec::RiscvOpcodePacked { opcode, xlen: 32 }) => (Some(*opcode), ell_addr),
+                Some(LutTableSpec::RiscvOpcodeEventTablePacked {
+                    opcode,
+                    xlen: 32,
+                    time_bits,
+                }) => (Some(*opcode), ell_addr.saturating_sub(*time_bits)),
+                _ => (None, ell_addr),
+            };
+
+            let (value_degree_bound, adapter_degree_bound) = match packed_opcode {
+                Some(RiscvOpcode::And | RiscvOpcode::Andn | RiscvOpcode::Or | RiscvOpcode::Xor) => (8, 6),
+                Some(RiscvOpcode::Add | RiscvOpcode::Sub) => (3, 2),
+                Some(RiscvOpcode::Eq | RiscvOpcode::Neq) => (4, 2 + packed_base_ell_addr),
+                Some(RiscvOpcode::Mul) => (4, 2),
+                Some(RiscvOpcode::Mulh) => (4, 5),
+                Some(RiscvOpcode::Mulhu) => (4, 2),
+                Some(RiscvOpcode::Mulhsu) => (4, 4),
+                Some(RiscvOpcode::Slt) => (3, 3),
+                Some(RiscvOpcode::Divu | RiscvOpcode::Remu) => (5, 4),
+                Some(RiscvOpcode::Div | RiscvOpcode::Rem) => (7, 6),
+                Some(RiscvOpcode::Sll) => (8, 2),
+                Some(RiscvOpcode::Srl | RiscvOpcode::Sra) => (8, 8),
+                Some(RiscvOpcode::Sltu) => (3, 3),
+                _ => (3, 2 + ell_addr),
+            };
 
             for _lane in 0..lanes {
                 out.push(TimeClaimMeta {
                     label: b"shout/value",
-                    degree_bound: 3,
+                    degree_bound: value_degree_bound,
                     is_dynamic: true,
                 });
                 out.push(TimeClaimMeta {
                     label: b"shout/adapter",
-                    degree_bound: 2 + ell_addr,
+                    degree_bound: adapter_degree_bound,
                     is_dynamic: true,
                 });
+                if let Some(LutTableSpec::RiscvOpcodeEventTablePacked { time_bits, .. }) = &lut_inst.table_spec {
+                    out.push(TimeClaimMeta {
+                        label: b"shout/event_table_hash",
+                        degree_bound: 2 + *time_bits,
+                        is_dynamic: true,
+                    });
+                }
             }
 
             out.push(TimeClaimMeta {
                 label: b"shout/bitness",
                 degree_bound: 3,
                 is_dynamic: false,
+            });
+        }
+
+        if any_event_table_shout {
+            out.push(TimeClaimMeta {
+                label: b"shout/event_trace_hash",
+                degree_bound: 3,
+                is_dynamic: true,
             });
         }
 
@@ -143,18 +196,37 @@ impl RouteATimeClaimPlan {
     ) -> Result<RouteATimeClaimPlan, PiCcsError> {
         let mut idx = claim_idx_start;
         let mut shout = Vec::with_capacity(step.lut_insts.len());
+        let any_event_table_shout = step
+            .lut_insts
+            .iter()
+            .any(|inst| matches!(inst.table_spec, Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })));
         let mut twist = Vec::with_capacity(step.mem_insts.len());
 
         for lut_inst in &step.lut_insts {
             let ell_addr = lut_inst.d * lut_inst.ell;
             let lanes = lut_inst.lanes.max(1);
+            let is_event_table = matches!(
+                lut_inst.table_spec,
+                Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })
+            );
             let mut lane_claims: Vec<ShoutLaneTimeClaimIdx> = Vec::with_capacity(lanes);
             for _lane in 0..lanes {
                 let value = idx;
                 idx += 1;
                 let adapter = idx;
                 idx += 1;
-                lane_claims.push(ShoutLaneTimeClaimIdx { value, adapter });
+                let event_table_hash = if is_event_table {
+                    let h = idx;
+                    idx += 1;
+                    Some(h)
+                } else {
+                    None
+                };
+                lane_claims.push(ShoutLaneTimeClaimIdx {
+                    value,
+                    adapter,
+                    event_table_hash,
+                });
             }
             let bitness = idx;
             idx += 1;
@@ -165,6 +237,14 @@ impl RouteATimeClaimPlan {
                 ell_addr,
             });
         }
+
+        let shout_event_trace_hash = if any_event_table_shout {
+            let out = idx;
+            idx += 1;
+            Some(out)
+        } else {
+            None
+        };
 
         for mem_inst in &step.mem_insts {
             let ell_addr = mem_inst.d * mem_inst.ell;
@@ -192,6 +272,7 @@ impl RouteATimeClaimPlan {
             claim_idx_start,
             claim_idx_end: idx,
             shout,
+            shout_event_trace_hash,
             twist,
         })
     }

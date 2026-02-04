@@ -492,7 +492,7 @@ fn full_folding_integration_single_chunk() {
 
     // Print a short summary so it's clear what was enforced.
     let step0 = &proof.steps[0];
-    let mem_me_val = step0.mem.cpu_me_claims_val.len();
+    let mem_me_val = step0.mem.val_me_claims.len();
     let ccs_me = step0.fold.ccs_out.len();
     let total_me = ccs_me;
     let children = step0.fold.dec_children.len();
@@ -842,10 +842,10 @@ fn missing_val_fold_fails() {
     .expect("prove should succeed");
 
     assert!(
-        proof.steps[0].val_fold.is_some(),
+        !proof.steps[0].val_fold.is_empty(),
         "fixture should produce val_fold when Twist is present"
     );
-    proof.steps[0].val_fold = None;
+    proof.steps[0].val_fold.clear();
 
     let mut tr_verify = Poseidon2Transcript::new(b"full-fold-missing-val-fold");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];

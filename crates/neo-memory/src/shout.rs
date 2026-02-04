@@ -153,6 +153,16 @@ pub fn check_shout_semantics<F: PrimeField>(
                     let out = compute_op(*opcode, rs1, rs2, *xlen);
                     F::from_u64(out)
                 }
+                Some(LutTableSpec::RiscvOpcodePacked { .. }) => {
+                    return Err(PiCcsError::InvalidInput(
+                        "Shout semantic checker only supports bit-addressed LUT witnesses".into(),
+                    ));
+                }
+                Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. }) => {
+                    return Err(PiCcsError::InvalidInput(
+                        "Shout semantic checker only supports bit-addressed LUT witnesses".into(),
+                    ));
+                }
                 Some(LutTableSpec::IdentityU32) => F::from_u64(addrs[j]),
                 None => {
                     if addr >= inst.table.len() {

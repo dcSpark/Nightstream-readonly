@@ -1,6 +1,9 @@
 use neo_vm_trace::{ShoutEvent, StepTrace, TwistEvent, TwistOpKind, VmTrace};
 
-use crate::riscv::lookups::{compute_op, decode_instruction, RiscvInstruction, RiscvOpcode, PROG_ID, RAM_ID, REG_ID};
+use crate::riscv::lookups::{
+    compute_op, decode_instruction, interleave_bits, uninterleave_bits, RiscvInstruction, RiscvOpcode, RiscvShoutTables,
+    PROG_ID, RAM_ID, REG_ID,
+};
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -733,6 +736,67 @@ impl Rv32MEventTable {
                 rd_write_val,
                 expected_rd_val: expected,
             });
+        }
+
+        Ok(Self { rows })
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Rv32ShoutEventRow {
+    /// Row index within the padded exec table (0..t).
+    pub row_idx: usize,
+    pub cycle: u64,
+    pub pc: u64,
+    pub shout_id: u32,
+    pub opcode: Option<RiscvOpcode>,
+    /// Canonicalized key: for shift ops, `rhs` is masked to 5 bits.
+    pub key: u64,
+    pub lhs: u64,
+    pub rhs: u64,
+    pub value: u64,
+}
+
+#[derive(Clone, Debug)]
+pub struct Rv32ShoutEventTable {
+    pub rows: Vec<Rv32ShoutEventRow>,
+}
+
+impl Rv32ShoutEventTable {
+    pub fn from_exec_table(exec: &Rv32ExecTable) -> Result<Self, String> {
+        let shout_tables = RiscvShoutTables::new(/*xlen=*/ 32);
+        let mut rows = Vec::new();
+
+        for (row_idx, r) in exec.rows.iter().enumerate() {
+            if !r.active {
+                continue;
+            }
+            for ev in r.shout_events.iter() {
+                let opcode = shout_tables.id_to_opcode(ev.shout_id);
+                let (lhs, rhs_raw) = uninterleave_bits(ev.key as u128);
+                let rhs = if matches!(opcode, Some(RiscvOpcode::Sll | RiscvOpcode::Srl | RiscvOpcode::Sra)) {
+                    rhs_raw & 0x1F
+                } else {
+                    rhs_raw
+                };
+                let key = if rhs != rhs_raw {
+                    interleave_bits(lhs, rhs) as u64
+                } else {
+                    ev.key
+                };
+
+                rows.push(Rv32ShoutEventRow {
+                    row_idx,
+                    cycle: r.cycle,
+                    pc: r.pc_before,
+                    shout_id: ev.shout_id.0,
+                    opcode,
+                    key,
+                    lhs,
+                    rhs,
+                    value: ev.value,
+                });
+            }
         }
 
         Ok(Self { rows })

@@ -123,7 +123,9 @@ fn build_trivial_fold_run_and_instance() -> (FoldRunInstance, FoldRunWitness) {
         steps: vec![StepProof {
             fold: step,
             mem: MemSidecarProof {
-                cpu_me_claims_val: Vec::new(),
+                shout_me_claims_time: Vec::new(),
+                twist_me_claims_time: Vec::new(),
+                val_me_claims: Vec::new(),
                 shout_addr_pre: Default::default(),
                 proofs: Vec::new(),
             },
@@ -133,7 +135,9 @@ fn build_trivial_fold_run_and_instance() -> (FoldRunInstance, FoldRunWitness) {
                 labels: Vec::new(),
                 round_polys: Vec::new(),
             },
-            val_fold: None,
+            val_fold: Vec::new(),
+            twist_time_fold: Vec::new(),
+            shout_time_fold: Vec::new(),
         }],
         output_proof: None,
     };

@@ -292,6 +292,12 @@ fn shout_meta_for_bus(
                     .ok_or_else(|| "2*xlen overflow for RISC-V shout table".to_string())?;
                 Ok((d, 2usize))
             }
+            LutTableSpec::RiscvOpcodePacked { .. } => {
+                Err("RiscvOpcodePacked is not supported in shared-bus circuits".into())
+            }
+            LutTableSpec::RiscvOpcodeEventTablePacked { .. } => {
+                Err("RiscvOpcodeEventTablePacked is not supported in shared-bus circuits".into())
+            }
             LutTableSpec::IdentityU32 => Ok((32usize, 2usize)),
         }
     } else {
