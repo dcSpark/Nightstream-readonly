@@ -1723,7 +1723,16 @@ where
             .filter(|cache| cache.src_ptr == src_ptr);
         let verifier_ctx = verifier_cache.map(|cache| &cache.ctx);
 
-        let m_in_steps = steps_public.first().map(|inst| inst.mcs_inst.m_in).unwrap_or(0);
+        let m_in_steps = steps_public
+            .first()
+            .map(|inst| inst.mcs_inst.m_in)
+            .unwrap_or(0);
+        if !steps_public
+            .iter()
+            .all(|inst| inst.mcs_inst.m_in == m_in_steps)
+        {
+            return Err(PiCcsError::InvalidInput("all steps must share the same m_in".into()));
+        }
         let s_prepared = self.prepared_ccs_for_accumulator(s)?;
 
         let seed_me: &[MeInstance<Cmt, F, K>] = match &self.acc0 {
@@ -1858,7 +1867,16 @@ where
             .filter(|cache| cache.src_ptr == src_ptr);
         let verifier_ctx = verifier_cache.map(|cache| &cache.ctx);
 
-        let m_in_steps = steps_public.first().map(|inst| inst.mcs_inst.m_in).unwrap_or(0);
+        let m_in_steps = steps_public
+            .first()
+            .map(|inst| inst.mcs_inst.m_in)
+            .unwrap_or(0);
+        if !steps_public
+            .iter()
+            .all(|inst| inst.mcs_inst.m_in == m_in_steps)
+        {
+            return Err(PiCcsError::InvalidInput("all steps must share the same m_in".into()));
+        }
         let s_prepared = self.prepared_ccs_for_accumulator(s)?;
 
         let seed_me: &[MeInstance<Cmt, F, K>] = match &self.acc0 {
