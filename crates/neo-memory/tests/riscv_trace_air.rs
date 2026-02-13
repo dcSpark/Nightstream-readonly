@@ -119,8 +119,5 @@ fn rv32_trace_air_rejects_non_boolean_funct3_bit() {
     let err = air
         .assert_satisfied(&wit)
         .expect_err("mutated witness should violate bit booleanity");
-    assert!(
-        err.contains("funct3_bit[0] not boolean"),
-        "unexpected error: {err}"
-    );
+    assert!(err.contains("funct3_bit[0] not boolean"), "unexpected error: {err}");
 }

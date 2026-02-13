@@ -344,7 +344,7 @@ fn indices_from_spec(spec: &StepSpec) -> Vec<usize> {
 /// consistency with the protocol engine (which expects padded y-vectors).
 pub fn me_from_z_balanced<Lm: SModuleHomomorphism<F, Cmt>>(
     params: &NeoParams,
-    s: &CcsStructure<F>, // should be identity-first
+    s: &CcsStructure<F>, // rectangular or square CCS
     l: &Lm,
     z: &[F],
     r: &[K],
@@ -459,7 +459,7 @@ pub fn me_from_z_balanced<Lm: SModuleHomomorphism<F, Cmt>>(
 /// as specified by StepSpec indices.
 pub fn me_from_z_balanced_select<Lm: SModuleHomomorphism<F, Cmt>>(
     params: &NeoParams,
-    s: &CcsStructure<F>, // should be identity-first
+    s: &CcsStructure<F>, // rectangular or square CCS
     l: &Lm,
     z: &[F],
     r: &[K],

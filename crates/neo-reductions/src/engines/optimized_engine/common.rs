@@ -1136,25 +1136,28 @@ where
         }
         #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
         {
-            z_out.par_chunks_exact_mut(m).enumerate().for_each(|(rr, row_out)| {
-                for col0 in (0..m).step_by(BLOCK_COLS) {
-                    let len = core::cmp::min(BLOCK_COLS, m - col0);
-                    for i in 0..k1 {
-                        let rho_data = rhos[i].as_slice();
-                        let z_in = Zs[i].as_slice();
-                        for kk in 0..d {
-                            let coeff = rho_data[rr * d + kk];
-                            if coeff == Ff::ZERO {
-                                continue;
-                            }
-                            let in_off = kk * m + col0;
-                            for t in 0..len {
-                                row_out[col0 + t] += coeff * z_in[in_off + t];
+            z_out
+                .par_chunks_exact_mut(m)
+                .enumerate()
+                .for_each(|(rr, row_out)| {
+                    for col0 in (0..m).step_by(BLOCK_COLS) {
+                        let len = core::cmp::min(BLOCK_COLS, m - col0);
+                        for i in 0..k1 {
+                            let rho_data = rhos[i].as_slice();
+                            let z_in = Zs[i].as_slice();
+                            for kk in 0..d {
+                                let coeff = rho_data[rr * d + kk];
+                                if coeff == Ff::ZERO {
+                                    continue;
+                                }
+                                let in_off = kk * m + col0;
+                                for t in 0..len {
+                                    row_out[col0 + t] += coeff * z_in[in_off + t];
+                                }
                             }
                         }
                     }
-                }
-            });
+                });
         }
         #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
         {

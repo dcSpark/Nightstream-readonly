@@ -189,7 +189,10 @@ fn rv32_shout_event_table_includes_rv32m_rows() {
     let events = Rv32ShoutEventTable::from_exec_table(&exec).expect("Rv32ShoutEventTable::from_exec_table");
 
     assert!(
-        events.rows.iter().any(|row| row.opcode == Some(RiscvOpcode::Mul)),
+        events
+            .rows
+            .iter()
+            .any(|row| row.opcode == Some(RiscvOpcode::Mul)),
         "expected RV32M (MUL) rows in trace shout event table"
     );
 }

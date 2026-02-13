@@ -3,7 +3,7 @@
 //! This module provides a **sound, shared-bus-compatible** step circuit for a small,
 //! MVP RV32 subset. The circuit is expressed as an R1CS→CCS:
 //! - `A(z) * B(z) = C(z)` with `C = 0` for almost all rows
-//! - when `n == m`, we include an identity-first `M0 = I_n` to match `neo_ccs::r1cs_to_ccs`
+//! - CCS uses the rectangular-friendly 3-matrix embedding (`M_0=A, M_1=B, M_2=C`)
 //!
 //! The witness `z` includes a **reserved bus tail** whose column schema matches
 //! `cpu::bus_layout::BusLayout`. The bus tail itself is written from `StepTrace`

@@ -397,7 +397,9 @@ impl Rv32TraceLayout {
             funct3_bit: [funct3_b0, funct3_b1, funct3_b2],
             rs1_bit: [rs1_b0, rs1_b1, rs1_b2, rs1_b3, rs1_b4],
             rs2_bit: [rs2_b0, rs2_b1, rs2_b2, rs2_b3, rs2_b4],
-            funct7_bit: [funct7_b0, funct7_b1, funct7_b2, funct7_b3, funct7_b4, funct7_b5, funct7_b6],
+            funct7_bit: [
+                funct7_b0, funct7_b1, funct7_b2, funct7_b3, funct7_b4, funct7_b5, funct7_b6,
+            ],
             rd_is_zero_01,
             rd_is_zero_012,
             rd_is_zero_0123,

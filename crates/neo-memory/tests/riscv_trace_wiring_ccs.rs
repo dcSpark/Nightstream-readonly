@@ -738,7 +738,8 @@ fn rv32_trace_wiring_ccs_rejects_load_without_ram_read() {
     let decoded_program = decode_program(&program_bytes).expect("decode_program");
     let mut cpu = RiscvCpu::new(/*xlen=*/ 32);
     cpu.load_program(/*base=*/ 0, decoded_program);
-    let mut twist = RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
+    let mut twist =
+        RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
     twist.store(RAM_ID, /*addr=*/ 0, /*value=*/ 7);
     let shout = RiscvShoutTables::new(/*xlen=*/ 32);
     let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 16).expect("trace_program");
@@ -874,7 +875,8 @@ fn rv32_trace_wiring_ccs_rejects_load_pc_update_tamper() {
     let decoded_program = decode_program(&program_bytes).expect("decode_program");
     let mut cpu = RiscvCpu::new(/*xlen=*/ 32);
     cpu.load_program(/*base=*/ 0, decoded_program);
-    let mut twist = RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
+    let mut twist =
+        RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
     twist.store(RAM_ID, /*addr=*/ 0, /*value=*/ 13);
     let shout = RiscvShoutTables::new(/*xlen=*/ 32);
     let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 16).expect("trace_program");
@@ -1087,7 +1089,8 @@ fn rv32_trace_wiring_ccs_rejects_load_ram_addr_tamper() {
     let decoded_program = decode_program(&program_bytes).expect("decode_program");
     let mut cpu = RiscvCpu::new(/*xlen=*/ 32);
     cpu.load_program(/*base=*/ 0, decoded_program);
-    let mut twist = RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
+    let mut twist =
+        RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
     twist.store(RAM_ID, /*addr=*/ 4, /*value=*/ 0x1234);
     let shout = RiscvShoutTables::new(/*xlen=*/ 32);
     let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 16).expect("trace_program");
@@ -1285,7 +1288,8 @@ fn rv32_trace_wiring_ccs_rejects_load_writeback_tamper_all_widths() {
         let decoded_program = decode_program(&program_bytes).expect("decode_program");
         let mut cpu = RiscvCpu::new(/*xlen=*/ 32);
         cpu.load_program(/*base=*/ 0, decoded_program);
-        let mut twist = RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
+        let mut twist =
+            RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
         twist.store(RAM_ID, /*addr=*/ 0, /*value=*/ ram_value);
         let shout = RiscvShoutTables::new(/*xlen=*/ 32);
         let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 16).expect("trace_program");
@@ -1327,7 +1331,8 @@ fn rv32_trace_wiring_ccs_rejects_sw_store_value_tamper() {
     let decoded_program = decode_program(&program_bytes).expect("decode_program");
     let mut cpu = RiscvCpu::new(/*xlen=*/ 32);
     cpu.load_program(/*base=*/ 0, decoded_program);
-    let mut twist = RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
+    let mut twist =
+        RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
     twist.store(RAM_ID, /*addr=*/ 0, /*value=*/ 0xAABB_CCDD);
     let shout = RiscvShoutTables::new(/*xlen=*/ 32);
     let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 16).expect("trace_program");
@@ -1372,7 +1377,8 @@ fn rv32_trace_wiring_ccs_rejects_sb_sh_store_merge_tamper() {
         let decoded_program = decode_program(&program_bytes).expect("decode_program");
         let mut cpu = RiscvCpu::new(/*xlen=*/ 32);
         cpu.load_program(/*base=*/ 0, decoded_program);
-        let mut twist = RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
+        let mut twist =
+            RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
         twist.store(RAM_ID, /*addr=*/ 0, /*value=*/ 0xA1B2_C3D4);
         let shout = RiscvShoutTables::new(/*xlen=*/ 32);
         let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 16).expect("trace_program");
@@ -1458,7 +1464,8 @@ fn rv32_trace_wiring_ccs_rejects_amo_in_trace_scope() {
     let decoded_program = decode_program(&program_bytes).expect("decode_program");
     let mut cpu = RiscvCpu::new(/*xlen=*/ 32);
     cpu.load_program(/*base=*/ 0, decoded_program);
-    let mut twist = RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
+    let mut twist =
+        RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
     twist.store(RAM_ID, /*addr=*/ 0, /*value=*/ 0x44);
     let shout = RiscvShoutTables::new(/*xlen=*/ 32);
     let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 16).expect("trace_program");

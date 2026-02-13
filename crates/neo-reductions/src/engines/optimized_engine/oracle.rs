@@ -206,7 +206,7 @@ where
         table.truncate(half);
     }
 
-    fn evals_col_phase(&self, xs: &[K]) -> Vec<K> {
+    fn evals_col_phase_generic(&self, xs: &[K]) -> Vec<K> {
         debug_assert!(self.cur_len >= 2 && self.cur_len % 2 == 0);
         let tail_len = self.cur_len / 2;
         let xs_len = xs.len();
@@ -314,6 +314,319 @@ where
             }
         } else {
             evals_col_phase_seq(tail_len, xs)
+        }
+    }
+
+    fn evals_col_phase_b2(&self, xs: &[K]) -> Vec<K> {
+        debug_assert!(self.cur_len >= 2 && self.cur_len % 2 == 0);
+        let tail_len = self.cur_len / 2;
+        if xs.is_empty() {
+            return Vec::new();
+        }
+
+        const PAR_THRESHOLD: usize = 1 << 13;
+        let three = K::from(F::from_u64(3));
+
+        let coeffs_seq = |tail_len: usize| -> [K; 5] {
+            let mut coeffs = [K::ZERO; 5];
+            for t in 0..tail_len {
+                let idx = 2 * t;
+                let e0 = self.eq_beta_m_tbl[idx];
+                let e1 = self.eq_beta_m_tbl[idx + 1] - e0;
+
+                let mut inner = [K::ZERO; 4];
+                for (wit_idx, tbl) in self.digits_tables.iter().enumerate() {
+                    let lo = &tbl[idx];
+                    let hi = &tbl[idx + 1];
+                    let weights = &self.weights[wit_idx];
+
+                    for rho in 0..D {
+                        let w = weights[rho];
+                        let a = lo[rho];
+                        let b = hi[rho] - a;
+
+                        let a2 = a * a;
+                        let a3 = a2 * a;
+                        let b2 = b * b;
+                        let b3 = b2 * b;
+
+                        // N(a+bX) = (a+bX)^3 - (a+bX)
+                        let t0 = a3 - a;
+                        let t1 = (a2 * b).scale_base_k(three) - b;
+                        let t2 = (a * b2).scale_base_k(three);
+                        let t3 = b3;
+
+                        inner[0] += w * t0;
+                        inner[1] += w * t1;
+                        inner[2] += w * t2;
+                        inner[3] += w * t3;
+                    }
+                }
+
+                // (e0 + e1 X) * (inner0 + inner1 X + inner2 X^2 + inner3 X^3)
+                coeffs[0] += e0 * inner[0];
+                coeffs[1] += e0 * inner[1] + e1 * inner[0];
+                coeffs[2] += e0 * inner[2] + e1 * inner[1];
+                coeffs[3] += e0 * inner[3] + e1 * inner[2];
+                coeffs[4] += e1 * inner[3];
+            }
+            coeffs
+        };
+
+        let coeffs = if tail_len >= PAR_THRESHOLD {
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+            {
+                (0..tail_len)
+                    .into_par_iter()
+                    .fold(
+                        || [K::ZERO; 5],
+                        |mut coeffs, t| {
+                            let idx = 2 * t;
+                            let e0 = self.eq_beta_m_tbl[idx];
+                            let e1 = self.eq_beta_m_tbl[idx + 1] - e0;
+
+                            let mut inner = [K::ZERO; 4];
+                            for (wit_idx, tbl) in self.digits_tables.iter().enumerate() {
+                                let lo = &tbl[idx];
+                                let hi = &tbl[idx + 1];
+                                let weights = &self.weights[wit_idx];
+
+                                for rho in 0..D {
+                                    let w = weights[rho];
+                                    let a = lo[rho];
+                                    let b = hi[rho] - a;
+
+                                    let a2 = a * a;
+                                    let a3 = a2 * a;
+                                    let b2 = b * b;
+                                    let b3 = b2 * b;
+
+                                    let t0 = a3 - a;
+                                    let t1 = (a2 * b).scale_base_k(three) - b;
+                                    let t2 = (a * b2).scale_base_k(three);
+                                    let t3 = b3;
+
+                                    inner[0] += w * t0;
+                                    inner[1] += w * t1;
+                                    inner[2] += w * t2;
+                                    inner[3] += w * t3;
+                                }
+                            }
+
+                            coeffs[0] += e0 * inner[0];
+                            coeffs[1] += e0 * inner[1] + e1 * inner[0];
+                            coeffs[2] += e0 * inner[2] + e1 * inner[1];
+                            coeffs[3] += e0 * inner[3] + e1 * inner[2];
+                            coeffs[4] += e1 * inner[3];
+                            coeffs
+                        },
+                    )
+                    .reduce(
+                        || [K::ZERO; 5],
+                        |mut a, b| {
+                            for i in 0..5 {
+                                a[i] += b[i];
+                            }
+                            a
+                        },
+                    )
+            }
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            {
+                coeffs_seq(tail_len)
+            }
+        } else {
+            coeffs_seq(tail_len)
+        };
+
+        let xs_are_base = xs.iter().all(|&x| x.imag() == Fq::ZERO);
+        if xs_are_base {
+            xs.iter()
+                .map(|&x| crate::sumcheck::poly_eval_k_base(&coeffs, x.real()))
+                .collect()
+        } else {
+            xs.iter()
+                .map(|&x| crate::sumcheck::poly_eval_k(&coeffs, x))
+                .collect()
+        }
+    }
+
+    fn evals_col_phase_b3(&self, xs: &[K]) -> Vec<K> {
+        debug_assert!(self.cur_len >= 2 && self.cur_len % 2 == 0);
+        let tail_len = self.cur_len / 2;
+        if xs.is_empty() {
+            return Vec::new();
+        }
+
+        const PAR_THRESHOLD: usize = 1 << 13;
+        let four = K::from(F::from_u64(4));
+        let five = K::from(F::from_u64(5));
+        let ten = K::from(F::from_u64(10));
+        let fifteen = K::from(F::from_u64(15));
+
+        let coeffs_seq = |tail_len: usize| -> [K; 7] {
+            let mut coeffs = [K::ZERO; 7];
+            for t in 0..tail_len {
+                let idx = 2 * t;
+                let e0 = self.eq_beta_m_tbl[idx];
+                let e1 = self.eq_beta_m_tbl[idx + 1] - e0;
+
+                let mut inner = [K::ZERO; 6];
+                for (wit_idx, tbl) in self.digits_tables.iter().enumerate() {
+                    let lo = &tbl[idx];
+                    let hi = &tbl[idx + 1];
+                    let weights = &self.weights[wit_idx];
+
+                    for rho in 0..D {
+                        let w = weights[rho];
+                        let a = lo[rho];
+                        let b = hi[rho] - a;
+
+                        let a2 = a * a;
+                        let a3 = a2 * a;
+                        let a4 = a2 * a2;
+                        let a5 = a4 * a;
+
+                        let b2 = b * b;
+                        let b3 = b2 * b;
+                        let b4 = b2 * b2;
+                        let b5 = b4 * b;
+
+                        // N(a+bX) = (a+bX)^5 - 5(a+bX)^3 + 4(a+bX)
+                        let t0 = a5 - a3.scale_base_k(five) + a.scale_base_k(four);
+                        let t1 = b * (a4.scale_base_k(five) - a2.scale_base_k(fifteen) + four);
+                        let t2 = b2 * (a3.scale_base_k(ten) - a.scale_base_k(fifteen));
+                        let t3 = b3 * (a2.scale_base_k(ten) - five);
+                        let t4 = b4 * a.scale_base_k(five);
+                        let t5 = b5;
+
+                        inner[0] += w * t0;
+                        inner[1] += w * t1;
+                        inner[2] += w * t2;
+                        inner[3] += w * t3;
+                        inner[4] += w * t4;
+                        inner[5] += w * t5;
+                    }
+                }
+
+                // (e0 + e1 X) * Σ_{k=0..5} inner[k] X^k
+                coeffs[0] += e0 * inner[0];
+                coeffs[1] += e0 * inner[1] + e1 * inner[0];
+                coeffs[2] += e0 * inner[2] + e1 * inner[1];
+                coeffs[3] += e0 * inner[3] + e1 * inner[2];
+                coeffs[4] += e0 * inner[4] + e1 * inner[3];
+                coeffs[5] += e0 * inner[5] + e1 * inner[4];
+                coeffs[6] += e1 * inner[5];
+            }
+            coeffs
+        };
+
+        let coeffs = if tail_len >= PAR_THRESHOLD {
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+            {
+                (0..tail_len)
+                    .into_par_iter()
+                    .fold(
+                        || [K::ZERO; 7],
+                        |mut coeffs, t| {
+                            let idx = 2 * t;
+                            let e0 = self.eq_beta_m_tbl[idx];
+                            let e1 = self.eq_beta_m_tbl[idx + 1] - e0;
+
+                            let mut inner = [K::ZERO; 6];
+                            for (wit_idx, tbl) in self.digits_tables.iter().enumerate() {
+                                let lo = &tbl[idx];
+                                let hi = &tbl[idx + 1];
+                                let weights = &self.weights[wit_idx];
+
+                                for rho in 0..D {
+                                    let w = weights[rho];
+                                    let a = lo[rho];
+                                    let b = hi[rho] - a;
+
+                                    let a2 = a * a;
+                                    let a3 = a2 * a;
+                                    let a4 = a2 * a2;
+                                    let a5 = a4 * a;
+
+                                    let b2 = b * b;
+                                    let b3 = b2 * b;
+                                    let b4 = b2 * b2;
+                                    let b5 = b4 * b;
+
+                                    let t0 = a5 - a3.scale_base_k(five) + a.scale_base_k(four);
+                                    let t1 = b * (a4.scale_base_k(five) - a2.scale_base_k(fifteen) + four);
+                                    let t2 = b2 * (a3.scale_base_k(ten) - a.scale_base_k(fifteen));
+                                    let t3 = b3 * (a2.scale_base_k(ten) - five);
+                                    let t4 = b4 * a.scale_base_k(five);
+                                    let t5 = b5;
+
+                                    inner[0] += w * t0;
+                                    inner[1] += w * t1;
+                                    inner[2] += w * t2;
+                                    inner[3] += w * t3;
+                                    inner[4] += w * t4;
+                                    inner[5] += w * t5;
+                                }
+                            }
+
+                            coeffs[0] += e0 * inner[0];
+                            coeffs[1] += e0 * inner[1] + e1 * inner[0];
+                            coeffs[2] += e0 * inner[2] + e1 * inner[1];
+                            coeffs[3] += e0 * inner[3] + e1 * inner[2];
+                            coeffs[4] += e0 * inner[4] + e1 * inner[3];
+                            coeffs[5] += e0 * inner[5] + e1 * inner[4];
+                            coeffs[6] += e1 * inner[5];
+                            coeffs
+                        },
+                    )
+                    .reduce(
+                        || [K::ZERO; 7],
+                        |mut a, b| {
+                            for i in 0..7 {
+                                a[i] += b[i];
+                            }
+                            a
+                        },
+                    )
+            }
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            {
+                coeffs_seq(tail_len)
+            }
+        } else {
+            coeffs_seq(tail_len)
+        };
+
+        let xs_are_base = xs.iter().all(|&x| x.imag() == Fq::ZERO);
+        if xs_are_base {
+            xs.iter()
+                .map(|&x| crate::sumcheck::poly_eval_k_base(&coeffs, x.real()))
+                .collect()
+        } else {
+            xs.iter()
+                .map(|&x| crate::sumcheck::poly_eval_k(&coeffs, x))
+                .collect()
+        }
+    }
+
+    fn evals_col_phase(&self, xs: &[K]) -> Vec<K> {
+        match self.params.b {
+            2 => self.evals_col_phase_b2(xs),
+            3 => self.evals_col_phase_b3(xs),
+            _ => self.evals_col_phase_generic(xs),
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn __test_col_phase_fast_vs_generic(&self, xs: &[K]) -> Option<(Vec<K>, Vec<K>)> {
+        if self.round_idx >= self.ell_m {
+            return None;
+        }
+        match self.params.b {
+            2 => Some((self.evals_col_phase_b2(xs), self.evals_col_phase_generic(xs))),
+            3 => Some((self.evals_col_phase_b3(xs), self.evals_col_phase_generic(xs))),
+            _ => None,
         }
     }
 
@@ -439,25 +752,12 @@ struct RowStreamState {
     /// Compiled sparse polynomial terms for `f` using `f_var_tables` indices.
     f_terms: Vec<CompiledPolyTerm>,
 
-    /// NC tables: for each witness i, a row-domain table where each entry holds Ajtai digits
-    /// `[Z_i[0,row], ..., Z_i[D-1,row]]`.
-    nc_tables: Vec<Vec<[K; D]>>,
-
-    /// Precomputed products `w_beta_a[rho] * gamma^(i+1)` flattened as `i*D + rho`.
-    ///
-    /// This lets NC accumulation multiply each polynomial coefficient once (by `w*gamma`) and
-    /// avoids a second pass that would otherwise scale by `w_beta_a` per coefficient.
-    w_gamma_nc: Vec<K>,
-
     /// Combined Eval block table over rows (already summed over α' and (i,j) coefficients).
     /// When present, Eval contribution is: `eq_r_inputs(r') * gamma_to_k * eval_tbl(r')`.
     eval_tbl: Option<Vec<K>>,
     gamma_to_k: K,
 
     b: u32,
-    /// Precomputed squares t^2 for the symmetric range polynomial factors (t=1..b-1).
-    range_t_sq: Vec<K>,
-
     /// True if all streamed tables are still in the base-field embedding (imag=0).
     ///
     /// When this holds and evaluation points are also base-field, we can evaluate the hot
@@ -474,7 +774,6 @@ impl RowStreamState {
         ell_n: usize,
         mcs_witnesses: &[McsWitness<Ff>],
         me_witnesses: &[Mat<Ff>],
-        include_nc: bool,
         r_inputs: Option<&[K]>,
         sparse: &SparseCache<Ff>,
     ) -> Self
@@ -569,7 +868,7 @@ impl RowStreamState {
             .collect();
         let k_total = all_witnesses.len();
 
-        // NC: w_beta_a weights and gamma coefficients.
+        // Sanity: challenge vectors for Ajtai rounds must match ell_d.
         if ch.beta_a.len() != ell_d || ch.alpha.len() != ell_d {
             panic!(
                 "Challenge length mismatch: alpha.len()={}, beta_a.len()={}, ell_d={ell_d}",
@@ -577,24 +876,6 @@ impl RowStreamState {
                 ch.beta_a.len()
             );
         }
-        let w_gamma_nc = if include_nc {
-            let w_beta_a: Vec<K> = (0..D)
-                .map(|rho| eq_points_bool_mask(rho, &ch.beta_a))
-                .collect();
-            let mut w_gamma_nc = vec![K::ZERO; k_total * D];
-            let mut g = ch.gamma;
-            for i in 0..k_total {
-                let base = i * D;
-                for rho in 0..D {
-                    w_gamma_nc[base + rho] = w_beta_a[rho] * g;
-                }
-                g *= ch.gamma;
-            }
-            w_gamma_nc
-        } else {
-            Vec::new()
-        };
-
         // Build z1 = recomposition of Z_1 (first MCS witness).
         let mut z1: Vec<K> = vec![K::ZERO; s.m];
         {
@@ -671,36 +952,6 @@ impl RowStreamState {
             }
             f_var_tables.push(out);
         }
-
-        // NC tables: digits at each boolean row index (legacy, only needed when NC is enabled).
-        let nc_tables = if include_nc {
-            let mut nc_tables: Vec<Vec<[K; D]>> = Vec::with_capacity(k_total);
-            for &Zi in &all_witnesses {
-                if Zi.rows() != D || Zi.cols() != s.m {
-                    panic!(
-                        "Z shape mismatch: expected {}×{}, got {}×{}",
-                        D,
-                        s.m,
-                        Zi.rows(),
-                        Zi.cols()
-                    );
-                }
-                let mut tbl = vec![[K::ZERO; D]; n_pad];
-                // Legacy NC table indexes witness columns by row-domain boolean index `row`.
-                // This is only sound under the identity-first square normal form (m == n).
-                let cap = core::cmp::min(core::cmp::min(n_eff, n_pad), s.m);
-                for rho in 0..D {
-                    let z_row = Zi.row(rho);
-                    for row in 0..cap {
-                        tbl[row][rho] = K::from(z_row[row]);
-                    }
-                }
-                nc_tables.push(tbl);
-            }
-            nc_tables
-        } else {
-            Vec::new()
-        };
 
         // Eval table (optional): only when both (a) there are carried witnesses, and (b) r_inputs exist.
         let mut gamma_to_k = K::ONE;
@@ -793,15 +1044,6 @@ impl RowStreamState {
             None
         };
 
-        let mut range_t_sq = Vec::new();
-        if include_nc && b > 1 {
-            range_t_sq.reserve((b - 1) as usize);
-            for t in 1..(b as i64) {
-                let tt = Ff::from_i64(t);
-                range_t_sq.push(K::from(tt * tt));
-            }
-        }
-
         Self {
             cur_len: n_pad,
             eq_beta_r_tbl,
@@ -809,12 +1051,9 @@ impl RowStreamState {
             z1,
             f_var_tables,
             f_terms,
-            nc_tables,
-            w_gamma_nc,
             eval_tbl,
             gamma_to_k,
             b,
-            range_t_sq,
             all_base,
         }
     }
@@ -832,21 +1071,6 @@ impl RowStreamState {
     }
 
     #[inline]
-    fn fold_digits_table_inplace(table: &mut Vec<[K; D]>, r: K) {
-        debug_assert!(table.len() >= 2 && table.len() % 2 == 0);
-        let half = table.len() / 2;
-        for i in 0..half {
-            let base = 2 * i;
-            for rho in 0..D {
-                let lo = table[base][rho];
-                let hi = table[base + 1][rho];
-                table[i][rho] = lo + (hi - lo) * r;
-            }
-        }
-        table.truncate(half);
-    }
-
-    #[inline]
     fn fold_table_inplace_base(table: &mut Vec<K>, r: Fq) {
         debug_assert!(table.len() >= 2 && table.len() % 2 == 0);
         let half = table.len() / 2;
@@ -854,21 +1078,6 @@ impl RowStreamState {
             let lo = table[2 * i].real();
             let hi = table[2 * i + 1].real();
             table[i] = K::from(lo + (hi - lo) * r);
-        }
-        table.truncate(half);
-    }
-
-    #[inline]
-    fn fold_digits_table_inplace_base(table: &mut Vec<[K; D]>, r: Fq) {
-        debug_assert!(table.len() >= 2 && table.len() % 2 == 0);
-        let half = table.len() / 2;
-        for i in 0..half {
-            let base = 2 * i;
-            for rho in 0..D {
-                let lo = table[base][rho].real();
-                let hi = table[base + 1][rho].real();
-                table[i][rho] = K::from(lo + (hi - lo) * r);
-            }
         }
         table.truncate(half);
     }
@@ -883,9 +1092,6 @@ impl RowStreamState {
             for tbl in self.f_var_tables.iter_mut() {
                 Self::fold_table_inplace_base(tbl, r0);
             }
-            for tbl in self.nc_tables.iter_mut() {
-                Self::fold_digits_table_inplace_base(tbl, r0);
-            }
             if let Some(tbl) = self.eval_tbl.as_mut() {
                 Self::fold_table_inplace_base(tbl, r0);
             }
@@ -897,9 +1103,6 @@ impl RowStreamState {
             }
             for tbl in self.f_var_tables.iter_mut() {
                 Self::fold_table_inplace(tbl, r);
-            }
-            for tbl in self.nc_tables.iter_mut() {
-                Self::fold_digits_table_inplace(tbl, r);
             }
             if let Some(tbl) = self.eval_tbl.as_mut() {
                 Self::fold_table_inplace(tbl, r);
@@ -934,7 +1137,6 @@ impl RowStreamState {
 
     fn evals_row_phase_b2_base(&self, tail_len: usize, xs: &[K]) -> Vec<K> {
         let xs_base: Vec<Fq> = xs.iter().map(|&x| x.real()).collect();
-        let three = Fq::from_u64(3);
 
         let f_max_term_deg: usize = self
             .f_terms
@@ -947,8 +1149,8 @@ impl RowStreamState {
             })
             .max()
             .unwrap_or(0);
-        // NC contributes degree 4 after multiplying by eq_beta_r(X).
-        let deg_max = core::cmp::max(4, f_max_term_deg + 1);
+        // eq_beta_r(X) adds one degree; Eval block is quadratic.
+        let deg_max = core::cmp::max(2, f_max_term_deg + 1);
 
         const PAR_THRESHOLD: usize = 1 << 14;
         let coeffs_seq = |tail_len: usize| -> Vec<Fq> {
@@ -980,43 +1182,6 @@ impl RowStreamState {
                         inner[i] += term_poly[i];
                     }
                 }
-
-                // NC: degree-3 in X before multiplying by eq_beta_r(X).
-                //
-                // Accumulate into locals to avoid repeated loads/stores to `inner[*]` in the hot rho loop.
-                let mut nc0 = Fq::ZERO;
-                let mut nc1 = Fq::ZERO;
-                let mut nc2 = Fq::ZERO;
-                let mut nc3 = Fq::ZERO;
-                for w_i in 0..self.nc_tables.len() {
-                    let lo = &self.nc_tables[w_i][idx];
-                    let hi = &self.nc_tables[w_i][idx + 1];
-                    let base = w_i * D;
-                    for rho in 0..D {
-                        let wg = self.w_gamma_nc[base + rho].real();
-                        let a = lo[rho].real();
-                        let b = hi[rho].real() - a;
-
-                        let a2 = a * a;
-                        let a3 = a2 * a;
-                        let b2 = b * b;
-                        let b3 = b2 * b;
-
-                        let t0 = a3 - a;
-                        let t1 = (a2 * b) * three - b;
-                        let t2 = (a * b2) * three;
-                        let t3 = b3;
-
-                        nc0 += wg * t0;
-                        nc1 += wg * t1;
-                        nc2 += wg * t2;
-                        nc3 += wg * t3;
-                    }
-                }
-                inner[0] += nc0;
-                inner[1] += nc1;
-                inner[2] += nc2;
-                inner[3] += nc3;
 
                 coeffs[0] += e0 * inner[0];
                 for d in 1..=deg_max {
@@ -1080,47 +1245,6 @@ impl RowStreamState {
                                     inner[i] += term_poly[i];
                                 }
                             }
-
-                            // NC: degree-3 in X before multiplying by eq_beta_r(X).
-                            //
-                            // Accumulate into locals to avoid repeated loads/stores to `inner[*]` in the hot rho loop.
-                            let mut nc0 = Fq::ZERO;
-                            let mut nc1 = Fq::ZERO;
-                            let mut nc2 = Fq::ZERO;
-                            let mut nc3 = Fq::ZERO;
-                            for w_i in 0..self.nc_tables.len() {
-                                let lo = &self.nc_tables[w_i][idx];
-                                let hi = &self.nc_tables[w_i][idx + 1];
-                                let base = w_i * D;
-                                for rho in 0..D {
-                                    let wg = self.w_gamma_nc[base + rho].real();
-
-                                    // y(X) = a + b·X
-                                    let a = lo[rho].real();
-                                    let b = hi[rho].real() - a;
-
-                                    // For b=2, N(y) = y(y^2-1) = y^3 - y.
-                                    // (a + bX)^3 - (a + bX)
-                                    let a2 = a * a;
-                                    let a3 = a2 * a;
-                                    let b2 = b * b;
-                                    let b3 = b2 * b;
-
-                                    let t0 = a3 - a;
-                                    let t1 = (a2 * b) * three - b;
-                                    let t2 = (a * b2) * three;
-                                    let t3 = b3;
-
-                                    nc0 += wg * t0;
-                                    nc1 += wg * t1;
-                                    nc2 += wg * t2;
-                                    nc3 += wg * t3;
-                                }
-                            }
-                            inner[0] += nc0;
-                            inner[1] += nc1;
-                            inner[2] += nc2;
-                            inner[3] += nc3;
 
                             // coeffs += eq_beta_r(X) * inner(X)
                             coeffs[0] += e0 * inner[0];
@@ -1173,10 +1297,6 @@ impl RowStreamState {
 
     fn evals_row_phase_b3_base(&self, tail_len: usize, xs: &[K]) -> Vec<K> {
         let xs_base: Vec<Fq> = xs.iter().map(|&x| x.real()).collect();
-        let four = Fq::from_u64(4);
-        let five = Fq::from_u64(5);
-        let ten = Fq::from_u64(10);
-        let fifteen = Fq::from_u64(15);
 
         let f_max_term_deg: usize = self
             .f_terms
@@ -1189,8 +1309,8 @@ impl RowStreamState {
             })
             .max()
             .unwrap_or(0);
-        // NC contributes degree 6 after multiplying by eq_beta_r(X).
-        let deg_max = core::cmp::max(6, f_max_term_deg + 1);
+        // eq_beta_r(X) adds one degree; Eval block is quadratic.
+        let deg_max = core::cmp::max(2, f_max_term_deg + 1);
 
         const PAR_THRESHOLD: usize = 1 << 14;
         let coeffs_seq = |tail_len: usize| -> Vec<Fq> {
@@ -1222,63 +1342,6 @@ impl RowStreamState {
                         inner[i] += term_poly[i];
                     }
                 }
-
-                // NC: degree-5 in X before multiplying by eq_beta_r(X).
-                //
-                // Accumulate into locals to avoid repeated loads/stores to `inner[*]` in the hot rho loop.
-                let mut nc0 = Fq::ZERO;
-                let mut nc1 = Fq::ZERO;
-                let mut nc2 = Fq::ZERO;
-                let mut nc3 = Fq::ZERO;
-                let mut nc4 = Fq::ZERO;
-                let mut nc5 = Fq::ZERO;
-                for w_i in 0..self.nc_tables.len() {
-                    let lo = &self.nc_tables[w_i][idx];
-                    let hi = &self.nc_tables[w_i][idx + 1];
-                    let base = w_i * D;
-
-                    for rho in 0..D {
-                        let wg = self.w_gamma_nc[base + rho].real();
-                        let a = lo[rho].real();
-                        let b = hi[rho].real() - a;
-
-                        let a2 = a * a;
-                        let a3 = a2 * a;
-                        let a4 = a2 * a2;
-                        let a5 = a4 * a;
-
-                        let b2 = b * b;
-                        let b3 = b2 * b;
-                        let b4 = b2 * b2;
-                        let b5 = b4 * b;
-
-                        let t0 = a5 - a3 * five + a * four;
-                        let p1 = a4 * five - a2 * fifteen + four;
-                        let t1 = b * p1;
-
-                        let p2 = a3 * ten - a * fifteen;
-                        let t2 = b2 * p2;
-
-                        let p3 = a2 * ten - five;
-                        let t3 = b3 * p3;
-
-                        let t4 = b4 * (a * five);
-                        let t5 = b5;
-
-                        nc0 += wg * t0;
-                        nc1 += wg * t1;
-                        nc2 += wg * t2;
-                        nc3 += wg * t3;
-                        nc4 += wg * t4;
-                        nc5 += wg * t5;
-                    }
-                }
-                inner[0] += nc0;
-                inner[1] += nc1;
-                inner[2] += nc2;
-                inner[3] += nc3;
-                inner[4] += nc4;
-                inner[5] += nc5;
 
                 coeffs[0] += e0 * inner[0];
                 for d in 1..=deg_max {
@@ -1342,74 +1405,6 @@ impl RowStreamState {
                                     inner[i] += term_poly[i];
                                 }
                             }
-
-                            // NC: degree-5 in X before multiplying by eq_beta_r(X).
-                            //
-                            // Accumulate into locals to avoid repeated loads/stores to `inner[*]` in the hot rho loop.
-                            let mut nc0 = Fq::ZERO;
-                            let mut nc1 = Fq::ZERO;
-                            let mut nc2 = Fq::ZERO;
-                            let mut nc3 = Fq::ZERO;
-                            let mut nc4 = Fq::ZERO;
-                            let mut nc5 = Fq::ZERO;
-                            for w_i in 0..self.nc_tables.len() {
-                                let lo = &self.nc_tables[w_i][idx];
-                                let hi = &self.nc_tables[w_i][idx + 1];
-                                let base = w_i * D;
-
-                                for rho in 0..D {
-                                    let wg = self.w_gamma_nc[base + rho].real();
-
-                                    // y(X) = a + b·X
-                                    let a = lo[rho].real();
-                                    let b = hi[rho].real() - a;
-
-                                    // Expand N(a + bX) = (a+bX)^5 - 5(a+bX)^3 + 4(a+bX).
-                                    //
-                                    // Coeffs:
-                                    // X^0: a^5 - 5a^3 + 4a
-                                    // X^1: b(5a^4 - 15a^2 + 4)
-                                    // X^2: b^2(10a^3 - 15a)
-                                    // X^3: b^3(10a^2 - 5)
-                                    // X^4: 5ab^4
-                                    // X^5: b^5
-                                    let a2 = a * a;
-                                    let a3 = a2 * a;
-                                    let a4 = a2 * a2;
-                                    let a5 = a4 * a;
-
-                                    let b2 = b * b;
-                                    let b3 = b2 * b;
-                                    let b4 = b2 * b2;
-                                    let b5 = b4 * b;
-
-                                    let t0 = a5 - a3 * five + a * four;
-                                    let p1 = a4 * five - a2 * fifteen + four;
-                                    let t1 = b * p1;
-
-                                    let p2 = a3 * ten - a * fifteen;
-                                    let t2 = b2 * p2;
-
-                                    let p3 = a2 * ten - five;
-                                    let t3 = b3 * p3;
-
-                                    let t4 = b4 * (a * five);
-                                    let t5 = b5;
-
-                                    nc0 += wg * t0;
-                                    nc1 += wg * t1;
-                                    nc2 += wg * t2;
-                                    nc3 += wg * t3;
-                                    nc4 += wg * t4;
-                                    nc5 += wg * t5;
-                                }
-                            }
-                            inner[0] += nc0;
-                            inner[1] += nc1;
-                            inner[2] += nc2;
-                            inner[3] += nc3;
-                            inner[4] += nc4;
-                            inner[5] += nc5;
 
                             // coeffs += eq_beta_r(X) * inner(X)
                             coeffs[0] += e0 * inner[0];
@@ -1490,8 +1485,6 @@ impl RowStreamState {
                 return self.evals_row_phase_b2_base(tail_len, xs);
             }
 
-            let three = K::from(Ff::from_u64(3));
-
             let f_max_term_deg: usize = self
                 .f_terms
                 .iter()
@@ -1503,8 +1496,8 @@ impl RowStreamState {
                 })
                 .max()
                 .unwrap_or(0);
-            // NC contributes degree 4 after multiplying by eq_beta_r(X).
-            let deg_max = core::cmp::max(4, f_max_term_deg + 1);
+            // eq_beta_r(X) adds one degree; Eval block is quadratic.
+            let deg_max = core::cmp::max(2, f_max_term_deg + 1);
 
             let mut coeffs = vec![K::ZERO; deg_max + 1];
             let mut inner = vec![K::ZERO; deg_max + 1];
@@ -1515,7 +1508,7 @@ impl RowStreamState {
                 let e0 = self.eq_beta_r_tbl[2 * t];
                 let e1 = self.eq_beta_r_tbl[2 * t + 1] - e0;
 
-                // inner(X) = f_prime(X) + nc_total(X)
+                // inner(X) = f_prime(X)
                 inner.fill(K::ZERO);
 
                 // f_prime(X): expand sparse polynomial with affine substitutions.
@@ -1535,41 +1528,6 @@ impl RowStreamState {
                     }
                     for i in 0..=core::cmp::min(current_deg, deg_max) {
                         inner[i] += term_poly[i];
-                    }
-                }
-
-                // NC: degree-3 in X before multiplying by eq_beta_r(X).
-                for w_i in 0..self.nc_tables.len() {
-                    let base = w_i * D;
-                    for rho in 0..D {
-                        let wg = self.w_gamma_nc[base + rho];
-
-                        // y(X) = a + b·X
-                        let a = self.nc_tables[w_i][2 * t][rho];
-                        let b = self.nc_tables[w_i][2 * t + 1][rho] - a;
-
-                        // For b=2, N(y) = y(y^2-1) = y^3 - y.
-                        let a2 = a * a;
-                        let a3 = a2 * a;
-                        let b2 = b * b;
-                        let b3 = b2 * b;
-
-                        // (a + bX)^3 - (a + bX)
-                        let t0 = a3 - a;
-                        let t1 = (a2 * b).scale_base_k(three) - b;
-                        let t2 = (a * b2).scale_base_k(three);
-                        let t3 = b3;
-
-                        inner[0] += wg * t0;
-                        if deg_max >= 1 {
-                            inner[1] += wg * t1;
-                        }
-                        if deg_max >= 2 {
-                            inner[2] += wg * t2;
-                        }
-                        if deg_max >= 3 {
-                            inner[3] += wg * t3;
-                        }
                     }
                 }
 
@@ -1616,11 +1574,6 @@ impl RowStreamState {
                 return self.evals_row_phase_b3_base(tail_len, xs);
             }
 
-            let four = K::from(Ff::from_u64(4));
-            let five = K::from(Ff::from_u64(5));
-            let ten = K::from(Ff::from_u64(10));
-            let fifteen = K::from(Ff::from_u64(15));
-
             let f_max_term_deg: usize = self
                 .f_terms
                 .iter()
@@ -1632,8 +1585,8 @@ impl RowStreamState {
                 })
                 .max()
                 .unwrap_or(0);
-            // NC contributes degree 6 after multiplying by eq_beta_r(X).
-            let deg_max = core::cmp::max(6, f_max_term_deg + 1);
+            // eq_beta_r(X) adds one degree; Eval block is quadratic.
+            let deg_max = core::cmp::max(2, f_max_term_deg + 1);
 
             let coeffs = {
                 #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
@@ -1653,7 +1606,7 @@ impl RowStreamState {
                                 let e0 = self.eq_beta_r_tbl[2 * t];
                                 let e1 = self.eq_beta_r_tbl[2 * t + 1] - e0;
 
-                                // inner(X) = f_prime(X) + nc_total(X)
+                                // inner(X) = f_prime(X)
                                 inner.fill(K::ZERO);
 
                                 // f_prime(X): expand sparse polynomial with affine substitutions.
@@ -1673,60 +1626,6 @@ impl RowStreamState {
                                     }
                                     for i in 0..=core::cmp::min(current_deg, deg_max) {
                                         inner[i] += term_poly[i];
-                                    }
-                                }
-
-                                // NC: degree-5 in X before multiplying by eq_beta_r(X).
-                                for w_i in 0..self.nc_tables.len() {
-                                    let lo = &self.nc_tables[w_i][2 * t];
-                                    let hi = &self.nc_tables[w_i][2 * t + 1];
-                                    let base = w_i * D;
-
-                                    for rho in 0..D {
-                                        let wg = self.w_gamma_nc[base + rho];
-
-                                        // y(X) = a + b·X
-                                        let a = lo[rho];
-                                        let b = hi[rho] - a;
-
-                                        // Expand N(a + bX) = (a+bX)^5 - 5(a+bX)^3 + 4(a+bX).
-                                        //
-                                        // Coeffs:
-                                        // X^0: a^5 - 5a^3 + 4a
-                                        // X^1: b(5a^4 - 15a^2 + 4)
-                                        // X^2: b^2(10a^3 - 15a)
-                                        // X^3: b^3(10a^2 - 5)
-                                        // X^4: 5ab^4
-                                        // X^5: b^5
-                                        let a2 = a * a;
-                                        let a3 = a2 * a;
-                                        let a4 = a2 * a2;
-                                        let a5 = a4 * a;
-
-                                        let b2 = b * b;
-                                        let b3 = b2 * b;
-                                        let b4 = b2 * b2;
-                                        let b5 = b4 * b;
-
-                                        let t0 = a5 - a3.scale_base_k(five) + a.scale_base_k(four);
-                                        let p1 = a4.scale_base_k(five) - a2.scale_base_k(fifteen) + four;
-                                        let t1 = b * p1;
-
-                                        let p2 = a3.scale_base_k(ten) - a.scale_base_k(fifteen);
-                                        let t2 = b2 * p2;
-
-                                        let p3 = a2.scale_base_k(ten) - five;
-                                        let t3 = b3 * p3;
-
-                                        let t4 = b4 * a.scale_base_k(five);
-                                        let t5 = b5;
-
-                                        inner[0] += wg * t0;
-                                        inner[1] += wg * t1;
-                                        inner[2] += wg * t2;
-                                        inner[3] += wg * t3;
-                                        inner[4] += wg * t4;
-                                        inner[5] += wg * t5;
                                     }
                                 }
 
@@ -1776,7 +1675,7 @@ impl RowStreamState {
                         let e0 = self.eq_beta_r_tbl[2 * t];
                         let e1 = self.eq_beta_r_tbl[2 * t + 1] - e0;
 
-                        // inner(X) = f_prime(X) + nc_total(X)
+                        // inner(X) = f_prime(X)
                         inner.fill(K::ZERO);
 
                         // f_prime(X): expand sparse polynomial with affine substitutions.
@@ -1796,60 +1695,6 @@ impl RowStreamState {
                             }
                             for i in 0..=core::cmp::min(current_deg, deg_max) {
                                 inner[i] += term_poly[i];
-                            }
-                        }
-
-                        // NC: degree-5 in X before multiplying by eq_beta_r(X).
-                        for w_i in 0..self.nc_tables.len() {
-                            let lo = &self.nc_tables[w_i][2 * t];
-                            let hi = &self.nc_tables[w_i][2 * t + 1];
-                            let base = w_i * D;
-
-                            for rho in 0..D {
-                                let wg = self.w_gamma_nc[base + rho];
-
-                                // y(X) = a + b·X
-                                let a = lo[rho];
-                                let b = hi[rho] - a;
-
-                                // Expand N(a + bX) = (a+bX)^5 - 5(a+bX)^3 + 4(a+bX).
-                                //
-                                // Coeffs:
-                                // X^0: a^5 - 5a^3 + 4a
-                                // X^1: b(5a^4 - 15a^2 + 4)
-                                // X^2: b^2(10a^3 - 15a)
-                                // X^3: b^3(10a^2 - 5)
-                                // X^4: 5ab^4
-                                // X^5: b^5
-                                let a2 = a * a;
-                                let a3 = a2 * a;
-                                let a4 = a2 * a2;
-                                let a5 = a4 * a;
-
-                                let b2 = b * b;
-                                let b3 = b2 * b;
-                                let b4 = b2 * b2;
-                                let b5 = b4 * b;
-
-                                let t0 = a5 - a3.scale_base_k(five) + a.scale_base_k(four);
-                                let p1 = a4.scale_base_k(five) - a2.scale_base_k(fifteen) + four;
-                                let t1 = b * p1;
-
-                                let p2 = a3.scale_base_k(ten) - a.scale_base_k(fifteen);
-                                let t2 = b2 * p2;
-
-                                let p3 = a2.scale_base_k(ten) - five;
-                                let t3 = b3 * p3;
-
-                                let t4 = b4 * a.scale_base_k(five);
-                                let t5 = b5;
-
-                                inner[0] += wg * t0;
-                                inner[1] += wg * t1;
-                                inner[2] += wg * t2;
-                                inner[3] += wg * t3;
-                                inner[4] += wg * t4;
-                                inner[5] += wg * t5;
                             }
                         }
 
@@ -1922,21 +1767,7 @@ impl RowStreamState {
                         f_prime += acc;
                     }
 
-                    // NC: Σ_i Σ_rho (w_beta_a[rho]·gamma_i) · N_i(y_i_rho)
-                    let mut nc_total = K::ZERO;
-                    for w_i in 0..self.nc_tables.len() {
-                        let base = w_i * D;
-                        for rho in 0..D {
-                            let wg = self.w_gamma_nc[base + rho];
-                            let lo = self.nc_tables[w_i][2 * t][rho];
-                            let hi = self.nc_tables[w_i][2 * t + 1][rho];
-                            let y = one_minus * lo + x * hi;
-                            let ni = range_product_cached(y, &self.range_t_sq);
-                            nc_total += wg * ni;
-                        }
-                    }
-
-                    let mut out = eq_beta_r * (f_prime + nc_total);
+                    let mut out = eq_beta_r * f_prime;
 
                     // Eval: eq_r_inputs(r') * gamma_to_k * eval_tbl(r')
                     if let (Some(eq_tbl), Some(eval_tbl)) = (self.eq_r_inputs_tbl.as_ref(), self.eval_tbl.as_ref()) {
@@ -2158,7 +1989,6 @@ where
             ell_n,
             mcs_witnesses,
             me_witnesses,
-            false,
             r_inputs,
             sparse.as_ref(),
         );

@@ -6,6 +6,7 @@ mod event_table_packed;
 use std::collections::BTreeMap;
 use std::marker::PhantomData;
 
+use crate::suite::{default_mixers, setup_ajtai_committer};
 use neo_ajtai::Commitment as Cmt;
 use neo_ccs::relations::{McsInstance, McsWitness};
 use neo_ccs::traits::SModuleHomomorphism;
@@ -23,7 +24,6 @@ use neo_params::NeoParams;
 use neo_transcript::Poseidon2Transcript;
 use neo_transcript::Transcript;
 use neo_vm_trace::trace_program;
-use crate::suite::{default_mixers, setup_ajtai_committer};
 
 #[test]
 fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_event_table_packed_prove_verify() {

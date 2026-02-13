@@ -18,7 +18,7 @@ fn shared_cpu_bus_copyout_indices_match_bus_layout() {
     let step0_inst = &fx.steps_instance[0];
     let ccs_out0 = &proof.steps[0].fold.ccs_out[0];
 
-    let s0 = fx.ccs.ensure_identity_first().expect("identity-first");
+    let s0 = fx.ccs.clone();
     let base_t = s0.t();
 
     let bus = build_bus_layout_for_instances(

@@ -194,11 +194,7 @@ fn push_tier21_value_semantics(
         vec![(tr(l.ram_rv_q16, i), F::ONE)],
     ));
     for &bit_col in &l.ram_rv_low_bit {
-        cons.push(Constraint::terms(
-            ram_has_read,
-            true,
-            vec![(tr(bit_col, i), F::ONE)],
-        ));
+        cons.push(Constraint::terms(ram_has_read, true, vec![(tr(bit_col, i), F::ONE)]));
     }
 
     // Load/store sub-op decode.
@@ -281,12 +277,18 @@ fn push_tier21_value_semantics(
     cons.push(Constraint::terms(
         f3(0),
         false,
-        vec![(tr(l.alu_reg_table_delta, i), F::ONE), (tr(l.funct7_bit[5], i), -F::ONE)],
+        vec![
+            (tr(l.alu_reg_table_delta, i), F::ONE),
+            (tr(l.funct7_bit[5], i), -F::ONE),
+        ],
     ));
     cons.push(Constraint::terms(
         f3(5),
         false,
-        vec![(tr(l.alu_reg_table_delta, i), F::ONE), (tr(l.funct7_bit[5], i), -F::ONE)],
+        vec![
+            (tr(l.alu_reg_table_delta, i), F::ONE),
+            (tr(l.funct7_bit[5], i), -F::ONE),
+        ],
     ));
     for &k in &[1usize, 2, 3, 4, 6, 7] {
         cons.push(Constraint::terms(
@@ -298,7 +300,10 @@ fn push_tier21_value_semantics(
     cons.push(Constraint::terms(
         f3(5),
         false,
-        vec![(tr(l.alu_imm_table_delta, i), F::ONE), (tr(l.funct7_bit[5], i), -F::ONE)],
+        vec![
+            (tr(l.alu_imm_table_delta, i), F::ONE),
+            (tr(l.funct7_bit[5], i), -F::ONE),
+        ],
     ));
     for &k in &[0usize, 1, 2, 3, 4, 6, 7] {
         cons.push(Constraint::terms(
@@ -1004,14 +1009,22 @@ pub fn build_rv32_trace_wiring_ccs(layout: &Rv32TraceCcsLayout) -> Result<CcsStr
                 tr(l.op_amo, i),
             ],
             false,
-            vec![(tr(l.pc_after, i), F::ONE), (tr(l.pc_before, i), -F::ONE), (one, -F::from_u64(4))],
+            vec![
+                (tr(l.pc_after, i), F::ONE),
+                (tr(l.pc_before, i), -F::ONE),
+                (one, -F::from_u64(4)),
+            ],
         ));
 
         // JAL/JALR/BRANCH control-flow targets.
         cons.push(Constraint::terms(
             tr(l.op_jal, i),
             false,
-            vec![(tr(l.pc_after, i), F::ONE), (tr(l.pc_before, i), -F::ONE), (tr(l.imm_j, i), -F::ONE)],
+            vec![
+                (tr(l.pc_after, i), F::ONE),
+                (tr(l.pc_before, i), -F::ONE),
+                (tr(l.imm_j, i), -F::ONE),
+            ],
         ));
         // JALR target uses 4-byte alignment in this VM profile:
         // pc_after + drop_bit0 + 2*drop_bit1 == rs1_val + imm_i
@@ -1044,7 +1057,10 @@ pub fn build_rv32_trace_wiring_ccs(layout: &Rv32TraceCcsLayout) -> Result<CcsStr
         cons.push(Constraint::terms(
             tr(l.op_branch, i),
             false,
-            vec![(tr(l.branch_invert_shout, i), F::ONE), (tr(l.funct3_bit[0], i), -F::ONE)],
+            vec![
+                (tr(l.branch_invert_shout, i), F::ONE),
+                (tr(l.funct3_bit[0], i), -F::ONE),
+            ],
         ));
         // Valid branch funct3 set: disallow 010/011 via b1 <= b2.
         cons.push(Constraint::terms(
@@ -1216,12 +1232,20 @@ pub fn build_rv32_trace_wiring_ccs(layout: &Rv32TraceCcsLayout) -> Result<CcsStr
         cons.push(Constraint::terms(
             tr(l.op_load, i),
             false,
-            vec![(tr(l.ram_addr, i), F::ONE), (tr(l.rs1_val, i), -F::ONE), (tr(l.imm_i, i), -F::ONE)],
+            vec![
+                (tr(l.ram_addr, i), F::ONE),
+                (tr(l.rs1_val, i), -F::ONE),
+                (tr(l.imm_i, i), -F::ONE),
+            ],
         ));
         cons.push(Constraint::terms(
             tr(l.op_store, i),
             false,
-            vec![(tr(l.ram_addr, i), F::ONE), (tr(l.rs1_val, i), -F::ONE), (tr(l.imm_s, i), -F::ONE)],
+            vec![
+                (tr(l.ram_addr, i), F::ONE),
+                (tr(l.rs1_val, i), -F::ONE),
+                (tr(l.imm_s, i), -F::ONE),
+            ],
         ));
 
         // RAM class policy.
@@ -1285,7 +1309,12 @@ pub fn build_rv32_trace_wiring_ccs(layout: &Rv32TraceCcsLayout) -> Result<CcsStr
 
         // Non-writeback classes must not assert rd_has_write.
         cons.push(Constraint::terms_or(
-            &[tr(l.op_branch, i), tr(l.op_store, i), tr(l.op_misc_mem, i), tr(l.op_system, i)],
+            &[
+                tr(l.op_branch, i),
+                tr(l.op_store, i),
+                tr(l.op_misc_mem, i),
+                tr(l.op_system, i),
+            ],
             false,
             vec![(rd_has_write, F::ONE)],
         ));
@@ -1303,26 +1332,14 @@ pub fn build_rv32_trace_wiring_ccs(layout: &Rv32TraceCcsLayout) -> Result<CcsStr
         );
 
         // Bind class+write helper flags.
-        cons.push(Constraint::mul(
-            tr(l.op_lui, i),
-            rd_has_write,
-            tr(l.op_lui_write, i),
-        ));
+        cons.push(Constraint::mul(tr(l.op_lui, i), rd_has_write, tr(l.op_lui_write, i)));
         cons.push(Constraint::mul(
             tr(l.op_auipc, i),
             rd_has_write,
             tr(l.op_auipc_write, i),
         ));
-        cons.push(Constraint::mul(
-            tr(l.op_jal, i),
-            rd_has_write,
-            tr(l.op_jal_write, i),
-        ));
-        cons.push(Constraint::mul(
-            tr(l.op_jalr, i),
-            rd_has_write,
-            tr(l.op_jalr_write, i),
-        ));
+        cons.push(Constraint::mul(tr(l.op_jal, i), rd_has_write, tr(l.op_jal_write, i)));
+        cons.push(Constraint::mul(tr(l.op_jalr, i), rd_has_write, tr(l.op_jalr_write, i)));
 
         // rd_is_zero prefix products.
         //
@@ -1411,12 +1428,20 @@ pub fn build_rv32_trace_wiring_ccs(layout: &Rv32TraceCcsLayout) -> Result<CcsStr
         cons.push(Constraint::terms(
             tr(l.op_jal_write, i),
             false,
-            vec![(tr(l.rd_val, i), F::ONE), (tr(l.pc_before, i), -F::ONE), (one, -F::from_u64(4))],
+            vec![
+                (tr(l.rd_val, i), F::ONE),
+                (tr(l.pc_before, i), -F::ONE),
+                (one, -F::from_u64(4)),
+            ],
         ));
         cons.push(Constraint::terms(
             tr(l.op_jalr_write, i),
             false,
-            vec![(tr(l.rd_val, i), F::ONE), (tr(l.pc_before, i), -F::ONE), (one, -F::from_u64(4))],
+            vec![
+                (tr(l.rd_val, i), F::ONE),
+                (tr(l.pc_before, i), -F::ONE),
+                (one, -F::from_u64(4)),
+            ],
         ));
 
         // If rd_has_write==0, rd_addr and rd_val must be 0.

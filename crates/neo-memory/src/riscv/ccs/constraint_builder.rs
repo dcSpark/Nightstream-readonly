@@ -137,12 +137,7 @@ pub(super) fn build_r1cs_ccs(
         ],
     );
 
-    // Match `neo_ccs::r1cs_to_ccs`: insert identity-first only when square.
-    let (matrices, f) = if n == m {
-        (vec![CcsMatrix::Identity { n }, a, b, c], f_base.insert_var_at_front())
-    } else {
-        (vec![a, b, c], f_base)
-    };
+    let matrices = vec![a, b, c];
 
-    CcsStructure::new_sparse(matrices, f).map_err(|e| format!("RV32 B1 CCS: invalid structure: {e:?}"))
+    CcsStructure::new_sparse(matrices, f_base).map_err(|e| format!("RV32 B1 CCS: invalid structure: {e:?}"))
 }

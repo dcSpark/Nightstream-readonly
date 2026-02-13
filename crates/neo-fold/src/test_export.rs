@@ -199,8 +199,8 @@ fn build_step_ccs(
     matrix_b: &SparseMatrix,
     matrix_c: &SparseMatrix,
 ) -> CcsStructure<F> {
-    // Pad exported R1CS to square n×n (needed for Ajtai/NC identity-first semantics).
-    let n = num_constraints.max(num_variables);
+    let n = num_constraints;
+    let m = num_variables;
 
     let to_triplets = |m: &SparseMatrix| -> Vec<(usize, usize, F)> {
         m.entries
@@ -209,11 +209,11 @@ fn build_step_ccs(
             .collect()
     };
 
-    let a = CcsMatrix::Csc(CscMat::from_triplets(to_triplets(matrix_a), n, n));
-    let b = CcsMatrix::Csc(CscMat::from_triplets(to_triplets(matrix_b), n, n));
-    let c = CcsMatrix::Csc(CscMat::from_triplets(to_triplets(matrix_c), n, n));
+    let a = CcsMatrix::Csc(CscMat::from_triplets(to_triplets(matrix_a), n, m));
+    let b = CcsMatrix::Csc(CscMat::from_triplets(to_triplets(matrix_b), n, m));
+    let c = CcsMatrix::Csc(CscMat::from_triplets(to_triplets(matrix_c), n, m));
 
-    // R1CS → CCS embedding with identity-first form: M_0 = I_n, M_1=A, M_2=B, M_3=C.
+    // R1CS → CCS embedding: M_0=A, M_1=B, M_2=C.
     let f_base = SparsePoly::new(
         3,
         vec![
@@ -227,9 +227,7 @@ fn build_step_ccs(
             }, // -X3
         ],
     );
-    let f = f_base.insert_var_at_front();
-
-    CcsStructure::new_sparse(vec![CcsMatrix::Identity { n }, a, b, c], f).expect("valid R1CS→CCS structure")
+    CcsStructure::new_sparse(vec![a, b, c], f_base).expect("valid R1CS→CCS structure")
 }
 
 fn pad_witness_to_m(mut z: Vec<F>, m_target: usize) -> Vec<F> {

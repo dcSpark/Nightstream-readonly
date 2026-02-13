@@ -638,11 +638,7 @@ impl Rv32ExecRow {
                     let shout_id = RiscvShoutTables::new(/*xlen=*/ 32).opcode_to_id(*op);
                     let key = interleave_bits(rs1_val, rs2_val) as u64;
                     let value = compute_op(*op, rs1_val, rs2_val, /*xlen=*/ 32);
-                    shout_events.push(ShoutEvent {
-                        shout_id,
-                        key,
-                        value,
-                    });
+                    shout_events.push(ShoutEvent { shout_id, key, value });
                 }
             }
         }

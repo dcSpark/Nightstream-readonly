@@ -659,7 +659,7 @@ impl<F: Field> CpuConstraintBuilder<F> {
         let m = self.m;
         let num_constraints = self.constraints.len();
 
-        // We need n >= num_constraints for square CCS
+        // We need enough rows to place all generated constraints.
         if num_constraints > n {
             return Err(format!(
                 "too many constraints ({}) for CCS with n={}",
@@ -700,40 +700,21 @@ impl<F: Field> CpuConstraintBuilder<F> {
         let b = Mat::from_row_major(n, m, b_data);
         let c = Mat::from_row_major(n, m, c_data);
 
-        // Convert to CCS: f(x1, x2, x3) = x1 * x2 - x3
-        // For identity-first CCS (square), we add I_n as M_0
-        if n == m {
-            let i_n = Mat::identity(n);
-            let f = SparsePoly::new(
-                4,
-                vec![
-                    Term {
-                        coeff: F::ONE,
-                        exps: vec![0, 1, 1, 0], // x1 * x2
-                    },
-                    Term {
-                        coeff: -F::ONE,
-                        exps: vec![0, 0, 0, 1], // -x3
-                    },
-                ],
-            );
-            CcsStructure::new(vec![i_n, a, b, c], f).map_err(|e| format!("failed to create CCS: {:?}", e))
-        } else {
-            let f = SparsePoly::new(
-                3,
-                vec![
-                    Term {
-                        coeff: F::ONE,
-                        exps: vec![1, 1, 0], // x1 * x2
-                    },
-                    Term {
-                        coeff: -F::ONE,
-                        exps: vec![0, 0, 1], // -x3
-                    },
-                ],
-            );
-            CcsStructure::new(vec![a, b, c], f).map_err(|e| format!("failed to create CCS: {:?}", e))
-        }
+        // Convert to CCS: f(x0, x1, x2) = x0 * x1 - x2
+        let f = SparsePoly::new(
+            3,
+            vec![
+                Term {
+                    coeff: F::ONE,
+                    exps: vec![1, 1, 0], // x0 * x1
+                },
+                Term {
+                    coeff: -F::ONE,
+                    exps: vec![0, 0, 1], // -x2
+                },
+            ],
+        );
+        CcsStructure::new(vec![a, b, c], f).map_err(|e| format!("failed to create CCS: {:?}", e))
     }
 
     /// Extend an existing CCS with bus binding constraints.

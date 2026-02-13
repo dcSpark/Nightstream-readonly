@@ -6,7 +6,7 @@ use neo_ajtai::Commitment as Cmt;
 use neo_ccs::relations::{McsInstance, McsWitness};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_fold::pi_ccs::FoldingMode;
-use neo_fold::shard::{fold_shard_prove};
+use neo_fold::shard::fold_shard_prove;
 use neo_math::F;
 use neo_memory::cpu::build_bus_layout_for_instances_with_shout_and_twist_lanes;
 use neo_memory::riscv::ccs::{build_rv32_trace_wiring_ccs, rv32_trace_ccs_witness_from_exec_table, Rv32TraceCcsLayout};

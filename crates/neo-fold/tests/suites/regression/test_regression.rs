@@ -69,8 +69,8 @@ fn test_regression_optimized_all_public_inputs() {
 
 #[test]
 fn test_regression_optimized_normalizes_identity_first() {
-    // Regression: session should accept a square CCS that is not identity-first
-    // by calling `ensure_identity_first()` internally.
+    // Regression: session should accept a square CCS that uses plain 3-matrix
+    // R1CS embedding (no identity-first matrix).
     let n_constraints = 3usize;
     let n_vars = 3usize;
 
@@ -108,5 +108,5 @@ fn test_regression_optimized_normalizes_identity_first() {
 
     let public_mcss = session.mcss_public();
     let ok = session.verify(&ccs, &public_mcss, &run).expect("verify");
-    assert!(ok, "verification should pass after identity-first normalization");
+    assert!(ok, "verification should pass for non-identity-first 3-matrix CCS");
 }

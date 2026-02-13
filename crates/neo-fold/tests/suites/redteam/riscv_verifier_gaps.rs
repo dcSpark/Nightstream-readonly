@@ -180,7 +180,8 @@ fn redteam_output_claim_variants_should_not_accept_without_sidecar_enforcement()
     );
 
     assert!(
-        run.verify_default_output_claim_in_bundle(&bad_bundle).is_err(),
+        run.verify_default_output_claim_in_bundle(&bad_bundle)
+            .is_err(),
         "default output-claim verification accepted a bundle with corrupted sidecar proofs"
     );
 
