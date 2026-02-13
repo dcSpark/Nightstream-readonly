@@ -33,6 +33,3 @@ pub mod riscv_shard;
 pub mod output_binding;
 
 mod shard_proof_types;
-
-/// Serde helpers for proof serialization (e.g. `&'static [u8]` labels).
-pub mod serde_helpers;

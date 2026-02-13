@@ -158,12 +158,7 @@ pub struct BatchedTimeProof {
     /// Degree bounds per participating oracle.
     pub degree_bounds: Vec<usize>,
     /// Domain-separation labels per participating oracle.
-    /// Serialized as `Vec<Vec<u8>>`; the `&'static` lifetime is restored via `labels_static()`.
-    #[serde(
-        serialize_with = "crate::serde_helpers::serialize_static_byte_slices",
-        deserialize_with = "crate::serde_helpers::deserialize_static_byte_slices"
-    )]
-    pub labels: Vec<&'static [u8]>,
+    pub labels: Vec<Vec<u8>>,
     /// Per-claim sum-check messages: `round_polys[claim][round] = coeffs`.
     pub round_polys: Vec<Vec<Vec<K>>>,
 }

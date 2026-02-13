@@ -509,6 +509,8 @@ impl Rv32B1 {
             session,
             ccs,
             _layout: layout,
+            mem_layouts,
+            statement_initial_mem: initial_mem,
             ram_num_bits: d_ram,
             output_claims: self.output_claims,
         })
@@ -718,6 +720,8 @@ pub struct Rv32B1Verifier {
     session: FoldingSession<AjtaiSModule>,
     ccs: CcsStructure<F>,
     _layout: Rv32B1Layout,
+    mem_layouts: HashMap<u32, PlainMemLayout>,
+    statement_initial_mem: HashMap<(u32, u64), F>,
     ram_num_bits: usize,
     output_claims: ProgramIO<F>,
 }
@@ -734,8 +738,15 @@ impl Rv32B1Verifier {
         proof: &ShardProof,
         steps_public: &[StepInstanceBundle<Cmt, F, K>],
     ) -> Result<bool, PiCcsError> {
+        rv32_b1_enforce_chunk0_mem_init_matches_statement(
+            &self.mem_layouts,
+            &self.statement_initial_mem,
+            steps_public,
+        )?;
+
         if self.output_claims.is_empty() {
-            self.session.verify_with_external_steps(&self.ccs, steps_public, proof)
+            self.session
+                .verify_with_external_steps(&self.ccs, steps_public, proof)
         } else {
             let ob_cfg = OutputBindingConfig::new(self.ram_num_bits, self.output_claims.clone());
             self.session
