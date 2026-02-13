@@ -301,6 +301,7 @@ pub struct Rv32B1 {
     chunk_size_auto: bool,
     max_steps: Option<usize>,
     trace_min_len: usize,
+    trace_chunk_rows: Option<usize>,
     mode: FoldingMode,
     shout_auto_minimal: bool,
     shout_ops: Option<HashSet<RiscvOpcode>>,
@@ -345,6 +346,7 @@ impl Rv32B1 {
             chunk_size_auto: false,
             max_steps: None,
             trace_min_len: 4,
+            trace_chunk_rows: None,
             mode: FoldingMode::Optimized,
             shout_auto_minimal: true,
             shout_ops: None,
@@ -401,6 +403,12 @@ impl Rv32B1 {
     /// Final `t` is `max(trace_len, trace_min_len)`.
     pub fn trace_min_len(mut self, min_trace_len: usize) -> Self {
         self.trace_min_len = min_trace_len.max(1);
+        self
+    }
+
+    /// Fixed rows per trace step when using `prove_trace_wiring()`.
+    pub fn trace_chunk_rows(mut self, chunk_rows: usize) -> Self {
+        self.trace_chunk_rows = Some(chunk_rows);
         self
     }
 
@@ -465,12 +473,15 @@ impl Rv32B1 {
     /// Prove/verify only the Tier 2.1 trace-wiring CCS (time-in-rows).
     ///
     /// `chunk_size`, `chunk_size_auto`, `ram_bytes`, and Shout-table selection knobs are ignored
-    /// by this mode.
+    /// by this mode; use `trace_chunk_rows` to control trace-step sizing.
     pub fn prove_trace_wiring(self) -> Result<crate::riscv_trace_shard::Rv32TraceWiringRun, PiCcsError> {
         let mut runner = crate::riscv_trace_shard::Rv32TraceWiring::from_rom(self.program_base, &self.program_bytes)
             .xlen(self.xlen)
             .mode(self.mode)
             .min_trace_len(self.trace_min_len);
+        if let Some(chunk_rows) = self.trace_chunk_rows {
+            runner = runner.chunk_rows(chunk_rows);
+        }
         match self.output_target {
             OutputTarget::Ram => {
                 for (addr, value) in self.output_claims.claims() {

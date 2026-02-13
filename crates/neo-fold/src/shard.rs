@@ -1623,7 +1623,9 @@ where
         ];
 
         let want_len = core_t + trace_cols_to_open.len();
-        if rlc_parent.y.len() == want_len && rlc_parent.y_scalars.len() == want_len {
+        let has_core_only = rlc_parent.y.len() == core_t && rlc_parent.y_scalars.len() == core_t;
+        let has_trace_openings = rlc_parent.y.len() == want_len && rlc_parent.y_scalars.len() == want_len;
+        if has_core_only || has_trace_openings {
             let m_in = rlc_parent.m_in;
             if m_in != 5 {
                 return Err(PiCcsError::InvalidInput(format!(
@@ -1676,6 +1678,14 @@ where
                     child,
                 )?;
             }
+        } else {
+            return Err(PiCcsError::InvalidInput(format!(
+                "trace linkage openings expect parent y/y_scalars len to be core_t={} or core_t+trace_openings={} (got y.len()={}, y_scalars.len()={})",
+                core_t,
+                want_len,
+                rlc_parent.y.len(),
+                rlc_parent.y_scalars.len(),
+            )));
         }
     }
 

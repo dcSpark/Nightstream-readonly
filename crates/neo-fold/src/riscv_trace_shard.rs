@@ -5,7 +5,7 @@
 //! - `neo_memory::riscv::ccs::trace` for fixed-width trace wiring CCS.
 //!
 //! The runner intentionally targets the current Tier 2.1 scope:
-//! - one trace-wiring CCS step with PROG/REG/RAM + shout sidecar instances,
+//! - fixed-width trace-wiring CCS steps with PROG/REG/RAM sidecar instances,
 //! - no decode/semantics sidecar proofs in this wrapper yet.
 
 #![allow(non_snake_case)]
@@ -17,7 +17,7 @@ use std::time::Duration;
 use crate::output_binding::OutputBindingConfig;
 use crate::pi_ccs::FoldingMode;
 use crate::session::FoldingSession;
-use crate::shard::ShardProof;
+use crate::shard::{ShardProof, StepLinkingConfig};
 use crate::PiCcsError;
 use neo_ajtai::AjtaiSModule;
 use neo_ccs::relations::{McsInstance, McsWitness};
@@ -73,10 +73,13 @@ fn elapsed_duration(start: TimePoint) -> Duration {
 }
 
 /// Hard instruction cap for trace-wiring mode (Option C).
-///
-/// Trace mode is currently single-shot (one CCS step), so longer executions should
-/// use the chunked RV32B1 path for true multi-step IVC.
 const DEFAULT_RV32_TRACE_MAX_STEPS: usize = 1 << 20;
+
+/// Default per-step trace rows for trace-mode IVC.
+///
+/// The full trace is split into fixed-size chunks of this row count (except when the whole
+/// trace is smaller), and those chunks are folded with step-linking.
+const DEFAULT_RV32_TRACE_CHUNK_ROWS: usize = 1 << 16;
 
 fn max_ram_addr_from_exec(exec: &Rv32ExecTable) -> Option<u64> {
     exec.rows
@@ -271,11 +274,142 @@ fn final_ram_state_dense(exec: &Rv32ExecTable, ram_init: &HashMap<u64, u64>, k: 
     Ok(out)
 }
 
+fn init_reg_state(reg_init: &HashMap<u64, u64>) -> Result<[u64; 32], PiCcsError> {
+    let mut regs = [0u64; 32];
+    for (&reg, &value) in reg_init {
+        if reg >= 32 {
+            return Err(PiCcsError::InvalidInput(format!(
+                "reg_init_u32: register index out of range: reg={reg} (expected 0..32)"
+            )));
+        }
+        if reg == 0 && value != 0 {
+            return Err(PiCcsError::InvalidInput(
+                "reg_init_u32: x0 must be 0 (non-zero init is forbidden)".into(),
+            ));
+        }
+        regs[reg as usize] = value as u32 as u64;
+    }
+    regs[0] = 0;
+    Ok(regs)
+}
+
+fn init_ram_state(ram_init: &HashMap<u64, u64>, ram_ell_addr: usize) -> Result<HashMap<u64, u64>, PiCcsError> {
+    if ram_ell_addr > 64 {
+        return Err(PiCcsError::InvalidInput(format!(
+            "RAM ell_addr too large for u64 addressing: ell_addr={ram_ell_addr}"
+        )));
+    }
+
+    let mut ram = HashMap::<u64, u64>::new();
+    for (&addr, &value) in ram_init {
+        if ram_ell_addr < 64 && (addr >> ram_ell_addr) != 0 {
+            return Err(PiCcsError::InvalidInput(format!(
+                "RAM init addr out of range for ell_addr={ram_ell_addr}: addr={addr}"
+            )));
+        }
+        let v = value as u32 as u64;
+        if v != 0 {
+            ram.insert(addr, v);
+        }
+    }
+    Ok(ram)
+}
+
+fn reg_state_to_sparse_map(regs: &[u64; 32]) -> HashMap<u64, u64> {
+    let mut out = HashMap::<u64, u64>::new();
+    for (idx, &value) in regs.iter().enumerate().skip(1) {
+        if value != 0 {
+            out.insert(idx as u64, value);
+        }
+    }
+    out
+}
+
+fn apply_exec_chunk_writes_to_state(
+    chunk: &Rv32ExecTable,
+    regs: &mut [u64; 32],
+    ram: &mut HashMap<u64, u64>,
+) -> Result<(), PiCcsError> {
+    for r in chunk.rows.iter().filter(|r| r.active) {
+        if let Some(w) = &r.reg_write_lane0 {
+            if w.addr == 0 {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "trace writes x0 at cycle {} which is invalid",
+                    r.cycle
+                )));
+            }
+            if w.addr >= 32 {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "trace register write addr out of range at cycle {}: addr={}",
+                    r.cycle, w.addr
+                )));
+            }
+            regs[w.addr as usize] = w.value as u32 as u64;
+            regs[0] = 0;
+        }
+
+        for e in &r.ram_events {
+            if e.kind != TwistOpKind::Write {
+                continue;
+            }
+            let value = e.value as u32 as u64;
+            if value == 0 {
+                ram.remove(&e.addr);
+            } else {
+                ram.insert(e.addr, value);
+            }
+        }
+    }
+    Ok(())
+}
+
+fn split_exec_into_fixed_chunks(exec: &Rv32ExecTable, chunk_rows: usize) -> Result<Vec<Rv32ExecTable>, PiCcsError> {
+    if chunk_rows == 0 {
+        return Err(PiCcsError::InvalidInput("trace chunk_rows must be non-zero".into()));
+    }
+    if exec.rows.is_empty() {
+        return Err(PiCcsError::InvalidInput("trace execution table is empty".into()));
+    }
+
+    if exec.rows.len() <= chunk_rows {
+        return Ok(vec![exec.clone()]);
+    }
+
+    let mut out = Vec::<Rv32ExecTable>::new();
+    let total = exec.rows.len();
+    let mut start = 0usize;
+    while start < total {
+        let end = (start + chunk_rows).min(total);
+        let mut rows = exec.rows[start..end].to_vec();
+        if rows.len() < chunk_rows {
+            let last = rows
+                .last()
+                .ok_or_else(|| PiCcsError::InvalidInput("trace chunk unexpectedly empty".into()))?
+                .clone();
+            let mut cycle = last.cycle;
+            let pad_pc = last.pc_after;
+            let pad_halted = last.halted;
+            while rows.len() < chunk_rows {
+                cycle = cycle
+                    .checked_add(1)
+                    .ok_or_else(|| PiCcsError::InvalidInput("cycle overflow while chunk-padding trace".into()))?;
+                rows.push(neo_memory::riscv::exec_table::Rv32ExecRow::inactive(
+                    cycle, pad_pc, pad_halted,
+                ));
+            }
+        }
+        out.push(Rv32ExecTable { rows });
+        start = end;
+    }
+
+    Ok(out)
+}
+
 /// High-level builder for proving/verifying the RV32 trace wiring CCS.
 ///
 /// This path is intentionally narrow:
 /// - builds a padded execution table,
-/// - proves one trace-wiring CCS step,
+/// - proves one or more trace-wiring CCS steps (IVC),
 /// - verifies the resulting shard proof.
 #[derive(Clone, Copy, Debug, Default)]
 enum OutputTarget {
@@ -291,6 +425,7 @@ pub struct Rv32TraceWiring {
     xlen: usize,
     max_steps: Option<usize>,
     min_trace_len: usize,
+    chunk_rows: Option<usize>,
     mode: FoldingMode,
     ram_init: HashMap<u64, u64>,
     reg_init: HashMap<u64, u64>,
@@ -307,6 +442,7 @@ impl Rv32TraceWiring {
             xlen: 32,
             max_steps: None,
             min_trace_len: 4,
+            chunk_rows: None,
             mode: FoldingMode::Optimized,
             ram_init: HashMap::new(),
             reg_init: HashMap::new(),
@@ -325,6 +461,15 @@ impl Rv32TraceWiring {
     /// Final `t` is `max(trace_len, min_trace_len)`.
     pub fn min_trace_len(mut self, min_trace_len: usize) -> Self {
         self.min_trace_len = min_trace_len.max(1);
+        self
+    }
+
+    /// Fixed rows per trace step for IVC folding.
+    ///
+    /// The trace is split into fixed-size chunks, each chunk is proven with the same step CCS,
+    /// and step-linking enforces `pc_final -> pc0`.
+    pub fn chunk_rows(mut self, chunk_rows: usize) -> Self {
+        self.chunk_rows = Some(chunk_rows);
         self
     }
 
@@ -398,7 +543,7 @@ impl Rv32TraceWiring {
         }
         if self.min_trace_len > DEFAULT_RV32_TRACE_MAX_STEPS {
             return Err(PiCcsError::InvalidInput(format!(
-                "min_trace_len={} exceeds trace-mode hard cap {} (single-shot mode). Use the chunked RV32B1 runner for longer executions.",
+                "min_trace_len={} exceeds trace-mode hard cap {}. Use the chunked RV32B1 runner for longer executions.",
                 self.min_trace_len, DEFAULT_RV32_TRACE_MAX_STEPS
             )));
         }
@@ -426,7 +571,7 @@ impl Rv32TraceWiring {
                 }
                 if n > DEFAULT_RV32_TRACE_MAX_STEPS {
                     return Err(PiCcsError::InvalidInput(format!(
-                        "max_steps={} exceeds trace-mode hard cap {} (single-shot mode). Use the chunked RV32B1 runner for longer executions.",
+                        "max_steps={} exceeds trace-mode hard cap {}. Use the chunked RV32B1 runner for longer executions.",
                         n, DEFAULT_RV32_TRACE_MAX_STEPS
                     )));
                 }
@@ -474,7 +619,7 @@ impl Rv32TraceWiring {
         let target_len = trace.steps.len().max(self.min_trace_len);
         if target_len > DEFAULT_RV32_TRACE_MAX_STEPS {
             return Err(PiCcsError::InvalidInput(format!(
-                "trace length {} exceeds trace-mode hard cap {} (single-shot mode). Use the chunked RV32B1 runner for longer executions.",
+                "trace length {} exceeds trace-mode hard cap {}. Use the chunked RV32B1 runner for longer executions.",
                 target_len, DEFAULT_RV32_TRACE_MAX_STEPS
             )));
         }
@@ -489,10 +634,15 @@ impl Rv32TraceWiring {
         exec.validate_inactive_rows_are_empty()
             .map_err(|e| PiCcsError::InvalidInput(format!("validate_inactive_rows_are_empty failed: {e}")))?;
 
-        let layout = Rv32TraceCcsLayout::new(exec.rows.len())
+        let requested_chunk_rows = self.chunk_rows.unwrap_or(DEFAULT_RV32_TRACE_CHUNK_ROWS);
+        if requested_chunk_rows == 0 {
+            return Err(PiCcsError::InvalidInput("trace chunk_rows must be non-zero".into()));
+        }
+        let step_rows = requested_chunk_rows.min(exec.rows.len().max(1));
+        let exec_chunks = split_exec_into_fixed_chunks(&exec, step_rows)?;
+
+        let layout = Rv32TraceCcsLayout::new(step_rows)
             .map_err(|e| PiCcsError::InvalidInput(format!("Rv32TraceCcsLayout::new failed: {e}")))?;
-        let (x, w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec)
-            .map_err(|e| PiCcsError::InvalidInput(format!("rv32_trace_ccs_witness_from_exec_table failed: {e}")))?;
         let ccs = build_rv32_trace_wiring_ccs(&layout)
             .map_err(|e| PiCcsError::InvalidInput(format!("build_rv32_trace_wiring_ccs failed: {e}")))?;
 
@@ -516,18 +666,7 @@ impl Rv32TraceWiring {
             .ok_or_else(|| PiCcsError::InvalidInput(format!("RAM address width too large: d={ram_d}")))?;
 
         let mut session = FoldingSession::<AjtaiSModule>::new_ajtai(self.mode.clone(), &ccs)?;
-
-        let z_cpu: Vec<F> = x.iter().copied().chain(w.iter().copied()).collect();
-        let Z_cpu = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &z_cpu);
-        let c_cpu = session.committer().commit(&Z_cpu);
-        let mcs = (
-            McsInstance {
-                c: c_cpu,
-                x: x.clone(),
-                m_in: layout.m_in,
-            },
-            McsWitness { w, Z: Z_cpu },
-        );
+        session.set_step_linking(StepLinkingConfig::new(vec![(layout.pc_final, layout.pc0)]));
 
         let mut prog_init_pairs: Vec<(u64, F)> = prog_init_words
             .into_iter()
@@ -539,112 +678,134 @@ impl Rv32TraceWiring {
         } else {
             MemInit::Sparse(prog_init_pairs)
         };
-        let reg_mem_init = mem_init_from_u64_sparse(&reg_init_map, 32, "REG")?;
-        let ram_mem_init = mem_init_from_u64_sparse(&ram_init_map, ram_k, "RAM")?;
-
         // P0 bridge: keep the main CPU witness as pure trace columns (no bus tail), and attach
         // PROG/REG/RAM as separately committed no-shared-bus Twist instances linked at r_time.
-        let twist_lanes = extract_twist_lanes_over_time(&exec, &reg_init_map, &ram_init_map, ram_d)
-            .map_err(|e| PiCcsError::InvalidInput(format!("extract_twist_lanes_over_time failed: {e}")))?;
+        let mut reg_state = init_reg_state(&reg_init_map)?;
+        let mut ram_state = init_ram_state(&ram_init_map, ram_d)?;
+        for exec_chunk in &exec_chunks {
+            let reg_init_chunk = reg_state_to_sparse_map(&reg_state);
+            let ram_init_chunk = ram_state.clone();
 
-        let prog_mem_inst = MemInstance {
-            mem_id: PROG_ID.0,
-            comms: Vec::new(),
-            k: prog_layout.k,
-            d: prog_layout.d,
-            n_side: prog_layout.n_side,
-            steps: exec.rows.len(),
-            lanes: 1,
-            ell: 1,
-            init: prog_mem_init,
-        };
-        let reg_mem_inst = MemInstance {
-            mem_id: REG_ID.0,
-            comms: Vec::new(),
-            k: 32,
-            d: 5,
-            n_side: 2,
-            steps: exec.rows.len(),
-            lanes: 2,
-            ell: 1,
-            init: reg_mem_init,
-        };
-        let ram_mem_inst = MemInstance {
-            mem_id: RAM_ID.0,
-            comms: Vec::new(),
-            k: ram_k,
-            d: ram_d,
-            n_side: 2,
-            steps: exec.rows.len(),
-            lanes: 1,
-            ell: 1,
-            init: ram_mem_init,
-        };
+            let reg_mem_init = mem_init_from_u64_sparse(&reg_init_chunk, 32, "REG")?;
+            let ram_mem_init = mem_init_from_u64_sparse(&ram_init_chunk, ram_k, "RAM")?;
+            let twist_lanes = extract_twist_lanes_over_time(exec_chunk, &reg_init_chunk, &ram_init_chunk, ram_d)
+                .map_err(|e| PiCcsError::InvalidInput(format!("extract_twist_lanes_over_time failed: {e}")))?;
 
-        let prog_z = build_twist_only_bus_z(
-            ccs.m,
-            layout.m_in,
-            exec.rows.len(),
-            prog_mem_inst.d * prog_mem_inst.ell,
-            prog_mem_inst.lanes,
-            &[twist_lanes.prog.clone()],
-            &x,
-        )
-        .map_err(|e| PiCcsError::InvalidInput(format!("build PROG twist z failed: {e}")))?;
-        let prog_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &prog_z);
-        let prog_c = session.committer().commit(&prog_Z);
-        let prog_mem_inst = MemInstance {
-            comms: vec![prog_c],
-            ..prog_mem_inst
-        };
-        let prog_mem_wit = MemWitness { mats: vec![prog_Z] };
+            let (x, w) = rv32_trace_ccs_witness_from_exec_table(&layout, exec_chunk)
+                .map_err(|e| PiCcsError::InvalidInput(format!("rv32_trace_ccs_witness_from_exec_table failed: {e}")))?;
+            let z_cpu: Vec<F> = x.iter().copied().chain(w.iter().copied()).collect();
+            let Z_cpu = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &z_cpu);
+            let c_cpu = session.committer().commit(&Z_cpu);
+            let mcs = (
+                McsInstance {
+                    c: c_cpu,
+                    x: x.clone(),
+                    m_in: layout.m_in,
+                },
+                McsWitness { w, Z: Z_cpu },
+            );
 
-        let reg_z = build_twist_only_bus_z(
-            ccs.m,
-            layout.m_in,
-            exec.rows.len(),
-            reg_mem_inst.d * reg_mem_inst.ell,
-            reg_mem_inst.lanes,
-            &[twist_lanes.reg_lane0.clone(), twist_lanes.reg_lane1.clone()],
-            &x,
-        )
-        .map_err(|e| PiCcsError::InvalidInput(format!("build REG twist z failed: {e}")))?;
-        let reg_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &reg_z);
-        let reg_c = session.committer().commit(&reg_Z);
-        let reg_mem_inst = MemInstance {
-            comms: vec![reg_c],
-            ..reg_mem_inst
-        };
-        let reg_mem_wit = MemWitness { mats: vec![reg_Z] };
+            let prog_mem_inst = MemInstance {
+                mem_id: PROG_ID.0,
+                comms: Vec::new(),
+                k: prog_layout.k,
+                d: prog_layout.d,
+                n_side: prog_layout.n_side,
+                steps: layout.t,
+                lanes: 1,
+                ell: 1,
+                init: prog_mem_init.clone(),
+            };
+            let reg_mem_inst = MemInstance {
+                mem_id: REG_ID.0,
+                comms: Vec::new(),
+                k: 32,
+                d: 5,
+                n_side: 2,
+                steps: layout.t,
+                lanes: 2,
+                ell: 1,
+                init: reg_mem_init,
+            };
+            let ram_mem_inst = MemInstance {
+                mem_id: RAM_ID.0,
+                comms: Vec::new(),
+                k: ram_k,
+                d: ram_d,
+                n_side: 2,
+                steps: layout.t,
+                lanes: 1,
+                ell: 1,
+                init: ram_mem_init,
+            };
 
-        let ram_z = build_twist_only_bus_z(
-            ccs.m,
-            layout.m_in,
-            exec.rows.len(),
-            ram_mem_inst.d * ram_mem_inst.ell,
-            ram_mem_inst.lanes,
-            &[twist_lanes.ram.clone()],
-            &x,
-        )
-        .map_err(|e| PiCcsError::InvalidInput(format!("build RAM twist z failed: {e}")))?;
-        let ram_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &ram_z);
-        let ram_c = session.committer().commit(&ram_Z);
-        let ram_mem_inst = MemInstance {
-            comms: vec![ram_c],
-            ..ram_mem_inst
-        };
-        let ram_mem_wit = MemWitness { mats: vec![ram_Z] };
+            let prog_z = build_twist_only_bus_z(
+                ccs.m,
+                layout.m_in,
+                layout.t,
+                prog_mem_inst.d * prog_mem_inst.ell,
+                prog_mem_inst.lanes,
+                std::slice::from_ref(&twist_lanes.prog),
+                &x,
+            )
+            .map_err(|e| PiCcsError::InvalidInput(format!("build PROG twist z failed: {e}")))?;
+            let prog_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &prog_z);
+            let prog_c = session.committer().commit(&prog_Z);
+            let prog_mem_inst = MemInstance {
+                comms: vec![prog_c],
+                ..prog_mem_inst
+            };
+            let prog_mem_wit = MemWitness { mats: vec![prog_Z] };
 
-        session.add_step_bundle(StepWitnessBundle {
-            mcs,
-            lut_instances: Vec::<(LutInstance<_, _>, LutWitness<F>)>::new(),
-            mem_instances: vec![
-                (prog_mem_inst, prog_mem_wit),
-                (reg_mem_inst, reg_mem_wit),
-                (ram_mem_inst, ram_mem_wit),
-            ],
-            _phantom: PhantomData::<K>,
-        });
+            let reg_z = build_twist_only_bus_z(
+                ccs.m,
+                layout.m_in,
+                layout.t,
+                reg_mem_inst.d * reg_mem_inst.ell,
+                reg_mem_inst.lanes,
+                &[twist_lanes.reg_lane0.clone(), twist_lanes.reg_lane1.clone()],
+                &x,
+            )
+            .map_err(|e| PiCcsError::InvalidInput(format!("build REG twist z failed: {e}")))?;
+            let reg_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &reg_z);
+            let reg_c = session.committer().commit(&reg_Z);
+            let reg_mem_inst = MemInstance {
+                comms: vec![reg_c],
+                ..reg_mem_inst
+            };
+            let reg_mem_wit = MemWitness { mats: vec![reg_Z] };
+
+            let ram_z = build_twist_only_bus_z(
+                ccs.m,
+                layout.m_in,
+                layout.t,
+                ram_mem_inst.d * ram_mem_inst.ell,
+                ram_mem_inst.lanes,
+                std::slice::from_ref(&twist_lanes.ram),
+                &x,
+            )
+            .map_err(|e| PiCcsError::InvalidInput(format!("build RAM twist z failed: {e}")))?;
+            let ram_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &ram_z);
+            let ram_c = session.committer().commit(&ram_Z);
+            let ram_mem_inst = MemInstance {
+                comms: vec![ram_c],
+                ..ram_mem_inst
+            };
+            let ram_mem_wit = MemWitness { mats: vec![ram_Z] };
+
+            session.add_step_bundle(StepWitnessBundle {
+                mcs,
+                lut_instances: Vec::<(LutInstance<_, _>, LutWitness<F>)>::new(),
+                mem_instances: vec![
+                    (prog_mem_inst, prog_mem_wit),
+                    (reg_mem_inst, reg_mem_wit),
+                    (ram_mem_inst, ram_mem_wit),
+                ],
+                _phantom: PhantomData::<K>,
+            });
+
+            apply_exec_chunk_writes_to_state(exec_chunk, &mut reg_state, &mut ram_state)?;
+        }
 
         let (proof, output_binding_cfg) = if output_claims.is_empty() {
             (session.fold_and_prove(&ccs)?, None)

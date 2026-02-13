@@ -179,3 +179,114 @@ fn rv32_trace_wiring_runner_rejects_min_trace_len_above_trace_cap() {
         "unexpected error message: {msg}"
     );
 }
+
+#[test]
+fn rv32_trace_wiring_runner_chunked_ivc_step_linking() {
+    // Program: ADDI x1, x0, 1; ADDI x2, x1, 2; HALT
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 1,
+            imm: 2,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .chunk_rows(2)
+        .prove()
+        .expect("trace wiring prove with chunked ivc");
+
+    run.verify().expect("trace wiring verify with chunked ivc");
+
+    assert_eq!(
+        run.fold_count(),
+        2,
+        "chunk_rows=2 over 3 rows should produce two fold steps"
+    );
+    let steps = run.steps_public();
+    assert_eq!(steps.len(), 2, "expected two public steps");
+
+    let layout = run.layout();
+    let prev = &steps[0].mcs_inst.x;
+    let cur = &steps[1].mcs_inst.x;
+    assert_eq!(
+        prev[layout.pc_final], cur[layout.pc0],
+        "trace step linking must enforce pc_final -> pc0 across steps"
+    );
+}
+
+#[test]
+fn rv32_trace_wiring_runner_rejects_zero_chunk_rows() {
+    let program = vec![RiscvInstruction::Halt];
+    let program_bytes = encode_program(&program);
+
+    let err = match Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .chunk_rows(0)
+        .prove()
+    {
+        Ok(_) => panic!("chunk_rows=0 must be rejected"),
+        Err(e) => e,
+    };
+
+    let msg = err.to_string();
+    assert!(msg.contains("chunk_rows"), "unexpected error message: {msg}");
+}
+
+fn prove_verify_trace_program(program: Vec<RiscvInstruction>) {
+    let program_bytes = encode_program(&program);
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .min_trace_len(program.len())
+        .max_steps(program.len())
+        .prove()
+        .expect("trace wiring prove");
+    run.verify().expect("trace wiring verify");
+}
+
+#[test]
+fn rv32_trace_wiring_runner_accepts_mixed_addi_andi_halt() {
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::And,
+            rd: 2,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    prove_verify_trace_program(program);
+}
+
+#[test]
+fn rv32_trace_wiring_runner_accepts_mixed_addi_ori_halt() {
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Or,
+            rd: 3,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    prove_verify_trace_program(program);
+}

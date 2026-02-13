@@ -157,3 +157,17 @@ fn rv32_b1_trace_wiring_mode_allows_without_insecure_ack() {
     run.verify()
         .expect("trace-wiring proof should verify without insecure benchmark-only ack");
 }
+
+#[test]
+fn rv32_b1_trace_wiring_mode_chunked_ivc() {
+    let program_bytes = trace_mode_program_bytes();
+
+    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+        .trace_chunk_rows(2)
+        .prove_trace_wiring()
+        .expect("trace wiring prove with chunked ivc via Rv32B1");
+
+    run.verify()
+        .expect("trace wiring verify with chunked ivc via Rv32B1");
+    assert_eq!(run.fold_count(), 2, "expected two fold steps with trace_chunk_rows=2");
+}

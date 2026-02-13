@@ -328,8 +328,12 @@ impl Rv32TraceWitness {
         // Branch/JALR semantic helpers.
         for i in 0..t {
             let opcode = cols.opcode[i] as u64;
+            let funct3 = cols.funct3[i] as u64;
+            let f3_b1 = (funct3 >> 1) & 1;
+            let f3_b2 = (funct3 >> 2) & 1;
+            wit.cols[layout.branch_f3b1_op][i] = F::from_u64(f3_b1 * f3_b2);
+
             if opcode == 0x63 {
-                let funct3 = cols.funct3[i] as u64;
                 let invert = funct3 & 1;
                 let shout_val = match exec.rows[i].shout_events.as_slice() {
                     [ev] => ev.value & 1,
@@ -342,10 +346,6 @@ impl Rv32TraceWitness {
                 wit.cols[layout.branch_taken][i] = F::from_u64(taken);
                 wit.cols[layout.branch_taken_imm][i] = F::from_u64(if taken == 1 { imm_b } else { 0 });
                 wit.cols[layout.branch_invert_shout_prod][i] = F::from_u64(invert * shout_val);
-
-                let f3_b1 = (funct3 >> 1) & 1;
-                let f3_b2 = (funct3 >> 2) & 1;
-                wit.cols[layout.branch_f3b1_op][i] = F::from_u64(f3_b1 * f3_b2);
             }
 
             if opcode == 0x67 {

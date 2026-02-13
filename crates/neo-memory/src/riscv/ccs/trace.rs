@@ -1174,23 +1174,6 @@ pub fn build_rv32_trace_wiring_ccs(layout: &Rv32TraceCcsLayout) -> Result<CcsStr
                 tr(l.op_amo, i),
             ],
             false,
-            vec![(tr(l.branch_f3b1_op, i), F::ONE)],
-        ));
-        cons.push(Constraint::terms_or(
-            &[
-                tr(l.op_lui, i),
-                tr(l.op_auipc, i),
-                tr(l.op_jal, i),
-                tr(l.op_jalr, i),
-                tr(l.op_load, i),
-                tr(l.op_store, i),
-                tr(l.op_alu_imm, i),
-                tr(l.op_alu_reg, i),
-                tr(l.op_misc_mem, i),
-                tr(l.op_system, i),
-                tr(l.op_amo, i),
-            ],
-            false,
             vec![(tr(l.branch_invert_shout_prod, i), F::ONE)],
         ));
         cons.push(Constraint::terms_or(
