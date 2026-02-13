@@ -399,6 +399,7 @@ fn build_single_chunk_inputs() -> (
 
     // Shared-bus mode: instances are metadata-only; access rows live in the CPU witness.
     let mem_inst = neo_memory::witness::MemInstance::<Cmt, F> {
+        mem_id: 0,
         comms: Vec::new(),
         k: mem_layout.k,
         d: mem_layout.d,
@@ -566,6 +567,7 @@ fn full_folding_integration_multi_step_chunk() {
     };
 
     let mem_inst = neo_memory::witness::MemInstance::<Cmt, F> {
+        mem_id: 0,
         comms: Vec::new(),
         k: mem_layout.k,
         d: mem_layout.d,

@@ -620,7 +620,11 @@ impl Rv32PackedMulOracleSparseTime {
         debug_assert_eq!(val.len(), 1usize << ell_n);
         debug_assert_eq!(carry_bits.len(), 32);
         for (i, b) in carry_bits.iter().enumerate() {
-            debug_assert_eq!(b.len(), 1usize << ell_n, "carry_bits[{i}] length must match time domain");
+            debug_assert_eq!(
+                b.len(),
+                1usize << ell_n,
+                "carry_bits[{i}] length must match time domain"
+            );
         }
 
         Self {
@@ -1436,12 +1440,10 @@ impl RoundOracle for Rv32PackedMulhsuAdapterOracleSparseTime {
     }
 }
 
-/// Sparse Route A oracle for RV32 packed EQ correctness:
-///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · ((lhs(t) - rhs(t))·inv(t) - (1 - val(t)))
+/// Sparse Route A oracle for RV32 packed EQ correctness (Ajtai-representable):
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (val(t) - Π_i (1 - diff_bit_i(t)))
 ///
-/// Here `inv(t)` is a witness column intended to be:
-/// - `inv = 0` when `lhs == rhs` (unconstrained in this case),
-/// - `inv = 1/(lhs - rhs)` when `lhs != rhs`.
+/// Where `diff_bits` encode `diff = lhs - rhs (mod 2^32)` (checked by the adapter oracle).
 ///
 /// Intended usage: set the claimed sum to 0 to enforce correctness.
 pub struct Rv32PackedEqOracleSparseTime {
@@ -1449,9 +1451,7 @@ pub struct Rv32PackedEqOracleSparseTime {
     r_cycle: Vec<K>,
     prefix_eq: K,
     has_lookup: SparseIdxVec<K>,
-    lhs: SparseIdxVec<K>,
-    rhs: SparseIdxVec<K>,
-    inv: SparseIdxVec<K>,
+    diff_bits: Vec<SparseIdxVec<K>>,
     val: SparseIdxVec<K>,
     degree_bound: usize,
 }
@@ -1460,28 +1460,30 @@ impl Rv32PackedEqOracleSparseTime {
     pub fn new(
         r_cycle: &[K],
         has_lookup: SparseIdxVec<K>,
-        lhs: SparseIdxVec<K>,
-        rhs: SparseIdxVec<K>,
-        inv: SparseIdxVec<K>,
+        diff_bits: Vec<SparseIdxVec<K>>,
         val: SparseIdxVec<K>,
     ) -> Self {
         let ell_n = r_cycle.len();
         debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
-        debug_assert_eq!(lhs.len(), 1usize << ell_n);
-        debug_assert_eq!(rhs.len(), 1usize << ell_n);
-        debug_assert_eq!(inv.len(), 1usize << ell_n);
         debug_assert_eq!(val.len(), 1usize << ell_n);
+        debug_assert_eq!(diff_bits.len(), 32);
+        for (i, b) in diff_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "diff_bits[{i}] length must match time domain");
+        }
 
         Self {
             bit_idx: 0,
             r_cycle: r_cycle.to_vec(),
             prefix_eq: K::ONE,
             has_lookup,
-            lhs,
-            rhs,
-            inv,
+            diff_bits,
             val,
-            degree_bound: 4,
+            // Degree bound:
+            // - chi(t): multilinear (degree 1)
+            // - has_lookup(t): multilinear (degree 1)
+            // - Π_i (1 - diff_bit_i(t)): product of 32 linear terms (degree 32)
+            // ⇒ total degree ≤ 1 + 1 + 32 = 34
+            degree_bound: 34,
         }
     }
 }
@@ -1490,12 +1492,13 @@ impl RoundOracle for Rv32PackedEqOracleSparseTime {
     fn evals_at(&mut self, points: &[K]) -> Vec<K> {
         if self.has_lookup.len() == 1 {
             let gate = self.has_lookup.singleton_value();
-            let lhs = self.lhs.singleton_value();
-            let rhs = self.rhs.singleton_value();
-            let inv = self.inv.singleton_value();
             let val = self.val.singleton_value();
-            let diff = lhs - rhs;
-            let expr = diff * inv - (K::ONE - val);
+            let mut prod = K::ONE;
+            for b in self.diff_bits.iter() {
+                let bit = b.singleton_value();
+                prod *= K::ONE - bit;
+            }
+            let expr = val - prod;
             let v = self.prefix_eq * gate * expr;
             return vec![v; points.len()];
         }
@@ -1515,17 +1518,8 @@ impl RoundOracle for Rv32PackedEqOracleSparseTime {
                 continue;
             }
 
-            let lhs0 = self.lhs.get(child0);
-            let lhs1 = self.lhs.get(child1);
-            let rhs0 = self.rhs.get(child0);
-            let rhs1 = self.rhs.get(child1);
-            let inv0 = self.inv.get(child0);
-            let inv1 = self.inv.get(child1);
             let val0 = self.val.get(child0);
             let val1 = self.val.get(child1);
-
-            let diff0 = lhs0 - rhs0;
-            let diff1 = lhs1 - rhs1;
 
             let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
 
@@ -1538,10 +1532,15 @@ impl RoundOracle for Rv32PackedEqOracleSparseTime {
                 if gate_x == K::ZERO {
                     continue;
                 }
-                let diff_x = interp(diff0, diff1, x);
-                let inv_x = interp(inv0, inv1, x);
                 let val_x = interp(val0, val1, x);
-                let expr_x = diff_x * inv_x - (K::ONE - val_x);
+                let mut prod_x = K::ONE;
+                for b in self.diff_bits.iter() {
+                    let b0 = b.get(child0);
+                    let b1 = b.get(child1);
+                    let bit_x = interp(b0, b1, x);
+                    prod_x *= K::ONE - bit_x;
+                }
+                let expr_x = val_x - prod_x;
                 if expr_x == K::ZERO {
                     continue;
                 }
@@ -1565,16 +1564,20 @@ impl RoundOracle for Rv32PackedEqOracleSparseTime {
         }
         self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
         self.has_lookup.fold_round_in_place(r);
-        self.lhs.fold_round_in_place(r);
-        self.rhs.fold_round_in_place(r);
-        self.inv.fold_round_in_place(r);
+        for b in self.diff_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
         self.val.fold_round_in_place(r);
         self.bit_idx += 1;
     }
 }
 
-/// Sparse Route A oracle for RV32 packed EQ "zero product" check:
-///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs(t) - rhs(t)) · val(t)
+/// Sparse Route A oracle for RV32 packed EQ/NEQ diff decomposition check:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs(t) - rhs(t) - diff(t) + borrow(t)·2^32)
+///
+/// Where:
+/// - `borrow(t)` is the SUB borrow bit (1 iff lhs < rhs),
+/// - `diff(t) = Σ_i 2^i · diff_bit_i(t)` is the u32 wraparound difference `lhs - rhs (mod 2^32)`.
 ///
 /// Intended usage: set the claimed sum to 0 to enforce correctness.
 pub struct Rv32PackedEqAdapterOracleSparseTime {
@@ -1584,7 +1587,8 @@ pub struct Rv32PackedEqAdapterOracleSparseTime {
     has_lookup: SparseIdxVec<K>,
     lhs: SparseIdxVec<K>,
     rhs: SparseIdxVec<K>,
-    val: SparseIdxVec<K>,
+    borrow: SparseIdxVec<K>,
+    diff_bits: Vec<SparseIdxVec<K>>,
     degree_bound: usize,
 }
 
@@ -1594,14 +1598,18 @@ impl Rv32PackedEqAdapterOracleSparseTime {
         has_lookup: SparseIdxVec<K>,
         lhs: SparseIdxVec<K>,
         rhs: SparseIdxVec<K>,
-        val: SparseIdxVec<K>,
-        degree_bound: usize,
+        borrow: SparseIdxVec<K>,
+        diff_bits: Vec<SparseIdxVec<K>>,
     ) -> Self {
         let ell_n = r_cycle.len();
         debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
         debug_assert_eq!(lhs.len(), 1usize << ell_n);
         debug_assert_eq!(rhs.len(), 1usize << ell_n);
-        debug_assert_eq!(val.len(), 1usize << ell_n);
+        debug_assert_eq!(borrow.len(), 1usize << ell_n);
+        debug_assert_eq!(diff_bits.len(), 32);
+        for (i, b) in diff_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "diff_bits[{i}] length must match time domain");
+        }
 
         Self {
             bit_idx: 0,
@@ -1610,8 +1618,9 @@ impl Rv32PackedEqAdapterOracleSparseTime {
             has_lookup,
             lhs,
             rhs,
-            val,
-            degree_bound,
+            borrow,
+            diff_bits,
+            degree_bound: 3,
         }
     }
 }
@@ -1619,12 +1628,17 @@ impl Rv32PackedEqAdapterOracleSparseTime {
 impl RoundOracle for Rv32PackedEqAdapterOracleSparseTime {
     fn evals_at(&mut self, points: &[K]) -> Vec<K> {
         if self.has_lookup.len() == 1 {
+            let two32 = K::from_u64(1u64 << 32);
             let gate = self.has_lookup.singleton_value();
             let lhs = self.lhs.singleton_value();
             let rhs = self.rhs.singleton_value();
-            let val = self.val.singleton_value();
-            let diff = lhs - rhs;
-            let expr = diff * val;
+            let borrow = self.borrow.singleton_value();
+            let mut diff = K::ZERO;
+            for (i, b) in self.diff_bits.iter().enumerate() {
+                let bit = b.singleton_value();
+                diff += bit * K::from_u64(1u64 << i);
+            }
+            let expr = lhs - rhs - diff + borrow * two32;
             let v = self.prefix_eq * gate * expr;
             return vec![v; points.len()];
         }
@@ -1632,6 +1646,8 @@ impl RoundOracle for Rv32PackedEqAdapterOracleSparseTime {
         let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
         let half = self.has_lookup.len() / 2;
         debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let two32 = K::from_u64(1u64 << 32);
 
         let mut ys = vec![K::ZERO; points.len()];
         for &pair in pairs.iter() {
@@ -1648,11 +1664,17 @@ impl RoundOracle for Rv32PackedEqAdapterOracleSparseTime {
             let lhs1 = self.lhs.get(child1);
             let rhs0 = self.rhs.get(child0);
             let rhs1 = self.rhs.get(child1);
-            let val0 = self.val.get(child0);
-            let val1 = self.val.get(child1);
-
-            let diff0 = lhs0 - rhs0;
-            let diff1 = lhs1 - rhs1;
+            let borrow0 = self.borrow.get(child0);
+            let borrow1 = self.borrow.get(child1);
+            let mut diff0 = K::ZERO;
+            let mut diff1 = K::ZERO;
+            for (i, b) in self.diff_bits.iter().enumerate() {
+                let pow = K::from_u64(1u64 << i);
+                diff0 += b.get(child0) * pow;
+                diff1 += b.get(child1) * pow;
+            }
+            let expr0 = lhs0 - rhs0 - diff0 + borrow0 * two32;
+            let expr1 = lhs1 - rhs1 - diff1 + borrow1 * two32;
 
             let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
 
@@ -1665,9 +1687,7 @@ impl RoundOracle for Rv32PackedEqAdapterOracleSparseTime {
                 if gate_x == K::ZERO {
                     continue;
                 }
-                let diff_x = interp(diff0, diff1, x);
-                let val_x = interp(val0, val1, x);
-                let expr_x = diff_x * val_x;
+                let expr_x = interp(expr0, expr1, x);
                 if expr_x == K::ZERO {
                     continue;
                 }
@@ -1693,17 +1713,18 @@ impl RoundOracle for Rv32PackedEqAdapterOracleSparseTime {
         self.has_lookup.fold_round_in_place(r);
         self.lhs.fold_round_in_place(r);
         self.rhs.fold_round_in_place(r);
-        self.val.fold_round_in_place(r);
+        self.borrow.fold_round_in_place(r);
+        for b in self.diff_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
         self.bit_idx += 1;
     }
 }
 
-/// Sparse Route A oracle for RV32 packed NEQ correctness:
-///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · ((lhs(t) - rhs(t))·inv(t) - val(t))
+/// Sparse Route A oracle for RV32 packed NEQ correctness (Ajtai-representable):
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (val(t) - (1 - Π_i (1 - diff_bit_i(t))))
 ///
-/// Here `inv(t)` is a witness column intended to be:
-/// - `inv = 0` when `lhs == rhs` (unconstrained in this case),
-/// - `inv = 1/(lhs - rhs)` when `lhs != rhs`.
+/// Where `diff_bits` encode `diff = lhs - rhs (mod 2^32)` (checked by the adapter oracle).
 ///
 /// Intended usage: set the claimed sum to 0 to enforce correctness.
 pub struct Rv32PackedNeqOracleSparseTime {
@@ -1711,9 +1732,7 @@ pub struct Rv32PackedNeqOracleSparseTime {
     r_cycle: Vec<K>,
     prefix_eq: K,
     has_lookup: SparseIdxVec<K>,
-    lhs: SparseIdxVec<K>,
-    rhs: SparseIdxVec<K>,
-    inv: SparseIdxVec<K>,
+    diff_bits: Vec<SparseIdxVec<K>>,
     val: SparseIdxVec<K>,
     degree_bound: usize,
 }
@@ -1722,28 +1741,26 @@ impl Rv32PackedNeqOracleSparseTime {
     pub fn new(
         r_cycle: &[K],
         has_lookup: SparseIdxVec<K>,
-        lhs: SparseIdxVec<K>,
-        rhs: SparseIdxVec<K>,
-        inv: SparseIdxVec<K>,
+        diff_bits: Vec<SparseIdxVec<K>>,
         val: SparseIdxVec<K>,
     ) -> Self {
         let ell_n = r_cycle.len();
         debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
-        debug_assert_eq!(lhs.len(), 1usize << ell_n);
-        debug_assert_eq!(rhs.len(), 1usize << ell_n);
-        debug_assert_eq!(inv.len(), 1usize << ell_n);
         debug_assert_eq!(val.len(), 1usize << ell_n);
+        debug_assert_eq!(diff_bits.len(), 32);
+        for (i, b) in diff_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "diff_bits[{i}] length must match time domain");
+        }
 
         Self {
             bit_idx: 0,
             r_cycle: r_cycle.to_vec(),
             prefix_eq: K::ONE,
             has_lookup,
-            lhs,
-            rhs,
-            inv,
+            diff_bits,
             val,
-            degree_bound: 4,
+            // Same degree bound as EQ: 1 + 1 + 32 = 34.
+            degree_bound: 34,
         }
     }
 }
@@ -1752,12 +1769,13 @@ impl RoundOracle for Rv32PackedNeqOracleSparseTime {
     fn evals_at(&mut self, points: &[K]) -> Vec<K> {
         if self.has_lookup.len() == 1 {
             let gate = self.has_lookup.singleton_value();
-            let lhs = self.lhs.singleton_value();
-            let rhs = self.rhs.singleton_value();
-            let inv = self.inv.singleton_value();
             let val = self.val.singleton_value();
-            let diff = lhs - rhs;
-            let expr = diff * inv - val;
+            let mut prod = K::ONE;
+            for b in self.diff_bits.iter() {
+                let bit = b.singleton_value();
+                prod *= K::ONE - bit;
+            }
+            let expr = val + prod - K::ONE;
             let v = self.prefix_eq * gate * expr;
             return vec![v; points.len()];
         }
@@ -1777,17 +1795,8 @@ impl RoundOracle for Rv32PackedNeqOracleSparseTime {
                 continue;
             }
 
-            let lhs0 = self.lhs.get(child0);
-            let lhs1 = self.lhs.get(child1);
-            let rhs0 = self.rhs.get(child0);
-            let rhs1 = self.rhs.get(child1);
-            let inv0 = self.inv.get(child0);
-            let inv1 = self.inv.get(child1);
             let val0 = self.val.get(child0);
             let val1 = self.val.get(child1);
-
-            let diff0 = lhs0 - rhs0;
-            let diff1 = lhs1 - rhs1;
 
             let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
 
@@ -1800,10 +1809,15 @@ impl RoundOracle for Rv32PackedNeqOracleSparseTime {
                 if gate_x == K::ZERO {
                     continue;
                 }
-                let diff_x = interp(diff0, diff1, x);
-                let inv_x = interp(inv0, inv1, x);
                 let val_x = interp(val0, val1, x);
-                let expr_x = diff_x * inv_x - val_x;
+                let mut prod_x = K::ONE;
+                for b in self.diff_bits.iter() {
+                    let b0 = b.get(child0);
+                    let b1 = b.get(child1);
+                    let bit_x = interp(b0, b1, x);
+                    prod_x *= K::ONE - bit_x;
+                }
+                let expr_x = val_x + prod_x - K::ONE;
                 if expr_x == K::ZERO {
                     continue;
                 }
@@ -1827,16 +1841,19 @@ impl RoundOracle for Rv32PackedNeqOracleSparseTime {
         }
         self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
         self.has_lookup.fold_round_in_place(r);
-        self.lhs.fold_round_in_place(r);
-        self.rhs.fold_round_in_place(r);
-        self.inv.fold_round_in_place(r);
+        for b in self.diff_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
         self.val.fold_round_in_place(r);
         self.bit_idx += 1;
     }
 }
 
-/// Sparse Route A oracle for RV32 packed NEQ "zero product" check:
-///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs(t) - rhs(t)) · (1 - val(t))
+/// Sparse Route A oracle for RV32 packed NEQ diff decomposition check:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs(t) - rhs(t) - diff(t) + borrow(t)·2^32)
+///
+/// See [`Rv32PackedEqAdapterOracleSparseTime`] for details; this is identical but kept as a
+/// distinct type for call-site clarity.
 ///
 /// Intended usage: set the claimed sum to 0 to enforce correctness.
 pub struct Rv32PackedNeqAdapterOracleSparseTime {
@@ -1846,7 +1863,8 @@ pub struct Rv32PackedNeqAdapterOracleSparseTime {
     has_lookup: SparseIdxVec<K>,
     lhs: SparseIdxVec<K>,
     rhs: SparseIdxVec<K>,
-    val: SparseIdxVec<K>,
+    borrow: SparseIdxVec<K>,
+    diff_bits: Vec<SparseIdxVec<K>>,
     degree_bound: usize,
 }
 
@@ -1856,14 +1874,18 @@ impl Rv32PackedNeqAdapterOracleSparseTime {
         has_lookup: SparseIdxVec<K>,
         lhs: SparseIdxVec<K>,
         rhs: SparseIdxVec<K>,
-        val: SparseIdxVec<K>,
-        degree_bound: usize,
+        borrow: SparseIdxVec<K>,
+        diff_bits: Vec<SparseIdxVec<K>>,
     ) -> Self {
         let ell_n = r_cycle.len();
         debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
         debug_assert_eq!(lhs.len(), 1usize << ell_n);
         debug_assert_eq!(rhs.len(), 1usize << ell_n);
-        debug_assert_eq!(val.len(), 1usize << ell_n);
+        debug_assert_eq!(borrow.len(), 1usize << ell_n);
+        debug_assert_eq!(diff_bits.len(), 32);
+        for (i, b) in diff_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "diff_bits[{i}] length must match time domain");
+        }
 
         Self {
             bit_idx: 0,
@@ -1872,8 +1894,9 @@ impl Rv32PackedNeqAdapterOracleSparseTime {
             has_lookup,
             lhs,
             rhs,
-            val,
-            degree_bound,
+            borrow,
+            diff_bits,
+            degree_bound: 3,
         }
     }
 }
@@ -1881,12 +1904,17 @@ impl Rv32PackedNeqAdapterOracleSparseTime {
 impl RoundOracle for Rv32PackedNeqAdapterOracleSparseTime {
     fn evals_at(&mut self, points: &[K]) -> Vec<K> {
         if self.has_lookup.len() == 1 {
+            let two32 = K::from_u64(1u64 << 32);
             let gate = self.has_lookup.singleton_value();
             let lhs = self.lhs.singleton_value();
             let rhs = self.rhs.singleton_value();
-            let val = self.val.singleton_value();
-            let diff = lhs - rhs;
-            let expr = diff * (K::ONE - val);
+            let borrow = self.borrow.singleton_value();
+            let mut diff = K::ZERO;
+            for (i, b) in self.diff_bits.iter().enumerate() {
+                let bit = b.singleton_value();
+                diff += bit * K::from_u64(1u64 << i);
+            }
+            let expr = lhs - rhs - diff + borrow * two32;
             let v = self.prefix_eq * gate * expr;
             return vec![v; points.len()];
         }
@@ -1894,6 +1922,8 @@ impl RoundOracle for Rv32PackedNeqAdapterOracleSparseTime {
         let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
         let half = self.has_lookup.len() / 2;
         debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let two32 = K::from_u64(1u64 << 32);
 
         let mut ys = vec![K::ZERO; points.len()];
         for &pair in pairs.iter() {
@@ -1910,11 +1940,17 @@ impl RoundOracle for Rv32PackedNeqAdapterOracleSparseTime {
             let lhs1 = self.lhs.get(child1);
             let rhs0 = self.rhs.get(child0);
             let rhs1 = self.rhs.get(child1);
-            let val0 = self.val.get(child0);
-            let val1 = self.val.get(child1);
-
-            let diff0 = lhs0 - rhs0;
-            let diff1 = lhs1 - rhs1;
+            let borrow0 = self.borrow.get(child0);
+            let borrow1 = self.borrow.get(child1);
+            let mut diff0 = K::ZERO;
+            let mut diff1 = K::ZERO;
+            for (i, b) in self.diff_bits.iter().enumerate() {
+                let pow = K::from_u64(1u64 << i);
+                diff0 += b.get(child0) * pow;
+                diff1 += b.get(child1) * pow;
+            }
+            let expr0 = lhs0 - rhs0 - diff0 + borrow0 * two32;
+            let expr1 = lhs1 - rhs1 - diff1 + borrow1 * two32;
 
             let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
 
@@ -1927,9 +1963,7 @@ impl RoundOracle for Rv32PackedNeqAdapterOracleSparseTime {
                 if gate_x == K::ZERO {
                     continue;
                 }
-                let diff_x = interp(diff0, diff1, x);
-                let val_x = interp(val0, val1, x);
-                let expr_x = diff_x * (K::ONE - val_x);
+                let expr_x = interp(expr0, expr1, x);
                 if expr_x == K::ZERO {
                     continue;
                 }
@@ -1955,7 +1989,10 @@ impl RoundOracle for Rv32PackedNeqAdapterOracleSparseTime {
         self.has_lookup.fold_round_in_place(r);
         self.lhs.fold_round_in_place(r);
         self.rhs.fold_round_in_place(r);
-        self.val.fold_round_in_place(r);
+        self.borrow.fold_round_in_place(r);
+        for b in self.diff_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
         self.bit_idx += 1;
     }
 }
@@ -2311,11 +2348,19 @@ impl Rv32PackedSllOracleSparseTime {
         debug_assert_eq!(val.len(), 1usize << ell_n);
         debug_assert_eq!(shamt_bits.len(), 5);
         for (i, b) in shamt_bits.iter().enumerate() {
-            debug_assert_eq!(b.len(), 1usize << ell_n, "shamt_bits[{i}] length must match time domain");
+            debug_assert_eq!(
+                b.len(),
+                1usize << ell_n,
+                "shamt_bits[{i}] length must match time domain"
+            );
         }
         debug_assert_eq!(carry_bits.len(), 32);
         for (i, b) in carry_bits.iter().enumerate() {
-            debug_assert_eq!(b.len(), 1usize << ell_n, "carry_bits[{i}] length must match time domain");
+            debug_assert_eq!(
+                b.len(),
+                1usize << ell_n,
+                "carry_bits[{i}] length must match time domain"
+            );
         }
 
         Self {
@@ -2509,7 +2554,11 @@ impl Rv32PackedSrlOracleSparseTime {
         debug_assert_eq!(val.len(), 1usize << ell_n);
         debug_assert_eq!(shamt_bits.len(), 5);
         for (i, b) in shamt_bits.iter().enumerate() {
-            debug_assert_eq!(b.len(), 1usize << ell_n, "shamt_bits[{i}] length must match time domain");
+            debug_assert_eq!(
+                b.len(),
+                1usize << ell_n,
+                "shamt_bits[{i}] length must match time domain"
+            );
         }
         debug_assert_eq!(rem_bits.len(), 32);
         for (i, b) in rem_bits.iter().enumerate() {
@@ -2691,7 +2740,11 @@ impl Rv32PackedSrlAdapterOracleSparseTime {
         debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
         debug_assert_eq!(shamt_bits.len(), 5);
         for (i, b) in shamt_bits.iter().enumerate() {
-            debug_assert_eq!(b.len(), 1usize << ell_n, "shamt_bits[{i}] length must match time domain");
+            debug_assert_eq!(
+                b.len(),
+                1usize << ell_n,
+                "shamt_bits[{i}] length must match time domain"
+            );
         }
         debug_assert_eq!(rem_bits.len(), 32);
         for (i, b) in rem_bits.iter().enumerate() {
@@ -2912,7 +2965,11 @@ impl Rv32PackedSraOracleSparseTime {
         debug_assert_eq!(sign.len(), 1usize << ell_n);
         debug_assert_eq!(shamt_bits.len(), 5);
         for (i, b) in shamt_bits.iter().enumerate() {
-            debug_assert_eq!(b.len(), 1usize << ell_n, "shamt_bits[{i}] length must match time domain");
+            debug_assert_eq!(
+                b.len(),
+                1usize << ell_n,
+                "shamt_bits[{i}] length must match time domain"
+            );
         }
         debug_assert_eq!(rem_bits.len(), 31);
         for (i, b) in rem_bits.iter().enumerate() {
@@ -3106,7 +3163,11 @@ impl Rv32PackedSraAdapterOracleSparseTime {
         debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
         debug_assert_eq!(shamt_bits.len(), 5);
         for (i, b) in shamt_bits.iter().enumerate() {
-            debug_assert_eq!(b.len(), 1usize << ell_n, "shamt_bits[{i}] length must match time domain");
+            debug_assert_eq!(
+                b.len(),
+                1usize << ell_n,
+                "shamt_bits[{i}] length must match time domain"
+            );
         }
         debug_assert_eq!(rem_bits.len(), 31);
         for (i, b) in rem_bits.iter().enumerate() {
@@ -3647,13 +3708,13 @@ impl Rv32PackedDivRemuAdapterOracleSparseTime {
             diff,
             diff_bits,
             weights,
-	            // Degree bound:
-	            // - chi(t): multilinear (degree 1)
-	            // - has_lookup(t): multilinear (degree 1)
-	            // - remainder bound term multiplies by (1 - rhs_is_zero): degree 2
-	            // ⇒ total degree ≤ 1 + 1 + 2 = 4
-	            degree_bound: 4,
-	        }
+            // Degree bound:
+            // - chi(t): multilinear (degree 1)
+            // - has_lookup(t): multilinear (degree 1)
+            // - remainder bound term multiplies by (1 - rhs_is_zero): degree 2
+            // ⇒ total degree ≤ 1 + 1 + 2 = 4
+            degree_bound: 4,
+        }
     }
 }
 
@@ -4196,34 +4257,34 @@ impl RoundOracle for Rv32PackedDivRemAdapterOracleSparseTime {
         let two = K::from_u64(2);
         let two32 = K::from_u64(1u64 << 32);
 
-	        if self.has_lookup.len() == 1 {
-	            let gate = self.has_lookup.singleton_value();
-	            let lhs = self.lhs.singleton_value();
-	            let rhs = self.rhs.singleton_value();
-	            let z = self.rhs_is_zero.singleton_value();
-	            let lhs_sign = self.lhs_sign.singleton_value();
-	            let rhs_sign = self.rhs_sign.singleton_value();
-	            let q_abs = self.q_abs.singleton_value();
-	            let r_abs = self.r_abs.singleton_value();
-	            let mag = self.mag.singleton_value();
-	            let mag_z = self.mag_is_zero.singleton_value();
-	            let diff = self.diff.singleton_value();
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let z = self.rhs_is_zero.singleton_value();
+            let lhs_sign = self.lhs_sign.singleton_value();
+            let rhs_sign = self.rhs_sign.singleton_value();
+            let q_abs = self.q_abs.singleton_value();
+            let r_abs = self.r_abs.singleton_value();
+            let mag = self.mag.singleton_value();
+            let mag_z = self.mag_is_zero.singleton_value();
+            let diff = self.diff.singleton_value();
 
             let mut sum = K::ZERO;
             for (i, b) in self.diff_bits.iter().enumerate() {
                 sum += b.singleton_value() * K::from_u64(1u64 << i);
             }
 
-	            let lhs_abs = lhs + lhs_sign * (two32 - two * lhs);
-	            let rhs_abs = rhs + rhs_sign * (two32 - two * rhs);
+            let lhs_abs = lhs + lhs_sign * (two32 - two * lhs);
+            let rhs_abs = rhs + rhs_sign * (two32 - two * rhs);
 
-	            let c0 = z * (K::ONE - z);
-	            let c1 = z * rhs;
-	            let c2 = mag_z * (K::ONE - mag_z);
-	            let c3 = mag_z * mag;
-	            let c4 = (K::ONE - z) * (lhs_abs - rhs_abs * q_abs - r_abs);
-	            let c5 = (K::ONE - z) * (r_abs - rhs_abs - diff + two32);
-	            let c6 = diff - sum;
+            let c0 = z * (K::ONE - z);
+            let c1 = z * rhs;
+            let c2 = mag_z * (K::ONE - mag_z);
+            let c3 = mag_z * mag;
+            let c4 = (K::ONE - z) * (lhs_abs - rhs_abs * q_abs - r_abs);
+            let c5 = (K::ONE - z) * (r_abs - rhs_abs - diff + two32);
+            let c6 = diff - sum;
 
             let w = &self.weights;
             let expr = w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3 + w[4] * c4 + w[5] * c5 + w[6] * c6;
@@ -4246,26 +4307,26 @@ impl RoundOracle for Rv32PackedDivRemAdapterOracleSparseTime {
                 continue;
             }
 
-	            let lhs0 = self.lhs.get(child0);
-	            let lhs1 = self.lhs.get(child1);
-	            let rhs0 = self.rhs.get(child0);
-	            let rhs1 = self.rhs.get(child1);
-	            let z0 = self.rhs_is_zero.get(child0);
-	            let z1 = self.rhs_is_zero.get(child1);
-	            let lhs_sign0 = self.lhs_sign.get(child0);
-	            let lhs_sign1 = self.lhs_sign.get(child1);
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let z0 = self.rhs_is_zero.get(child0);
+            let z1 = self.rhs_is_zero.get(child1);
+            let lhs_sign0 = self.lhs_sign.get(child0);
+            let lhs_sign1 = self.lhs_sign.get(child1);
             let rhs_sign0 = self.rhs_sign.get(child0);
             let rhs_sign1 = self.rhs_sign.get(child1);
             let q0 = self.q_abs.get(child0);
-	            let q1 = self.q_abs.get(child1);
-	            let r0 = self.r_abs.get(child0);
-	            let r1 = self.r_abs.get(child1);
-	            let mag0 = self.mag.get(child0);
-	            let mag1 = self.mag.get(child1);
-	            let mag_z0 = self.mag_is_zero.get(child0);
-	            let mag_z1 = self.mag_is_zero.get(child1);
-	            let diff0 = self.diff.get(child0);
-	            let diff1 = self.diff.get(child1);
+            let q1 = self.q_abs.get(child1);
+            let r0 = self.r_abs.get(child0);
+            let r1 = self.r_abs.get(child1);
+            let mag0 = self.mag.get(child0);
+            let mag1 = self.mag.get(child1);
+            let mag_z0 = self.mag_is_zero.get(child0);
+            let mag_z1 = self.mag_is_zero.get(child1);
+            let diff0 = self.diff.get(child0);
+            let diff1 = self.diff.get(child1);
 
             let mut b0s: [K; 32] = [K::ZERO; 32];
             let mut b1s: [K; 32] = [K::ZERO; 32];
@@ -4281,21 +4342,21 @@ impl RoundOracle for Rv32PackedDivRemAdapterOracleSparseTime {
                 if chi_x == K::ZERO {
                     continue;
                 }
-	                let gate_x = interp(gate0, gate1, x);
-	                if gate_x == K::ZERO {
-	                    continue;
-	                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
 
-	                let lhs = interp(lhs0, lhs1, x);
-	                let rhs = interp(rhs0, rhs1, x);
-	                let z = interp(z0, z1, x);
-	                let lhs_sign = interp(lhs_sign0, lhs_sign1, x);
-	                let rhs_sign = interp(rhs_sign0, rhs_sign1, x);
-	                let q_abs = interp(q0, q1, x);
-	                let r_abs = interp(r0, r1, x);
-	                let mag = interp(mag0, mag1, x);
-	                let mag_z = interp(mag_z0, mag_z1, x);
-	                let diff = interp(diff0, diff1, x);
+                let lhs = interp(lhs0, lhs1, x);
+                let rhs = interp(rhs0, rhs1, x);
+                let z = interp(z0, z1, x);
+                let lhs_sign = interp(lhs_sign0, lhs_sign1, x);
+                let rhs_sign = interp(rhs_sign0, rhs_sign1, x);
+                let q_abs = interp(q0, q1, x);
+                let r_abs = interp(r0, r1, x);
+                let mag = interp(mag0, mag1, x);
+                let mag_z = interp(mag_z0, mag_z1, x);
+                let diff = interp(diff0, diff1, x);
 
                 let mut sum = K::ZERO;
                 for j in 0..32 {
@@ -4303,16 +4364,16 @@ impl RoundOracle for Rv32PackedDivRemAdapterOracleSparseTime {
                     sum += b_x * K::from_u64(1u64 << j);
                 }
 
-	                let lhs_abs = lhs + lhs_sign * (two32 - two * lhs);
-	                let rhs_abs = rhs + rhs_sign * (two32 - two * rhs);
+                let lhs_abs = lhs + lhs_sign * (two32 - two * lhs);
+                let rhs_abs = rhs + rhs_sign * (two32 - two * rhs);
 
-	                let c0 = z * (K::ONE - z);
-	                let c1 = z * rhs;
-	                let c2 = mag_z * (K::ONE - mag_z);
-	                let c3 = mag_z * mag;
-	                let c4 = (K::ONE - z) * (lhs_abs - rhs_abs * q_abs - r_abs);
-	                let c5 = (K::ONE - z) * (r_abs - rhs_abs - diff + two32);
-	                let c6 = diff - sum;
+                let c0 = z * (K::ONE - z);
+                let c1 = z * rhs;
+                let c2 = mag_z * (K::ONE - mag_z);
+                let c3 = mag_z * mag;
+                let c4 = (K::ONE - z) * (lhs_abs - rhs_abs * q_abs - r_abs);
+                let c5 = (K::ONE - z) * (r_abs - rhs_abs - diff + two32);
+                let c6 = diff - sum;
 
                 let w = &self.weights;
                 let expr_x = w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3 + w[4] * c4 + w[5] * c5 + w[6] * c6;
@@ -4339,17 +4400,17 @@ impl RoundOracle for Rv32PackedDivRemAdapterOracleSparseTime {
             return;
         }
         self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
-	        self.has_lookup.fold_round_in_place(r);
-	        self.lhs.fold_round_in_place(r);
-	        self.rhs.fold_round_in_place(r);
-	        self.rhs_is_zero.fold_round_in_place(r);
-	        self.lhs_sign.fold_round_in_place(r);
-	        self.rhs_sign.fold_round_in_place(r);
-	        self.q_abs.fold_round_in_place(r);
-	        self.r_abs.fold_round_in_place(r);
-	        self.mag.fold_round_in_place(r);
-	        self.mag_is_zero.fold_round_in_place(r);
-	        self.diff.fold_round_in_place(r);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        self.rhs_is_zero.fold_round_in_place(r);
+        self.lhs_sign.fold_round_in_place(r);
+        self.rhs_sign.fold_round_in_place(r);
+        self.q_abs.fold_round_in_place(r);
+        self.r_abs.fold_round_in_place(r);
+        self.mag.fold_round_in_place(r);
+        self.mag_is_zero.fold_round_in_place(r);
+        self.diff.fold_round_in_place(r);
         for b in self.diff_bits.iter_mut() {
             b.fold_round_in_place(r);
         }
@@ -4464,10 +4525,18 @@ impl Rv32PackedBitwiseAdapterOracleSparseTime {
         debug_assert_eq!(lhs_digits.len(), 16);
         debug_assert_eq!(rhs_digits.len(), 16);
         for (i, d) in lhs_digits.iter().enumerate() {
-            debug_assert_eq!(d.len(), 1usize << ell_n, "lhs_digits[{i}] length must match time domain");
+            debug_assert_eq!(
+                d.len(),
+                1usize << ell_n,
+                "lhs_digits[{i}] length must match time domain"
+            );
         }
         for (i, d) in rhs_digits.iter().enumerate() {
-            debug_assert_eq!(d.len(), 1usize << ell_n, "rhs_digits[{i}] length must match time domain");
+            debug_assert_eq!(
+                d.len(),
+                1usize << ell_n,
+                "rhs_digits[{i}] length must match time domain"
+            );
         }
         debug_assert_eq!(weights.len(), 34);
 
@@ -4646,10 +4715,18 @@ impl Rv32PackedBitwiseOracleSparseTime {
         debug_assert_eq!(lhs_digits.len(), 16);
         debug_assert_eq!(rhs_digits.len(), 16);
         for (i, d) in lhs_digits.iter().enumerate() {
-            debug_assert_eq!(d.len(), 1usize << ell_n, "lhs_digits[{i}] length must match time domain");
+            debug_assert_eq!(
+                d.len(),
+                1usize << ell_n,
+                "lhs_digits[{i}] length must match time domain"
+            );
         }
         for (i, d) in rhs_digits.iter().enumerate() {
-            debug_assert_eq!(d.len(), 1usize << ell_n, "rhs_digits[{i}] length must match time domain");
+            debug_assert_eq!(
+                d.len(),
+                1usize << ell_n,
+                "rhs_digits[{i}] length must match time domain"
+            );
         }
 
         // Degree bound:

@@ -28,6 +28,7 @@ pub mod shard;
 
 // Convenience wrappers for RV32 shard verification
 pub mod riscv_shard;
+pub mod riscv_trace_shard;
 
 // Output binding integration
 pub mod output_binding;

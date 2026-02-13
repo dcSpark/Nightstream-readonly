@@ -54,7 +54,8 @@ fn rv32_shout_event_table_matches_fixed_lane_extract() {
     assert!(trace.did_halt(), "expected program to halt");
 
     let exec = Rv32ExecTable::from_trace_padded_pow2(&trace, /*min_len=*/ 8).expect("from_trace_padded_pow2");
-    exec.validate_inactive_rows_are_empty().expect("inactive rows");
+    exec.validate_inactive_rows_are_empty()
+        .expect("inactive rows");
 
     let shout_table_ids = vec![
         RiscvShoutTables::new(32).opcode_to_id(RiscvOpcode::Add).0,
@@ -70,7 +71,9 @@ fn rv32_shout_event_table_matches_fixed_lane_extract() {
     let mut by_row: HashMap<(usize, u32), (u64, u64)> = HashMap::new();
     for e in table.rows.iter() {
         assert!(
-            by_row.insert((e.row_idx, e.shout_id), (e.key, e.value)).is_none(),
+            by_row
+                .insert((e.row_idx, e.shout_id), (e.key, e.value))
+                .is_none(),
             "duplicate shout event at row_idx={} shout_id={}",
             e.row_idx,
             e.shout_id
@@ -89,7 +92,10 @@ fn rv32_shout_event_table_matches_fixed_lane_extract() {
                     .get(&(row_idx, shout_id))
                     .copied()
                     .unwrap_or_else(|| panic!("missing shout event row_idx={row_idx} shout_id={shout_id}"));
-                assert_eq!(key, lane.key[row_idx], "key mismatch at row_idx={row_idx} shout_id={shout_id}");
+                assert_eq!(
+                    key, lane.key[row_idx],
+                    "key mismatch at row_idx={row_idx} shout_id={shout_id}"
+                );
                 assert_eq!(
                     value, lane.value[row_idx],
                     "value mismatch at row_idx={row_idx} shout_id={shout_id}"
@@ -109,3 +115,54 @@ fn rv32_shout_event_table_matches_fixed_lane_extract() {
     assert!(sll_ev.rhs <= 31, "expected canonicalized SLL rhs <= 31");
 }
 
+#[test]
+fn rv32_shout_event_table_is_empty_for_halt_only_program() {
+    let program = vec![RiscvInstruction::Halt];
+    let program_bytes = encode_program(&program);
+
+    let decoded_program = decode_program(&program_bytes).expect("decode_program");
+    let mut cpu = RiscvCpu::new(/*xlen=*/ 32);
+    cpu.load_program(/*base=*/ 0, decoded_program);
+
+    let twist = RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
+    let shout = RiscvShoutTables::new(/*xlen=*/ 32);
+    let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 8).expect("trace_program");
+    let exec = Rv32ExecTable::from_trace_padded_pow2(&trace, /*min_len=*/ 4).expect("from_trace_padded_pow2");
+
+    let table = Rv32ShoutEventTable::from_exec_table(&exec).expect("Rv32ShoutEventTable::from_exec_table");
+    assert!(table.rows.is_empty(), "expected no shout events for HALT-only program");
+}
+
+#[test]
+fn rv32_shout_event_table_single_row_for_single_xor() {
+    // Program: XOR x1,x0,x0; HALT
+    let program = vec![
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Xor,
+            rd: 1,
+            rs1: 0,
+            rs2: 0,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let decoded_program = decode_program(&program_bytes).expect("decode_program");
+    let mut cpu = RiscvCpu::new(/*xlen=*/ 32);
+    cpu.load_program(/*base=*/ 0, decoded_program);
+
+    let twist = RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
+    let shout = RiscvShoutTables::new(/*xlen=*/ 32);
+    let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 16).expect("trace_program");
+    let exec = Rv32ExecTable::from_trace_padded_pow2(&trace, /*min_len=*/ 4).expect("from_trace_padded_pow2");
+
+    let table = Rv32ShoutEventTable::from_exec_table(&exec).expect("Rv32ShoutEventTable::from_exec_table");
+    assert_eq!(table.rows.len(), 1, "expected exactly one shout event");
+
+    let ev = &table.rows[0];
+    let xor_id = RiscvShoutTables::new(32).opcode_to_id(RiscvOpcode::Xor).0;
+    assert_eq!(ev.shout_id, xor_id);
+    assert_eq!(ev.lhs, 0);
+    assert_eq!(ev.rhs, 0);
+    assert_eq!(ev.value, 0);
+}

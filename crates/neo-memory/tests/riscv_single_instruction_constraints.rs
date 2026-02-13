@@ -74,9 +74,15 @@ fn nightstream_single_addi_constraint_counts() {
     let semantics_constraints_p2 = semantics_constraints.next_power_of_two();
     let semantics_witness_cols_p2 = semantics_witness_cols.next_power_of_two();
 
-    assert!(nightstream_constraints > 0);
-    assert!(decode_constraints > 0);
-    assert!(semantics_constraints > 0);
+    assert_eq!(nightstream_constraints, 142, "step CCS constraint count regression");
+    assert_eq!(
+        decode_constraints, 101,
+        "decode sidecar CCS constraint count regression"
+    );
+    assert_eq!(
+        semantics_constraints, 139,
+        "semantics sidecar CCS constraint count regression"
+    );
 
     println!();
     println!(

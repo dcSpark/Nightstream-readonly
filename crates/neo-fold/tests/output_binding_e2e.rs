@@ -105,6 +105,7 @@ fn output_binding_e2e_wrong_claim_fails() -> Result<(), PiCcsError> {
     let const_one_col = 0usize;
 
     let mem_inst = MemInstance::<Cmt, F> {
+        mem_id: 0,
         comms: Vec::new(),
         k: 4,
         d: 1,

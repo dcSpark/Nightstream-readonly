@@ -37,7 +37,8 @@ pub enum LutTableSpec {
     /// - Witness convention: the Shout lane's `addr_bits` slice is repurposed as packed columns.
     ///   The exact layout depends on `opcode`; the suffix columns are always `[has_lookup, val_u32]`.
     ///   Examples:
-    ///   - `Add/Sub/Eq/Neq` (d=3): `[lhs_u32, rhs_u32, aux]`
+    ///   - `Add/Sub` (d=3): `[lhs_u32, rhs_u32, aux_bit]` (carry for `Add`, borrow for `Sub`)
+    ///   - `Eq/Neq` (d=35): `[lhs_u32, rhs_u32, borrow_bit, diff_bits[0..32]]` where `val_u32` is the out bit
     ///   - `Mul` (d=34): `[lhs_u32, rhs_u32, hi_bits[0..32]]` where `val_u32` is the low 32 bits
     ///   - `Mulhu` (d=34): `[lhs_u32, rhs_u32, lo_bits[0..32]]` where `val_u32` is the high 32 bits
     ///   - `Sltu` (d=35): `[lhs_u32, rhs_u32, diff_u32, diff_bits[0..32]]` where `val_u32` is the out bit
@@ -104,6 +105,11 @@ impl LutTableSpec {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemInstance<C, F> {
+    /// Logical memory instance identifier (e.g. RISC-V `PROG_ID/REG_ID/RAM_ID`).
+    ///
+    /// This is used by higher-level protocols to link Twist instances to CPU trace columns
+    /// without relying on a fixed instance ordering.
+    pub mem_id: u32,
     pub comms: Vec<C>,
     pub k: usize,
     pub d: usize,

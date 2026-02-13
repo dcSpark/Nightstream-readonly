@@ -48,8 +48,9 @@ fn lut_inst() -> LutInstance<(), F> {
     }
 }
 
-fn mem_inst() -> MemInstance<(), F> {
+fn mem_inst(mem_id: u32) -> MemInstance<(), F> {
     MemInstance {
+        mem_id,
         comms: Vec::new(),
         k: 2,
         d: 1,
@@ -68,7 +69,7 @@ fn shared_cpu_bus_injection_supports_independent_instances() {
     let base_ccs = empty_identity_first_r1cs_ccs(n);
 
     let lut_insts = vec![lut_inst(), lut_inst()];
-    let mem_insts = vec![mem_inst(), mem_inst()];
+    let mem_insts = vec![mem_inst(100), mem_inst(101)];
 
     // CPU columns (all < bus_base) are per-instance.
     let shout_cpu = vec![

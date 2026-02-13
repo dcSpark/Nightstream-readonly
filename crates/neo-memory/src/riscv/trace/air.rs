@@ -90,6 +90,42 @@ impl Rv32TraceAir {
                     return Err(format!("row {i}: rd_bit[{bit}] not boolean"));
                 }
             }
+            for (bit, c) in l.funct3_bit.iter().copied().enumerate() {
+                let e = Self::bool_check(col(c, i));
+                if !Self::is_zero(e) {
+                    return Err(format!("row {i}: funct3_bit[{bit}] not boolean"));
+                }
+            }
+            for (bit, c) in l.rs1_bit.iter().copied().enumerate() {
+                let e = Self::bool_check(col(c, i));
+                if !Self::is_zero(e) {
+                    return Err(format!("row {i}: rs1_bit[{bit}] not boolean"));
+                }
+            }
+            for (bit, c) in l.rs2_bit.iter().copied().enumerate() {
+                let e = Self::bool_check(col(c, i));
+                if !Self::is_zero(e) {
+                    return Err(format!("row {i}: rs2_bit[{bit}] not boolean"));
+                }
+            }
+            for (bit, c) in l.funct7_bit.iter().copied().enumerate() {
+                let e = Self::bool_check(col(c, i));
+                if !Self::is_zero(e) {
+                    return Err(format!("row {i}: funct7_bit[{bit}] not boolean"));
+                }
+            }
+            for (bit, c) in l.ram_rv_low_bit.iter().copied().enumerate() {
+                let e = Self::bool_check(col(c, i));
+                if !Self::is_zero(e) {
+                    return Err(format!("row {i}: ram_rv_low_bit[{bit}] not boolean"));
+                }
+            }
+            for (bit, c) in l.rs2_low_bit.iter().copied().enumerate() {
+                let e = Self::bool_check(col(c, i));
+                if !Self::is_zero(e) {
+                    return Err(format!("row {i}: rs2_low_bit[{bit}] not boolean"));
+                }
+            }
 
             // Padding invariants: inactive rows must not carry "hidden" values.
             let inv_active = F::ONE - active;
@@ -202,19 +238,13 @@ impl Rv32TraceAir {
             // Shout padding: if no lookup, the lookup output must be 0.
             {
                 if !Self::is_zero(Self::gated_zero(F::ONE - shout_has_lookup, col(l.shout_val, i))) {
-                    return Err(format!(
-                        "row {i}: shout_val must be 0 when shout_has_lookup=0"
-                    ));
+                    return Err(format!("row {i}: shout_val must be 0 when shout_has_lookup=0"));
                 }
                 if !Self::is_zero(Self::gated_zero(F::ONE - shout_has_lookup, col(l.shout_lhs, i))) {
-                    return Err(format!(
-                        "row {i}: shout_lhs must be 0 when shout_has_lookup=0"
-                    ));
+                    return Err(format!("row {i}: shout_lhs must be 0 when shout_has_lookup=0"));
                 }
                 if !Self::is_zero(Self::gated_zero(F::ONE - shout_has_lookup, col(l.shout_rhs, i))) {
-                    return Err(format!(
-                        "row {i}: shout_rhs must be 0 when shout_has_lookup=0"
-                    ));
+                    return Err(format!("row {i}: shout_rhs must be 0 when shout_has_lookup=0"));
                 }
             }
 
@@ -266,6 +296,11 @@ impl Rv32TraceAir {
             let h1 = col(l.halted, i + 1);
             if !Self::is_zero(h0 * (F::ONE - h1)) {
                 return Err(format!("halted monotonicity violated at row {i}"));
+            }
+
+            // HALT terminates execution: halted[i] => active[i+1] == 0.
+            if !Self::is_zero(h0 * a1) {
+                return Err(format!("halted tail quiescence violated at row {i}"));
             }
         }
 

@@ -116,10 +116,7 @@ pub fn extract_twist_lanes_over_time(
                 || !r.ram_events.is_empty()
                 || !r.shout_events.is_empty()
             {
-                return Err(format!(
-                    "trace extract: inactive row has events at cycle {}",
-                    r.cycle
-                ));
+                return Err(format!("trace extract: inactive row has events at cycle {}", r.cycle));
             }
             continue;
         }
@@ -277,7 +274,9 @@ pub fn extract_shout_lanes_over_time(
         }
     }
 
-    let mut lanes: Vec<ShoutLaneOverTime> = (0..shout_table_ids.len()).map(|_| ShoutLaneOverTime::new_zero(t)).collect();
+    let mut lanes: Vec<ShoutLaneOverTime> = (0..shout_table_ids.len())
+        .map(|_| ShoutLaneOverTime::new_zero(t))
+        .collect();
 
     for (row_idx, r) in exec.rows.iter().enumerate() {
         if !r.active {
@@ -293,12 +292,15 @@ pub fn extract_shout_lanes_over_time(
         match r.shout_events.as_slice() {
             [] => {}
             [ev] => {
-                let idx = table_id_to_idx.get(&ev.shout_id.0).copied().ok_or_else(|| {
-                    format!(
-                        "trace extract: shout_id={} not provisioned (cycle {})",
-                        ev.shout_id.0, r.cycle
-                    )
-                })?;
+                let idx = table_id_to_idx
+                    .get(&ev.shout_id.0)
+                    .copied()
+                    .ok_or_else(|| {
+                        format!(
+                            "trace extract: shout_id={} not provisioned (cycle {})",
+                            ev.shout_id.0, r.cycle
+                        )
+                    })?;
                 lanes[idx].has_lookup[row_idx] = true;
                 let mut key = ev.key;
                 if let Some(op) = RiscvShoutTables::new(/*xlen=*/ 32).id_to_opcode(ev.shout_id) {

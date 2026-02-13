@@ -67,7 +67,9 @@ fn exec_table_extracts_from_chunked_run_and_pads() {
     assert_eq!(counts, vec![1, 0]);
 
     // Build a padded-to-pow2 exec table from the replayed trace.
-    let exec = run.exec_table_padded_pow2(/*min_len=*/ 8).expect("exec table");
+    let exec = run
+        .exec_table_padded_pow2(/*min_len=*/ 8)
+        .expect("exec table");
     assert_eq!(exec.rows.len(), 8);
     exec.validate_pc_chain().expect("pc chain");
     exec.validate_cycle_chain().expect("cycle chain");
@@ -102,7 +104,8 @@ fn exec_table_extracts_from_chunked_run_and_pads() {
     }
     exec.validate_regfile_semantics(&init_regs)
         .expect("regfile semantics");
-    exec.validate_ram_semantics(&init_ram).expect("ram semantics");
+    exec.validate_ram_semantics(&init_ram)
+        .expect("ram semantics");
 
     // Extract reg/RAM event tables (sparse-over-time representation).
     let reg_table = Rv32RegEventTable::from_exec_table(&exec, &init_regs).expect("reg event table");
@@ -134,12 +137,14 @@ fn exec_table_extracts_from_chunked_run_and_pads() {
 
     let ram_table = Rv32RamEventTable::from_exec_table(&exec, &init_ram).expect("ram event table");
     assert_eq!(ram_table.rows.len(), 2);
-    assert!(ram_table.rows.iter().any(|r| {
-        r.kind == Rv32RamEventKind::Write && r.addr == 0 && r.prev_val == 0 && r.next_val == 12
-    }));
-    assert!(ram_table.rows.iter().any(|r| {
-        r.kind == Rv32RamEventKind::Read && r.addr == 0 && r.prev_val == 12 && r.next_val == 12
-    }));
+    assert!(ram_table
+        .rows
+        .iter()
+        .any(|r| { r.kind == Rv32RamEventKind::Write && r.addr == 0 && r.prev_val == 0 && r.next_val == 12 }));
+    assert!(ram_table
+        .rows
+        .iter()
+        .any(|r| { r.kind == Rv32RamEventKind::Read && r.addr == 0 && r.prev_val == 12 && r.next_val == 12 }));
 
     // Extract RV32M events from the exec table (time-in-rows view).
     let m = Rv32MEventTable::from_exec_table(&exec).expect("rv32m event table");

@@ -85,6 +85,7 @@ fn create_mcs_from_z(
 }
 
 fn make_twist_instance(
+    mem_id: u32,
     layout: &PlainMemLayout,
     init: MemInit<F>,
     steps: usize,
@@ -95,6 +96,7 @@ fn make_twist_instance(
     let ell = layout.n_side.trailing_zeros() as usize;
     (
         neo_memory::witness::MemInstance {
+            mem_id,
             comms: Vec::new(),
             k: layout.k,
             d: layout.d,
@@ -246,7 +248,7 @@ fn memory_cross_step_read_consistency() {
             inc_at_write_addr: vec![F::from_u64(42)], // 42 - 0 = 42
         };
         let mem_init = MemInit::Zero;
-        let (mem_inst, mem_wit) = make_twist_instance(&mem_layout, mem_init, 1);
+        let (mem_inst, mem_wit) = make_twist_instance(0, &mem_layout, mem_init, 1);
         steps.push(create_step_with_twist_bus(
             &params,
             &ccs,
@@ -270,7 +272,7 @@ fn memory_cross_step_read_consistency() {
         };
         // Memory state after step 0: addr[0] = 42
         let mem_init = MemInit::Sparse(vec![(0, F::from_u64(42))]);
-        let (mem_inst, mem_wit) = make_twist_instance(&mem_layout, mem_init, 1);
+        let (mem_inst, mem_wit) = make_twist_instance(0, &mem_layout, mem_init, 1);
         steps.push(create_step_with_twist_bus(
             &params,
             &ccs,
@@ -293,7 +295,7 @@ fn memory_cross_step_read_consistency() {
             inc_at_write_addr: vec![F::from_u64(100) - F::from_u64(42)], // 100 - 42 = 58
         };
         let mem_init = MemInit::Sparse(vec![(0, F::from_u64(42))]);
-        let (mem_inst, mem_wit) = make_twist_instance(&mem_layout, mem_init, 1);
+        let (mem_inst, mem_wit) = make_twist_instance(0, &mem_layout, mem_init, 1);
         steps.push(create_step_with_twist_bus(
             &params,
             &ccs,
@@ -367,7 +369,7 @@ fn memory_read_uninitialized_returns_zero() {
     };
     let mem_init = MemInit::Zero;
 
-    let (mem_inst, mem_wit) = make_twist_instance(&mem_layout, mem_init, 1);
+    let (mem_inst, mem_wit) = make_twist_instance(0, &mem_layout, mem_init, 1);
     let step_bundle = create_step_with_twist_bus(&params, &ccs, &l, 0, vec![(mem_inst, mem_wit, mem_trace)]);
 
     let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
@@ -437,7 +439,7 @@ fn memory_tamper_read_value_fails() {
         inc_at_write_addr: vec![F::ZERO],
     };
 
-    let (mem_inst, mem_wit) = make_twist_instance(&mem_layout, mem_init, 1);
+    let (mem_inst, mem_wit) = make_twist_instance(0, &mem_layout, mem_init, 1);
     let step_bundle = create_step_with_twist_bus(&params, &ccs, &l, 0, vec![(mem_inst, mem_wit, bad_mem_trace)]);
 
     let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
@@ -508,7 +510,7 @@ fn memory_tamper_write_increment_fails() {
         write_val: vec![F::from_u64(100)],
         inc_at_write_addr: vec![F::from_u64(10)], // WRONG: should be 58
     };
-    let (mem_inst, mem_wit) = make_twist_instance(&mem_layout, mem_init, 1);
+    let (mem_inst, mem_wit) = make_twist_instance(0, &mem_layout, mem_init, 1);
     let step_bundle = create_step_with_twist_bus(&params, &ccs, &l, 0, vec![(mem_inst, mem_wit, bad_mem_trace)]);
 
     let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
@@ -596,8 +598,8 @@ fn memory_multiple_regions_same_step() {
     };
     let reg_init = MemInit::Sparse(vec![(0, F::from_u64(10))]);
 
-    let (ram_inst, ram_wit) = make_twist_instance(&ram_layout, ram_init, 1);
-    let (reg_inst, reg_wit) = make_twist_instance(&reg_layout, reg_init, 1);
+    let (ram_inst, ram_wit) = make_twist_instance(0, &ram_layout, ram_init, 1);
+    let (reg_inst, reg_wit) = make_twist_instance(1, &reg_layout, reg_init, 1);
     let step_bundle = create_step_with_twist_bus(
         &params,
         &ccs,
@@ -672,7 +674,7 @@ fn memory_sparse_initialization() {
         inc_at_write_addr: vec![F::ZERO],
     };
 
-    let (mem_inst, mem_wit) = make_twist_instance(&mem_layout, mem_init, 1);
+    let (mem_inst, mem_wit) = make_twist_instance(0, &mem_layout, mem_init, 1);
     let step_bundle = create_step_with_twist_bus(&params, &ccs, &l, 0, vec![(mem_inst, mem_wit, mem_trace)]);
 
     let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();

@@ -265,6 +265,7 @@ where
             let ell = ell_from_pow2_n_side(layout.n_side)?;
 
             let inst = MemInstance::<Cmt, Goldilocks> {
+                mem_id,
                 comms: Vec::new(),
                 k: layout.k,
                 d: layout.d,

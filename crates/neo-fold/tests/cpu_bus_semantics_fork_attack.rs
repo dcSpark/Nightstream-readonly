@@ -264,6 +264,7 @@ fn cpu_semantic_shadow_fork_attack_should_be_rejected() {
     };
 
     let mem_inst = MemInstance::<Cmt, F> {
+        mem_id: 0,
         comms: Vec::new(),
         k: mem_layout.k,
         d: mem_layout.d,
@@ -462,6 +463,7 @@ fn cpu_semantic_fork_splice_attack_should_be_rejected() {
     };
 
     let mem_inst = MemInstance::<Cmt, F> {
+        mem_id: 0,
         comms: Vec::new(),
         k: mem_layout.k,
         d: mem_layout.d,
@@ -672,6 +674,7 @@ fn cpu_lookup_shadow_fork_attack_should_be_rejected() {
         inc_at_write_addr: vec![F::ZERO],
     };
     let mem_inst = MemInstance::<Cmt, F> {
+        mem_id: 0,
         comms: Vec::new(),
         k: mem_layout.k,
         d: mem_layout.d,

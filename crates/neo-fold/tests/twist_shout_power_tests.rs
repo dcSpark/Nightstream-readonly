@@ -108,7 +108,7 @@ fn redteam_drop_val_fold_must_fail() {
     let fx = build_twist_shout_2step_fixture(3);
     let mut proof = prove(FoldingMode::Optimized, &fx);
 
-    proof.steps[0].val_fold = None;
+    proof.steps[0].val_fold.clear();
 
     assert!(
         verify(FoldingMode::Optimized, &fx, &proof).is_err(),

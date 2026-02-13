@@ -60,12 +60,9 @@ impl RouteATimeClaimPlan {
     {
         let lut_insts: Vec<&LutInstance<Cmt, F>> = lut_insts.into_iter().collect();
         let mem_insts: Vec<&MemInstance<Cmt, F>> = mem_insts.into_iter().collect();
-        let any_event_table_shout = lut_insts.iter().any(|inst| {
-            matches!(
-                inst.table_spec,
-                Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })
-            )
-        });
+        let any_event_table_shout = lut_insts
+            .iter()
+            .any(|inst| matches!(inst.table_spec, Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })));
 
         let mut out = Vec::new();
 
@@ -78,7 +75,7 @@ impl RouteATimeClaimPlan {
         for lut_inst in lut_insts {
             let ell_addr = lut_inst.d * lut_inst.ell;
             let lanes = lut_inst.lanes.max(1);
-            let (packed_opcode, packed_base_ell_addr) = match &lut_inst.table_spec {
+            let (packed_opcode, _packed_base_ell_addr) = match &lut_inst.table_spec {
                 Some(LutTableSpec::RiscvOpcodePacked { opcode, xlen: 32 }) => (Some(*opcode), ell_addr),
                 Some(LutTableSpec::RiscvOpcodeEventTablePacked {
                     opcode,
@@ -91,7 +88,7 @@ impl RouteATimeClaimPlan {
             let (value_degree_bound, adapter_degree_bound) = match packed_opcode {
                 Some(RiscvOpcode::And | RiscvOpcode::Andn | RiscvOpcode::Or | RiscvOpcode::Xor) => (8, 6),
                 Some(RiscvOpcode::Add | RiscvOpcode::Sub) => (3, 2),
-                Some(RiscvOpcode::Eq | RiscvOpcode::Neq) => (4, 2 + packed_base_ell_addr),
+                Some(RiscvOpcode::Eq | RiscvOpcode::Neq) => (34, 3),
                 Some(RiscvOpcode::Mul) => (4, 2),
                 Some(RiscvOpcode::Mulh) => (4, 5),
                 Some(RiscvOpcode::Mulhu) => (4, 2),

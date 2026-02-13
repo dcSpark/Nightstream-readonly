@@ -1,4 +1,4 @@
-use neo_memory::riscv::exec_table::Rv32ExecTable;
+use neo_memory::riscv::exec_table::{Rv32ExecTable, Rv32ShoutEventTable};
 use neo_memory::riscv::lookups::{
     decode_program, encode_program, interleave_bits, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode,
     RiscvShoutTables, PROG_ID,
@@ -147,4 +147,49 @@ fn rv32_exec_table_padding_builds_inactive_rows() {
     assert_eq!(cols.pc_after[3], halted_pc);
     assert_eq!(cols.prog_value[2], 0);
     assert!(!cols.rd_has_write[3]);
+}
+
+#[test]
+fn rv32_shout_event_table_includes_rv32m_rows() {
+    // Target production behavior: RV32M Shout-backed ops should appear in the
+    // trace-derived event table used by event-table packed proving paths.
+    //
+    // This test is expected to fail until RV32M event-table coverage is fully wired.
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 7,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 0,
+            imm: 9,
+        },
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Mul,
+            rd: 3,
+            rs1: 1,
+            rs2: 2,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let decoded_program = decode_program(&program_bytes).expect("decode_program");
+    let mut cpu = RiscvCpu::new(/*xlen=*/ 32);
+    cpu.load_program(/*base=*/ 0, decoded_program);
+    let twist = RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
+    let shout = RiscvShoutTables::new(/*xlen=*/ 32);
+    let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 32).expect("trace_program");
+
+    let exec = Rv32ExecTable::from_trace_padded_pow2(&trace, /*min_len=*/ 8).expect("from_trace_padded_pow2");
+    let events = Rv32ShoutEventTable::from_exec_table(&exec).expect("Rv32ShoutEventTable::from_exec_table");
+
+    assert!(
+        events.rows.iter().any(|row| row.opcode == Some(RiscvOpcode::Mul)),
+        "expected RV32M (MUL) rows in trace shout event table"
+    );
 }

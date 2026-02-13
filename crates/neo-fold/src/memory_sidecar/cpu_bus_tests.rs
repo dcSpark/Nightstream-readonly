@@ -198,6 +198,7 @@ fn minimal_bus_steps(
     };
 
     let mem = MemInstance::<Commitment, F> {
+        mem_id: 0,
         comms: Vec::new(),
         k: 1usize << twist_d,
         d: twist_d,

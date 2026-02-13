@@ -409,8 +409,9 @@ fn twist_shout_fibonacci_cycle_trace() {
                     .unwrap_or(0)
             );
             println!(
-                "mem_sidecar: cpu_me_claims_val={}  proofs={}",
-                step_proof.mem.cpu_me_claims_val.len(),
+                "mem_sidecar: val_me_claims={} twist_me_claims_time={} proofs={}",
+                step_proof.mem.val_me_claims.len(),
+                step_proof.mem.twist_me_claims_time.len(),
                 step_proof.mem.proofs.len()
             );
             println!(
@@ -472,14 +473,33 @@ fn twist_shout_fibonacci_cycle_trace() {
                 }
             }
 
-            if let Some(val_fold) = &step_proof.val_fold {
-                println!(
-                    "val_lane: rlc_rhos={} dec_children={}",
-                    val_fold.rlc_rhos.len(),
-                    val_fold.dec_children.len()
-                );
-            } else {
+            if step_proof.val_fold.is_empty() {
                 println!("val_lane: <none>");
+            } else {
+                let total_children: usize = step_proof
+                    .val_fold
+                    .iter()
+                    .map(|p| p.dec_children.len())
+                    .sum();
+                println!(
+                    "val_lane: proofs={} total_dec_children={}",
+                    step_proof.val_fold.len(),
+                    total_children
+                );
+            }
+            if step_proof.twist_time_fold.is_empty() {
+                println!("twist_time_lane: <none>");
+            } else {
+                let total_children: usize = step_proof
+                    .twist_time_fold
+                    .iter()
+                    .map(|p| p.dec_children.len())
+                    .sum();
+                println!(
+                    "twist_time_lane: proofs={} total_dec_children={}",
+                    step_proof.twist_time_fold.len(),
+                    total_children
+                );
             }
         }
     }

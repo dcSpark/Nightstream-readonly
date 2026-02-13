@@ -108,37 +108,34 @@ pub fn validate_pow2_bit_addressing_shape(proto: &'static str, n_side: usize, el
 pub fn validate_shout_bit_addressing<Cmt, F>(inst: &LutInstance<Cmt, F>) -> Result<(), PiCcsError> {
     // Virtual/implicit tables may not have a materialized `k = n_side^d` table.
     if let Some(spec) = &inst.table_spec {
-        let rv32_packed_expected_d =
-            |opcode: crate::riscv::lookups::RiscvOpcode| -> Result<usize, PiCcsError> {
-                Ok(match opcode {
-                    crate::riscv::lookups::RiscvOpcode::And
-                    | crate::riscv::lookups::RiscvOpcode::Andn
-                    | crate::riscv::lookups::RiscvOpcode::Xor
-                    | crate::riscv::lookups::RiscvOpcode::Or => 34usize,
-                    crate::riscv::lookups::RiscvOpcode::Add
-                    | crate::riscv::lookups::RiscvOpcode::Sub
-                    | crate::riscv::lookups::RiscvOpcode::Eq
-                    | crate::riscv::lookups::RiscvOpcode::Neq => 3usize,
-                    crate::riscv::lookups::RiscvOpcode::Slt => 37usize,
-                    crate::riscv::lookups::RiscvOpcode::Sll => 38usize,
-                    crate::riscv::lookups::RiscvOpcode::Srl => 38usize,
-                    crate::riscv::lookups::RiscvOpcode::Sra => 38usize,
-                    crate::riscv::lookups::RiscvOpcode::Sltu => 35usize,
-                    crate::riscv::lookups::RiscvOpcode::Mul => 34usize,
-                    crate::riscv::lookups::RiscvOpcode::Mulh => 38usize,
-                    crate::riscv::lookups::RiscvOpcode::Mulhu => 34usize,
-                    crate::riscv::lookups::RiscvOpcode::Mulhsu => 37usize,
-                    crate::riscv::lookups::RiscvOpcode::Div => 43usize,
-                    crate::riscv::lookups::RiscvOpcode::Divu => 38usize,
-                    crate::riscv::lookups::RiscvOpcode::Rem => 43usize,
-                    crate::riscv::lookups::RiscvOpcode::Remu => 38usize,
-                    _ => {
-                        return Err(PiCcsError::InvalidInput(format!(
-                            "Shout(RISC-V packed): unsupported opcode={opcode:?}"
-                        )));
-                    }
-                })
-            };
+        let rv32_packed_expected_d = |opcode: crate::riscv::lookups::RiscvOpcode| -> Result<usize, PiCcsError> {
+            Ok(match opcode {
+                crate::riscv::lookups::RiscvOpcode::And
+                | crate::riscv::lookups::RiscvOpcode::Andn
+                | crate::riscv::lookups::RiscvOpcode::Xor
+                | crate::riscv::lookups::RiscvOpcode::Or => 34usize,
+                crate::riscv::lookups::RiscvOpcode::Add | crate::riscv::lookups::RiscvOpcode::Sub => 3usize,
+                crate::riscv::lookups::RiscvOpcode::Eq | crate::riscv::lookups::RiscvOpcode::Neq => 35usize,
+                crate::riscv::lookups::RiscvOpcode::Slt => 37usize,
+                crate::riscv::lookups::RiscvOpcode::Sll => 38usize,
+                crate::riscv::lookups::RiscvOpcode::Srl => 38usize,
+                crate::riscv::lookups::RiscvOpcode::Sra => 38usize,
+                crate::riscv::lookups::RiscvOpcode::Sltu => 35usize,
+                crate::riscv::lookups::RiscvOpcode::Mul => 34usize,
+                crate::riscv::lookups::RiscvOpcode::Mulh => 38usize,
+                crate::riscv::lookups::RiscvOpcode::Mulhu => 34usize,
+                crate::riscv::lookups::RiscvOpcode::Mulhsu => 37usize,
+                crate::riscv::lookups::RiscvOpcode::Div => 43usize,
+                crate::riscv::lookups::RiscvOpcode::Divu => 38usize,
+                crate::riscv::lookups::RiscvOpcode::Rem => 43usize,
+                crate::riscv::lookups::RiscvOpcode::Remu => 38usize,
+                _ => {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Shout(RISC-V packed): unsupported opcode={opcode:?}"
+                    )));
+                }
+            })
+        };
 
         validate_pow2_bit_addressing_shape("Shout", inst.n_side, inst.ell)?;
         if inst.k != 0 {

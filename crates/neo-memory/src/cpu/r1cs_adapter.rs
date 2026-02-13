@@ -108,7 +108,7 @@ where
         tables: &HashMap<u32, LutTable<F>>,
         table_specs: &HashMap<u32, LutTableSpec>,
         chunk_to_witness: Box<dyn Fn(&[StepTrace<u64, u64>]) -> Vec<F> + Send + Sync>,
-    ) -> Self {
+    ) -> Result<Self, String> {
         let mut shout_meta = HashMap::new();
         for (id, table) in tables {
             shout_meta.insert(*id, (table.d, table.n_side));
@@ -117,10 +117,10 @@ where
             let (d, n_side) = match spec {
                 LutTableSpec::RiscvOpcode { xlen, .. } => (xlen.saturating_mul(2), 2usize),
                 LutTableSpec::RiscvOpcodePacked { .. } => {
-                    panic!("RiscvOpcodePacked is not supported in the shared-bus R1csCpu path");
+                    return Err("RiscvOpcodePacked is not supported in the shared-bus R1csCpu path".into());
                 }
                 LutTableSpec::RiscvOpcodeEventTablePacked { .. } => {
-                    panic!("RiscvOpcodeEventTablePacked is not supported in the shared-bus R1csCpu path");
+                    return Err("RiscvOpcodeEventTablePacked is not supported in the shared-bus R1csCpu path".into());
                 }
                 LutTableSpec::IdentityU32 => (32usize, 2usize),
             };
@@ -141,7 +141,7 @@ where
             }
         }
 
-        Self {
+        Ok(Self {
             ccs,
             params,
             committer,
@@ -150,7 +150,7 @@ where
             shared_cpu_bus: None,
             chunk_to_witness,
             _phantom: PhantomData,
-        }
+        })
     }
 
     fn shared_bus_schema(
@@ -395,6 +395,7 @@ where
                 .ok_or_else(|| format!("shared_cpu_bus: missing mem_layout for mem_id={mem_id}"))?;
             let ell = layout.n_side.trailing_zeros() as usize;
             mem_insts.push(MemInstance {
+                mem_id: *mem_id,
                 comms: Vec::new(),
                 k: layout.k,
                 d: layout.d,

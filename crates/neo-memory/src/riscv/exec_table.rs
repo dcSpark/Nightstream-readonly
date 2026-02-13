@@ -1,8 +1,8 @@
 use neo_vm_trace::{ShoutEvent, StepTrace, TwistEvent, TwistOpKind, VmTrace};
 
 use crate::riscv::lookups::{
-    compute_op, decode_instruction, interleave_bits, uninterleave_bits, RiscvInstruction, RiscvOpcode, RiscvShoutTables,
-    PROG_ID, RAM_ID, REG_ID,
+    compute_op, decode_instruction, interleave_bits, uninterleave_bits, RiscvInstruction, RiscvOpcode,
+    RiscvShoutTables, PROG_ID, RAM_ID, REG_ID,
 };
 use std::collections::HashMap;
 
@@ -291,10 +291,16 @@ impl Rv32ExecTable {
 
             if let Some(w) = &r.reg_write_lane0 {
                 if w.addr >= 32 {
-                    return Err(format!("REG write addr out of range at cycle {}: addr={}", r.cycle, w.addr));
+                    return Err(format!(
+                        "REG write addr out of range at cycle {}: addr={}",
+                        r.cycle, w.addr
+                    ));
                 }
                 if w.addr == 0 {
-                    return Err(format!("unexpected x0 write at cycle {} pc={:#x}", r.cycle, r.pc_before));
+                    return Err(format!(
+                        "unexpected x0 write at cycle {} pc={:#x}",
+                        r.cycle, r.pc_before
+                    ));
                 }
                 regs[w.addr as usize] = w.value;
             }
@@ -607,7 +613,39 @@ impl Rv32ExecRow {
             .collect();
 
         // Shout events
-        let shout_events = step.shout_events.clone();
+        let mut shout_events = step.shout_events.clone();
+        if shout_events.is_empty() {
+            // Backfill RV32M shout events for trace/event-table consumers.
+            //
+            // Some trace builders currently omit explicit Shout events for RV32M rows even when
+            // the operation is semantically Shout-backed. Reconstruct the canonical event from the
+            // decoded op and the architectural operands.
+            if let RiscvInstruction::RAlu { op, .. } = &decoded {
+                let is_rv32m = matches!(
+                    op,
+                    RiscvOpcode::Mul
+                        | RiscvOpcode::Mulh
+                        | RiscvOpcode::Mulhu
+                        | RiscvOpcode::Mulhsu
+                        | RiscvOpcode::Div
+                        | RiscvOpcode::Divu
+                        | RiscvOpcode::Rem
+                        | RiscvOpcode::Remu
+                );
+                if is_rv32m {
+                    let rs1_val = reg_read_lane0.value;
+                    let rs2_val = reg_read_lane1.value;
+                    let shout_id = RiscvShoutTables::new(/*xlen=*/ 32).opcode_to_id(*op);
+                    let key = interleave_bits(rs1_val, rs2_val) as u64;
+                    let value = compute_op(*op, rs1_val, rs2_val, /*xlen=*/ 32);
+                    shout_events.push(ShoutEvent {
+                        shout_id,
+                        key,
+                        value,
+                    });
+                }
+            }
+        }
 
         Ok(Self {
             active: true,
@@ -892,10 +930,16 @@ impl Rv32RegEventTable {
 
             if let Some(w) = &r.reg_write_lane0 {
                 if w.addr >= 32 {
-                    return Err(format!("REG write addr out of range at cycle {}: addr={}", r.cycle, w.addr));
+                    return Err(format!(
+                        "REG write addr out of range at cycle {}: addr={}",
+                        r.cycle, w.addr
+                    ));
                 }
                 if w.addr == 0 {
-                    return Err(format!("unexpected x0 write at cycle {} pc={:#x}", r.cycle, r.pc_before));
+                    return Err(format!(
+                        "unexpected x0 write at cycle {} pc={:#x}",
+                        r.cycle, r.pc_before
+                    ));
                 }
 
                 let prev = regs[w.addr as usize];

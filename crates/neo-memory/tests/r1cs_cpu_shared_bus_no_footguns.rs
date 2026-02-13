@@ -107,7 +107,8 @@ fn with_shared_cpu_bus_injects_constraints_and_forces_const_one() {
         &tables,
         &HashMap::new(),
         Box::new(|_step| vec![F::ZERO]),
-    );
+    )
+    .expect("R1csCpu::new");
 
     let mut mem_layouts: HashMap<u32, PlainMemLayout> = HashMap::new();
     mem_layouts.insert(
@@ -238,7 +239,8 @@ fn shared_bus_shout_lane_assignment_is_in_order_and_resets_per_step() {
             }
             z
         }),
-    );
+    )
+    .expect("R1csCpu::new");
 
     let cfg = SharedCpuBusConfig::<F> {
         mem_layouts: HashMap::new(),
@@ -370,7 +372,8 @@ fn shared_bus_rejects_shout_lane_overflow_in_one_step() {
         &tables,
         &HashMap::new(),
         Box::new(|_chunk| vec![F::ZERO]),
-    );
+    )
+    .expect("R1csCpu::new");
 
     let cfg = SharedCpuBusConfig::<F> {
         mem_layouts: HashMap::new(),
@@ -435,7 +438,8 @@ fn with_shared_cpu_bus_rejects_non_public_const_one() {
         &tables,
         &HashMap::new(),
         Box::new(|_step| vec![F::ZERO]),
-    );
+    )
+    .expect("R1csCpu::new");
 
     let cfg = SharedCpuBusConfig::<F> {
         mem_layouts: HashMap::new(),
@@ -477,7 +481,8 @@ fn with_shared_cpu_bus_rejects_bindings_in_bus_tail() {
         &tables,
         &HashMap::new(),
         Box::new(|_step| vec![F::ZERO]),
-    );
+    )
+    .expect("R1csCpu::new");
 
     let mut mem_layouts: HashMap<u32, PlainMemLayout> = HashMap::new();
     mem_layouts.insert(

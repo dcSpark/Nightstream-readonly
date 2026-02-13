@@ -96,6 +96,7 @@ fn default_mixers() -> CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32
 }
 
 fn metadata_only_mem_instance(
+    mem_id: u32,
     layout: &PlainMemLayout,
     init: MemInit<F>,
     steps: usize,
@@ -103,6 +104,7 @@ fn metadata_only_mem_instance(
     let ell = layout.n_side.trailing_zeros() as usize;
     (
         MemInstance {
+            mem_id,
             comms: Vec::new(),
             k: layout.k,
             d: layout.d,
@@ -267,7 +269,7 @@ fn has_write_flag_mismatch_wv_nonzero_should_be_rejected() {
         inc_at_write_addr: vec![F::ZERO],
     };
 
-    let (mem_inst, mem_wit) = metadata_only_mem_instance(&mem_layout, mem_init, mem_trace.steps);
+    let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
     let steps_witness = vec![StepWitnessBundle {
         mcs,
@@ -388,7 +390,7 @@ fn has_write_flag_mismatch_inc_nonzero_should_be_rejected() {
         inc_at_write_addr: vec![F::from_u64(50)], // Attack
     };
 
-    let (mem_inst, mem_wit) = metadata_only_mem_instance(&mem_layout, mem_init, mem_trace.steps);
+    let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
     let steps_witness = vec![StepWitnessBundle {
         mcs,
@@ -509,7 +511,7 @@ fn has_read_flag_mismatch_ra_bits_nonzero_should_be_rejected() {
         inc_at_write_addr: vec![F::ZERO],
     };
 
-    let (mem_inst, mem_wit) = metadata_only_mem_instance(&mem_layout, mem_init, mem_trace.steps);
+    let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
     let steps_witness = vec![StepWitnessBundle {
         mcs,
@@ -630,7 +632,7 @@ fn has_write_flag_mismatch_wa_bits_nonzero_should_be_rejected() {
         inc_at_write_addr: vec![F::ZERO],
     };
 
-    let (mem_inst, mem_wit) = metadata_only_mem_instance(&mem_layout, mem_init, mem_trace.steps);
+    let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
     let steps_witness = vec![StepWitnessBundle {
         mcs,
@@ -775,7 +777,7 @@ fn has_lookup_flag_mismatch_val_nonzero_should_be_rejected() {
         write_val: vec![F::ZERO],
         inc_at_write_addr: vec![F::ZERO],
     };
-    let (mem_inst, mem_wit) = metadata_only_mem_instance(&mem_layout, mem_init, mem_trace.steps);
+    let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
     let steps_witness = vec![StepWitnessBundle {
         mcs,
@@ -916,7 +918,7 @@ fn has_lookup_flag_mismatch_addr_bits_nonzero_should_be_rejected() {
         write_val: vec![F::ZERO],
         inc_at_write_addr: vec![F::ZERO],
     };
-    let (mem_inst, mem_wit) = metadata_only_mem_instance(&mem_layout, mem_init, mem_trace.steps);
+    let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
     let steps_witness = vec![StepWitnessBundle {
         mcs,

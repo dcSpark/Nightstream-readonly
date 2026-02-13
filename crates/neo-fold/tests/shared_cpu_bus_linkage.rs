@@ -241,6 +241,7 @@ fn build_one_step_fixture(seed: u64) -> SharedBusFixture {
     let lut_ell = lut_table.n_side.trailing_zeros() as usize;
 
     let mem_inst = neo_memory::witness::MemInstance::<Cmt, F> {
+        mem_id: 0,
         comms: Vec::new(),
         k: mem_layout.k,
         d: mem_layout.d,
@@ -395,7 +396,7 @@ fn shared_cpu_bus_missing_cpu_me_claim_val_fails() {
     .expect("prove");
 
     // Shared-bus mode expects CPU ME claims at r_val inside mem proof, so dropping them must fail.
-    proof.steps[0].mem.cpu_me_claims_val.clear();
+    proof.steps[0].mem.val_me_claims.clear();
 
     let mut tr_v = Poseidon2Transcript::new(b"shared-cpu-bus");
     assert!(

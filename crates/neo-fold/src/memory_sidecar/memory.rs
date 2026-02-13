@@ -14,6 +14,7 @@ use neo_memory::bit_ops::{eq_bit_affine, eq_bits_prod};
 use neo_memory::cpu::{build_bus_layout_for_instances_with_shout_and_twist_lanes, BusLayout};
 use neo_memory::identity::shout_oracle::IdentityAddressLookupOracleSparse;
 use neo_memory::mle::{eq_points, lt_eval};
+use neo_memory::riscv::lookups::{PROG_ID, RAM_ID, REG_ID};
 use neo_memory::riscv::shout_oracle::RiscvAddressLookupOracleSparse;
 use neo_memory::riscv::trace::Rv32TraceLayout;
 use neo_memory::sparse_time::SparseIdxVec;
@@ -21,16 +22,15 @@ use neo_memory::ts_common as ts;
 use neo_memory::twist_oracle::{
     AddressLookupOracle, IndexAdapterOracleSparseTime, LazyWeightedBitnessOracleSparseTime,
     Rv32PackedAddOracleSparseTime, Rv32PackedAndOracleSparseTime, Rv32PackedAndnOracleSparseTime,
-    Rv32PackedBitwiseAdapterOracleSparseTime,
-    Rv32PackedDivOracleSparseTime, Rv32PackedDivRemAdapterOracleSparseTime, Rv32PackedDivRemuAdapterOracleSparseTime,
-    Rv32PackedDivuOracleSparseTime, Rv32PackedEqAdapterOracleSparseTime, Rv32PackedEqOracleSparseTime,
-    Rv32PackedMulHiOracleSparseTime, Rv32PackedMulOracleSparseTime, Rv32PackedMulhAdapterOracleSparseTime,
-    Rv32PackedMulhsuAdapterOracleSparseTime, Rv32PackedMulhuOracleSparseTime, Rv32PackedNeqAdapterOracleSparseTime,
-    Rv32PackedNeqOracleSparseTime, Rv32PackedOrOracleSparseTime, Rv32PackedRemOracleSparseTime,
-    Rv32PackedRemuOracleSparseTime, Rv32PackedSllOracleSparseTime, Rv32PackedSltOracleSparseTime,
-    Rv32PackedSltuOracleSparseTime, Rv32PackedSraAdapterOracleSparseTime, Rv32PackedSraOracleSparseTime,
-    Rv32PackedSrlAdapterOracleSparseTime, Rv32PackedSrlOracleSparseTime, Rv32PackedSubOracleSparseTime,
-    Rv32PackedXorOracleSparseTime, ShoutValueOracleSparse, TwistLaneSparseCols,
+    Rv32PackedBitwiseAdapterOracleSparseTime, Rv32PackedDivOracleSparseTime, Rv32PackedDivRemAdapterOracleSparseTime,
+    Rv32PackedDivRemuAdapterOracleSparseTime, Rv32PackedDivuOracleSparseTime, Rv32PackedEqAdapterOracleSparseTime,
+    Rv32PackedEqOracleSparseTime, Rv32PackedMulHiOracleSparseTime, Rv32PackedMulOracleSparseTime,
+    Rv32PackedMulhAdapterOracleSparseTime, Rv32PackedMulhsuAdapterOracleSparseTime, Rv32PackedMulhuOracleSparseTime,
+    Rv32PackedNeqAdapterOracleSparseTime, Rv32PackedNeqOracleSparseTime, Rv32PackedOrOracleSparseTime,
+    Rv32PackedRemOracleSparseTime, Rv32PackedRemuOracleSparseTime, Rv32PackedSllOracleSparseTime,
+    Rv32PackedSltOracleSparseTime, Rv32PackedSltuOracleSparseTime, Rv32PackedSraAdapterOracleSparseTime,
+    Rv32PackedSraOracleSparseTime, Rv32PackedSrlAdapterOracleSparseTime, Rv32PackedSrlOracleSparseTime,
+    Rv32PackedSubOracleSparseTime, Rv32PackedXorOracleSparseTime, ShoutValueOracleSparse, TwistLaneSparseCols,
     TwistReadCheckAddrOracleSparseTimeMultiLane, TwistReadCheckOracleSparseTime, TwistTotalIncOracleSparseTime,
     TwistValEvalOracleSparseTime, TwistWriteCheckAddrOracleSparseTimeMultiLane, TwistWriteCheckOracleSparseTime,
     U32DecompOracleSparseTime, ZeroOracleSparseTime,
@@ -53,52 +53,20 @@ fn bind_shout_table_spec(tr: &mut Poseidon2Transcript, spec: &Option<LutTableSpe
     };
 
     tr.append_message(b"shout/table_spec/tag", &[1u8]);
-    let opcode_to_id = |opcode: &neo_memory::riscv::lookups::RiscvOpcode| -> u64 {
-        // Stable numeric encoding: align with `RiscvShoutTables::opcode_to_id`.
-        match opcode {
-            neo_memory::riscv::lookups::RiscvOpcode::And => 0,
-            neo_memory::riscv::lookups::RiscvOpcode::Xor => 1,
-            neo_memory::riscv::lookups::RiscvOpcode::Or => 2,
-            neo_memory::riscv::lookups::RiscvOpcode::Add => 3,
-            neo_memory::riscv::lookups::RiscvOpcode::Sub => 4,
-            neo_memory::riscv::lookups::RiscvOpcode::Slt => 5,
-            neo_memory::riscv::lookups::RiscvOpcode::Sltu => 6,
-            neo_memory::riscv::lookups::RiscvOpcode::Sll => 7,
-            neo_memory::riscv::lookups::RiscvOpcode::Srl => 8,
-            neo_memory::riscv::lookups::RiscvOpcode::Sra => 9,
-            neo_memory::riscv::lookups::RiscvOpcode::Eq => 10,
-            neo_memory::riscv::lookups::RiscvOpcode::Neq => 11,
-            neo_memory::riscv::lookups::RiscvOpcode::Mul => 12,
-            neo_memory::riscv::lookups::RiscvOpcode::Mulh => 13,
-            neo_memory::riscv::lookups::RiscvOpcode::Mulhu => 14,
-            neo_memory::riscv::lookups::RiscvOpcode::Mulhsu => 15,
-            neo_memory::riscv::lookups::RiscvOpcode::Div => 16,
-            neo_memory::riscv::lookups::RiscvOpcode::Divu => 17,
-            neo_memory::riscv::lookups::RiscvOpcode::Rem => 18,
-            neo_memory::riscv::lookups::RiscvOpcode::Remu => 19,
-            neo_memory::riscv::lookups::RiscvOpcode::Addw => 20,
-            neo_memory::riscv::lookups::RiscvOpcode::Subw => 21,
-            neo_memory::riscv::lookups::RiscvOpcode::Sllw => 22,
-            neo_memory::riscv::lookups::RiscvOpcode::Srlw => 23,
-            neo_memory::riscv::lookups::RiscvOpcode::Sraw => 24,
-            neo_memory::riscv::lookups::RiscvOpcode::Mulw => 25,
-            neo_memory::riscv::lookups::RiscvOpcode::Divw => 26,
-            neo_memory::riscv::lookups::RiscvOpcode::Divuw => 27,
-            neo_memory::riscv::lookups::RiscvOpcode::Remw => 28,
-            neo_memory::riscv::lookups::RiscvOpcode::Remuw => 29,
-            neo_memory::riscv::lookups::RiscvOpcode::Andn => 30,
-        }
-    };
     match spec {
         LutTableSpec::RiscvOpcode { opcode, xlen } => {
-            let opcode_id = opcode_to_id(opcode);
+            let opcode_id = neo_memory::riscv::lookups::RiscvShoutTables::new(*xlen)
+                .opcode_to_id(*opcode)
+                .0 as u64;
 
             tr.append_message(b"shout/table_spec/riscv/tag", &[1u8]);
             tr.append_message(b"shout/table_spec/riscv/opcode_id", &opcode_id.to_le_bytes());
             tr.append_message(b"shout/table_spec/riscv/xlen", &(*xlen as u64).to_le_bytes());
         }
         LutTableSpec::RiscvOpcodePacked { opcode, xlen } => {
-            let opcode_id = opcode_to_id(opcode);
+            let opcode_id = neo_memory::riscv::lookups::RiscvShoutTables::new(*xlen)
+                .opcode_to_id(*opcode)
+                .0 as u64;
 
             tr.append_message(b"shout/table_spec/riscv_packed/tag", &[1u8]);
             tr.append_message(b"shout/table_spec/riscv_packed/opcode_id", &opcode_id.to_le_bytes());
@@ -109,7 +77,9 @@ fn bind_shout_table_spec(tr: &mut Poseidon2Transcript, spec: &Option<LutTableSpe
             xlen,
             time_bits,
         } => {
-            let opcode_id = opcode_to_id(opcode);
+            let opcode_id = neo_memory::riscv::lookups::RiscvShoutTables::new(*xlen)
+                .opcode_to_id(*opcode)
+                .0 as u64;
 
             tr.append_message(b"shout/table_spec/riscv_event_table_packed/tag", &[1u8]);
             tr.append_message(
@@ -162,6 +132,7 @@ where
     for (i, inst) in mem_insts.by_ref().enumerate() {
         // Bind public memory parameters before any challenges.
         tr.append_message(b"step/mem_idx", &(i as u64).to_le_bytes());
+        tr.append_message(b"twist/mem_id", &(inst.mem_id as u64).to_le_bytes());
         tr.append_message(b"twist/k", &(inst.k as u64).to_le_bytes());
         tr.append_message(b"twist/d", &(inst.d as u64).to_le_bytes());
         tr.append_message(b"twist/n_side", &(inst.n_side as u64).to_le_bytes());
@@ -283,6 +254,33 @@ fn rv32_packed_shout_layout(spec: &Option<LutTableSpec>) -> Result<Option<(Rv32P
     };
 
     Ok(Some((op, time_bits)))
+}
+
+fn rv32_shout_table_id_from_spec(spec: &Option<LutTableSpec>) -> Result<u32, PiCcsError> {
+    let (opcode, xlen) = match spec {
+        Some(LutTableSpec::RiscvOpcode { opcode, xlen }) => (*opcode, *xlen),
+        Some(LutTableSpec::RiscvOpcodePacked { opcode, xlen }) => (*opcode, *xlen),
+        Some(LutTableSpec::RiscvOpcodeEventTablePacked { opcode, xlen, .. }) => (*opcode, *xlen),
+        Some(LutTableSpec::IdentityU32) => {
+            return Err(PiCcsError::InvalidInput(
+                "trace linkage expects RISC-V shout table specs (IdentityU32 is unsupported)".into(),
+            ));
+        }
+        None => {
+            return Err(PiCcsError::InvalidInput(
+                "trace linkage requires LutTableSpec on no-shared-bus shout instances".into(),
+            ));
+        }
+    };
+
+    if xlen != 32 {
+        return Err(PiCcsError::InvalidInput(format!(
+            "trace linkage expects RV32 shout specs (got xlen={xlen})"
+        )));
+    }
+    Ok(neo_memory::riscv::lookups::RiscvShoutTables::new(xlen)
+        .opcode_to_id(opcode)
+        .0)
 }
 
 // ============================================================================
@@ -709,6 +707,506 @@ pub struct RouteAMemoryVerifyOutput {
     pub twist_time_openings: Vec<TwistTimeLaneOpenings>,
 }
 
+#[derive(Clone, Copy)]
+struct TraceCpuLinkOpenings {
+    active: K,
+    prog_addr: K,
+    prog_value: K,
+    rs1_addr: K,
+    rs1_val: K,
+    rs2_addr: K,
+    rs2_val: K,
+    rd_has_write: K,
+    rd_addr: K,
+    rd_val: K,
+    ram_has_read: K,
+    ram_has_write: K,
+    ram_addr: K,
+    ram_rv: K,
+    ram_wv: K,
+    shout_has_lookup: K,
+    shout_val: K,
+    shout_lhs: K,
+    shout_rhs: K,
+    shout_table_id: K,
+}
+
+#[inline]
+fn pack_bits_lsb(bits: &[K]) -> K {
+    let two = K::from(F::from_u64(2));
+    let mut pow = K::ONE;
+    let mut acc = K::ZERO;
+    for &b in bits {
+        acc += pow * b;
+        pow *= two;
+    }
+    acc
+}
+
+#[inline]
+fn unpack_interleaved_halves_lsb(addr_bits: &[K]) -> Result<(K, K), PiCcsError> {
+    if !addr_bits.len().is_multiple_of(2) {
+        return Err(PiCcsError::InvalidInput(format!(
+            "shout linkage expects even ell_addr, got {}",
+            addr_bits.len()
+        )));
+    }
+    let half_len = addr_bits.len() / 2;
+    let two = K::from(F::from_u64(2));
+    let mut pow = K::ONE;
+    let mut lhs = K::ZERO;
+    let mut rhs = K::ZERO;
+    for k in 0..half_len {
+        lhs += pow * addr_bits[2 * k];
+        rhs += pow * addr_bits[2 * k + 1];
+        pow *= two;
+    }
+    Ok((lhs, rhs))
+}
+
+fn extract_trace_cpu_link_openings(
+    m: usize,
+    core_t: usize,
+    step: &StepInstanceBundle<Cmt, F, K>,
+    ccs_out0: &MeInstance<Cmt, F, K>,
+) -> Result<Option<TraceCpuLinkOpenings>, PiCcsError> {
+    if step.mem_insts.is_empty() && step.lut_insts.is_empty() {
+        return Ok(None);
+    }
+
+    // RV32 trace linkage: the prover appends time-combined openings for selected CPU trace columns
+    // to the CCS ME output at r_time. We use those to bind Twist instances (PROG/REG/RAM) to the
+    // same trace, without embedding a shared CPU bus tail.
+    let trace = Rv32TraceLayout::new();
+    let trace_cols_to_open: Vec<usize> = vec![
+        trace.active,
+        trace.prog_addr,
+        trace.prog_value,
+        trace.rs1_addr,
+        trace.rs1_val,
+        trace.rs2_addr,
+        trace.rs2_val,
+        trace.rd_has_write,
+        trace.rd_addr,
+        trace.rd_val,
+        trace.ram_has_read,
+        trace.ram_has_write,
+        trace.ram_addr,
+        trace.ram_rv,
+        trace.ram_wv,
+        trace.shout_has_lookup,
+        trace.shout_val,
+        trace.shout_lhs,
+        trace.shout_rhs,
+        trace.shout_table_id,
+    ];
+
+    let m_in = step.mcs_inst.m_in;
+    if m_in != 5 {
+        return Err(PiCcsError::InvalidInput(format!(
+            "no-shared-bus trace linkage expects m_in=5 (got {m_in})"
+        )));
+    }
+    let t_len = step
+        .mem_insts
+        .first()
+        .map(|inst| inst.steps)
+        .or_else(|| {
+            // Shout event-table instances may have `steps != t_len`; prefer a non-event-table
+            // instance if present, otherwise fall back to inferring from the trace layout.
+            step.lut_insts
+                .iter()
+                .find(|inst| !matches!(inst.table_spec, Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })))
+                .map(|inst| inst.steps)
+        })
+        .or_else(|| {
+            // Trace CCS layout inference: z = [x (m_in) | trace_cols * t_len]
+            let w = m.checked_sub(m_in)?;
+            if trace.cols == 0 || w % trace.cols != 0 {
+                return None;
+            }
+            Some(w / trace.cols)
+        })
+        .ok_or_else(|| PiCcsError::InvalidInput("missing mem/lut instances".into()))?;
+    if t_len == 0 {
+        return Err(PiCcsError::InvalidInput(
+            "no-shared-bus trace linkage requires steps>=1".into(),
+        ));
+    }
+    for (i, inst) in step.mem_insts.iter().enumerate() {
+        if inst.steps != t_len {
+            return Err(PiCcsError::InvalidInput(format!(
+                "no-shared-bus trace linkage requires stable steps across mem instances (mem_idx={i} has steps={}, expected {t_len})",
+                inst.steps
+            )));
+        }
+    }
+    let trace_len = trace
+        .cols
+        .checked_mul(t_len)
+        .ok_or_else(|| PiCcsError::InvalidInput("trace cols * t_len overflow".into()))?;
+    let expected_m = m_in
+        .checked_add(trace_len)
+        .ok_or_else(|| PiCcsError::InvalidInput("m_in + trace_len overflow".into()))?;
+    if m < expected_m {
+        return Err(PiCcsError::InvalidInput(format!(
+            "no-shared-bus trace linkage expects m >= m_in + trace.cols*t_len (m={}; min_m={expected_m} for t_len={t_len}, trace_cols={})",
+            m, trace.cols
+        )));
+    }
+    let expected_y_len = core_t
+        .checked_add(trace_cols_to_open.len())
+        .ok_or_else(|| PiCcsError::InvalidInput("core_t + trace_openings overflow".into()))?;
+    if ccs_out0.y_scalars.len() != expected_y_len {
+        return Err(PiCcsError::InvalidInput(format!(
+            "no-shared-bus trace linkage expects CPU ME output to contain exactly core_t + trace_openings y_scalars (have {}, expected {expected_y_len})",
+            ccs_out0.y_scalars.len(),
+        )));
+    }
+    let cpu_open = |idx: usize| -> Result<K, PiCcsError> {
+        ccs_out0
+            .y_scalars
+            .get(core_t + idx)
+            .copied()
+            .ok_or_else(|| PiCcsError::ProtocolError("missing CPU trace linkage opening".into()))
+    };
+
+    Ok(Some(TraceCpuLinkOpenings {
+        active: cpu_open(0)?,
+        prog_addr: cpu_open(1)?,
+        prog_value: cpu_open(2)?,
+        rs1_addr: cpu_open(3)?,
+        rs1_val: cpu_open(4)?,
+        rs2_addr: cpu_open(5)?,
+        rs2_val: cpu_open(6)?,
+        rd_has_write: cpu_open(7)?,
+        rd_addr: cpu_open(8)?,
+        rd_val: cpu_open(9)?,
+        ram_has_read: cpu_open(10)?,
+        ram_has_write: cpu_open(11)?,
+        ram_addr: cpu_open(12)?,
+        ram_rv: cpu_open(13)?,
+        ram_wv: cpu_open(14)?,
+        shout_has_lookup: cpu_open(15)?,
+        shout_val: cpu_open(16)?,
+        shout_lhs: cpu_open(17)?,
+        shout_rhs: cpu_open(18)?,
+        shout_table_id: cpu_open(19)?,
+    }))
+}
+
+fn verify_no_shared_bus_twist_val_eval_phase(
+    tr: &mut Poseidon2Transcript,
+    m: usize,
+    step: &StepInstanceBundle<Cmt, F, K>,
+    prev_step: Option<&StepInstanceBundle<Cmt, F, K>>,
+    proofs_mem: &[MemOrLutProof],
+    mem_proof: &MemSidecarProof<Cmt, F, K>,
+    twist_pre: &[TwistAddrPreVerifyData],
+    step_idx: usize,
+    r_time: &[K],
+) -> Result<(), PiCcsError> {
+    // --------------------------------------------------------------------
+    // Phase 2: Verify batched Twist val-eval sum-check, deriving shared r_val.
+    // --------------------------------------------------------------------
+    let has_prev = prev_step.is_some();
+    let proof_offset = step.lut_insts.len();
+
+    let mut r_val: Vec<K> = Vec::new();
+    let mut val_eval_finals: Vec<K> = Vec::new();
+    if !step.mem_insts.is_empty() {
+        let plan = crate::memory_sidecar::claim_plan::TwistValEvalClaimPlan::build(step.mem_insts.iter(), has_prev);
+        let claim_count = plan.claim_count;
+
+        let mut per_claim_rounds: Vec<Vec<Vec<K>>> = Vec::with_capacity(claim_count);
+        let mut per_claim_sums: Vec<K> = Vec::with_capacity(claim_count);
+        let mut bind_claims: Vec<(u8, K)> = Vec::with_capacity(claim_count);
+        let mut claim_idx = 0usize;
+
+        for (i_mem, _inst) in step.mem_insts.iter().enumerate() {
+            let twist_proof = match &proofs_mem[proof_offset + i_mem] {
+                MemOrLutProof::Twist(proof) => proof,
+                _ => return Err(PiCcsError::InvalidInput("expected Twist proof".into())),
+            };
+            let val = twist_proof
+                .val_eval
+                .as_ref()
+                .ok_or_else(|| PiCcsError::InvalidInput("Twist(Route A): missing val_eval proof".into()))?;
+
+            per_claim_rounds.push(val.rounds_lt.clone());
+            per_claim_sums.push(val.claimed_inc_sum_lt);
+            bind_claims.push((plan.bind_tags[claim_idx], val.claimed_inc_sum_lt));
+            claim_idx += 1;
+
+            per_claim_rounds.push(val.rounds_total.clone());
+            per_claim_sums.push(val.claimed_inc_sum_total);
+            bind_claims.push((plan.bind_tags[claim_idx], val.claimed_inc_sum_total));
+            claim_idx += 1;
+
+            if has_prev {
+                let prev_total = val.claimed_prev_inc_sum_total.ok_or_else(|| {
+                    PiCcsError::InvalidInput("Twist(Route A): missing claimed_prev_inc_sum_total".into())
+                })?;
+                let prev_rounds = val
+                    .rounds_prev_total
+                    .clone()
+                    .ok_or_else(|| PiCcsError::InvalidInput("Twist(Route A): missing rounds_prev_total".into()))?;
+                per_claim_rounds.push(prev_rounds);
+                per_claim_sums.push(prev_total);
+                bind_claims.push((plan.bind_tags[claim_idx], prev_total));
+                claim_idx += 1;
+            } else if val.claimed_prev_inc_sum_total.is_some() || val.rounds_prev_total.is_some() {
+                return Err(PiCcsError::InvalidInput(
+                    "Twist(Route A): rollover fields present but prev_step is None".into(),
+                ));
+            }
+        }
+
+        tr.append_message(
+            b"twist/val_eval/batch_start",
+            &(step.mem_insts.len() as u64).to_le_bytes(),
+        );
+        tr.append_message(b"twist/val_eval/step_idx", &(step_idx as u64).to_le_bytes());
+        bind_twist_val_eval_claim_sums(tr, &bind_claims);
+
+        let (r_val_out, finals_out, ok) = verify_batched_sumcheck_rounds_ds(
+            tr,
+            b"twist/val_eval_batch",
+            step_idx,
+            &per_claim_rounds,
+            &per_claim_sums,
+            &plan.labels,
+            &plan.degree_bounds,
+        );
+        if !ok {
+            return Err(PiCcsError::SumcheckError(
+                "twist val-eval batched sumcheck invalid".into(),
+            ));
+        }
+        if r_val_out.len() != r_time.len() {
+            return Err(PiCcsError::ProtocolError(format!(
+                "twist val-eval r_val.len()={}, expected ell_n={}",
+                r_val_out.len(),
+                r_time.len()
+            )));
+        }
+        if finals_out.len() != claim_count {
+            return Err(PiCcsError::ProtocolError(format!(
+                "twist val-eval finals.len()={}, expected {}",
+                finals_out.len(),
+                claim_count
+            )));
+        }
+        r_val = r_val_out;
+        val_eval_finals = finals_out;
+
+        tr.append_message(b"twist/val_eval/batch_done", &[]);
+    }
+
+    // Verify val-eval terminal identity against Twist ME openings at r_val.
+    let lt = if step.mem_insts.is_empty() {
+        if !r_val.is_empty() {
+            return Err(PiCcsError::ProtocolError(
+                "twist val-eval produced r_val but no mem instances are present".into(),
+            ));
+        }
+        K::ZERO
+    } else {
+        if r_val.len() != r_time.len() {
+            return Err(PiCcsError::ProtocolError(format!(
+                "twist val-eval r_val.len()={}, expected ell_n={}",
+                r_val.len(),
+                r_time.len()
+            )));
+        }
+        lt_eval(&r_val, r_time)
+    };
+
+    let n_mem = step.mem_insts.len();
+    let expected_claims = n_mem * (1 + usize::from(has_prev));
+    if step.mem_insts.is_empty() {
+        if !mem_proof.val_me_claims.is_empty() {
+            return Err(PiCcsError::InvalidInput(
+                "proof contains val-lane ME claims with no Twist instances".into(),
+            ));
+        }
+    } else if mem_proof.val_me_claims.len() != expected_claims {
+        return Err(PiCcsError::InvalidInput(format!(
+            "no-shared-bus expects {} ME claim(s) at r_val (per mem instance, plus prev if any), got {}",
+            expected_claims,
+            mem_proof.val_me_claims.len()
+        )));
+    }
+
+    for (i_mem, inst) in step.mem_insts.iter().enumerate() {
+        let twist_proof = match &proofs_mem[proof_offset + i_mem] {
+            MemOrLutProof::Twist(proof) => proof,
+            _ => return Err(PiCcsError::InvalidInput("expected Twist proof".into())),
+        };
+        let val_eval = twist_proof
+            .val_eval
+            .as_ref()
+            .ok_or_else(|| PiCcsError::InvalidInput("Twist(Route A): missing val_eval proof".into()))?;
+        let layout = inst.twist_layout();
+        let ell_addr = layout
+            .lanes
+            .first()
+            .ok_or_else(|| PiCcsError::InvalidInput("TwistWitnessLayout has no lanes".into()))?
+            .ell_addr;
+
+        let expected_lanes = inst.lanes.max(1);
+        let bus = build_bus_layout_for_instances_with_shout_and_twist_lanes(
+            m,
+            step.mcs_inst.m_in,
+            inst.steps,
+            core::iter::empty::<(usize, usize)>(),
+            core::iter::once((ell_addr, expected_lanes)),
+        )
+        .map_err(|e| PiCcsError::InvalidInput(format!("Twist(Route A): bus layout failed: {e}")))?;
+
+        let me_cur = mem_proof
+            .val_me_claims
+            .get(i_mem)
+            .ok_or_else(|| PiCcsError::ProtocolError("missing Twist ME(val) claim".into()))?;
+        if me_cur.r.as_slice() != r_val {
+            return Err(PiCcsError::ProtocolError(
+                "Twist ME(val) r mismatch (expected r_val)".into(),
+            ));
+        }
+        if inst.comms.is_empty() || me_cur.c != inst.comms[0] {
+            return Err(PiCcsError::ProtocolError("Twist ME(val) commitment mismatch".into()));
+        }
+        let bus_y_base_val = me_cur
+            .y_scalars
+            .len()
+            .checked_sub(bus.bus_cols)
+            .ok_or_else(|| PiCcsError::InvalidInput("Twist y_scalars too short for bus openings".into()))?;
+
+        let r_addr = twist_pre
+            .get(i_mem)
+            .ok_or_else(|| PiCcsError::InvalidInput("missing Twist pre-time data".into()))?
+            .r_addr
+            .as_slice();
+
+        let twist_inst_cols = bus
+            .twist_cols
+            .first()
+            .ok_or_else(|| PiCcsError::InvalidInput("missing twist_cols[0]".into()))?;
+
+        let mut inc_at_r_addr_val = K::ZERO;
+        for twist_cols in twist_inst_cols.lanes.iter() {
+            let mut wa_bits_val_open = Vec::with_capacity(ell_addr);
+            for col_id in twist_cols.wa_bits.clone() {
+                wa_bits_val_open.push(
+                    me_cur
+                        .y_scalars
+                        .get(bus.y_scalar_index(bus_y_base_val, col_id))
+                        .copied()
+                        .ok_or_else(|| PiCcsError::ProtocolError("missing wa_bits(val) opening".into()))?,
+                );
+            }
+            let has_write_val_open = me_cur
+                .y_scalars
+                .get(bus.y_scalar_index(bus_y_base_val, twist_cols.has_write))
+                .copied()
+                .ok_or_else(|| PiCcsError::ProtocolError("missing has_write(val) opening".into()))?;
+            let inc_at_write_addr_val_open = me_cur
+                .y_scalars
+                .get(bus.y_scalar_index(bus_y_base_val, twist_cols.inc))
+                .copied()
+                .ok_or_else(|| PiCcsError::ProtocolError("missing inc(val) opening".into()))?;
+
+            let eq_wa_val = eq_bits_prod(&wa_bits_val_open, r_addr)?;
+            inc_at_r_addr_val += has_write_val_open * inc_at_write_addr_val_open * eq_wa_val;
+        }
+
+        let expected_lt_final = inc_at_r_addr_val * lt;
+        let claims_per_mem = if has_prev { 3 } else { 2 };
+        let base = claims_per_mem * i_mem;
+        if expected_lt_final != val_eval_finals[base] {
+            return Err(PiCcsError::ProtocolError(
+                "twist/val_eval_lt terminal value mismatch".into(),
+            ));
+        }
+        let expected_total_final = inc_at_r_addr_val;
+        if expected_total_final != val_eval_finals[base + 1] {
+            return Err(PiCcsError::ProtocolError(
+                "twist/val_eval_total terminal value mismatch".into(),
+            ));
+        }
+
+        if has_prev {
+            let prev = prev_step.ok_or_else(|| PiCcsError::ProtocolError("prev_step missing".into()))?;
+            let prev_inst = prev
+                .mem_insts
+                .get(i_mem)
+                .ok_or_else(|| PiCcsError::ProtocolError("missing prev mem instance".into()))?;
+            let me_prev = mem_proof
+                .val_me_claims
+                .get(n_mem + i_mem)
+                .ok_or_else(|| PiCcsError::ProtocolError("missing prev Twist ME(val)".into()))?;
+            if me_prev.r.as_slice() != r_val {
+                return Err(PiCcsError::ProtocolError(
+                    "prev Twist ME(val) r mismatch (expected r_val)".into(),
+                ));
+            }
+            if prev_inst.comms.is_empty() || me_prev.c != prev_inst.comms[0] {
+                return Err(PiCcsError::ProtocolError(
+                    "prev Twist ME(val) commitment mismatch".into(),
+                ));
+            }
+            let bus_y_base_prev = me_prev
+                .y_scalars
+                .len()
+                .checked_sub(bus.bus_cols)
+                .ok_or_else(|| PiCcsError::InvalidInput("prev Twist y_scalars too short".into()))?;
+
+            let mut inc_at_r_addr_prev = K::ZERO;
+            for twist_cols in twist_inst_cols.lanes.iter() {
+                let mut wa_bits_prev_open = Vec::with_capacity(ell_addr);
+                for col_id in twist_cols.wa_bits.clone() {
+                    wa_bits_prev_open.push(
+                        me_prev
+                            .y_scalars
+                            .get(bus.y_scalar_index(bus_y_base_prev, col_id))
+                            .copied()
+                            .ok_or_else(|| PiCcsError::ProtocolError("missing wa_bits(prev) opening".into()))?,
+                    );
+                }
+                let has_write_prev_open = me_prev
+                    .y_scalars
+                    .get(bus.y_scalar_index(bus_y_base_prev, twist_cols.has_write))
+                    .copied()
+                    .ok_or_else(|| PiCcsError::ProtocolError("missing has_write(prev) opening".into()))?;
+                let inc_prev_open = me_prev
+                    .y_scalars
+                    .get(bus.y_scalar_index(bus_y_base_prev, twist_cols.inc))
+                    .copied()
+                    .ok_or_else(|| PiCcsError::ProtocolError("missing inc(prev) opening".into()))?;
+
+                let eq_wa_prev = eq_bits_prod(&wa_bits_prev_open, r_addr)?;
+                inc_at_r_addr_prev += has_write_prev_open * inc_prev_open * eq_wa_prev;
+            }
+            if inc_at_r_addr_prev != val_eval_finals[base + 2] {
+                return Err(PiCcsError::ProtocolError(
+                    "twist/rollover_prev_total terminal value mismatch".into(),
+                ));
+            }
+
+            let claimed_prev_total = val_eval
+                .claimed_prev_inc_sum_total
+                .ok_or_else(|| PiCcsError::ProtocolError("twist rollover missing claimed_prev_inc_sum_total".into()))?;
+            let init_prev_at_r_addr = eval_init_at_r_addr(&prev_inst.init, prev_inst.k, r_addr)?;
+            let init_cur_at_r_addr = eval_init_at_r_addr(&inst.init, inst.k, r_addr)?;
+            if init_cur_at_r_addr != init_prev_at_r_addr + claimed_prev_total {
+                return Err(PiCcsError::ProtocolError("twist rollover init check failed".into()));
+            }
+        }
+    }
+
+    Ok(())
+}
+
 pub(crate) fn prove_twist_addr_pre_time(
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
@@ -745,7 +1243,13 @@ pub(crate) fn prove_twist_addr_pre_time(
         let m_in = step.mcs.0.m_in;
 
         let (bus, z) = match cpu_bus {
-            Some(bus) => (bus.clone(), cpu_z_k.as_ref().expect("cpu_z_k present when cpu_bus").clone()),
+            Some(bus) => (
+                bus.clone(),
+                cpu_z_k
+                    .as_ref()
+                    .expect("cpu_z_k present when cpu_bus")
+                    .clone(),
+            ),
             None => {
                 if mem_wit.mats.len() != 1 {
                     return Err(PiCcsError::InvalidInput(format!(
@@ -1050,7 +1554,10 @@ pub(crate) fn prove_shout_addr_pre_time(
                     lut_inst.steps,
                     pow2_cycle,
                 )?;
-                let has_any_lookup = has_lookup.entries().iter().any(|&(_t, gate)| gate != K::ZERO);
+                let has_any_lookup = has_lookup
+                    .entries()
+                    .iter()
+                    .any(|&(_t, gate)| gate != K::ZERO);
                 let active_js: Vec<usize> = if has_any_lookup {
                     let m_in = bus.m_in;
                     let mut out: Vec<usize> = Vec::with_capacity(has_lookup.entries().len());
@@ -1270,7 +1777,10 @@ pub(crate) fn prove_shout_addr_pre_time(
                     lut_inst.steps,
                     pow2_cycle,
                 )?;
-                let has_any_lookup = has_lookup.entries().iter().any(|&(_t, gate)| gate != K::ZERO);
+                let has_any_lookup = has_lookup
+                    .entries()
+                    .iter()
+                    .any(|&(_t, gate)| gate != K::ZERO);
                 let active_js: Vec<usize> = if has_any_lookup {
                     let m_in = page0.bus.m_in;
                     let mut out: Vec<usize> = Vec::with_capacity(has_lookup.entries().len());
@@ -1300,21 +1810,16 @@ pub(crate) fn prove_shout_addr_pre_time(
                 let addr_bits: Vec<SparseIdxVec<K>> = if has_any_lookup {
                     let mut out: Vec<SparseIdxVec<K>> = Vec::with_capacity(inst_ell_addr);
                     for page in pages.iter() {
-                        let inst_cols = page
-                            .bus
-                            .shout_cols
-                            .get(0)
-                            .ok_or_else(|| PiCcsError::ProtocolError("Shout(Route A): missing shout_cols[0]".into()))?;
+                        let inst_cols =
+                            page.bus.shout_cols.get(0).ok_or_else(|| {
+                                PiCcsError::ProtocolError("Shout(Route A): missing shout_cols[0]".into())
+                            })?;
                         let shout_cols = inst_cols.lanes.get(lane_idx).ok_or_else(|| {
                             PiCcsError::ProtocolError("Shout(Route A): missing shout lane cols".into())
                         })?;
                         for col_id in shout_cols.addr_bits.clone() {
                             out.push(crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col_at_js(
-                                &page.z,
-                                &page.bus,
-                                col_id,
-                                &active_js,
-                                pow2_cycle,
+                                &page.z, &page.bus, col_id, &active_js, pow2_cycle,
                             )?);
                         }
                     }
@@ -1865,18 +2370,13 @@ pub(crate) fn build_route_a_memory_oracles(
         )));
     }
 
-    let any_event_table_shout = step.lut_instances.iter().any(|(inst, _wit)| {
-        matches!(
-            inst.table_spec,
-            Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })
-        )
-    });
+    let any_event_table_shout = step
+        .lut_instances
+        .iter()
+        .any(|(inst, _wit)| matches!(inst.table_spec, Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })));
     if any_event_table_shout {
         for (idx, (inst, _wit)) in step.lut_instances.iter().enumerate() {
-            if !matches!(
-                inst.table_spec,
-                Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })
-            ) {
+            if !matches!(inst.table_spec, Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })) {
                 return Err(PiCcsError::InvalidInput(format!(
                     "event-table Shout mode requires all Shout instances to use RiscvOpcodeEventTablePacked (lut_idx={idx})"
                 )));
@@ -1886,9 +2386,7 @@ pub(crate) fn build_route_a_memory_oracles(
 
     let event_hash_coeffs = |r: &[K]| -> Result<(K, K, K), PiCcsError> {
         if r.len() < 3 {
-            return Err(PiCcsError::InvalidInput(
-                "event-table Shout requires ell_n >= 3".into(),
-            ));
+            return Err(PiCcsError::InvalidInput("event-table Shout requires ell_n >= 3".into()));
         }
         Ok((r[0], r[1], r[2]))
     };
@@ -1946,7 +2444,9 @@ pub(crate) fn build_route_a_memory_oracles(
             )));
         }
         if Z.cols() != m {
-            return Err(PiCcsError::ProtocolError("event-table Shout: CPU witness width drift".into()));
+            return Err(PiCcsError::ProtocolError(
+                "event-table Shout: CPU witness width drift".into(),
+            ));
         }
 
         let bK = K::from(F::from_u64(params.b as u64));
@@ -2072,7 +2572,10 @@ pub(crate) fn build_route_a_memory_oracles(
 
                 // Packed bitwise (AND/OR/XOR): base-4 digit decomposition.
                 let (bitwise_lhs_digits, bitwise_rhs_digits) = match op {
-                    Rv32PackedShoutOp::And | Rv32PackedShoutOp::Andn | Rv32PackedShoutOp::Or | Rv32PackedShoutOp::Xor => {
+                    Rv32PackedShoutOp::And
+                    | Rv32PackedShoutOp::Andn
+                    | Rv32PackedShoutOp::Or
+                    | Rv32PackedShoutOp::Xor => {
                         if packed_cols.len() != 34 {
                             return Err(PiCcsError::InvalidInput(format!(
                                 "packed RV32 bitwise: expected ell_addr=34, got {}",
@@ -2145,23 +2648,31 @@ pub(crate) fn build_route_a_memory_oracles(
                     Rv32PackedShoutOp::Eq => Box::new(Rv32PackedEqOracleSparseTime::new(
                         r_cycle,
                         lane.has_lookup.clone(),
-                        lhs.clone(),
-                        rhs.clone(),
-                        packed_cols
-                            .get(2)
-                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 EQ: missing inv column".into()))?
-                            .clone(),
+                        {
+                            let diff_bits: Vec<SparseIdxVec<K>> = packed_cols.iter().skip(3).cloned().collect();
+                            if diff_bits.len() != 32 {
+                                return Err(PiCcsError::InvalidInput(format!(
+                                    "packed RV32 EQ: expected 32 diff bits, got {}",
+                                    diff_bits.len()
+                                )));
+                            }
+                            diff_bits
+                        },
                         lane.val.clone(),
                     )),
                     Rv32PackedShoutOp::Neq => Box::new(Rv32PackedNeqOracleSparseTime::new(
                         r_cycle,
                         lane.has_lookup.clone(),
-                        lhs.clone(),
-                        rhs.clone(),
-                        packed_cols
-                            .get(2)
-                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 NEQ: missing inv column".into()))?
-                            .clone(),
+                        {
+                            let diff_bits: Vec<SparseIdxVec<K>> = packed_cols.iter().skip(3).cloned().collect();
+                            if diff_bits.len() != 32 {
+                                return Err(PiCcsError::InvalidInput(format!(
+                                    "packed RV32 NEQ: expected 32 diff bits, got {}",
+                                    diff_bits.len()
+                                )));
+                            }
+                            diff_bits
+                        },
                         lane.val.clone(),
                     )),
                     Rv32PackedShoutOp::Mul => {
@@ -2717,7 +3228,9 @@ pub(crate) fn build_route_a_memory_oracles(
                             lane.has_lookup.clone(),
                             packed_cols
                                 .get(2)
-                                .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 SLT: missing diff opening".into()))?
+                                .ok_or_else(|| {
+                                    PiCcsError::InvalidInput("packed RV32 SLT: missing diff opening".into())
+                                })?
                                 .clone(),
                             diff_bits,
                         ))
@@ -2771,16 +3284,40 @@ pub(crate) fn build_route_a_memory_oracles(
                         lane.has_lookup.clone(),
                         lhs,
                         rhs,
-                        lane.val.clone(),
-                        2 + packed_cols.len(),
+                        packed_cols
+                            .get(2)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 EQ: missing borrow bit".into()))?
+                            .clone(),
+                        {
+                            let diff_bits: Vec<SparseIdxVec<K>> = packed_cols.iter().skip(3).cloned().collect();
+                            if diff_bits.len() != 32 {
+                                return Err(PiCcsError::InvalidInput(format!(
+                                    "packed RV32 EQ: expected 32 diff bits, got {}",
+                                    diff_bits.len()
+                                )));
+                            }
+                            diff_bits
+                        },
                     )),
                     Rv32PackedShoutOp::Neq => Box::new(Rv32PackedNeqAdapterOracleSparseTime::new(
                         r_cycle,
                         lane.has_lookup.clone(),
                         lhs,
                         rhs,
-                        lane.val.clone(),
-                        2 + packed_cols.len(),
+                        packed_cols
+                            .get(2)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 NEQ: missing borrow bit".into()))?
+                            .clone(),
+                        {
+                            let diff_bits: Vec<SparseIdxVec<K>> = packed_cols.iter().skip(3).cloned().collect();
+                            if diff_bits.len() != 32 {
+                                return Err(PiCcsError::InvalidInput(format!(
+                                    "packed RV32 NEQ: expected 32 diff bits, got {}",
+                                    diff_bits.len()
+                                )));
+                            }
+                            diff_bits
+                        },
                     )),
                     Rv32PackedShoutOp::Sltu => {
                         let diff_bits: Vec<SparseIdxVec<K>> = packed_cols.iter().skip(3).cloned().collect();
@@ -2795,7 +3332,9 @@ pub(crate) fn build_route_a_memory_oracles(
                             lane.has_lookup.clone(),
                             packed_cols
                                 .get(2)
-                                .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 SLTU: missing diff opening".into()))?
+                                .ok_or_else(|| {
+                                    PiCcsError::InvalidInput("packed RV32 SLTU: missing diff opening".into())
+                                })?
                                 .clone(),
                             diff_bits,
                         ))
@@ -2816,7 +3355,9 @@ pub(crate) fn build_route_a_memory_oracles(
                             for i in 0..5usize {
                                 let b = packed_cols
                                     .get(1 + i)
-                                    .ok_or_else(|| PiCcsError::InvalidInput("event-table hash: missing shamt bit".into()))?
+                                    .ok_or_else(|| {
+                                        PiCcsError::InvalidInput("event-table hash: missing shamt bit".into())
+                                    })?
                                     .clone();
                                 out.push((b, K::from(F::from_u64(1u64 << i))));
                             }
@@ -2886,13 +3427,16 @@ pub(crate) fn build_route_a_memory_oracles(
                 if packed_time_bits > 0 {
                     bit_cols.extend(lane.addr_bits.iter().take(packed_time_bits).cloned());
                 }
-                let packed_cols: &[SparseIdxVec<K>] =
-                    lane.addr_bits
-                        .get(packed_time_bits..)
-                        .ok_or_else(|| PiCcsError::InvalidInput("packed RV32: missing packed cols".into()))?;
+                let packed_cols: &[SparseIdxVec<K>] = lane
+                    .addr_bits
+                    .get(packed_time_bits..)
+                    .ok_or_else(|| PiCcsError::InvalidInput("packed RV32: missing packed cols".into()))?;
                 match packed_op {
                     Some(
-                        Rv32PackedShoutOp::And | Rv32PackedShoutOp::Andn | Rv32PackedShoutOp::Or | Rv32PackedShoutOp::Xor,
+                        Rv32PackedShoutOp::And
+                        | Rv32PackedShoutOp::Andn
+                        | Rv32PackedShoutOp::Or
+                        | Rv32PackedShoutOp::Xor,
                     ) => {
                         bit_cols.push(lane.has_lookup.clone());
                     }
@@ -2905,8 +3449,21 @@ pub(crate) fn build_route_a_memory_oracles(
                         bit_cols.push(lane.has_lookup.clone());
                     }
                     Some(Rv32PackedShoutOp::Eq | Rv32PackedShoutOp::Neq) => {
-                        bit_cols.push(lane.val.clone());
+                        let borrow = packed_cols
+                            .get(2)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 EQ/NEQ: missing borrow bit".into()))?
+                            .clone();
+                        let diff_bits: Vec<SparseIdxVec<K>> = packed_cols.iter().skip(3).cloned().collect();
+                        if diff_bits.len() != 32 {
+                            return Err(PiCcsError::InvalidInput(format!(
+                                "packed RV32 EQ/NEQ: expected 32 diff bits, got {}",
+                                diff_bits.len()
+                            )));
+                        }
                         bit_cols.push(lane.has_lookup.clone());
+                        bit_cols.push(lane.val.clone());
+                        bit_cols.push(borrow);
+                        bit_cols.extend(diff_bits);
                     }
                     Some(Rv32PackedShoutOp::Mul) => {
                         let carry_bits: Vec<SparseIdxVec<K>> = packed_cols.iter().skip(2).cloned().collect();
@@ -3071,7 +3628,9 @@ pub(crate) fn build_route_a_memory_oracles(
                     Some(Rv32PackedShoutOp::Divu | Rv32PackedShoutOp::Remu) => {
                         let rhs_is_zero = packed_cols
                             .get(4)
-                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 DIVU/REMU: missing rhs_is_zero".into()))?
+                            .ok_or_else(|| {
+                                PiCcsError::InvalidInput("packed RV32 DIVU/REMU: missing rhs_is_zero".into())
+                            })?
                             .clone();
                         let diff_bits: Vec<SparseIdxVec<K>> = packed_cols.iter().skip(6).cloned().collect();
                         if diff_bits.len() != 32 {
@@ -3371,7 +3930,9 @@ pub fn append_route_a_shout_time_claims<'a>(
         });
 
         if let Some(prefix) = lane.event_table_hash_prefix.as_mut() {
-            let claim = lane.event_table_hash_claim.expect("event_table_hash_claim missing");
+            let claim = lane
+                .event_table_hash_claim
+                .expect("event_table_hash_claim missing");
             claimed_sums.push(claim);
             degree_bounds.push(prefix.degree_bound());
             labels.push(b"shout/event_table_hash");
@@ -5301,183 +5862,7 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
     twist_pre: &[TwistAddrPreVerifyData],
     step_idx: usize,
 ) -> Result<RouteAMemoryVerifyOutput, PiCcsError> {
-    #[derive(Clone, Copy)]
-    struct TraceCpuLinkOpenings {
-        active: K,
-        prog_addr: K,
-        prog_value: K,
-        rs1_addr: K,
-        rs1_val: K,
-        rs2_addr: K,
-        rs2_val: K,
-        rd_has_write: K,
-        rd_addr: K,
-        rd_val: K,
-        ram_has_read: K,
-        ram_has_write: K,
-        ram_addr: K,
-        ram_rv: K,
-        ram_wv: K,
-        shout_has_lookup: K,
-        shout_val: K,
-        shout_lhs: K,
-        shout_rhs: K,
-    }
-
-    let cpu_link: Option<TraceCpuLinkOpenings> = if step.mem_insts.is_empty() && step.lut_insts.is_empty() {
-        None
-    } else {
-        // RV32 trace linkage: the prover appends time-combined openings for selected CPU trace columns
-        // to the CCS ME output at r_time. We use those to bind Twist instances (PROG/REG/RAM) to the
-        // same trace, without embedding a shared CPU bus tail.
-        let trace = Rv32TraceLayout::new();
-        let trace_cols_to_open: Vec<usize> = vec![
-            trace.active,
-            trace.prog_addr,
-            trace.prog_value,
-            trace.rs1_addr,
-            trace.rs1_val,
-            trace.rs2_addr,
-            trace.rs2_val,
-            trace.rd_has_write,
-            trace.rd_addr,
-            trace.rd_val,
-            trace.ram_has_read,
-            trace.ram_has_write,
-            trace.ram_addr,
-            trace.ram_rv,
-            trace.ram_wv,
-            trace.shout_has_lookup,
-            trace.shout_val,
-            trace.shout_lhs,
-            trace.shout_rhs,
-        ];
-
-        let m_in = step.mcs_inst.m_in;
-        if m_in != 5 {
-            return Err(PiCcsError::InvalidInput(format!(
-                "no-shared-bus trace linkage expects m_in=5 (got {m_in})"
-            )));
-        }
-        let t_len = step
-            .mem_insts
-            .first()
-            .map(|inst| inst.steps)
-            .or_else(|| {
-                // Shout event-table instances may have `steps != t_len`; prefer a non-event-table
-                // instance if present, otherwise fall back to inferring from the trace layout.
-                step.lut_insts
-                    .iter()
-                    .find(|inst| !matches!(inst.table_spec, Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })))
-                    .map(|inst| inst.steps)
-            })
-            .or_else(|| {
-                // Trace CCS layout inference: z = [x (m_in) | trace_cols * t_len]
-                let w = m.checked_sub(m_in)?;
-                if trace.cols == 0 || w % trace.cols != 0 {
-                    return None;
-                }
-                Some(w / trace.cols)
-            })
-            .ok_or_else(|| PiCcsError::InvalidInput("missing mem/lut instances".into()))?;
-        if t_len == 0 {
-            return Err(PiCcsError::InvalidInput(
-                "no-shared-bus trace linkage requires steps>=1".into(),
-            ));
-        }
-        for (i, inst) in step.mem_insts.iter().enumerate() {
-            if inst.steps != t_len {
-                return Err(PiCcsError::InvalidInput(format!(
-                    "no-shared-bus trace linkage requires stable steps across mem instances (mem_idx={i} has steps={}, expected {t_len})",
-                    inst.steps
-                )));
-            }
-        }
-        let trace_len = trace
-            .cols
-            .checked_mul(t_len)
-            .ok_or_else(|| PiCcsError::InvalidInput("trace cols * t_len overflow".into()))?;
-        let expected_m = m_in
-            .checked_add(trace_len)
-            .ok_or_else(|| PiCcsError::InvalidInput("m_in + trace_len overflow".into()))?;
-        if m < expected_m {
-            return Err(PiCcsError::InvalidInput(format!(
-                "no-shared-bus trace linkage expects m >= m_in + trace.cols*t_len (m={}; min_m={expected_m} for t_len={t_len}, trace_cols={})",
-                m, trace.cols
-            )));
-        }
-        let expected_y_len = core_t
-            .checked_add(trace_cols_to_open.len())
-            .ok_or_else(|| PiCcsError::InvalidInput("core_t + trace_openings overflow".into()))?;
-        if ccs_out0.y_scalars.len() != expected_y_len {
-            return Err(PiCcsError::InvalidInput(format!(
-                "no-shared-bus trace linkage expects CPU ME output to contain exactly core_t + trace_openings y_scalars (have {}, expected {expected_y_len})",
-                ccs_out0.y_scalars.len(),
-            )));
-        }
-        let cpu_open = |idx: usize| -> Result<K, PiCcsError> {
-            ccs_out0
-                .y_scalars
-                .get(core_t + idx)
-                .copied()
-                .ok_or_else(|| PiCcsError::ProtocolError("missing CPU trace linkage opening".into()))
-        };
-
-        Some(TraceCpuLinkOpenings {
-            active: cpu_open(0)?,
-            prog_addr: cpu_open(1)?,
-            prog_value: cpu_open(2)?,
-            rs1_addr: cpu_open(3)?,
-            rs1_val: cpu_open(4)?,
-            rs2_addr: cpu_open(5)?,
-            rs2_val: cpu_open(6)?,
-            rd_has_write: cpu_open(7)?,
-            rd_addr: cpu_open(8)?,
-            rd_val: cpu_open(9)?,
-            ram_has_read: cpu_open(10)?,
-            ram_has_write: cpu_open(11)?,
-            ram_addr: cpu_open(12)?,
-            ram_rv: cpu_open(13)?,
-            ram_wv: cpu_open(14)?,
-            shout_has_lookup: cpu_open(15)?,
-            shout_val: cpu_open(16)?,
-            shout_lhs: cpu_open(17)?,
-            shout_rhs: cpu_open(18)?,
-        })
-    };
-
-    #[inline]
-    fn pack_bits_lsb(bits: &[K]) -> K {
-        let two = K::from(F::from_u64(2));
-        let mut pow = K::ONE;
-        let mut acc = K::ZERO;
-        for &b in bits {
-            acc += pow * b;
-            pow *= two;
-        }
-        acc
-    }
-
-    #[inline]
-    fn unpack_interleaved_halves_lsb(addr_bits: &[K]) -> Result<(K, K), PiCcsError> {
-        if addr_bits.len() % 2 != 0 {
-            return Err(PiCcsError::InvalidInput(format!(
-                "shout linkage expects even ell_addr, got {}",
-                addr_bits.len()
-            )));
-        }
-        let half_len = addr_bits.len() / 2;
-        let two = K::from(F::from_u64(2));
-        let mut pow = K::ONE;
-        let mut lhs = K::ZERO;
-        let mut rhs = K::ZERO;
-        for k in 0..half_len {
-            lhs += pow * addr_bits[2 * k];
-            rhs += pow * addr_bits[2 * k + 1];
-            pow *= two;
-        }
-        Ok((lhs, rhs))
-    }
+    let cpu_link = extract_trace_cpu_link_openings(m, core_t, step, ccs_out0)?;
 
     let chi_cycle_at_r_time = eq_points(r_time, r_cycle);
     if ccs_out0.r.as_slice() != r_time {
@@ -5570,18 +5955,13 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
         ));
     }
 
-    let any_event_table_shout = step.lut_insts.iter().any(|inst| {
-        matches!(
-            inst.table_spec,
-            Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })
-        )
-    });
+    let any_event_table_shout = step
+        .lut_insts
+        .iter()
+        .any(|inst| matches!(inst.table_spec, Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })));
     if any_event_table_shout {
         for (idx, inst) in step.lut_insts.iter().enumerate() {
-            if !matches!(
-                inst.table_spec,
-                Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })
-            ) {
+            if !matches!(inst.table_spec, Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })) {
                 return Err(PiCcsError::InvalidInput(format!(
                     "event-table Shout mode requires all Shout instances to use RiscvOpcodeEventTablePacked (lut_idx={idx})"
                 )));
@@ -5593,9 +5973,7 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
             ));
         }
         if r_cycle.len() < 3 {
-            return Err(PiCcsError::InvalidInput(
-                "event-table Shout requires ell_n >= 3".into(),
-            ));
+            return Err(PiCcsError::InvalidInput("event-table Shout requires ell_n >= 3".into()));
         }
     }
     let (event_alpha, event_beta, event_gamma) = if any_event_table_shout {
@@ -5611,6 +5989,7 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
     let mut shout_val_sum: K = K::ZERO;
     let mut shout_lhs_sum: K = K::ZERO;
     let mut shout_rhs_sum: K = K::ZERO;
+    let mut shout_table_id_sum: K = K::ZERO;
 
     let mut shout_me_base: usize = 0;
     for (lut_idx, inst) in step.lut_insts.iter().enumerate() {
@@ -5680,9 +6059,7 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                 .get(shout_me_start + page_idx)
                 .ok_or_else(|| PiCcsError::ProtocolError("missing Shout ME(time) claim".into()))?;
             if me_time.c != inst.comms[page_idx] {
-                return Err(PiCcsError::ProtocolError(
-                    "Shout ME(time) commitment mismatch".into(),
-                ));
+                return Err(PiCcsError::ProtocolError("Shout ME(time) commitment mismatch".into()));
             }
             let bus_y_base_time = me_time
                 .y_scalars
@@ -5743,8 +6120,8 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
             }
             let has_lookup = lane_has_lookup[lane_idx]
                 .ok_or_else(|| PiCcsError::ProtocolError("missing Shout has_lookup(time) opening".into()))?;
-            let val =
-                lane_val[lane_idx].ok_or_else(|| PiCcsError::ProtocolError("missing Shout val(time) opening".into()))?;
+            let val = lane_val[lane_idx]
+                .ok_or_else(|| PiCcsError::ProtocolError("missing Shout val(time) opening".into()))?;
 
             lane_opens.push(ShoutLaneOpen {
                 addr_bits: lane_addr_bits[lane_idx].clone(),
@@ -5755,9 +6132,11 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
 
         // Fixed-lane Shout view: sum lanes must match the trace (skipped in event-table mode).
         if !any_event_table_shout {
+            let lane_table_id = K::from(F::from_u64(rv32_shout_table_id_from_spec(&inst.table_spec)? as u64));
             for lane in lane_opens.iter() {
                 shout_has_sum += lane.has_lookup;
                 shout_val_sum += lane.val;
+                shout_table_id_sum += lane.has_lookup * lane_table_id;
                 if is_packed {
                     let packed_cols: &[K] = lane.addr_bits.get(packed_time_bits..).ok_or_else(|| {
                         PiCcsError::InvalidInput("packed RV32: addr_bits too short for time_bits prefix".into())
@@ -5834,15 +6213,25 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                         }
                         Some(
                             Rv32PackedShoutOp::And
-                                | Rv32PackedShoutOp::Andn
-                                | Rv32PackedShoutOp::Or
-                                | Rv32PackedShoutOp::Xor,
+                            | Rv32PackedShoutOp::Andn
+                            | Rv32PackedShoutOp::Or
+                            | Rv32PackedShoutOp::Xor,
                         ) => {
                             opens.push(lane.has_lookup);
                         }
                         Some(Rv32PackedShoutOp::Eq | Rv32PackedShoutOp::Neq) => {
-                            opens.push(lane.val);
                             opens.push(lane.has_lookup);
+                            opens.push(lane.val);
+                            let borrow = *packed_cols.get(2).ok_or_else(|| {
+                                PiCcsError::InvalidInput("packed RV32 EQ/NEQ: missing borrow bit opening".into())
+                            })?;
+                            opens.push(borrow);
+                            for i in 0..32 {
+                                let b = *packed_cols.get(3 + i).ok_or_else(|| {
+                                    PiCcsError::InvalidInput("packed RV32 EQ/NEQ: missing diff bit opening(s)".into())
+                                })?;
+                                opens.push(b);
+                            }
                         }
                         Some(Rv32PackedShoutOp::Mul) => {
                             opens.push(lane.has_lookup);
@@ -5981,7 +6370,9 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                             opens.push(rhs_is_zero);
                             for i in 0..32 {
                                 let b = *packed_cols.get(6 + i).ok_or_else(|| {
-                                    PiCcsError::InvalidInput("packed RV32 DIVU/REMU: missing diff bit opening(s)".into())
+                                    PiCcsError::InvalidInput(
+                                        "packed RV32 DIVU/REMU: missing diff bit opening(s)".into(),
+                                    )
                                 })?;
                                 opens.push(b);
                             }
@@ -5991,15 +6382,15 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                             let rhs_is_zero = *packed_cols.get(5).ok_or_else(|| {
                                 PiCcsError::InvalidInput("packed RV32 DIV: missing rhs_is_zero".into())
                             })?;
-                            let lhs_sign = *packed_cols.get(6).ok_or_else(|| {
-                                PiCcsError::InvalidInput("packed RV32 DIV: missing lhs_sign".into())
-                            })?;
-                            let rhs_sign = *packed_cols.get(7).ok_or_else(|| {
-                                PiCcsError::InvalidInput("packed RV32 DIV: missing rhs_sign".into())
-                            })?;
-                            let q_is_zero = *packed_cols.get(9).ok_or_else(|| {
-                                PiCcsError::InvalidInput("packed RV32 DIV: missing q_is_zero".into())
-                            })?;
+                            let lhs_sign = *packed_cols
+                                .get(6)
+                                .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 DIV: missing lhs_sign".into()))?;
+                            let rhs_sign = *packed_cols
+                                .get(7)
+                                .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 DIV: missing rhs_sign".into()))?;
+                            let q_is_zero = *packed_cols
+                                .get(9)
+                                .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 DIV: missing q_is_zero".into()))?;
                             opens.push(rhs_is_zero);
                             opens.push(lhs_sign);
                             opens.push(rhs_sign);
@@ -6016,15 +6407,15 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                             let rhs_is_zero = *packed_cols.get(5).ok_or_else(|| {
                                 PiCcsError::InvalidInput("packed RV32 REM: missing rhs_is_zero".into())
                             })?;
-                            let lhs_sign = *packed_cols.get(6).ok_or_else(|| {
-                                PiCcsError::InvalidInput("packed RV32 REM: missing lhs_sign".into())
-                            })?;
-                            let rhs_sign = *packed_cols.get(7).ok_or_else(|| {
-                                PiCcsError::InvalidInput("packed RV32 REM: missing rhs_sign".into())
-                            })?;
-                            let r_is_zero = *packed_cols.get(9).ok_or_else(|| {
-                                PiCcsError::InvalidInput("packed RV32 REM: missing r_is_zero".into())
-                            })?;
+                            let lhs_sign = *packed_cols
+                                .get(6)
+                                .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 REM: missing lhs_sign".into()))?;
+                            let rhs_sign = *packed_cols
+                                .get(7)
+                                .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 REM: missing rhs_sign".into()))?;
+                            let r_is_zero = *packed_cols
+                                .get(9)
+                                .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 REM: missing r_is_zero".into()))?;
                             opens.push(rhs_is_zero);
                             opens.push(lhs_sign);
                             opens.push(rhs_sign);
@@ -6170,9 +6561,7 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                                 let mut carry = K::ZERO;
                                 for i in 0..32 {
                                     let b = *packed_cols.get(2 + i).ok_or_else(|| {
-                                        PiCcsError::InvalidInput(
-                                            "packed RV32 MUL: missing carry bit opening(s)".into(),
-                                        )
+                                        PiCcsError::InvalidInput("packed RV32 MUL: missing carry bit opening(s)".into())
                                     })?;
                                     carry += b * K::from_u64(1u64 << i);
                                 }
@@ -6183,9 +6572,7 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                                 let mut lo = K::ZERO;
                                 for i in 0..32 {
                                     let b = *packed_cols.get(2 + i).ok_or_else(|| {
-                                        PiCcsError::InvalidInput(
-                                            "packed RV32 MULHU: missing lo bit opening(s)".into(),
-                                        )
+                                        PiCcsError::InvalidInput("packed RV32 MULHU: missing lo bit opening(s)".into())
                                     })?;
                                     lo += b * K::from_u64(1u64 << i);
                                 }
@@ -6196,9 +6583,7 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                                 let mut lo = K::ZERO;
                                 for i in 0..32 {
                                     let b = *packed_cols.get(6 + i).ok_or_else(|| {
-                                        PiCcsError::InvalidInput(
-                                            "packed RV32 MULH: missing lo bit opening(s)".into(),
-                                        )
+                                        PiCcsError::InvalidInput("packed RV32 MULH: missing lo bit opening(s)".into())
                                     })?;
                                     lo += b * K::from_u64(1u64 << i);
                                 }
@@ -6211,16 +6596,32 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                                 let mut lo = K::ZERO;
                                 for i in 0..32 {
                                     let b = *packed_cols.get(5 + i).ok_or_else(|| {
-                                        PiCcsError::InvalidInput(
-                                            "packed RV32 MULHSU: missing lo bit opening(s)".into(),
-                                        )
+                                        PiCcsError::InvalidInput("packed RV32 MULHSU: missing lo bit opening(s)".into())
                                     })?;
                                     lo += b * K::from_u64(1u64 << i);
                                 }
                                 lhs * rhs - lo - aux * two32
                             }
-                            Rv32PackedShoutOp::Eq => (lhs - rhs) * aux - (K::ONE - lane.val),
-                            Rv32PackedShoutOp::Neq => (lhs - rhs) * aux - lane.val,
+                            Rv32PackedShoutOp::Eq => {
+                                let mut prod = K::ONE;
+                                for i in 0..32usize {
+                                    let b = *packed_cols.get(3 + i).ok_or_else(|| {
+                                        PiCcsError::InvalidInput("packed RV32 EQ: missing diff bit opening(s)".into())
+                                    })?;
+                                    prod *= K::ONE - b;
+                                }
+                                lane.val - prod
+                            }
+                            Rv32PackedShoutOp::Neq => {
+                                let mut prod = K::ONE;
+                                for i in 0..32usize {
+                                    let b = *packed_cols.get(3 + i).ok_or_else(|| {
+                                        PiCcsError::InvalidInput("packed RV32 NEQ: missing diff bit opening(s)".into())
+                                    })?;
+                                    prod *= K::ONE - b;
+                                }
+                                lane.val + prod - K::ONE
+                            }
                             Rv32PackedShoutOp::Divu => {
                                 let z = *packed_cols.get(4).ok_or_else(|| {
                                     PiCcsError::InvalidInput("packed RV32 DIVU: missing rhs_is_zero opening".into())
@@ -6290,18 +6691,14 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                                 let mut pow2 = K::ONE;
                                 for i in 0..5 {
                                     let b = *packed_cols.get(1 + i).ok_or_else(|| {
-                                        PiCcsError::InvalidInput(
-                                            "packed RV32 SLL: missing shamt bit opening(s)".into(),
-                                        )
+                                        PiCcsError::InvalidInput("packed RV32 SLL: missing shamt bit opening(s)".into())
                                     })?;
                                     pow2 *= K::ONE + b * (pow2_const[i] - K::ONE);
                                 }
                                 let mut carry = K::ZERO;
                                 for i in 0..32 {
                                     let b = *packed_cols.get(6 + i).ok_or_else(|| {
-                                        PiCcsError::InvalidInput(
-                                            "packed RV32 SLL: missing carry bit opening(s)".into(),
-                                        )
+                                        PiCcsError::InvalidInput("packed RV32 SLL: missing carry bit opening(s)".into())
                                     })?;
                                     carry += b * K::from_u64(1u64 << i);
                                 }
@@ -6318,18 +6715,14 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                                 let mut pow2 = K::ONE;
                                 for i in 0..5 {
                                     let b = *packed_cols.get(1 + i).ok_or_else(|| {
-                                        PiCcsError::InvalidInput(
-                                            "packed RV32 SRL: missing shamt bit opening(s)".into(),
-                                        )
+                                        PiCcsError::InvalidInput("packed RV32 SRL: missing shamt bit opening(s)".into())
                                     })?;
                                     pow2 *= K::ONE + b * (pow2_const[i] - K::ONE);
                                 }
                                 let mut rem = K::ZERO;
                                 for i in 0..32 {
                                     let b = *packed_cols.get(6 + i).ok_or_else(|| {
-                                        PiCcsError::InvalidInput(
-                                            "packed RV32 SRL: missing rem bit opening(s)".into(),
-                                        )
+                                        PiCcsError::InvalidInput("packed RV32 SRL: missing rem bit opening(s)".into())
                                     })?;
                                     rem += b * K::from_u64(1u64 << i);
                                 }
@@ -6347,9 +6740,7 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                                 let mut pow2 = K::ONE;
                                 for i in 0..5 {
                                     let b = *packed_cols.get(1 + i).ok_or_else(|| {
-                                        PiCcsError::InvalidInput(
-                                            "packed RV32 SRA: missing shamt bit opening(s)".into(),
-                                        )
+                                        PiCcsError::InvalidInput("packed RV32 SRA: missing shamt bit opening(s)".into())
                                     })?;
                                     pow2 *= K::ONE + b * (pow2_const[i] - K::ONE);
                                 }
@@ -6359,9 +6750,7 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                                 let mut rem = K::ZERO;
                                 for i in 0..31 {
                                     let b = *packed_cols.get(7 + i).ok_or_else(|| {
-                                        PiCcsError::InvalidInput(
-                                            "packed RV32 SRA: missing rem bit opening(s)".into(),
-                                        )
+                                        PiCcsError::InvalidInput("packed RV32 SRA: missing rem bit opening(s)".into())
                                     })?;
                                     rem += b * K::from_u64(1u64 << i);
                                 }
@@ -6455,24 +6844,24 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                         let w0 = weights[0];
                         let w1 = weights[1];
 
-                        let lhs = *packed_cols.get(0).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 MULH: missing lhs opening".into())
-                        })?;
-                        let rhs = *packed_cols.get(1).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 MULH: missing rhs opening".into())
-                        })?;
-                        let hi = *packed_cols.get(2).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 MULH: missing hi opening".into())
-                        })?;
+                        let lhs = *packed_cols
+                            .get(0)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 MULH: missing lhs opening".into()))?;
+                        let rhs = *packed_cols
+                            .get(1)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 MULH: missing rhs opening".into()))?;
+                        let hi = *packed_cols
+                            .get(2)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 MULH: missing hi opening".into()))?;
                         let lhs_sign = *packed_cols.get(3).ok_or_else(|| {
                             PiCcsError::InvalidInput("packed RV32 MULH: missing lhs_sign opening".into())
                         })?;
                         let rhs_sign = *packed_cols.get(4).ok_or_else(|| {
                             PiCcsError::InvalidInput("packed RV32 MULH: missing rhs_sign opening".into())
                         })?;
-                        let k = *packed_cols.get(5).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 MULH: missing k opening".into())
-                        })?;
+                        let k = *packed_cols
+                            .get(5)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 MULH: missing k opening".into()))?;
 
                         let two32 = K::from_u64(1u64 << 32);
                         let eq_expr = hi - lhs_sign * rhs - rhs_sign * lhs + k * two32 - lane.val;
@@ -6483,9 +6872,9 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                         let rhs = *packed_cols.get(1).ok_or_else(|| {
                             PiCcsError::InvalidInput("packed RV32 MULHSU: missing rhs opening".into())
                         })?;
-                        let hi = *packed_cols.get(2).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 MULHSU: missing hi opening".into())
-                        })?;
+                        let hi = *packed_cols
+                            .get(2)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 MULHSU: missing hi opening".into()))?;
                         let lhs_sign = *packed_cols.get(3).ok_or_else(|| {
                             PiCcsError::InvalidInput("packed RV32 MULHSU: missing lhs_sign opening".into())
                         })?;
@@ -6496,22 +6885,22 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                         let expr = hi - lhs_sign * rhs - lane.val + borrow * two32;
                         chi_cycle_at_r_time * lane.has_lookup * expr
                     }
-	                    Rv32PackedShoutOp::Divu => {
-	                        let weights = bitness_weights(r_cycle, 4, 0x4449_5655_4144_5054u64 + lut_idx as u64);
-	                        let w = [weights[0], weights[1], weights[2], weights[3]];
+                    Rv32PackedShoutOp::Divu => {
+                        let weights = bitness_weights(r_cycle, 4, 0x4449_5655_4144_5054u64 + lut_idx as u64);
+                        let w = [weights[0], weights[1], weights[2], weights[3]];
 
-                        let rhs = *packed_cols.get(1).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 DIVU: missing rhs opening".into())
+                        let rhs = *packed_cols
+                            .get(1)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 DIVU: missing rhs opening".into()))?;
+                        let rem = *packed_cols
+                            .get(2)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 DIVU: missing rem opening".into()))?;
+                        let z = *packed_cols.get(4).ok_or_else(|| {
+                            PiCcsError::InvalidInput("packed RV32 DIVU: missing rhs_is_zero opening".into())
                         })?;
-	                        let rem = *packed_cols.get(2).ok_or_else(|| {
-	                            PiCcsError::InvalidInput("packed RV32 DIVU: missing rem opening".into())
-	                        })?;
-	                        let z = *packed_cols.get(4).ok_or_else(|| {
-	                            PiCcsError::InvalidInput("packed RV32 DIVU: missing rhs_is_zero opening".into())
-	                        })?;
-                        let diff = *packed_cols.get(5).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 DIVU: missing diff opening".into())
-                        })?;
+                        let diff = *packed_cols
+                            .get(5)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 DIVU: missing diff opening".into()))?;
 
                         let mut sum = K::ZERO;
                         for i in 0..32 {
@@ -6521,27 +6910,27 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                             sum += b * K::from_u64(1u64 << i);
                         }
 
-	                        let two32 = K::from_u64(1u64 << 32);
-	                        let c0 = z * (K::ONE - z);
-	                        let c1 = z * rhs;
-	                        let c2 = (K::ONE - z) * (rem - rhs - diff + two32);
-	                        let c3 = diff - sum;
-	                        let expr = w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3;
-	                        chi_cycle_at_r_time * lane.has_lookup * expr
-	                    }
-	                    Rv32PackedShoutOp::Remu => {
-	                        let weights = bitness_weights(r_cycle, 4, 0x4449_5655_4144_5054u64 + lut_idx as u64);
-	                        let w = [weights[0], weights[1], weights[2], weights[3]];
+                        let two32 = K::from_u64(1u64 << 32);
+                        let c0 = z * (K::ONE - z);
+                        let c1 = z * rhs;
+                        let c2 = (K::ONE - z) * (rem - rhs - diff + two32);
+                        let c3 = diff - sum;
+                        let expr = w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3;
+                        chi_cycle_at_r_time * lane.has_lookup * expr
+                    }
+                    Rv32PackedShoutOp::Remu => {
+                        let weights = bitness_weights(r_cycle, 4, 0x4449_5655_4144_5054u64 + lut_idx as u64);
+                        let w = [weights[0], weights[1], weights[2], weights[3]];
 
-	                        let rhs = *packed_cols.get(1).ok_or_else(|| {
-	                            PiCcsError::InvalidInput("packed RV32 REMU: missing rhs opening".into())
-	                        })?;
-	                        let z = *packed_cols.get(4).ok_or_else(|| {
-	                            PiCcsError::InvalidInput("packed RV32 REMU: missing rhs_is_zero opening".into())
-	                        })?;
-                        let diff = *packed_cols.get(5).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 REMU: missing diff opening".into())
+                        let rhs = *packed_cols
+                            .get(1)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 REMU: missing rhs opening".into()))?;
+                        let z = *packed_cols.get(4).ok_or_else(|| {
+                            PiCcsError::InvalidInput("packed RV32 REMU: missing rhs_is_zero opening".into())
                         })?;
+                        let diff = *packed_cols
+                            .get(5)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 REMU: missing diff opening".into()))?;
 
                         let mut sum = K::ZERO;
                         for i in 0..32 {
@@ -6551,32 +6940,32 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                             sum += b * K::from_u64(1u64 << i);
                         }
 
-	                        let two32 = K::from_u64(1u64 << 32);
-	                        let c0 = z * (K::ONE - z);
-	                        let c1 = z * rhs;
-	                        let c2 = (K::ONE - z) * (lane.val - rhs - diff + two32);
-	                        let c3 = diff - sum;
-	                        let expr = w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3;
-	                        chi_cycle_at_r_time * lane.has_lookup * expr
-	                    }
+                        let two32 = K::from_u64(1u64 << 32);
+                        let c0 = z * (K::ONE - z);
+                        let c1 = z * rhs;
+                        let c2 = (K::ONE - z) * (lane.val - rhs - diff + two32);
+                        let c3 = diff - sum;
+                        let expr = w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3;
+                        chi_cycle_at_r_time * lane.has_lookup * expr
+                    }
                     Rv32PackedShoutOp::Div => {
                         let weights = bitness_weights(r_cycle, 7, 0x4449_565F_4144_5054u64 + lut_idx as u64);
                         let w = [
                             weights[0], weights[1], weights[2], weights[3], weights[4], weights[5], weights[6],
                         ];
 
-                        let lhs = *packed_cols.get(0).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 DIV: missing lhs opening".into())
-                        })?;
-                        let rhs = *packed_cols.get(1).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 DIV: missing rhs opening".into())
-                        })?;
-                        let q_abs = *packed_cols.get(2).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 DIV: missing q_abs opening".into())
-                        })?;
-                        let r_abs = *packed_cols.get(3).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 DIV: missing r_abs opening".into())
-                        })?;
+                        let lhs = *packed_cols
+                            .get(0)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 DIV: missing lhs opening".into()))?;
+                        let rhs = *packed_cols
+                            .get(1)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 DIV: missing rhs opening".into()))?;
+                        let q_abs = *packed_cols
+                            .get(2)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 DIV: missing q_abs opening".into()))?;
+                        let r_abs = *packed_cols
+                            .get(3)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 DIV: missing r_abs opening".into()))?;
                         let z = *packed_cols.get(5).ok_or_else(|| {
                             PiCcsError::InvalidInput("packed RV32 DIV: missing rhs_is_zero opening".into())
                         })?;
@@ -6589,9 +6978,9 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                         let q_is_zero = *packed_cols.get(9).ok_or_else(|| {
                             PiCcsError::InvalidInput("packed RV32 DIV: missing q_is_zero opening".into())
                         })?;
-                        let diff = *packed_cols.get(10).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 DIV: missing diff opening".into())
-                        })?;
+                        let diff = *packed_cols
+                            .get(10)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 DIV: missing diff opening".into()))?;
 
                         let mut sum = K::ZERO;
                         for i in 0..32 {
@@ -6602,38 +6991,38 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                         }
 
                         let two = K::from_u64(2);
-	                        let two32 = K::from_u64(1u64 << 32);
-	                        let lhs_abs = lhs + lhs_sign * (two32 - two * lhs);
-	                        let rhs_abs = rhs + rhs_sign * (two32 - two * rhs);
+                        let two32 = K::from_u64(1u64 << 32);
+                        let lhs_abs = lhs + lhs_sign * (two32 - two * lhs);
+                        let rhs_abs = rhs + rhs_sign * (two32 - two * rhs);
 
-	                        let c0 = z * (K::ONE - z);
-	                        let c1 = z * rhs;
-	                        let c2 = q_is_zero * (K::ONE - q_is_zero);
-	                        let c3 = q_is_zero * q_abs;
-	                        let c4 = (K::ONE - z) * (lhs_abs - rhs_abs * q_abs - r_abs);
-	                        let c5 = (K::ONE - z) * (r_abs - rhs_abs - diff + two32);
-	                        let c6 = diff - sum;
-	                        let expr = w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3 + w[4] * c4 + w[5] * c5 + w[6] * c6;
-	                        chi_cycle_at_r_time * lane.has_lookup * expr
-	                    }
+                        let c0 = z * (K::ONE - z);
+                        let c1 = z * rhs;
+                        let c2 = q_is_zero * (K::ONE - q_is_zero);
+                        let c3 = q_is_zero * q_abs;
+                        let c4 = (K::ONE - z) * (lhs_abs - rhs_abs * q_abs - r_abs);
+                        let c5 = (K::ONE - z) * (r_abs - rhs_abs - diff + two32);
+                        let c6 = diff - sum;
+                        let expr = w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3 + w[4] * c4 + w[5] * c5 + w[6] * c6;
+                        chi_cycle_at_r_time * lane.has_lookup * expr
+                    }
                     Rv32PackedShoutOp::Rem => {
                         let weights = bitness_weights(r_cycle, 7, 0x4449_565F_4144_5054u64 + lut_idx as u64);
                         let w = [
                             weights[0], weights[1], weights[2], weights[3], weights[4], weights[5], weights[6],
                         ];
 
-                        let lhs = *packed_cols.get(0).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 REM: missing lhs opening".into())
-                        })?;
-                        let rhs = *packed_cols.get(1).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 REM: missing rhs opening".into())
-                        })?;
-                        let q_abs = *packed_cols.get(2).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 REM: missing q_abs opening".into())
-                        })?;
-                        let r_abs = *packed_cols.get(3).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 REM: missing r_abs opening".into())
-                        })?;
+                        let lhs = *packed_cols
+                            .get(0)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 REM: missing lhs opening".into()))?;
+                        let rhs = *packed_cols
+                            .get(1)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 REM: missing rhs opening".into()))?;
+                        let q_abs = *packed_cols
+                            .get(2)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 REM: missing q_abs opening".into()))?;
+                        let r_abs = *packed_cols
+                            .get(3)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 REM: missing r_abs opening".into()))?;
                         let z = *packed_cols.get(5).ok_or_else(|| {
                             PiCcsError::InvalidInput("packed RV32 REM: missing rhs_is_zero opening".into())
                         })?;
@@ -6646,9 +7035,9 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                         let r_is_zero = *packed_cols.get(9).ok_or_else(|| {
                             PiCcsError::InvalidInput("packed RV32 REM: missing r_is_zero opening".into())
                         })?;
-                        let diff = *packed_cols.get(10).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 REM: missing diff opening".into())
-                        })?;
+                        let diff = *packed_cols
+                            .get(10)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 REM: missing diff opening".into()))?;
 
                         let mut sum = K::ZERO;
                         for i in 0..32 {
@@ -6659,20 +7048,20 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                         }
 
                         let two = K::from_u64(2);
-	                        let two32 = K::from_u64(1u64 << 32);
-	                        let lhs_abs = lhs + lhs_sign * (two32 - two * lhs);
-	                        let rhs_abs = rhs + rhs_sign * (two32 - two * rhs);
+                        let two32 = K::from_u64(1u64 << 32);
+                        let lhs_abs = lhs + lhs_sign * (two32 - two * lhs);
+                        let rhs_abs = rhs + rhs_sign * (two32 - two * rhs);
 
-	                        let c0 = z * (K::ONE - z);
-	                        let c1 = z * rhs;
-	                        let c2 = r_is_zero * (K::ONE - r_is_zero);
-	                        let c3 = r_is_zero * r_abs;
-	                        let c4 = (K::ONE - z) * (lhs_abs - rhs_abs * q_abs - r_abs);
-	                        let c5 = (K::ONE - z) * (r_abs - rhs_abs - diff + two32);
-	                        let c6 = diff - sum;
-	                        let expr = w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3 + w[4] * c4 + w[5] * c5 + w[6] * c6;
-	                        chi_cycle_at_r_time * lane.has_lookup * expr
-	                    }
+                        let c0 = z * (K::ONE - z);
+                        let c1 = z * rhs;
+                        let c2 = r_is_zero * (K::ONE - r_is_zero);
+                        let c3 = r_is_zero * r_abs;
+                        let c4 = (K::ONE - z) * (lhs_abs - rhs_abs * q_abs - r_abs);
+                        let c5 = (K::ONE - z) * (r_abs - rhs_abs - diff + two32);
+                        let c6 = diff - sum;
+                        let expr = w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3 + w[4] * c4 + w[5] * c5 + w[6] * c6;
+                        chi_cycle_at_r_time * lane.has_lookup * expr
+                    }
                     Rv32PackedShoutOp::Add
                     | Rv32PackedShoutOp::Sub
                     | Rv32PackedShoutOp::Sll
@@ -6756,9 +7145,9 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                         chi_cycle_at_r_time * lane.has_lookup * expr
                     }
                     Rv32PackedShoutOp::Slt => {
-                        let diff = *packed_cols.get(2).ok_or_else(|| {
-                            PiCcsError::InvalidInput("packed RV32 SLT: missing diff opening".into())
-                        })?;
+                        let diff = *packed_cols
+                            .get(2)
+                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32 SLT: missing diff opening".into()))?;
                         let mut sum = K::ZERO;
                         for i in 0..32 {
                             let b = *packed_cols.get(5 + i).ok_or_else(|| {
@@ -6768,23 +7157,25 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                         }
                         chi_cycle_at_r_time * lane.has_lookup * (diff - sum)
                     }
-                    Rv32PackedShoutOp::Eq => {
+                    Rv32PackedShoutOp::Eq | Rv32PackedShoutOp::Neq => {
                         let lhs = *packed_cols
                             .get(0)
                             .ok_or_else(|| PiCcsError::InvalidInput("packed RV32: missing lhs opening".into()))?;
                         let rhs = *packed_cols
                             .get(1)
                             .ok_or_else(|| PiCcsError::InvalidInput("packed RV32: missing rhs opening".into()))?;
-                        chi_cycle_at_r_time * lane.has_lookup * (lhs - rhs) * lane.val
-                    }
-                    Rv32PackedShoutOp::Neq => {
-                        let lhs = *packed_cols
-                            .get(0)
-                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32: missing lhs opening".into()))?;
-                        let rhs = *packed_cols
-                            .get(1)
-                            .ok_or_else(|| PiCcsError::InvalidInput("packed RV32: missing rhs opening".into()))?;
-                        chi_cycle_at_r_time * lane.has_lookup * (lhs - rhs) * (K::ONE - lane.val)
+                        let borrow = *packed_cols.get(2).ok_or_else(|| {
+                            PiCcsError::InvalidInput("packed RV32 EQ/NEQ: missing borrow bit opening".into())
+                        })?;
+                        let mut diff = K::ZERO;
+                        for i in 0..32usize {
+                            let b = *packed_cols.get(3 + i).ok_or_else(|| {
+                                PiCcsError::InvalidInput("packed RV32 EQ/NEQ: missing diff bit opening(s)".into())
+                            })?;
+                            diff += b * K::from_u64(1u64 << i);
+                        }
+                        let two32 = K::from_u64(1u64 << 32);
+                        chi_cycle_at_r_time * lane.has_lookup * (lhs - rhs - diff + borrow * two32)
                     }
                     Rv32PackedShoutOp::Sltu => {
                         let diff = *packed_cols
@@ -6793,9 +7184,7 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                         let mut sum = K::ZERO;
                         for i in 0..32 {
                             let b = *packed_cols.get(3 + i).ok_or_else(|| {
-                                PiCcsError::InvalidInput(
-                                    "packed RV32 SLTU: missing diff bit opening(s)".into(),
-                                )
+                                PiCcsError::InvalidInput("packed RV32 SLTU: missing diff bit opening(s)".into())
                             })?;
                             sum += b * K::from_u64(1u64 << i);
                         }
@@ -6858,9 +7247,7 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
 
             if is_packed {
                 if value_claim != K::ZERO {
-                    return Err(PiCcsError::ProtocolError(
-                        "packed RV32 expects value claim == 0".into(),
-                    ));
+                    return Err(PiCcsError::ProtocolError("packed RV32 expects value claim == 0".into()));
                 }
                 if adapter_claim != K::ZERO {
                     return Err(PiCcsError::ProtocolError(
@@ -6938,8 +7325,10 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
 
             // Terminal value check for the trace hash oracle (ShoutValueOracleSparse):
             // χ_{r_cycle}(r_time) · has_lookup(r_time) · (has_lookup + α·val + β·lhs + γ·rhs)(r_time).
-            let hash_open =
-                cpu.shout_has_lookup + event_alpha * cpu.shout_val + event_beta * cpu.shout_lhs + event_gamma * cpu.shout_rhs;
+            let hash_open = cpu.shout_has_lookup
+                + event_alpha * cpu.shout_val
+                + event_beta * cpu.shout_lhs
+                + event_gamma * cpu.shout_rhs;
             let expected_final = chi_cycle_at_r_time * cpu.shout_has_lookup * hash_open;
             if expected_final != trace_hash_final {
                 return Err(PiCcsError::ProtocolError(
@@ -6953,13 +7342,24 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                 ));
             }
             if shout_val_sum != cpu.shout_val {
-                return Err(PiCcsError::ProtocolError("trace linkage failed: Shout val mismatch".into()));
+                return Err(PiCcsError::ProtocolError(
+                    "trace linkage failed: Shout val mismatch".into(),
+                ));
             }
             if shout_lhs_sum != cpu.shout_lhs {
-                return Err(PiCcsError::ProtocolError("trace linkage failed: Shout lhs mismatch".into()));
+                return Err(PiCcsError::ProtocolError(
+                    "trace linkage failed: Shout lhs mismatch".into(),
+                ));
             }
             if shout_rhs_sum != cpu.shout_rhs {
-                return Err(PiCcsError::ProtocolError("trace linkage failed: Shout rhs mismatch".into()));
+                return Err(PiCcsError::ProtocolError(
+                    "trace linkage failed: Shout rhs mismatch".into(),
+                ));
+            }
+            if shout_table_id_sum != cpu.shout_table_id {
+                return Err(PiCcsError::ProtocolError(
+                    "trace linkage failed: Shout table_id mismatch".into(),
+                ));
             }
         }
     }
@@ -7008,9 +7408,7 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
             )));
         }
         if me_time.c != inst.comms[0] {
-            return Err(PiCcsError::ProtocolError(
-                "Twist ME(time) commitment mismatch".into(),
-            ));
+            return Err(PiCcsError::ProtocolError("Twist ME(time) commitment mismatch".into()));
         }
 
         let bus_y_base_time = me_time
@@ -7107,36 +7505,55 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
 
         // Trace linkage at r_time: bind Twist(PROG/REG/RAM) to CPU trace columns.
         //
-        // Expected fixed ordering in the RV32 trace proof path:
-        //   mem_idx 0: PROG (lanes=1)
-        //   mem_idx 1: REG  (lanes=2, ell_addr=5)
-        //   mem_idx 2: RAM  (lanes=1)
+        // We key off `mem_id` (not instance ordering) so this remains robust if upstream reorders
+        // instances, while still enforcing the RV32 trace path expects exactly these 3 memories.
         if step.mem_insts.len() != 3 {
             return Err(PiCcsError::InvalidInput(format!(
                 "no-shared-bus trace linkage expects exactly 3 mem instances (PROG, REG, RAM), got {}",
                 step.mem_insts.len()
             )));
         }
+        {
+            let mut ids = std::collections::BTreeSet::<u32>::new();
+            for inst in step.mem_insts.iter() {
+                ids.insert(inst.mem_id);
+            }
+            let required = std::collections::BTreeSet::from([PROG_ID.0, REG_ID.0, RAM_ID.0]);
+            if ids != required {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "no-shared-bus trace linkage expects mem_id set {{PROG_ID={}, REG_ID={}, RAM_ID={}}}, got {:?}",
+                    PROG_ID.0, REG_ID.0, RAM_ID.0, ids
+                )));
+            }
+        }
         let cpu = cpu_link.ok_or_else(|| {
             PiCcsError::ProtocolError("missing CPU trace linkage openings in no-shared-bus mode".into())
         })?;
-        match i_mem {
-            0 => {
+        match inst.mem_id {
+            id if id == PROG_ID.0 => {
                 if expected_lanes != 1 {
                     return Err(PiCcsError::InvalidInput("PROG mem instance must have lanes=1".into()));
                 }
                 let lane = &lane_opens[0];
                 if lane.has_read != cpu.active {
-                    return Err(PiCcsError::ProtocolError("trace linkage failed: PROG has_read != active".into()));
+                    return Err(PiCcsError::ProtocolError(
+                        "trace linkage failed: PROG has_read != active".into(),
+                    ));
                 }
                 if lane.has_write != K::ZERO {
-                    return Err(PiCcsError::ProtocolError("trace linkage failed: PROG has_write != 0".into()));
+                    return Err(PiCcsError::ProtocolError(
+                        "trace linkage failed: PROG has_write != 0".into(),
+                    ));
                 }
                 if pack_bits_lsb(&lane.ra_bits) != cpu.prog_addr {
-                    return Err(PiCcsError::ProtocolError("trace linkage failed: PROG addr mismatch".into()));
+                    return Err(PiCcsError::ProtocolError(
+                        "trace linkage failed: PROG addr mismatch".into(),
+                    ));
                 }
                 if lane.rv != cpu.prog_value {
-                    return Err(PiCcsError::ProtocolError("trace linkage failed: PROG value mismatch".into()));
+                    return Err(PiCcsError::ProtocolError(
+                        "trace linkage failed: PROG value mismatch".into(),
+                    ));
                 }
                 // Enforce padding discipline for write-side columns even though PROG is read-only.
                 if lane.wv != K::ZERO || lane.inc != K::ZERO {
@@ -7145,7 +7562,7 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                     ));
                 }
             }
-            1 => {
+            id if id == REG_ID.0 => {
                 if expected_lanes != 2 || ell_addr != 5 {
                     return Err(PiCcsError::InvalidInput(
                         "REG mem instance must have lanes=2 and ell_addr=5".into(),
@@ -7207,23 +7624,31 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                     ));
                 }
             }
-            2 => {
+            id if id == RAM_ID.0 => {
                 if expected_lanes != 1 {
                     return Err(PiCcsError::InvalidInput("RAM mem instance must have lanes=1".into()));
                 }
                 let lane = &lane_opens[0];
 
                 if lane.has_read != cpu.ram_has_read {
-                    return Err(PiCcsError::ProtocolError("trace linkage failed: RAM has_read mismatch".into()));
+                    return Err(PiCcsError::ProtocolError(
+                        "trace linkage failed: RAM has_read mismatch".into(),
+                    ));
                 }
                 if lane.has_write != cpu.ram_has_write {
-                    return Err(PiCcsError::ProtocolError("trace linkage failed: RAM has_write mismatch".into()));
+                    return Err(PiCcsError::ProtocolError(
+                        "trace linkage failed: RAM has_write mismatch".into(),
+                    ));
                 }
                 if lane.rv != cpu.ram_rv {
-                    return Err(PiCcsError::ProtocolError("trace linkage failed: RAM rv mismatch".into()));
+                    return Err(PiCcsError::ProtocolError(
+                        "trace linkage failed: RAM rv mismatch".into(),
+                    ));
                 }
                 if lane.wv != cpu.ram_wv {
-                    return Err(PiCcsError::ProtocolError("trace linkage failed: RAM wv mismatch".into()));
+                    return Err(PiCcsError::ProtocolError(
+                        "trace linkage failed: RAM wv mismatch".into(),
+                    ));
                 }
 
                 // Address linkage is gated because the CPU trace has a single `ram_addr` column
@@ -7231,14 +7656,21 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                 let ra = pack_bits_lsb(&lane.ra_bits);
                 let wa = pack_bits_lsb(&lane.wa_bits);
                 if lane.has_read * (ra - cpu.ram_addr) != K::ZERO {
-                    return Err(PiCcsError::ProtocolError("trace linkage failed: RAM read addr mismatch".into()));
+                    return Err(PiCcsError::ProtocolError(
+                        "trace linkage failed: RAM read addr mismatch".into(),
+                    ));
                 }
                 if lane.has_write * (wa - cpu.ram_addr) != K::ZERO {
-                    return Err(PiCcsError::ProtocolError("trace linkage failed: RAM write addr mismatch".into()));
+                    return Err(PiCcsError::ProtocolError(
+                        "trace linkage failed: RAM write addr mismatch".into(),
+                    ));
                 }
             }
-            _ => {
-                return Err(PiCcsError::InvalidInput("unexpected extra mem instance".into()));
+            other => {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "unexpected mem_id={} in no-shared-bus RV32 trace linkage",
+                    other
+                )));
             }
         }
 
@@ -7336,300 +7768,9 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
         });
     }
 
-    // --------------------------------------------------------------------
-    // Phase 2: Verify batched Twist val-eval sum-check, deriving shared r_val.
-    // --------------------------------------------------------------------
-    let mut r_val: Vec<K> = Vec::new();
-    let mut val_eval_finals: Vec<K> = Vec::new();
-    if !step.mem_insts.is_empty() {
-        let plan = crate::memory_sidecar::claim_plan::TwistValEvalClaimPlan::build(step.mem_insts.iter(), has_prev);
-        let claim_count = plan.claim_count;
-
-        let mut per_claim_rounds: Vec<Vec<Vec<K>>> = Vec::with_capacity(claim_count);
-        let mut per_claim_sums: Vec<K> = Vec::with_capacity(claim_count);
-        let mut bind_claims: Vec<(u8, K)> = Vec::with_capacity(claim_count);
-        let mut claim_idx = 0usize;
-
-        for (i_mem, _inst) in step.mem_insts.iter().enumerate() {
-            let twist_proof = match &proofs_mem[proof_offset + i_mem] {
-                MemOrLutProof::Twist(proof) => proof,
-                _ => return Err(PiCcsError::InvalidInput("expected Twist proof".into())),
-            };
-            let val = twist_proof
-                .val_eval
-                .as_ref()
-                .ok_or_else(|| PiCcsError::InvalidInput("Twist(Route A): missing val_eval proof".into()))?;
-
-            per_claim_rounds.push(val.rounds_lt.clone());
-            per_claim_sums.push(val.claimed_inc_sum_lt);
-            bind_claims.push((plan.bind_tags[claim_idx], val.claimed_inc_sum_lt));
-            claim_idx += 1;
-
-            per_claim_rounds.push(val.rounds_total.clone());
-            per_claim_sums.push(val.claimed_inc_sum_total);
-            bind_claims.push((plan.bind_tags[claim_idx], val.claimed_inc_sum_total));
-            claim_idx += 1;
-
-            if has_prev {
-                let prev_total = val.claimed_prev_inc_sum_total.ok_or_else(|| {
-                    PiCcsError::InvalidInput("Twist(Route A): missing claimed_prev_inc_sum_total".into())
-                })?;
-                let prev_rounds = val
-                    .rounds_prev_total
-                    .clone()
-                    .ok_or_else(|| PiCcsError::InvalidInput("Twist(Route A): missing rounds_prev_total".into()))?;
-                per_claim_rounds.push(prev_rounds);
-                per_claim_sums.push(prev_total);
-                bind_claims.push((plan.bind_tags[claim_idx], prev_total));
-                claim_idx += 1;
-            } else if val.claimed_prev_inc_sum_total.is_some() || val.rounds_prev_total.is_some() {
-                return Err(PiCcsError::InvalidInput(
-                    "Twist(Route A): rollover fields present but prev_step is None".into(),
-                ));
-            }
-        }
-
-        tr.append_message(
-            b"twist/val_eval/batch_start",
-            &(step.mem_insts.len() as u64).to_le_bytes(),
-        );
-        tr.append_message(b"twist/val_eval/step_idx", &(step_idx as u64).to_le_bytes());
-        bind_twist_val_eval_claim_sums(tr, &bind_claims);
-
-        let (r_val_out, finals_out, ok) = verify_batched_sumcheck_rounds_ds(
-            tr,
-            b"twist/val_eval_batch",
-            step_idx,
-            &per_claim_rounds,
-            &per_claim_sums,
-            &plan.labels,
-            &plan.degree_bounds,
-        );
-        if !ok {
-            return Err(PiCcsError::SumcheckError(
-                "twist val-eval batched sumcheck invalid".into(),
-            ));
-        }
-        if r_val_out.len() != r_time.len() {
-            return Err(PiCcsError::ProtocolError(format!(
-                "twist val-eval r_val.len()={}, expected ell_n={}",
-                r_val_out.len(),
-                r_time.len()
-            )));
-        }
-        if finals_out.len() != claim_count {
-            return Err(PiCcsError::ProtocolError(format!(
-                "twist val-eval finals.len()={}, expected {}",
-                finals_out.len(),
-                claim_count
-            )));
-        }
-        r_val = r_val_out;
-        val_eval_finals = finals_out;
-
-        tr.append_message(b"twist/val_eval/batch_done", &[]);
-    }
-
-    // Verify val-eval terminal identity against Twist ME openings at r_val.
-    let lt = if step.mem_insts.is_empty() {
-        if !r_val.is_empty() {
-            return Err(PiCcsError::ProtocolError(
-                "twist val-eval produced r_val but no mem instances are present".into(),
-            ));
-        }
-        K::ZERO
-    } else {
-        if r_val.len() != r_time.len() {
-            return Err(PiCcsError::ProtocolError(format!(
-                "twist val-eval r_val.len()={}, expected ell_n={}",
-                r_val.len(),
-                r_time.len()
-            )));
-        }
-        lt_eval(&r_val, r_time)
-    };
-
-    let n_mem = step.mem_insts.len();
-    let expected_claims = n_mem * (1 + usize::from(has_prev));
-    if step.mem_insts.is_empty() {
-        if !mem_proof.val_me_claims.is_empty() {
-            return Err(PiCcsError::InvalidInput(
-                "proof contains val-lane ME claims with no Twist instances".into(),
-            ));
-        }
-    } else if mem_proof.val_me_claims.len() != expected_claims {
-        return Err(PiCcsError::InvalidInput(format!(
-            "no-shared-bus expects {} ME claim(s) at r_val (per mem instance, plus prev if any), got {}",
-            expected_claims,
-            mem_proof.val_me_claims.len()
-        )));
-    }
-
-    for (i_mem, inst) in step.mem_insts.iter().enumerate() {
-        let twist_proof = match &proofs_mem[proof_offset + i_mem] {
-            MemOrLutProof::Twist(proof) => proof,
-            _ => return Err(PiCcsError::InvalidInput("expected Twist proof".into())),
-        };
-        let val_eval = twist_proof
-            .val_eval
-            .as_ref()
-            .ok_or_else(|| PiCcsError::InvalidInput("Twist(Route A): missing val_eval proof".into()))?;
-        let layout = inst.twist_layout();
-        let ell_addr = layout
-            .lanes
-            .get(0)
-            .ok_or_else(|| PiCcsError::InvalidInput("TwistWitnessLayout has no lanes".into()))?
-            .ell_addr;
-
-        let expected_lanes = inst.lanes.max(1);
-        let bus = build_bus_layout_for_instances_with_shout_and_twist_lanes(
-            m,
-            step.mcs_inst.m_in,
-            inst.steps,
-            core::iter::empty::<(usize, usize)>(),
-            core::iter::once((ell_addr, expected_lanes)),
-        )
-        .map_err(|e| PiCcsError::InvalidInput(format!("Twist(Route A): bus layout failed: {e}")))?;
-
-        let me_cur = mem_proof
-            .val_me_claims
-            .get(i_mem)
-            .ok_or_else(|| PiCcsError::ProtocolError("missing Twist ME(val) claim".into()))?;
-        if me_cur.r.as_slice() != r_val {
-            return Err(PiCcsError::ProtocolError(
-                "Twist ME(val) r mismatch (expected r_val)".into(),
-            ));
-        }
-        if inst.comms.is_empty() || me_cur.c != inst.comms[0] {
-            return Err(PiCcsError::ProtocolError("Twist ME(val) commitment mismatch".into()));
-        }
-        let bus_y_base_val = me_cur
-            .y_scalars
-            .len()
-            .checked_sub(bus.bus_cols)
-            .ok_or_else(|| PiCcsError::InvalidInput("Twist y_scalars too short for bus openings".into()))?;
-
-        let r_addr = twist_pre
-            .get(i_mem)
-            .ok_or_else(|| PiCcsError::InvalidInput("missing Twist pre-time data".into()))?
-            .r_addr
-            .as_slice();
-
-        let twist_inst_cols = bus
-            .twist_cols
-            .get(0)
-            .ok_or_else(|| PiCcsError::InvalidInput("missing twist_cols[0]".into()))?;
-
-        let mut inc_at_r_addr_val = K::ZERO;
-        for twist_cols in twist_inst_cols.lanes.iter() {
-            let mut wa_bits_val_open = Vec::with_capacity(ell_addr);
-            for col_id in twist_cols.wa_bits.clone() {
-                wa_bits_val_open.push(
-                    me_cur
-                        .y_scalars
-                        .get(bus.y_scalar_index(bus_y_base_val, col_id))
-                        .copied()
-                        .ok_or_else(|| PiCcsError::ProtocolError("missing wa_bits(val) opening".into()))?,
-                );
-            }
-            let has_write_val_open = me_cur
-                .y_scalars
-                .get(bus.y_scalar_index(bus_y_base_val, twist_cols.has_write))
-                .copied()
-                .ok_or_else(|| PiCcsError::ProtocolError("missing has_write(val) opening".into()))?;
-            let inc_at_write_addr_val_open = me_cur
-                .y_scalars
-                .get(bus.y_scalar_index(bus_y_base_val, twist_cols.inc))
-                .copied()
-                .ok_or_else(|| PiCcsError::ProtocolError("missing inc(val) opening".into()))?;
-
-            let eq_wa_val = eq_bits_prod(&wa_bits_val_open, r_addr)?;
-            inc_at_r_addr_val += has_write_val_open * inc_at_write_addr_val_open * eq_wa_val;
-        }
-
-        let expected_lt_final = inc_at_r_addr_val * lt;
-        let claims_per_mem = if has_prev { 3 } else { 2 };
-        let base = claims_per_mem * i_mem;
-        if expected_lt_final != val_eval_finals[base] {
-            return Err(PiCcsError::ProtocolError(
-                "twist/val_eval_lt terminal value mismatch".into(),
-            ));
-        }
-        let expected_total_final = inc_at_r_addr_val;
-        if expected_total_final != val_eval_finals[base + 1] {
-            return Err(PiCcsError::ProtocolError(
-                "twist/val_eval_total terminal value mismatch".into(),
-            ));
-        }
-
-        if has_prev {
-            let prev = prev_step.ok_or_else(|| PiCcsError::ProtocolError("prev_step missing".into()))?;
-            let prev_inst = prev
-                .mem_insts
-                .get(i_mem)
-                .ok_or_else(|| PiCcsError::ProtocolError("missing prev mem instance".into()))?;
-            let me_prev = mem_proof
-                .val_me_claims
-                .get(n_mem + i_mem)
-                .ok_or_else(|| PiCcsError::ProtocolError("missing prev Twist ME(val)".into()))?;
-            if me_prev.r.as_slice() != r_val {
-                return Err(PiCcsError::ProtocolError(
-                    "prev Twist ME(val) r mismatch (expected r_val)".into(),
-                ));
-            }
-            if prev_inst.comms.is_empty() || me_prev.c != prev_inst.comms[0] {
-                return Err(PiCcsError::ProtocolError(
-                    "prev Twist ME(val) commitment mismatch".into(),
-                ));
-            }
-            let bus_y_base_prev = me_prev
-                .y_scalars
-                .len()
-                .checked_sub(bus.bus_cols)
-                .ok_or_else(|| PiCcsError::InvalidInput("prev Twist y_scalars too short".into()))?;
-
-            let mut inc_at_r_addr_prev = K::ZERO;
-            for twist_cols in twist_inst_cols.lanes.iter() {
-                let mut wa_bits_prev_open = Vec::with_capacity(ell_addr);
-                for col_id in twist_cols.wa_bits.clone() {
-                    wa_bits_prev_open.push(
-                        me_prev
-                            .y_scalars
-                            .get(bus.y_scalar_index(bus_y_base_prev, col_id))
-                            .copied()
-                            .ok_or_else(|| PiCcsError::ProtocolError("missing wa_bits(prev) opening".into()))?,
-                    );
-                }
-                let has_write_prev_open = me_prev
-                    .y_scalars
-                    .get(bus.y_scalar_index(bus_y_base_prev, twist_cols.has_write))
-                    .copied()
-                    .ok_or_else(|| PiCcsError::ProtocolError("missing has_write(prev) opening".into()))?;
-                let inc_prev_open = me_prev
-                    .y_scalars
-                    .get(bus.y_scalar_index(bus_y_base_prev, twist_cols.inc))
-                    .copied()
-                    .ok_or_else(|| PiCcsError::ProtocolError("missing inc(prev) opening".into()))?;
-
-                let eq_wa_prev = eq_bits_prod(&wa_bits_prev_open, r_addr)?;
-                inc_at_r_addr_prev += has_write_prev_open * inc_prev_open * eq_wa_prev;
-            }
-            if inc_at_r_addr_prev != val_eval_finals[base + 2] {
-                return Err(PiCcsError::ProtocolError(
-                    "twist/rollover_prev_total terminal value mismatch".into(),
-                ));
-            }
-
-            let claimed_prev_total = val_eval
-                .claimed_prev_inc_sum_total
-                .ok_or_else(|| PiCcsError::ProtocolError("twist rollover missing claimed_prev_inc_sum_total".into()))?;
-            let init_prev_at_r_addr = eval_init_at_r_addr(&prev_inst.init, prev_inst.k, r_addr)?;
-            let init_cur_at_r_addr = eval_init_at_r_addr(&inst.init, inst.k, r_addr)?;
-            if init_cur_at_r_addr != init_prev_at_r_addr + claimed_prev_total {
-                return Err(PiCcsError::ProtocolError("twist rollover init check failed".into()));
-            }
-        }
-    }
+    verify_no_shared_bus_twist_val_eval_phase(
+        tr, m, step, prev_step, proofs_mem, mem_proof, twist_pre, step_idx, r_time,
+    )?;
 
     Ok(RouteAMemoryVerifyOutput {
         claim_idx_end: claim_plan.claim_idx_end,

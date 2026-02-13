@@ -13,9 +13,7 @@ pub(crate) fn plan_shout_addr_pages(
     lanes: usize,
 ) -> Result<Vec<usize>, PiCcsError> {
     if steps == 0 {
-        return Err(PiCcsError::InvalidInput(
-            "Shout paging requires steps>=1".into(),
-        ));
+        return Err(PiCcsError::InvalidInput("Shout paging requires steps>=1".into()));
     }
     if m_in > m {
         return Err(PiCcsError::InvalidInput(format!(
@@ -36,9 +34,7 @@ pub(crate) fn plan_shout_addr_pages(
     let max_addr_cols_per_page = per_lane_capacity - 2;
 
     if ell_addr == 0 {
-        return Err(PiCcsError::InvalidInput(
-            "Shout paging: ell_addr must be >= 1".into(),
-        ));
+        return Err(PiCcsError::InvalidInput("Shout paging: ell_addr must be >= 1".into()));
     }
 
     let mut out = Vec::new();
@@ -50,4 +46,3 @@ pub(crate) fn plan_shout_addr_pages(
     }
     Ok(out)
 }
-

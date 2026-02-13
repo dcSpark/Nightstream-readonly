@@ -226,6 +226,7 @@ fn rv32_b1_signed_div_rem_shared_bus_constraints_satisfy() {
         .map(|id| {
             let l = mem_layouts.get(id).unwrap();
             MemInstance {
+                mem_id: *id,
                 comms: Vec::new(),
                 k: l.k,
                 d: l.d,

@@ -98,6 +98,7 @@ impl<C: NeoCircuit> SharedBusR1csPreprocessing<C> {
             &self.resources.lut_table_specs,
             chunk_to_witness,
         )
+        .map_err(|e| PiCcsError::InvalidInput(format!("R1csCpu::new failed: {e}")))?
         .with_shared_cpu_bus(
             SharedCpuBusConfig {
                 mem_layouts: self.resources.mem_layouts.clone(),

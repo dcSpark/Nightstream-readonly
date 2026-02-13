@@ -98,6 +98,7 @@ fn default_mixers() -> CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32
 }
 
 fn metadata_only_mem_instance(
+    mem_id: u32,
     layout: &PlainMemLayout,
     init: MemInit<F>,
     steps: usize,
@@ -105,6 +106,7 @@ fn metadata_only_mem_instance(
     let ell = layout.n_side.trailing_zeros() as usize;
     (
         MemInstance {
+            mem_id,
             comms: Vec::new(),
             k: layout.k,
             d: layout.d,
@@ -339,7 +341,7 @@ fn ccs_must_reference_bus_columns_guardrail() {
         },
     );
 
-    let (mem_inst, mem_wit) = metadata_only_mem_instance(&mem_layout, MemInit::Zero, mem_trace.steps);
+    let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, MemInit::Zero, mem_trace.steps);
 
     let steps_witness = vec![StepWitnessBundle {
         mcs,
@@ -454,7 +456,7 @@ fn address_bit_tampering_attack_should_be_rejected() {
         inc_at_write_addr: vec![F::ZERO],
     };
 
-    let (mem_inst, mem_wit) = metadata_only_mem_instance(&mem_layout, mem_init, mem_trace.steps);
+    let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
     let steps_witness = vec![StepWitnessBundle {
         mcs,
@@ -583,7 +585,7 @@ fn has_read_flag_mismatch_attack_should_be_rejected() {
         inc_at_write_addr: vec![F::ZERO],
     };
 
-    let (mem_inst, mem_wit) = metadata_only_mem_instance(&mem_layout, mem_init, mem_trace.steps);
+    let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
     let steps_witness = vec![StepWitnessBundle {
         mcs,
@@ -713,7 +715,7 @@ fn increment_value_tampering_attack_should_be_rejected() {
         inc_at_write_addr: vec![F::from_u64(100)], // WRONG
     };
 
-    let (mem_inst, mem_wit) = metadata_only_mem_instance(&mem_layout, mem_init, mem_trace.steps);
+    let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
     let steps_witness = vec![StepWitnessBundle {
         mcs,
@@ -868,7 +870,7 @@ fn lookup_value_tampering_attack_should_be_rejected() {
         write_val: vec![F::ZERO],
         inc_at_write_addr: vec![F::ZERO],
     };
-    let (mem_inst, mem_wit) = metadata_only_mem_instance(&mem_layout, mem_init, mem_trace.steps);
+    let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
     let steps_witness = vec![StepWitnessBundle {
         mcs,
@@ -997,7 +999,7 @@ fn bus_region_mismatch_with_twist_trace_should_be_rejected() {
         inc_at_write_addr: vec![F::ZERO],
     };
 
-    let (mem_inst, mem_wit) = metadata_only_mem_instance(&mem_layout, mem_init, mem_trace.steps);
+    let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
     let steps_witness = vec![StepWitnessBundle {
         mcs,
@@ -1124,7 +1126,7 @@ fn write_then_read_consistency_attack_should_be_rejected() {
         },
     );
 
-    let (mem_inst1, mem_wit1) = metadata_only_mem_instance(&mem_layout, mem_init_step1, mem_trace_step1.steps);
+    let (mem_inst1, mem_wit1) = metadata_only_mem_instance(0, &mem_layout, mem_init_step1, mem_trace_step1.steps);
 
     // Step 2: ATTACK - Read from addr 0, claim value is 0 (should be 100)
     let mem_init_step2 = MemInit::Sparse(vec![(0, F::from_u64(100))]); // State after step 1
@@ -1163,7 +1165,7 @@ fn write_then_read_consistency_attack_should_be_rejected() {
         },
     );
 
-    let (mem_inst2, mem_wit2) = metadata_only_mem_instance(&mem_layout, mem_init_step2, mem_trace_step2.steps);
+    let (mem_inst2, mem_wit2) = metadata_only_mem_instance(0, &mem_layout, mem_init_step2, mem_trace_step2.steps);
 
     let steps_witness = vec![
         StepWitnessBundle {
@@ -1300,7 +1302,7 @@ fn correct_witness_should_verify() {
         inc_at_write_addr: vec![F::ZERO],
     };
 
-    let (mem_inst, mem_wit) = metadata_only_mem_instance(&mem_layout, mem_init, mem_trace.steps);
+    let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
     let steps_witness = vec![StepWitnessBundle {
         mcs,

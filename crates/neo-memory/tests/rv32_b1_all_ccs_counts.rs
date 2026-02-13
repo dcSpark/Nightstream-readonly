@@ -23,9 +23,8 @@ fn rv32_b1_all_ccs_count_estimator_matches_built_ccs() {
     ];
     let program_bytes = encode_program(&program);
 
-    let (prog_layout, _prog_init) =
-        prog_rom_layout_and_init_words::<F>(PROG_ID, /*base_addr=*/ 0, &program_bytes)
-            .expect("prog_rom_layout_and_init_words");
+    let (prog_layout, _prog_init) = prog_rom_layout_and_init_words::<F>(PROG_ID, /*base_addr=*/ 0, &program_bytes)
+        .expect("prog_rom_layout_and_init_words");
 
     let mem_layouts = HashMap::from([
         (
@@ -52,11 +51,10 @@ fn rv32_b1_all_ccs_count_estimator_matches_built_ccs() {
     let shout = RiscvShoutTables::new(/*xlen=*/ 32);
     let shout_table_ids = vec![shout.opcode_to_id(RiscvOpcode::Add).0];
 
-    let (step_ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, /*chunk_size=*/ 1)
-        .expect("build_rv32_b1_step_ccs");
+    let (step_ccs, layout) =
+        build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, /*chunk_size=*/ 1).expect("build_rv32_b1_step_ccs");
     let decode_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode sidecar ccs");
-    let semantics_ccs =
-        build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
+    let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
 
     let counts = estimate_rv32_b1_all_ccs_counts(&mem_layouts, &shout_table_ids, /*chunk_size=*/ 1)
         .expect("estimate_rv32_b1_all_ccs_counts");

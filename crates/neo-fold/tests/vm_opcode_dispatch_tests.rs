@@ -268,6 +268,7 @@ fn empty_mem_trace() -> PlainMemTrace<F> {
 }
 
 fn metadata_only_mem_instance(
+    mem_id: u32,
     layout: &PlainMemLayout,
     init: MemInit<F>,
     steps: usize,
@@ -275,6 +276,7 @@ fn metadata_only_mem_instance(
     let ell = layout.n_side.trailing_zeros() as usize;
     (
         MemInstance {
+            mem_id,
             comms: Vec::new(),
             k: layout.k,
             d: layout.d,
@@ -362,7 +364,7 @@ fn vm_simple_add_program() {
             lanes: 1,
         };
         let mem_trace = empty_mem_trace();
-        let (mem_inst, mem_wit) = metadata_only_mem_instance(&mem_layout, MemInit::Zero, mem_trace.steps);
+        let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, MemInit::Zero, mem_trace.steps);
         let (opcode_inst, opcode_wit) = metadata_only_lut_instance(&bytecode_table, opcode_trace.has_lookup.len());
         let (imm_inst, imm_wit) = metadata_only_lut_instance(&imm_table, imm_trace.has_lookup.len());
 
@@ -449,7 +451,7 @@ fn vm_register_file_operations() {
             write_val: vec![F::from_u64(10)],
             inc_at_write_addr: vec![F::from_u64(10)],
         };
-        let (reg_inst, reg_wit) = metadata_only_mem_instance(&reg_layout, MemInit::Zero, reg_trace.steps);
+        let (reg_inst, reg_wit) = metadata_only_mem_instance(0, &reg_layout, MemInit::Zero, reg_trace.steps);
         let mem_bus = [(&reg_inst, &reg_trace)];
         let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, 0, &[], &mem_bus);
 
@@ -476,7 +478,7 @@ fn vm_register_file_operations() {
         // State after step 0: R0=10
         let reg_init = MemInit::Sparse(vec![(0, F::from_u64(10))]);
 
-        let (reg_inst, reg_wit) = metadata_only_mem_instance(&reg_layout, reg_init, reg_trace.steps);
+        let (reg_inst, reg_wit) = metadata_only_mem_instance(0, &reg_layout, reg_init, reg_trace.steps);
         let mem_bus = [(&reg_inst, &reg_trace)];
         let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, 1, &[], &mem_bus);
 
@@ -504,7 +506,7 @@ fn vm_register_file_operations() {
         // State after step 1: R0=10, R1=20
         let reg_init = MemInit::Sparse(vec![(0, F::from_u64(10)), (1, F::from_u64(20))]);
 
-        let (reg_inst, reg_wit) = metadata_only_mem_instance(&reg_layout, reg_init, reg_trace.steps);
+        let (reg_inst, reg_wit) = metadata_only_mem_instance(0, &reg_layout, reg_init, reg_trace.steps);
         let mem_bus = [(&reg_inst, &reg_trace)];
         let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, 2, &[], &mem_bus);
 
@@ -603,7 +605,7 @@ fn vm_combined_bytecode_and_data_memory() {
         inc_at_write_addr: vec![F::from_u64(42)],
     };
     let (bytecode_inst, bytecode_wit) = metadata_only_lut_instance(&bytecode, bytecode_trace.has_lookup.len());
-    let (ram_inst, ram_wit) = metadata_only_mem_instance(&ram_layout, MemInit::Zero, ram_trace.steps);
+    let (ram_inst, ram_wit) = metadata_only_mem_instance(0, &ram_layout, MemInit::Zero, ram_trace.steps);
 
     let lut_bus = [(&bytecode_inst, &bytecode_trace)];
     let mem_bus = [(&ram_inst, &ram_trace)];
@@ -763,7 +765,7 @@ fn vm_multi_instruction_sequence() {
         };
 
         let mem_trace = empty_mem_trace();
-        let (mem_inst, mem_wit) = metadata_only_mem_instance(&mem_layout, MemInit::Zero, mem_trace.steps);
+        let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, MemInit::Zero, mem_trace.steps);
         let (bytecode_inst, bytecode_wit) = metadata_only_lut_instance(&bytecode, bytecode_trace.has_lookup.len());
 
         let lut_bus = [(&bytecode_inst, &bytecode_trace)];

@@ -15,8 +15,8 @@
 #![allow(non_snake_case)]
 
 use crate::finalize::ObligationFinalizer;
-use crate::memory_sidecar::sumcheck_ds::{run_sumcheck_prover_ds, verify_sumcheck_rounds_ds};
 use crate::memory_sidecar::shout_paging::plan_shout_addr_pages;
+use crate::memory_sidecar::sumcheck_ds::{run_sumcheck_prover_ds, verify_sumcheck_rounds_ds};
 use crate::memory_sidecar::utils::RoundOraclePrefix;
 use crate::pi_ccs::{self as ccs, FoldingMode};
 pub use crate::shard_proof_types::{
@@ -33,8 +33,8 @@ use neo_ajtai::{
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::{CcsStructure, Mat, MeInstance};
 use neo_math::{KExtensions, D, F, K};
-use neo_memory::ts_common as ts;
 use neo_memory::riscv::trace::Rv32TraceLayout;
+use neo_memory::ts_common as ts;
 use neo_memory::witness::{LutTableSpec, StepInstanceBundle, StepWitnessBundle};
 use neo_params::NeoParams;
 use neo_reductions::engines::optimized_engine::oracle::SparseCache;
@@ -1590,6 +1590,7 @@ where
             trace.shout_val,
             trace.shout_lhs,
             trace.shout_rhs,
+            trace.shout_table_id,
         ];
 
         let want_len = core_t + trace_cols_to_open.len();
@@ -1600,9 +1601,8 @@ where
                     "trace linkage openings expect m_in=5 (got {m_in})"
                 )));
             }
-            let t_len = trace_linkage_t_len.ok_or_else(|| {
-                PiCcsError::ProtocolError("trace linkage openings require explicit t_len".into())
-            })?;
+            let t_len = trace_linkage_t_len
+                .ok_or_else(|| PiCcsError::ProtocolError("trace linkage openings require explicit t_len".into()))?;
             if t_len == 0 {
                 return Err(PiCcsError::InvalidInput("trace linkage expects t_len >= 1".into()));
             }
@@ -2216,10 +2216,7 @@ where
         }
     }
     let shared_cpu_bus = shared_cpu_bus.unwrap_or(true);
-    tr.append_message(
-        b"shard/cpu_bus_mode",
-        &[if shared_cpu_bus { 1u8 } else { 0u8 }],
-    );
+    tr.append_message(b"shard/cpu_bus_mode", &[if shared_cpu_bus { 1u8 } else { 0u8 }]);
 
     let (s, cpu_bus_opt) = if shared_cpu_bus {
         let (s, cpu_bus) = crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(s_me, steps)?;
@@ -2607,7 +2604,9 @@ where
                     &mut ccs_out[0],
                 )?;
                 for (out, Z) in ccs_out.iter_mut().skip(1).zip(accumulator_wit.iter()) {
-                    crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(params, cpu_bus, core_t, Z, out)?;
+                    crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
+                        params, cpu_bus, core_t, Z, out,
+                    )?;
                 }
             }
         }
@@ -2617,7 +2616,7 @@ where
         //
         // This is the "no bus tail + linkage at r_time" bridge: we keep the CPU witness small
         // (no bus bit columns), while still binding Twist instances to the same execution trace.
-	        if cpu_bus_opt.is_none() && (!step.mem_instances.is_empty() || !step.lut_instances.is_empty()) {
+        if cpu_bus_opt.is_none() && (!step.mem_instances.is_empty() || !step.lut_instances.is_empty()) {
             // Infer that the CPU witness is the RV32 trace column-major layout:
             // z = [x (m_in) | trace_cols * t_len]
             let m_in = mcs_inst.m_in;
@@ -2679,108 +2678,109 @@ where
                 )));
             }
 
-	            let trace_cols_to_open_dense: Vec<usize> = vec![
-	                trace.active,
-	                trace.prog_addr,
-	                trace.prog_value,
-	                trace.rs1_addr,
-	                trace.rs1_val,
-	                trace.rs2_addr,
-	                trace.rs2_val,
-	                trace.rd_has_write,
-	                trace.rd_addr,
-	                trace.rd_val,
-	                trace.ram_has_read,
-	                trace.ram_has_write,
-	                trace.ram_addr,
-	                trace.ram_rv,
-	                trace.ram_wv,
-	            ];
-	            let trace_cols_to_open_shout: Vec<usize> = vec![
-	                trace.shout_has_lookup,
-	                trace.shout_val,
-	                trace.shout_lhs,
-	                trace.shout_rhs,
-	            ];
-	            let trace_cols_to_open_all: Vec<usize> = trace_cols_to_open_dense
-	                .iter()
-	                .chain(trace_cols_to_open_shout.iter())
-	                .copied()
-	                .collect();
-	            let core_t = s.t();
-	            let col_base = m_in; // trace_base in the RV32 trace layout
+            let trace_cols_to_open_dense: Vec<usize> = vec![
+                trace.active,
+                trace.prog_addr,
+                trace.prog_value,
+                trace.rs1_addr,
+                trace.rs1_val,
+                trace.rs2_addr,
+                trace.rs2_val,
+                trace.rd_has_write,
+                trace.rd_addr,
+                trace.rd_val,
+                trace.ram_has_read,
+                trace.ram_has_write,
+                trace.ram_addr,
+                trace.ram_rv,
+                trace.ram_wv,
+            ];
+            let trace_cols_to_open_shout: Vec<usize> = vec![
+                trace.shout_has_lookup,
+                trace.shout_val,
+                trace.shout_lhs,
+                trace.shout_rhs,
+                trace.shout_table_id,
+            ];
+            let trace_cols_to_open_all: Vec<usize> = trace_cols_to_open_dense
+                .iter()
+                .chain(trace_cols_to_open_shout.iter())
+                .copied()
+                .collect();
+            let core_t = s.t();
+            let col_base = m_in; // trace_base in the RV32 trace layout
 
-	            // Event-table style micro-optimization: Shout trace columns are constrained to be 0
-	            // whenever `shout_has_lookup == 0`, so we can compute their openings by summing only
-	            // over the active lookup rows.
-	            let active_shout_js: Vec<usize> = {
-	                let d = neo_math::D;
-	                let mut out: Vec<usize> = Vec::new();
-	                let col_offset = trace
-	                    .shout_has_lookup
-	                    .checked_mul(t_len)
-	                    .ok_or_else(|| PiCcsError::InvalidInput("trace col_id * t_len overflow".into()))?;
-	                for j in 0..t_len {
-	                    let z_idx = col_base
-	                        .checked_add(col_offset)
-	                        .and_then(|x| x.checked_add(j))
-	                        .ok_or_else(|| PiCcsError::InvalidInput("trace z index overflow".into()))?;
-	                    if z_idx >= mcs_wit.Z.cols() {
-	                        return Err(PiCcsError::InvalidInput(format!(
-	                            "trace openings: z_idx out of range (z_idx={z_idx}, m={})",
-	                            mcs_wit.Z.cols()
-	                        )));
-	                    }
+            // Event-table style micro-optimization: Shout trace columns are constrained to be 0
+            // whenever `shout_has_lookup == 0`, so we can compute their openings by summing only
+            // over the active lookup rows.
+            let active_shout_js: Vec<usize> = {
+                let d = neo_math::D;
+                let mut out: Vec<usize> = Vec::new();
+                let col_offset = trace
+                    .shout_has_lookup
+                    .checked_mul(t_len)
+                    .ok_or_else(|| PiCcsError::InvalidInput("trace col_id * t_len overflow".into()))?;
+                for j in 0..t_len {
+                    let z_idx = col_base
+                        .checked_add(col_offset)
+                        .and_then(|x| x.checked_add(j))
+                        .ok_or_else(|| PiCcsError::InvalidInput("trace z index overflow".into()))?;
+                    if z_idx >= mcs_wit.Z.cols() {
+                        return Err(PiCcsError::InvalidInput(format!(
+                            "trace openings: z_idx out of range (z_idx={z_idx}, m={})",
+                            mcs_wit.Z.cols()
+                        )));
+                    }
 
-	                    let mut any = false;
-	                    for rho in 0..d {
-	                        if mcs_wit.Z[(rho, z_idx)] != F::ZERO {
-	                            any = true;
-	                            break;
-	                        }
-	                    }
-	                    if any {
-	                        out.push(j);
-	                    }
-	                }
-	                out
-	            };
+                    let mut any = false;
+                    for rho in 0..d {
+                        if mcs_wit.Z[(rho, z_idx)] != F::ZERO {
+                            any = true;
+                            break;
+                        }
+                    }
+                    if any {
+                        out.push(j);
+                    }
+                }
+                out
+            };
 
-	            crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
-	                params,
-	                m_in,
-	                t_len,
-	                col_base,
-	                &trace_cols_to_open_dense,
-	                core_t,
-	                &mcs_wit.Z,
-	                &mut ccs_out[0],
-	            )?;
-	            crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance_at_js(
-	                params,
-	                m_in,
-	                t_len,
-	                col_base,
-	                &trace_cols_to_open_shout,
-	                core_t + trace_cols_to_open_dense.len(),
-	                &mcs_wit.Z,
-	                &mut ccs_out[0],
-	                &active_shout_js,
-	            )?;
-	            for (out, Z) in ccs_out.iter_mut().skip(1).zip(accumulator_wit.iter()) {
-	                crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
-	                    params,
-	                    m_in,
-	                    t_len,
-	                    col_base,
-	                    &trace_cols_to_open_all,
-	                    core_t,
-	                    Z,
-	                    out,
-	                )?;
-	            }
-	            trace_linkage_t_len = Some(t_len);
-	        }
+            crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
+                params,
+                m_in,
+                t_len,
+                col_base,
+                &trace_cols_to_open_dense,
+                core_t,
+                &mcs_wit.Z,
+                &mut ccs_out[0],
+            )?;
+            crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance_at_js(
+                params,
+                m_in,
+                t_len,
+                col_base,
+                &trace_cols_to_open_shout,
+                core_t + trace_cols_to_open_dense.len(),
+                &mcs_wit.Z,
+                &mut ccs_out[0],
+                &active_shout_js,
+            )?;
+            for (out, Z) in ccs_out.iter_mut().skip(1).zip(accumulator_wit.iter()) {
+                crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
+                    params,
+                    m_in,
+                    t_len,
+                    col_base,
+                    &trace_cols_to_open_all,
+                    core_t,
+                    Z,
+                    out,
+                )?;
+            }
+            trace_linkage_t_len = Some(t_len);
+        }
 
         if ccs_out.len() != k {
             return Err(PiCcsError::ProtocolError(format!(
@@ -2802,9 +2802,9 @@ where
 
         #[cfg(feature = "paper-exact")]
         if let FoldingMode::OptimizedWithCrosscheck(cfg) = &mode {
-            let cpu_bus = cpu_bus_opt.as_ref().ok_or_else(|| {
-                PiCcsError::InvalidInput("OptimizedWithCrosscheck requires shared CPU bus".into())
-            })?;
+            let cpu_bus = cpu_bus_opt
+                .as_ref()
+                .ok_or_else(|| PiCcsError::InvalidInput("OptimizedWithCrosscheck requires shared CPU bus".into()))?;
             crosscheck_route_a_ccs_step(
                 cfg,
                 step_idx,
@@ -2927,9 +2927,8 @@ where
                     match claim_idx {
                         0 => (&mcs_wit.Z, "cpu"),
                         1 => {
-                            let prev = prev_step.ok_or_else(|| {
-                                PiCcsError::ProtocolError("missing prev_step for r_val claim".into())
-                            })?;
+                            let prev = prev_step
+                                .ok_or_else(|| PiCcsError::ProtocolError("missing prev_step for r_val claim".into()))?;
                             (&prev.mcs.1.Z, "cpu_prev")
                         }
                         _ => {
@@ -2942,9 +2941,8 @@ where
                     let is_prev = has_prev && claim_idx >= n_mem;
                     let mem_idx = if is_prev { claim_idx - n_mem } else { claim_idx };
                     let step_for_wit = if is_prev {
-                        prev_step.ok_or_else(|| {
-                            PiCcsError::ProtocolError("missing prev_step for r_val claim".into())
-                        })?
+                        prev_step
+                            .ok_or_else(|| PiCcsError::ProtocolError("missing prev_step for r_val claim".into()))?
                     } else {
                         step
                     };
@@ -2988,9 +2986,8 @@ where
                     let is_prev = has_prev && claim_idx >= n_mem;
                     let mem_idx = if is_prev { claim_idx - n_mem } else { claim_idx };
                     let step_for_wit = if is_prev {
-                        prev_step.ok_or_else(|| {
-                            PiCcsError::ProtocolError("missing prev_step for r_val claim".into())
-                        })?
+                        prev_step
+                            .ok_or_else(|| PiCcsError::ProtocolError("missing prev_step for r_val claim".into()))?
                     } else {
                         step
                     };
@@ -3153,14 +3150,21 @@ where
                 }
 
                 for (page_idx, &page_ell_addr) in page_ell_addrs.iter().enumerate() {
-                    let me = mem_proof.shout_me_claims_time.get(shout_me_idx).ok_or_else(|| {
-                        PiCcsError::ProtocolError("missing Shout ME(time) claim (paging drift)".into())
-                    })?;
-                    let mat = lut_wit.mats.get(page_idx).ok_or_else(|| {
-                        PiCcsError::ProtocolError("missing lut witness mat (paging drift)".into())
-                    })?;
+                    let me = mem_proof
+                        .shout_me_claims_time
+                        .get(shout_me_idx)
+                        .ok_or_else(|| {
+                            PiCcsError::ProtocolError("missing Shout ME(time) claim (paging drift)".into())
+                        })?;
+                    let mat = lut_wit
+                        .mats
+                        .get(page_idx)
+                        .ok_or_else(|| PiCcsError::ProtocolError("missing lut witness mat (paging drift)".into()))?;
 
-                    tr.append_message(b"fold/shout_time_lane_shout_me_idx", &(shout_me_idx as u64).to_le_bytes());
+                    tr.append_message(
+                        b"fold/shout_time_lane_shout_me_idx",
+                        &(shout_me_idx as u64).to_le_bytes(),
+                    );
                     tr.append_message(b"fold/shout_time_lane_lut_idx", &(lut_idx as u64).to_le_bytes());
                     tr.append_message(b"fold/shout_time_lane_page_idx", &(page_idx as u64).to_le_bytes());
 
@@ -3576,10 +3580,7 @@ where
         if step.lut_insts.is_empty() && step.mem_insts.is_empty() {
             continue;
         }
-        let is_shared_step = step
-            .lut_insts
-            .iter()
-            .all(|inst| inst.comms.is_empty())
+        let is_shared_step = step.lut_insts.iter().all(|inst| inst.comms.is_empty())
             && step.mem_insts.iter().all(|inst| inst.comms.is_empty());
         if let Some(expected) = shared_cpu_bus {
             if is_shared_step != expected {
@@ -3592,10 +3593,7 @@ where
         }
     }
     let shared_cpu_bus = shared_cpu_bus.unwrap_or(true);
-    tr.append_message(
-        b"shard/cpu_bus_mode",
-        &[if shared_cpu_bus { 1u8 } else { 0u8 }],
-    );
+    tr.append_message(b"shard/cpu_bus_mode", &[if shared_cpu_bus { 1u8 } else { 0u8 }]);
     let (s, cpu_bus_opt) = if shared_cpu_bus {
         let (s, cpu_bus) = crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(s_me, steps)?;
         (s, Some(cpu_bus))
@@ -4348,14 +4346,24 @@ where
                 }
 
                 for (page_idx, _page_ell_addr) in page_ell_addrs.iter().enumerate() {
-                    let me = step_proof.mem.shout_me_claims_time.get(shout_me_idx).ok_or_else(|| {
-                        PiCcsError::ProtocolError("missing Shout ME(time) claim (paging drift)".into())
-                    })?;
-                    let proof = step_proof.shout_time_fold.get(shout_me_idx).ok_or_else(|| {
-                        PiCcsError::ProtocolError("missing shout_time_fold proof (paging drift)".into())
-                    })?;
+                    let me = step_proof
+                        .mem
+                        .shout_me_claims_time
+                        .get(shout_me_idx)
+                        .ok_or_else(|| {
+                            PiCcsError::ProtocolError("missing Shout ME(time) claim (paging drift)".into())
+                        })?;
+                    let proof = step_proof
+                        .shout_time_fold
+                        .get(shout_me_idx)
+                        .ok_or_else(|| {
+                            PiCcsError::ProtocolError("missing shout_time_fold proof (paging drift)".into())
+                        })?;
 
-                    tr.append_message(b"fold/shout_time_lane_shout_me_idx", &(shout_me_idx as u64).to_le_bytes());
+                    tr.append_message(
+                        b"fold/shout_time_lane_shout_me_idx",
+                        &(shout_me_idx as u64).to_le_bytes(),
+                    );
                     tr.append_message(b"fold/shout_time_lane_lut_idx", &(lut_idx as u64).to_le_bytes());
                     tr.append_message(b"fold/shout_time_lane_page_idx", &(page_idx as u64).to_le_bytes());
 

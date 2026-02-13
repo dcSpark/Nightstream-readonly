@@ -517,9 +517,7 @@ where
         return Ok(());
     }
     if t_len == 0 {
-        return Err(PiCcsError::InvalidInput(
-            "trace openings require t_len >= 1".into(),
-        ));
+        return Err(PiCcsError::InvalidInput("trace openings require t_len >= 1".into()));
     }
 
     let y_pad = (params.d as usize).next_power_of_two();
@@ -543,9 +541,7 @@ where
         )));
     }
     if me.r.is_empty() {
-        return Err(PiCcsError::InvalidInput(
-            "trace openings require non-empty ME.r".into(),
-        ));
+        return Err(PiCcsError::InvalidInput("trace openings require non-empty ME.r".into()));
     }
     if col_base >= Z.cols() {
         return Err(PiCcsError::InvalidInput(format!(
@@ -676,9 +672,7 @@ where
         return Ok(());
     }
     if t_len == 0 {
-        return Err(PiCcsError::InvalidInput(
-            "trace openings require t_len >= 1".into(),
-        ));
+        return Err(PiCcsError::InvalidInput("trace openings require t_len >= 1".into()));
     }
 
     let y_pad = (params.d as usize).next_power_of_two();
@@ -702,9 +696,7 @@ where
         )));
     }
     if me.r.is_empty() {
-        return Err(PiCcsError::InvalidInput(
-            "trace openings require non-empty ME.r".into(),
-        ));
+        return Err(PiCcsError::InvalidInput("trace openings require non-empty ME.r".into()));
     }
     if col_base >= Z.cols() {
         return Err(PiCcsError::InvalidInput(format!(
@@ -942,10 +934,15 @@ fn required_bus_binding_cols_for_layout(layout: &BusLayout) -> Vec<BusColLabel> 
     // - by a decode/semantics sidecar CCS, and/or
     // - by VM-specific constraints that live outside the shared-bus binding gadget.
     //
-    // The Route-A Shout argument already constrains `(addr_bits, val)` internally. The critical CPU→bus
-    // linkage requirement for Route-A is that the CPU CCS binds `has_lookup` and `val` outside padding
-    // rows; requiring `addr_bits` outside padding rows would force CPUs to materialize a packed 64-bit
-    // key scalar, which can violate Neo's Ajtai encoding bounds (d=54 with balanced base-b digits).
+    // The Route-A Shout argument already constrains `(addr_bits, val)` internally via:
+    // - per-lane Shout value/adaptor terminal checks, and
+    // - trace linkage checks (`verify_route_a_memory_step_no_shared_cpu_bus`) that bind the
+    //   CPU trace's `(shout_has_lookup, shout_val, shout_lhs, shout_rhs)` to the sidecar openings.
+    //
+    // So the critical CPU→bus requirement here is that the CPU CCS binds `has_lookup` and `val`
+    // outside padding rows; requiring `addr_bits` outside padding rows would force CPUs to
+    // materialize a packed 64-bit key scalar, which can violate Neo's Ajtai encoding bounds
+    // (d=54 with balanced base-b digits).
     let shout_addr_cols: HashSet<usize> = layout
         .shout_cols
         .iter()

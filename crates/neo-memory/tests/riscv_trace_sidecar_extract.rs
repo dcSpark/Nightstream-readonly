@@ -50,7 +50,8 @@ fn build_exec_table() -> (Rv32ExecTable, Vec<u32>) {
     exec.validate_cycle_chain().expect("cycle chain");
     exec.validate_pc_chain().expect("pc chain");
     exec.validate_halted_tail().expect("halted tail");
-    exec.validate_inactive_rows_are_empty().expect("inactive rows");
+    exec.validate_inactive_rows_are_empty()
+        .expect("inactive rows");
 
     let shout_table_ids = vec![RiscvShoutTables::new(32).opcode_to_id(RiscvOpcode::Add).0];
     (exec, shout_table_ids)
@@ -63,7 +64,8 @@ fn trace_sidecar_extract_smoke() {
     // Keep it tiny: RAM addresses in this program are 0, so ell_addr=2 is enough.
     let init_regs: HashMap<u64, u64> = HashMap::new();
     let init_ram: HashMap<u64, u64> = HashMap::new();
-    let twist = extract_twist_lanes_over_time(&exec, &init_regs, &init_ram, /*ram_ell_addr=*/ 2).expect("twist extract");
+    let twist =
+        extract_twist_lanes_over_time(&exec, &init_regs, &init_ram, /*ram_ell_addr=*/ 2).expect("twist extract");
     let shout = extract_shout_lanes_over_time(&exec, &shout_table_ids).expect("shout extract");
 
     assert_eq!(twist.prog.has_read.len(), exec.rows.len());
@@ -124,7 +126,11 @@ fn trace_sidecar_extract_rejects_multiple_ram_writes() {
     let sw_row = exec
         .rows
         .iter()
-        .position(|r| r.ram_events.iter().any(|e| matches!(e.kind, neo_vm_trace::TwistOpKind::Write)))
+        .position(|r| {
+            r.ram_events
+                .iter()
+                .any(|e| matches!(e.kind, neo_vm_trace::TwistOpKind::Write))
+        })
         .expect("expected a RAM write row");
     let write_ev = exec.rows[sw_row]
         .ram_events
@@ -138,4 +144,35 @@ fn trace_sidecar_extract_rejects_multiple_ram_writes() {
     let init_ram: HashMap<u64, u64> = HashMap::new();
     let err = extract_twist_lanes_over_time(&exec, &init_regs, &init_ram, /*ram_ell_addr=*/ 2).unwrap_err();
     assert!(err.contains("multiple RAM writes"), "{err}");
+}
+
+#[test]
+fn trace_sidecar_extract_rejects_read_write_addr_mismatch() {
+    let (mut exec, _shout_table_ids) = build_exec_table();
+
+    let sw_row = exec
+        .rows
+        .iter()
+        .position(|r| {
+            r.ram_events
+                .iter()
+                .any(|e| matches!(e.kind, neo_vm_trace::TwistOpKind::Write))
+        })
+        .expect("expected a RAM write row");
+    let write_ev = exec.rows[sw_row]
+        .ram_events
+        .iter()
+        .find(|e| matches!(e.kind, neo_vm_trace::TwistOpKind::Write))
+        .cloned()
+        .expect("write event");
+
+    let mut read_ev = write_ev.clone();
+    read_ev.kind = neo_vm_trace::TwistOpKind::Read;
+    read_ev.addr = write_ev.addr + 1;
+    exec.rows[sw_row].ram_events.push(read_ev);
+
+    let init_regs: HashMap<u64, u64> = HashMap::new();
+    let init_ram: HashMap<u64, u64> = HashMap::new();
+    let err = extract_twist_lanes_over_time(&exec, &init_regs, &init_ram, /*ram_ell_addr=*/ 2).unwrap_err();
+    assert!(err.contains("RAM read/write addr mismatch"), "{err}");
 }

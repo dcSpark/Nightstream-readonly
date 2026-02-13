@@ -33,6 +33,7 @@ pub mod output_check;
 pub mod plain;
 pub mod riscv;
 pub mod shout;
+pub mod sparse_matrix;
 pub mod sparse_time;
 pub mod sumcheck_proof;
 pub mod ts_common;

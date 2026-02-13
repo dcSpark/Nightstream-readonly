@@ -12,10 +12,7 @@ use std::time::Duration;
 use crate::output_binding::{simple_output_config, OutputBindingConfig};
 use crate::pi_ccs::FoldingMode;
 use crate::session::FoldingSession;
-use crate::shard::{
-    fold_shard_verify_with_output_binding_and_step_linking, fold_shard_verify_with_step_linking, CommitMixers,
-    ShardFoldOutputs, ShardProof, StepLinkingConfig,
-};
+use crate::shard::{CommitMixers, ShardFoldOutputs, ShardProof, StepLinkingConfig};
 use crate::PiCcsError;
 use neo_ajtai::{AjtaiSModule, Commitment as Cmt};
 use neo_ccs::{CcsStructure, Mat, MeInstance};
@@ -137,8 +134,11 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let step_linking = rv32_b1_step_linking_config(layout);
-    fold_shard_verify_with_step_linking(mode, tr, params, s_me, steps, acc_init, proof, mixers, &step_linking)
+    let _ = (mode, tr, params, s_me, steps, acc_init, proof, mixers, layout);
+    Err(PiCcsError::InvalidInput(
+        "fold_shard_verify_rv32_b1 is not sound for RV32 B1 in this branch: step CCS is glue-only and semantics are proven in sidecars. Use Rv32B1::prove() and Rv32B1Run::verify()/verify_proof_bundle() instead."
+            .into(),
+    ))
 }
 
 pub fn fold_shard_verify_rv32_b1_with_statement_mem_init<MR, MB>(
@@ -158,8 +158,23 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    rv32_b1_enforce_chunk0_mem_init_matches_statement(mem_layouts, statement_initial_mem, steps)?;
-    fold_shard_verify_rv32_b1(mode, tr, params, s_me, steps, acc_init, proof, mixers, layout)
+    let _ = (
+        mode,
+        tr,
+        params,
+        s_me,
+        mem_layouts,
+        statement_initial_mem,
+        steps,
+        acc_init,
+        proof,
+        mixers,
+        layout,
+    );
+    Err(PiCcsError::InvalidInput(
+        "fold_shard_verify_rv32_b1_with_statement_mem_init is not sound for RV32 B1 in this branch: step CCS is glue-only and semantics are proven in sidecars. Use Rv32B1::prove() and Rv32B1Run::verify()/verify_proof_bundle() instead."
+            .into(),
+    ))
 }
 
 pub fn fold_shard_verify_rv32_b1_with_output_binding<MR, MB>(
@@ -178,19 +193,11 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let step_linking = rv32_b1_step_linking_config(layout);
-    fold_shard_verify_with_output_binding_and_step_linking(
-        mode,
-        tr,
-        params,
-        s_me,
-        steps,
-        acc_init,
-        proof,
-        mixers,
-        ob_cfg,
-        &step_linking,
-    )
+    let _ = (mode, tr, params, s_me, steps, acc_init, proof, mixers, ob_cfg, layout);
+    Err(PiCcsError::InvalidInput(
+        "fold_shard_verify_rv32_b1_with_output_binding is not sound for RV32 B1 in this branch: step CCS is glue-only and semantics are proven in sidecars. Use Rv32B1::prove() and Rv32B1Run::verify()/verify_output_claim*() instead."
+            .into(),
+    ))
 }
 
 fn pow2_ceil_k(min_k: usize) -> (usize, usize) {
@@ -293,6 +300,7 @@ pub struct Rv32B1 {
     chunk_size: usize,
     chunk_size_auto: bool,
     max_steps: Option<usize>,
+    trace_min_len: usize,
     mode: FoldingMode,
     shout_auto_minimal: bool,
     shout_ops: Option<HashSet<RiscvOpcode>>,
@@ -336,6 +344,7 @@ impl Rv32B1 {
             chunk_size: 1,
             chunk_size_auto: false,
             max_steps: None,
+            trace_min_len: 4,
             mode: FoldingMode::Optimized,
             shout_auto_minimal: true,
             shout_ops: None,
@@ -384,6 +393,14 @@ impl Rv32B1 {
     /// where you want to prove only a prefix of execution.
     pub fn max_steps(mut self, max_steps: usize) -> Self {
         self.max_steps = Some(max_steps);
+        self
+    }
+
+    /// Lower-bound for trace-wiring execution-table length.
+    ///
+    /// Final `t` is `max(trace_len, trace_min_len)`.
+    pub fn trace_min_len(mut self, min_trace_len: usize) -> Self {
+        self.trace_min_len = min_trace_len.max(1);
         self
     }
 
@@ -443,6 +460,49 @@ impl Rv32B1 {
     pub fn ram_init_u32(mut self, addr: u64, value: u32) -> Self {
         self.ram_init.insert(addr, value as u64);
         self
+    }
+
+    /// Prove/verify only the Tier 2.1 trace-wiring CCS (time-in-rows).
+    ///
+    /// `chunk_size`, `chunk_size_auto`, `ram_bytes`, and Shout-table selection knobs are ignored
+    /// by this mode.
+    pub fn prove_trace_wiring(self) -> Result<crate::riscv_trace_shard::Rv32TraceWiringRun, PiCcsError> {
+        let mut runner = crate::riscv_trace_shard::Rv32TraceWiring::from_rom(self.program_base, &self.program_bytes)
+            .xlen(self.xlen)
+            .mode(self.mode)
+            .min_trace_len(self.trace_min_len);
+        match self.output_target {
+            OutputTarget::Ram => {
+                for (addr, value) in self.output_claims.claims() {
+                    runner = runner.output_claim(addr, value);
+                }
+            }
+            OutputTarget::Reg => {
+                for (reg, value) in self.output_claims.claims() {
+                    runner = runner.reg_output_claim(reg, value);
+                }
+            }
+        }
+        if let Some(max_steps) = self.max_steps {
+            runner = runner.max_steps(max_steps);
+        }
+        for (addr, value) in self.ram_init {
+            let value_u32 = u32::try_from(value).map_err(|_| {
+                PiCcsError::InvalidInput(format!(
+                    "ram_init_u32: value out of u32 range at addr={addr}: value={value}"
+                ))
+            })?;
+            runner = runner.ram_init_u32(addr, value_u32);
+        }
+        for (reg, value) in self.reg_init {
+            let value_u32 = u32::try_from(value).map_err(|_| {
+                PiCcsError::InvalidInput(format!(
+                    "reg_init_u32: value out of u32 range at reg={reg}: value={value}"
+                ))
+            })?;
+            runner = runner.reg_init_u32(reg, value_u32);
+        }
+        runner.prove()
     }
 
     pub fn prove(self) -> Result<Rv32B1Run, PiCcsError> {
@@ -617,7 +677,8 @@ impl Rv32B1 {
             &empty_tables,
             &table_specs,
             rv32_b1_chunk_to_witness(layout.clone()),
-        );
+        )
+        .map_err(|e| PiCcsError::InvalidInput(format!("R1csCpu::new failed: {e}")))?;
         cpu = cpu
             .with_shared_cpu_bus(
                 rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts.clone(), initial_mem.clone())
@@ -689,7 +750,6 @@ impl Rv32B1 {
                     .map_err(|e| PiCcsError::ProtocolError(format!("decode plumbing sidecar prove failed: {e}")))?;
 
             PiCcsProofBundle {
-                ccs: decode_ccs,
                 num_steps,
                 me_out,
                 proof,
@@ -709,7 +769,6 @@ impl Rv32B1 {
                     .map_err(|e| PiCcsError::ProtocolError(format!("semantics sidecar prove failed: {e}")))?;
 
             PiCcsProofBundle {
-                ccs: semantics_ccs,
                 num_steps,
                 me_out,
                 proof,
@@ -880,7 +939,6 @@ impl Rv32B1 {
 
 #[derive(Clone, Debug)]
 pub struct PiCcsProofBundle {
-    pub ccs: CcsStructure<F>,
     pub num_steps: usize,
     pub me_out: Vec<MeInstance<Cmt, F, K>>,
     pub proof: crate::PiCcsProof,
@@ -996,33 +1054,39 @@ impl Rv32B1Run {
             .map_err(|e| PiCcsError::InvalidInput(format!("Rv32ExecTable::from_trace_padded_pow2 failed: {e}")))
     }
 
-    fn verify_bundle_inner(&self, bundle: &Rv32B1ProofBundle) -> Result<(), PiCcsError> {
-        let ok = match &self.output_binding_cfg {
-            None => self.session.verify_collected(&self.ccs, &bundle.main)?,
-            Some(cfg) => self
-                .session
-                .verify_with_output_binding_collected_simple(&self.ccs, &bundle.main, cfg)?,
-        };
-        if !ok {
-            return Err(PiCcsError::ProtocolError("verification failed".into()));
-        }
-
+    fn collected_mcs_instances(&self) -> Vec<neo_ccs::McsInstance<Cmt, F>> {
         let steps_public = self.session.steps_public();
-        if steps_public.len() != bundle.decode_plumbing.num_steps {
+        let mut mcs_insts = Vec::with_capacity(steps_public.len());
+        for step in &steps_public {
+            mcs_insts.push(step.mcs_inst.clone());
+        }
+        mcs_insts
+    }
+
+    fn verify_sidecars_inner(
+        &self,
+        bundle: &Rv32B1ProofBundle,
+        mcs_insts: &[neo_ccs::McsInstance<Cmt, F>],
+    ) -> Result<(), PiCcsError> {
+        // Rebuild verifier-side expected CCSes from statement/layout.
+        //
+        // Security: never trust prover-supplied CCS structures from the proof bundle.
+        let decode_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&self.layout).map_err(|e| {
+            PiCcsError::ProtocolError(format!("decode plumbing sidecar: failed to rebuild verifier CCS: {e}"))
+        })?;
+        let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&self.layout, &self.mem_layouts).map_err(|e| {
+            PiCcsError::ProtocolError(format!("semantics sidecar: failed to rebuild verifier CCS: {e}"))
+        })?;
+
+        if mcs_insts.len() != bundle.decode_plumbing.num_steps {
             return Err(PiCcsError::ProtocolError(
                 "decode plumbing sidecar: step count mismatch".into(),
             ));
         }
-        if steps_public.len() != bundle.semantics.num_steps {
+        if mcs_insts.len() != bundle.semantics.num_steps {
             return Err(PiCcsError::ProtocolError(
                 "semantics sidecar: step count mismatch".into(),
             ));
-        }
-
-        let mut mcs_insts = Vec::with_capacity(steps_public.len());
-        for step in &steps_public {
-            let inst = step.mcs_inst.clone();
-            mcs_insts.push(inst);
         }
 
         // Decode plumbing sidecar must always verify (it carries instruction decode signals).
@@ -1035,8 +1099,8 @@ impl Rv32B1Run {
             let ok = crate::pi_ccs_verify(
                 &mut tr,
                 self.session.params(),
-                &bundle.decode_plumbing.ccs,
-                &mcs_insts,
+                &decode_ccs,
+                mcs_insts,
                 &[],
                 &bundle.decode_plumbing.me_out,
                 &bundle.decode_plumbing.proof,
@@ -1055,8 +1119,8 @@ impl Rv32B1Run {
             let ok = crate::pi_ccs_verify(
                 &mut tr,
                 self.session.params(),
-                &bundle.semantics.ccs,
-                &mcs_insts,
+                &semantics_ccs,
+                mcs_insts,
                 &[],
                 &bundle.semantics.me_out,
                 &bundle.semantics.proof,
@@ -1174,6 +1238,23 @@ impl Rv32B1Run {
         Ok(())
     }
 
+    fn verify_bundle_inner(&self, bundle: &Rv32B1ProofBundle) -> Result<(), PiCcsError> {
+        let ok = match &self.output_binding_cfg {
+            None => self.session.verify_collected(&self.ccs, &bundle.main)?,
+            Some(cfg) => self
+                .session
+                .verify_with_output_binding_collected_simple(&self.ccs, &bundle.main, cfg)?,
+        };
+        if !ok {
+            return Err(PiCcsError::ProtocolError("verification failed".into()));
+        }
+
+        let mcs_insts = self.collected_mcs_instances();
+        self.verify_sidecars_inner(bundle, &mcs_insts)?;
+
+        Ok(())
+    }
+
     pub fn verify_proof_bundle(&self, bundle: &Rv32B1ProofBundle) -> Result<(), PiCcsError> {
         self.verify_bundle_inner(bundle)
     }
@@ -1210,25 +1291,62 @@ impl Rv32B1Run {
     }
 
     pub fn verify_output_claim(&self, output_addr: u64, expected_output: F) -> Result<bool, PiCcsError> {
+        self.verify_output_claim_in_bundle(&self.proof_bundle, output_addr, expected_output)
+    }
+
+    /// Verify an output claim against an explicit RV32 proof bundle.
+    ///
+    /// This always verifies required RV32 sidecars (decode plumbing, semantics, optional RV32M)
+    /// before checking the output binding against `bundle.main`.
+    pub fn verify_output_claim_in_bundle(
+        &self,
+        bundle: &Rv32B1ProofBundle,
+        output_addr: u64,
+        expected_output: F,
+    ) -> Result<bool, PiCcsError> {
         let cfg = self
             .output_binding_cfg
             .as_ref()
             .ok_or_else(|| PiCcsError::InvalidInput("no output binding configured".into()))?;
+        let mcs_insts = self.collected_mcs_instances();
+        self.verify_sidecars_inner(bundle, &mcs_insts)?;
         let ob_cfg = simple_output_config(cfg.num_bits, output_addr, expected_output).with_mem_idx(cfg.mem_idx);
         self.session
-            .verify_with_output_binding_collected_simple(&self.ccs, &self.proof_bundle.main, &ob_cfg)
+            .verify_with_output_binding_collected_simple(&self.ccs, &bundle.main, &ob_cfg)
     }
 
     pub fn verify_default_output_claim(&self) -> Result<bool, PiCcsError> {
+        self.verify_default_output_claim_in_bundle(&self.proof_bundle)
+    }
+
+    /// Verify the configured default output binding against an explicit RV32 proof bundle.
+    ///
+    /// This always verifies required RV32 sidecars (decode plumbing, semantics, optional RV32M)
+    /// before checking the output binding against `bundle.main`.
+    pub fn verify_default_output_claim_in_bundle(&self, bundle: &Rv32B1ProofBundle) -> Result<bool, PiCcsError> {
         let ob_cfg = self
             .output_binding_cfg
             .as_ref()
             .ok_or_else(|| PiCcsError::InvalidInput("no output binding configured".into()))?;
+        let mcs_insts = self.collected_mcs_instances();
+        self.verify_sidecars_inner(bundle, &mcs_insts)?;
         self.session
-            .verify_with_output_binding_collected_simple(&self.ccs, &self.proof_bundle.main, ob_cfg)
+            .verify_with_output_binding_collected_simple(&self.ccs, &bundle.main, ob_cfg)
     }
 
     pub fn verify_output_claims(&self, output_claims: ProgramIO<F>) -> Result<bool, PiCcsError> {
+        self.verify_output_claims_in_bundle(&self.proof_bundle, output_claims)
+    }
+
+    /// Verify output claims against an explicit RV32 proof bundle.
+    ///
+    /// This always verifies required RV32 sidecars (decode plumbing, semantics, optional RV32M)
+    /// before checking the output binding against `bundle.main`.
+    pub fn verify_output_claims_in_bundle(
+        &self,
+        bundle: &Rv32B1ProofBundle,
+        output_claims: ProgramIO<F>,
+    ) -> Result<bool, PiCcsError> {
         let cfg = self
             .output_binding_cfg
             .as_ref()
@@ -1236,9 +1354,11 @@ impl Rv32B1Run {
         if output_claims.is_empty() {
             return Err(PiCcsError::InvalidInput("output_claims must be non-empty".into()));
         }
+        let mcs_insts = self.collected_mcs_instances();
+        self.verify_sidecars_inner(bundle, &mcs_insts)?;
         let ob_cfg = OutputBindingConfig::new(cfg.num_bits, output_claims).with_mem_idx(cfg.mem_idx);
         self.session
-            .verify_with_output_binding_collected_simple(&self.ccs, &self.proof_bundle.main, &ob_cfg)
+            .verify_with_output_binding_collected_simple(&self.ccs, &bundle.main, &ob_cfg)
     }
 
     /// Original unpadded RV32 trace length (instruction count), if this run was built via shared-bus execution.

@@ -295,6 +295,7 @@ fn build_twist_shout_2step_fixture_inner(seed: u64, bad_lookup_step1: bool) -> S
     let lut_ell = lut_table.n_side.trailing_zeros() as usize;
 
     let mem_inst0 = neo_memory::witness::MemInstance::<Cmt, F> {
+        mem_id: 0,
         comms: Vec::new(),
         k: mem_layout.k,
         d: mem_layout.d,
@@ -319,6 +320,7 @@ fn build_twist_shout_2step_fixture_inner(seed: u64, bad_lookup_step1: bool) -> S
     let lut_wit0 = neo_memory::witness::LutWitness { mats: Vec::new() };
 
     let mem_inst1 = neo_memory::witness::MemInstance::<Cmt, F> {
+        mem_id: 0,
         comms: Vec::new(),
         k: mem_layout.k,
         d: mem_layout.d,

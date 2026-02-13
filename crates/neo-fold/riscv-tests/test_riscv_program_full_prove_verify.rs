@@ -86,7 +86,11 @@ fn test_riscv_program_full_prove_verify() {
             continue;
         }
         // With `shout_ops([ADD])`, there is exactly one Shout lane and it is lane 0.
-        assert_eq!(active_lanes, vec![0u32], "expected ADD-only Shout addr-pre active_lanes");
+        assert_eq!(
+            active_lanes,
+            vec![0u32],
+            "expected ADD-only Shout addr-pre active_lanes"
+        );
         let rounds_total: usize = pre.groups.iter().map(|g| g.round_polys.len()).sum();
         assert_eq!(rounds_total, 1, "ADD-only step must include 1 proof");
         saw_add_only = true;
@@ -241,7 +245,11 @@ fn perf_rv32_b1_chunk_size_sweep() {
     ];
 
     for (profile_name, table_ids) in profiles {
-        let ops: Vec<RiscvOpcode> = table_ids.iter().copied().map(opcode_from_table_id).collect();
+        let ops: Vec<RiscvOpcode> = table_ids
+            .iter()
+            .copied()
+            .map(opcode_from_table_id)
+            .collect();
         println!("\n== profile={profile_name} shout_tables={} ==", table_ids.len());
 
         for chunk_size in [1usize, 2, 4, 8, 16] {
@@ -322,8 +330,10 @@ fn test_riscv_program_chunk_size_equivalence() {
     let start_2 = extract_boundary_state(run_2.layout(), &steps_2[0].mcs_inst.x).expect("boundary");
     assert_eq!(start_1.pc0, start_2.pc0, "pc0 must be chunk-size invariant");
 
-    let end_1 = extract_boundary_state(run_1.layout(), &steps_1.last().expect("non-empty").mcs_inst.x).expect("boundary");
-    let end_2 = extract_boundary_state(run_2.layout(), &steps_2.last().expect("non-empty").mcs_inst.x).expect("boundary");
+    let end_1 =
+        extract_boundary_state(run_1.layout(), &steps_1.last().expect("non-empty").mcs_inst.x).expect("boundary");
+    let end_2 =
+        extract_boundary_state(run_2.layout(), &steps_2.last().expect("non-empty").mcs_inst.x).expect("boundary");
     assert_eq!(end_1.pc_final, end_2.pc_final, "pc_final must be chunk-size invariant");
 
     // Stronger equivalence: each chunk boundary in chunk_size=2 corresponds to the same boundary
@@ -409,7 +419,11 @@ fn test_riscv_program_rv32m_full_prove_verify() {
     rv32m_chunks.sort_unstable();
     assert_eq!(rv32m_chunks, vec![2, 3], "expected RV32M rows on the MUL/DIV chunks");
 
-    let rv32m = run.proof().rv32m.as_ref().expect("expected RV32M sidecar proofs");
+    let rv32m = run
+        .proof()
+        .rv32m
+        .as_ref()
+        .expect("expected RV32M sidecar proofs");
     let mut proof_chunks: Vec<usize> = rv32m.iter().map(|p| p.chunk_idx).collect();
     proof_chunks.sort_unstable();
     assert_eq!(proof_chunks, vec![2, 3], "expected one RV32M proof per M chunk");

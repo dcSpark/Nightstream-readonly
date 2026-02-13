@@ -283,6 +283,7 @@ fn rv32_b1_ccs_happy_path_small_program() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -369,6 +370,7 @@ fn rv32_b1_ccs_happy_path_rv32i_fence_program() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -498,6 +500,7 @@ fn rv32_b1_ccs_happy_path_rv32m_program() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -694,6 +697,7 @@ fn rv32_b1_ccs_happy_path_rv32m_signed_program() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -1201,6 +1205,7 @@ fn rv32_b1_ccs_happy_path_rv32i_byte_half_load_store_program() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -1310,6 +1315,7 @@ fn rv32_b1_ccs_byte_store_updates_aligned_word() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -1382,6 +1388,7 @@ fn rv32_b1_ccs_rejects_misaligned_lh() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -1455,6 +1462,7 @@ fn rv32_b1_ccs_rejects_misaligned_lw() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -1528,6 +1536,7 @@ fn rv32_b1_ccs_rejects_misaligned_sh() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -1601,6 +1610,7 @@ fn rv32_b1_ccs_rejects_misaligned_sw() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -1705,6 +1715,7 @@ fn rv32_b1_ccs_happy_path_rv32a_amoaddw_program() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -1802,6 +1813,7 @@ fn rv32_b1_ccs_rejects_tampered_ram_write_value_for_amoaddw() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -1932,6 +1944,7 @@ fn rv32_b1_ccs_happy_path_rv32a_word_amos_program() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -2013,6 +2026,7 @@ fn rv32_b1_ccs_chunk_size_2_padding_carries_state() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         chunk_size,
@@ -2143,6 +2157,7 @@ fn rv32_b1_ccs_branches_and_jal() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -2282,6 +2297,7 @@ fn rv32_b1_ccs_rv32i_alu_ops() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -2439,6 +2455,7 @@ fn rv32_b1_ccs_branches_blt_bge_bltu_bgeu() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -2525,6 +2542,7 @@ fn rv32_b1_ccs_jalr_masks_lsb() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -2658,6 +2676,7 @@ fn rv32_b1_ccs_rejects_step_after_halt_within_chunk() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         chunk_size,
@@ -2733,6 +2752,7 @@ fn rv32_b1_ccs_rejects_tampered_pc_out() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -2814,6 +2834,7 @@ fn rv32_b1_ccs_rejects_non_boolean_prog_read_addr_bit() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -2921,6 +2942,7 @@ fn rv32_b1_ccs_rejects_non_boolean_shout_addr_bit() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -3025,6 +3047,7 @@ fn rv32_b1_ccs_rejects_rom_value_mismatch() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -3105,6 +3128,7 @@ fn rv32_b1_ccs_rejects_tampered_regfile() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -3188,6 +3212,7 @@ fn rv32_b1_ccs_rejects_tampered_x0() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -3277,6 +3302,7 @@ fn rv32_b1_ccs_binds_public_initial_and_final_state() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         chunk_size,
@@ -3370,6 +3396,7 @@ fn rv32_b1_ccs_rejects_rom_addr_mismatch() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -3452,6 +3479,7 @@ fn rv32_b1_ccs_rejects_decode_bit_mismatch() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -3544,6 +3572,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -3629,6 +3658,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_lw_eff_addr() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -3732,6 +3762,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_amoaddw() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -3829,6 +3860,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_beq() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -3932,6 +3964,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_bne() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -4023,6 +4056,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_ori() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -4114,6 +4148,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_slli() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -4212,6 +4247,7 @@ fn rv32_b1_ccs_rejects_sltu_key_bit_mismatch_divu_remainder_check() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -4291,6 +4327,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_auipc_pc_operand() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -4395,6 +4432,7 @@ fn rv32_b1_ccs_rejects_cheating_mul_hi_all_ones() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -4534,6 +4572,7 @@ fn rv32_b1_rv32m_sidecar_rejects_divu_modp_wrap_quotient() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts.clone(), initial_mem).expect("cfg"),
         1,
@@ -4647,6 +4686,7 @@ fn rv32_b1_ccs_rejects_wrong_shout_table_activation() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -4732,6 +4772,7 @@ fn rv32_b1_ccs_rejects_inactive_shout_addr_bit_nonzero() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -4840,6 +4881,7 @@ fn rv32_b1_ccs_rejects_ram_read_value_mismatch() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,
@@ -4928,6 +4970,7 @@ fn rv32_b1_ccs_rejects_chunk_size_2_continuity_break() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         chunk_size,
