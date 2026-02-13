@@ -126,6 +126,46 @@ format_number() {
     }'
 }
 
+# ---------------------------------------------------------------------------
+# Token counting — prefer tiktoken (accurate) with bytes/4 fallback
+# ---------------------------------------------------------------------------
+# Tries to use ~/smart-context-packer/token_counter.py with its venv for exact
+# BPE token counts.  If the script or tiktoken is unavailable, falls back to
+# the bytes/4 heuristic silently.
+TIKTOKEN_PYTHON="$HOME/smart-context-packer/.venv/bin/python3"
+TIKTOKEN_SCRIPT="$HOME/smart-context-packer/token_counter.py"
+HAS_TIKTOKEN=false
+
+if [ -x "$TIKTOKEN_PYTHON" ] && [ -f "$TIKTOKEN_SCRIPT" ]; then
+    # Quick smoke test: make sure tiktoken is importable
+    if "$TIKTOKEN_PYTHON" -c "import tiktoken" 2>/dev/null; then
+        HAS_TIKTOKEN=true
+    fi
+fi
+
+# Count tokens for a file.  Outputs a single integer.
+count_tokens_file() {
+    local file="$1"
+    if $HAS_TIKTOKEN; then
+        "$TIKTOKEN_PYTHON" "$TIKTOKEN_SCRIPT" "$file" 2>/dev/null
+    else
+        local size
+        size=$(wc -c < "$file")
+        echo $((size / 4))
+    fi
+}
+
+# Count tokens for text on stdin.  Outputs a single integer.
+count_tokens_stdin() {
+    if $HAS_TIKTOKEN; then
+        "$TIKTOKEN_PYTHON" "$TIKTOKEN_SCRIPT" 2>/dev/null
+    else
+        local size
+        size=$(wc -c)
+        echo $((size / 4))
+    fi
+}
+
 # Remove trailing slashes from all directories
 for i in "${!dirs[@]}"; do
     dirs[$i]="${dirs[$i]%/}"
@@ -161,7 +201,10 @@ for dir in "${dirs[@]}"; do
     done < <(eval "$find_cmd")
 done
 
-# Deduplicate while preserving input order, then process
+# Deduplicate while preserving input order, then process.
+# Per-file token counts use the fast bytes/4 estimate (calling Python per-file
+# would be too slow).  The accurate tiktoken count is done once at the end on
+# the complete output file.
 printf '%s\n' "${files_to_process[@]}" | awk '!seen[$0]++' | while IFS= read -r file; do
     [ -e "$file" ] || continue
     # Get size before processing this file
@@ -180,7 +223,7 @@ printf '%s\n' "${files_to_process[@]}" | awk '!seen[$0]++' | while IFS= read -r 
         cat "$file" >> "$outfile"
     fi
     echo >> "$outfile"
-    # Calculate this file's token contribution
+    # Per-file estimate (bytes/4 — fast, just for progress display)
     size_after=$(wc -c < "$outfile")
     file_size=$((size_after - size_before))
     file_tokens=$((file_size / 4))
@@ -191,12 +234,20 @@ done
 if [ -f "$outfile" ]; then
     final_size=$(wc -c < "$outfile")
     final_words=$(wc -w < "$outfile")
-    # Approximate AI token count (1 token ≈ 4 characters for English text)
-    final_ai_tokens=$((final_size / 4))
+
+    # Token count: use tiktoken (accurate) if available, else bytes/4 estimate
+    if $HAS_TIKTOKEN; then
+        final_ai_tokens=$(count_tokens_file "$outfile")
+        token_label="tiktoken"
+    else
+        final_ai_tokens=$((final_size / 4))
+        token_label="est"
+    fi
+
     echo
     echo "=== Final Output Statistics ==="
     echo "Output file: $outfile"
     echo "Total size: $(format_number $final_size) bytes"
     echo "Total words: $(format_number $final_words)"
-    echo "Total AI tokens (est): $(format_number $final_ai_tokens)"
+    echo "Total AI tokens ($token_label): $(format_number $final_ai_tokens)"
 fi

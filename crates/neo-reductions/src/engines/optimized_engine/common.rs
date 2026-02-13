@@ -818,12 +818,12 @@ where
 /// - This helper performs only algebraic mixing over witnesses and outputs; it does not compute the
 ///   combined commitment. The output `c` is copied from the first input as a placeholder.
 /// - Caller should set `out.c = Σ ρ_i · c_i` using the commitment module action if a commitment mix is required.
-pub fn rlc_reduction_paper_exact<Ff>(
+fn rlc_reduction_paper_exact_from_refs<Ff>(
     s: &CcsStructure<Ff>,
     params: &NeoParams,
     rhos: &[Mat<Ff>],
     me_inputs: &[MeInstance<Cmt, Ff, K>],
-    Zs: &[Mat<Ff>],
+    Zs: &[&Mat<Ff>],
     ell_d: usize,
 ) -> (MeInstance<Cmt, Ff, K>, Mat<Ff>)
 where
@@ -940,7 +940,7 @@ where
     // Z := Σ ρ_i Z_i
     let mut Z = Mat::zero(d, s.m, Ff::ZERO);
     for i in 0..k1 {
-        left_mul_acc(&mut Z, &rhos[i], &Zs[i]);
+        left_mul_acc(&mut Z, &rhos[i], Zs[i]);
     }
 
     let out = MeInstance::<Cmt, Ff, K> {
@@ -961,6 +961,22 @@ where
     (out, Z)
 }
 
+pub fn rlc_reduction_paper_exact<Ff>(
+    s: &CcsStructure<Ff>,
+    params: &NeoParams,
+    rhos: &[Mat<Ff>],
+    me_inputs: &[MeInstance<Cmt, Ff, K>],
+    Zs: &[Mat<Ff>],
+    ell_d: usize,
+) -> (MeInstance<Cmt, Ff, K>, Mat<Ff>)
+where
+    Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<Ff>,
+{
+    let z_refs: Vec<&Mat<Ff>> = Zs.iter().collect();
+    rlc_reduction_paper_exact_from_refs::<Ff>(s, params, rhos, me_inputs, &z_refs, ell_d)
+}
+
 /// --- Π_RLC (optimized) -----------------------------------------------------
 ///
 /// Optimized Random Linear Combination for the prover path.
@@ -968,12 +984,12 @@ where
 /// Semantics match `rlc_reduction_paper_exact`, but this implementation:
 /// - Fast-paths the common `k=1` case (no mixing) to avoid a D×D by D×m multiply.
 /// - Uses cache-friendly row-major loops for the large witness matrix `Z` when k>1.
-pub fn rlc_reduction_optimized<Ff>(
+fn rlc_reduction_optimized_from_refs<Ff>(
     s: &CcsStructure<Ff>,
     params: &NeoParams,
     rhos: &[Mat<Ff>],
     me_inputs: &[MeInstance<Cmt, Ff, K>],
-    Zs: &[Mat<Ff>],
+    Zs: &[&Mat<Ff>],
     ell_d: usize,
 ) -> (MeInstance<Cmt, Ff, K>, Mat<Ff>)
 where
@@ -996,7 +1012,7 @@ where
         let mut out = me_inputs[0].clone();
         out.y.truncate(t_core);
         out.y_scalars.truncate(t_core);
-        return (out, Zs[0].clone());
+        return (out, (*Zs[0]).clone());
     }
 
     let d = D;
@@ -1112,30 +1128,60 @@ where
         let m = s.m;
         let z_out = Z.as_mut_slice();
         const BLOCK_COLS: usize = 1024;
-
         for i in 0..k1 {
-            let rho = &rhos[i];
-            let zi = &Zs[i];
-            debug_assert_eq!(rho.rows(), d);
-            debug_assert_eq!(rho.cols(), d);
-            debug_assert_eq!(zi.rows(), d);
-            debug_assert_eq!(zi.cols(), m);
-
-            let rho_data = rho.as_slice();
-            let z_in = zi.as_slice();
-
-            for col0 in (0..m).step_by(BLOCK_COLS) {
-                let len = core::cmp::min(BLOCK_COLS, m - col0);
-                for kk in 0..d {
-                    let in_off = kk * m + col0;
-                    for rr in 0..d {
-                        let coeff = rho_data[rr * d + kk];
-                        if coeff == Ff::ZERO {
-                            continue;
+            debug_assert_eq!(rhos[i].rows(), d);
+            debug_assert_eq!(rhos[i].cols(), d);
+            debug_assert_eq!(Zs[i].rows(), d);
+            debug_assert_eq!(Zs[i].cols(), m);
+        }
+        #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+        {
+            z_out.par_chunks_exact_mut(m).enumerate().for_each(|(rr, row_out)| {
+                for col0 in (0..m).step_by(BLOCK_COLS) {
+                    let len = core::cmp::min(BLOCK_COLS, m - col0);
+                    for i in 0..k1 {
+                        let rho_data = rhos[i].as_slice();
+                        let z_in = Zs[i].as_slice();
+                        for kk in 0..d {
+                            let coeff = rho_data[rr * d + kk];
+                            if coeff == Ff::ZERO {
+                                continue;
+                            }
+                            let in_off = kk * m + col0;
+                            for t in 0..len {
+                                row_out[col0 + t] += coeff * z_in[in_off + t];
+                            }
                         }
-                        let out_off = rr * m + col0;
-                        for t in 0..len {
-                            z_out[out_off + t] += coeff * z_in[in_off + t];
+                    }
+                }
+            });
+        }
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+        {
+            for i in 0..k1 {
+                let rho = &rhos[i];
+                let zi = Zs[i];
+                debug_assert_eq!(rho.rows(), d);
+                debug_assert_eq!(rho.cols(), d);
+                debug_assert_eq!(zi.rows(), d);
+                debug_assert_eq!(zi.cols(), m);
+
+                let rho_data = rho.as_slice();
+                let z_in = zi.as_slice();
+
+                for col0 in (0..m).step_by(BLOCK_COLS) {
+                    let len = core::cmp::min(BLOCK_COLS, m - col0);
+                    for kk in 0..d {
+                        let in_off = kk * m + col0;
+                        for rr in 0..d {
+                            let coeff = rho_data[rr * d + kk];
+                            if coeff == Ff::ZERO {
+                                continue;
+                            }
+                            let out_off = rr * m + col0;
+                            for t in 0..len {
+                                z_out[out_off + t] += coeff * z_in[in_off + t];
+                            }
                         }
                     }
                 }
@@ -1161,6 +1207,22 @@ where
     (out, Z)
 }
 
+pub fn rlc_reduction_optimized<Ff>(
+    s: &CcsStructure<Ff>,
+    params: &NeoParams,
+    rhos: &[Mat<Ff>],
+    me_inputs: &[MeInstance<Cmt, Ff, K>],
+    Zs: &[Mat<Ff>],
+    ell_d: usize,
+) -> (MeInstance<Cmt, Ff, K>, Mat<Ff>)
+where
+    Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<Ff>,
+{
+    let z_refs: Vec<&Mat<Ff>> = Zs.iter().collect();
+    rlc_reduction_optimized_from_refs::<Ff>(s, params, rhos, me_inputs, &z_refs, ell_d)
+}
+
 /// Same as `rlc_reduction_paper_exact`, but also computes the combined commitment via a caller-supplied
 /// mixing function over commitments. This matches the paper's Π_RLC output when `combine_commit` implements
 /// the correct S-module action on commitments.
@@ -1183,6 +1245,28 @@ where
     let inputs_c: Vec<Cmt> = me_inputs.iter().map(|m| m.c.clone()).collect();
     let mixed_c = combine_commit(rhos, &inputs_c);
     out.c = mixed_c;
+    (out, Z)
+}
+
+/// Same as `rlc_reduction_optimized`, but computes the combined commitment via a caller-supplied
+/// mixing function and accepts borrowed witness matrices (to avoid cloning large Z inputs).
+pub fn rlc_reduction_optimized_with_commit_mix<Ff, Comb>(
+    s: &CcsStructure<Ff>,
+    params: &NeoParams,
+    rhos: &[Mat<Ff>],
+    me_inputs: &[MeInstance<Cmt, Ff, K>],
+    Zs: &[&Mat<Ff>],
+    ell_d: usize,
+    combine_commit: Comb,
+) -> (MeInstance<Cmt, Ff, K>, Mat<Ff>)
+where
+    Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync,
+    K: From<Ff>,
+    Comb: Fn(&[Mat<Ff>], &[Cmt]) -> Cmt,
+{
+    let (mut out, Z) = rlc_reduction_optimized_from_refs::<Ff>(s, params, rhos, me_inputs, Zs, ell_d);
+    let inputs_c: Vec<Cmt> = me_inputs.iter().map(|m| m.c.clone()).collect();
+    out.c = combine_commit(rhos, &inputs_c);
     (out, Z)
 }
 
@@ -1363,8 +1447,12 @@ where
 
             for rho in 0..d {
                 let mut acc = K::ZERO;
-                for c in 0..s.m {
-                    acc += K::from(get_F(Zi, rho, c)) * vj[c];
+                if rho < Zi.rows() {
+                    let z_row = Zi.row(rho);
+                    let cap = core::cmp::min(s.m, z_row.len());
+                    for c in 0..cap {
+                        acc += K::from(z_row[c]) * vj[c];
+                    }
                 }
                 yij_pad[rho] = acc;
             }
@@ -1385,8 +1473,12 @@ where
             let mut yz_pad = vec![K::ZERO; d_pad];
             for rho in 0..d {
                 let mut acc = K::ZERO;
-                for c in 0..s.m {
-                    acc += K::from(get_F(Zi, rho, c)) * chi_s[c];
+                if rho < Zi.rows() {
+                    let z_row = Zi.row(rho);
+                    let cap = core::cmp::min(s.m, z_row.len());
+                    for c in 0..cap {
+                        acc += K::from(z_row[c]) * chi_s[c];
+                    }
                 }
                 yz_pad[rho] = acc;
             }

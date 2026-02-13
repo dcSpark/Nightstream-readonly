@@ -48,6 +48,7 @@ pub use common::{
     recomposed_z_from_Z,
 
     rlc_reduction_optimized,
+    rlc_reduction_optimized_with_commit_mix,
     // Paper-exact RLC/DEC
     rlc_reduction_paper_exact,
     rlc_reduction_paper_exact_with_commit_mix,

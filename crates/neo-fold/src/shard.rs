@@ -1451,18 +1451,47 @@ where
 
         (out, Cow::Borrowed(wit_inputs[0]))
     } else {
-        // `ccs::rlc_with_commit` expects an owned slice; avoid changing the public API by cloning here.
-        let wit_owned: Vec<Mat<F>> = wit_inputs.iter().map(|m| (*m).clone()).collect();
-        let (out, Z_mix) = ccs::rlc_with_commit(
-            mode.clone(),
-            s,
-            params,
-            &rlc_rhos,
-            me_inputs,
-            &wit_owned,
-            ell_d,
-            mixers.mix_rhos_commits,
-        )?;
+        let (out, Z_mix) = {
+            #[cfg(feature = "paper-exact")]
+            {
+                if matches!(mode, FoldingMode::PaperExact) {
+                    // Keep paper-exact dispatch through the public API.
+                    let wit_owned: Vec<Mat<F>> = wit_inputs.iter().map(|m| (*m).clone()).collect();
+                    ccs::rlc_with_commit(
+                        mode.clone(),
+                        s,
+                        params,
+                        &rlc_rhos,
+                        me_inputs,
+                        &wit_owned,
+                        ell_d,
+                        mixers.mix_rhos_commits,
+                    )?
+                } else {
+                    neo_reductions::optimized_engine::rlc_reduction_optimized_with_commit_mix(
+                        s,
+                        params,
+                        &rlc_rhos,
+                        me_inputs,
+                        wit_inputs,
+                        ell_d,
+                        mixers.mix_rhos_commits,
+                    )
+                }
+            }
+            #[cfg(not(feature = "paper-exact"))]
+            {
+                neo_reductions::optimized_engine::rlc_reduction_optimized_with_commit_mix(
+                    s,
+                    params,
+                    &rlc_rhos,
+                    me_inputs,
+                    wit_inputs,
+                    ell_d,
+                    mixers.mix_rhos_commits,
+                )
+            }
+        };
         (out, Cow::Owned(Z_mix))
     };
 

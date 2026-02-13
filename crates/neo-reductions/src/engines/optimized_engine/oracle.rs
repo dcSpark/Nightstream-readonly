@@ -135,9 +135,10 @@ where
             }
             let mut tbl = vec![[K::ZERO; D]; m_pad];
             let cap = core::cmp::min(s.m, m_pad);
-            for col in 0..cap {
-                for rho in 0..D {
-                    tbl[col][rho] = K::from(Zi[(rho, col)]);
+            for rho in 0..D {
+                let z_row = Zi.row(rho);
+                for col in 0..cap {
+                    tbl[col][rho] = K::from(z_row[col]);
                 }
             }
             digits_tables.push(tbl);
@@ -688,9 +689,10 @@ impl RowStreamState {
                 // Legacy NC table indexes witness columns by row-domain boolean index `row`.
                 // This is only sound under the identity-first square normal form (m == n).
                 let cap = core::cmp::min(core::cmp::min(n_eff, n_pad), s.m);
-                for row in 0..cap {
-                    for rho in 0..D {
-                        tbl[row][rho] = K::from(Zi[(rho, row)]);
+                for rho in 0..D {
+                    let z_row = Zi.row(rho);
+                    for row in 0..cap {
+                        tbl[row][rho] = K::from(z_row[row]);
                     }
                 }
                 nc_tables.push(tbl);
@@ -907,11 +909,11 @@ impl RowStreamState {
     }
 
     #[inline]
-    fn poly_mul_affine_inplace_base(poly: &mut [Fq], a: Fq, b: Fq) {
+    fn poly_mul_affine_inplace_base(poly: &mut [Fq], a: Fq, b: Fq, current_deg: usize) {
         // Coeffs are low→high. Output truncates to input length:
         // new[0] = a*old[0]; new[d] = a*old[d] + b*old[d-1] (d>=1).
         let mut prev = Fq::ZERO;
-        for coeff in poly.iter_mut() {
+        for coeff in poly.iter_mut().take(current_deg + 2) {
             let old = *coeff;
             *coeff = a * old + b * prev;
             prev = old;
@@ -964,18 +966,17 @@ impl RowStreamState {
                 for term in &self.f_terms {
                     term_poly.fill(Fq::ZERO);
                     term_poly[0] = term.coeff.real();
+                    let mut current_deg = 0usize;
                     for &(var_pos, exp) in &term.vars {
-                        if exp == 0 {
-                            continue;
-                        }
                         let tbl = &self.f_var_tables[var_pos];
                         let a = tbl[idx].real();
                         let b = tbl[idx + 1].real() - a;
                         for _ in 0..exp {
-                            Self::poly_mul_affine_inplace_base(&mut term_poly, a, b);
+                            Self::poly_mul_affine_inplace_base(&mut term_poly, a, b, current_deg);
+                            current_deg += 1;
                         }
                     }
-                    for i in 0..=deg_max {
+                    for i in 0..=core::cmp::min(current_deg, deg_max) {
                         inner[i] += term_poly[i];
                     }
                 }
@@ -1064,19 +1065,18 @@ impl RowStreamState {
                             for term in &self.f_terms {
                                 term_poly.fill(Fq::ZERO);
                                 term_poly[0] = term.coeff.real();
+                                let mut current_deg = 0usize;
                                 for &(var_pos, exp) in &term.vars {
-                                    if exp == 0 {
-                                        continue;
-                                    }
                                     let tbl = &self.f_var_tables[var_pos];
                                     // v(X) = a + b·X
                                     let a = tbl[idx].real();
                                     let b = tbl[idx + 1].real() - a;
                                     for _ in 0..exp {
-                                        Self::poly_mul_affine_inplace_base(&mut term_poly, a, b);
+                                        Self::poly_mul_affine_inplace_base(&mut term_poly, a, b, current_deg);
+                                        current_deg += 1;
                                     }
                                 }
-                                for i in 0..=deg_max {
+                                for i in 0..=core::cmp::min(current_deg, deg_max) {
                                     inner[i] += term_poly[i];
                                 }
                             }
@@ -1208,18 +1208,17 @@ impl RowStreamState {
                 for term in &self.f_terms {
                     term_poly.fill(Fq::ZERO);
                     term_poly[0] = term.coeff.real();
+                    let mut current_deg = 0usize;
                     for &(var_pos, exp) in &term.vars {
-                        if exp == 0 {
-                            continue;
-                        }
                         let tbl = &self.f_var_tables[var_pos];
                         let a = tbl[idx].real();
                         let b = tbl[idx + 1].real() - a;
                         for _ in 0..exp {
-                            Self::poly_mul_affine_inplace_base(&mut term_poly, a, b);
+                            Self::poly_mul_affine_inplace_base(&mut term_poly, a, b, current_deg);
+                            current_deg += 1;
                         }
                     }
-                    for i in 0..=deg_max {
+                    for i in 0..=core::cmp::min(current_deg, deg_max) {
                         inner[i] += term_poly[i];
                     }
                 }
@@ -1328,19 +1327,18 @@ impl RowStreamState {
                             for term in &self.f_terms {
                                 term_poly.fill(Fq::ZERO);
                                 term_poly[0] = term.coeff.real();
+                                let mut current_deg = 0usize;
                                 for &(var_pos, exp) in &term.vars {
-                                    if exp == 0 {
-                                        continue;
-                                    }
                                     let tbl = &self.f_var_tables[var_pos];
                                     // v(X) = a + b·X
                                     let a = tbl[idx].real();
                                     let b = tbl[idx + 1].real() - a;
                                     for _ in 0..exp {
-                                        Self::poly_mul_affine_inplace_base(&mut term_poly, a, b);
+                                        Self::poly_mul_affine_inplace_base(&mut term_poly, a, b, current_deg);
+                                        current_deg += 1;
                                     }
                                 }
-                                for i in 0..=deg_max {
+                                for i in 0..=core::cmp::min(current_deg, deg_max) {
                                     inner[i] += term_poly[i];
                                 }
                             }
@@ -1466,9 +1464,9 @@ impl RowStreamState {
     ///
     /// Coefficients are in low→high order. Output is truncated to the input length.
     #[inline]
-    fn poly_mul_affine_inplace(poly: &mut [K], a: K, b: K) {
+    fn poly_mul_affine_inplace(poly: &mut [K], a: K, b: K, current_deg: usize) {
         let mut prev = K::ZERO;
-        for coeff in poly.iter_mut() {
+        for coeff in poly.iter_mut().take(current_deg + 2) {
             let old = *coeff;
             *coeff = a * old + b * prev;
             prev = old;
@@ -1524,19 +1522,18 @@ impl RowStreamState {
                 for term in &self.f_terms {
                     term_poly.fill(K::ZERO);
                     term_poly[0] = term.coeff;
+                    let mut current_deg = 0usize;
                     for &(var_pos, exp) in &term.vars {
-                        if exp == 0 {
-                            continue;
-                        }
                         let tbl = &self.f_var_tables[var_pos];
                         // v(X) = a + b·X
                         let a = tbl[2 * t];
                         let b = tbl[2 * t + 1] - a;
                         for _ in 0..exp {
-                            Self::poly_mul_affine_inplace(&mut term_poly, a, b);
+                            Self::poly_mul_affine_inplace(&mut term_poly, a, b, current_deg);
+                            current_deg += 1;
                         }
                     }
-                    for i in 0..=deg_max {
+                    for i in 0..=core::cmp::min(current_deg, deg_max) {
                         inner[i] += term_poly[i];
                     }
                 }
@@ -1663,19 +1660,18 @@ impl RowStreamState {
                                 for term in &self.f_terms {
                                     term_poly.fill(K::ZERO);
                                     term_poly[0] = term.coeff;
+                                    let mut current_deg = 0usize;
                                     for &(var_pos, exp) in &term.vars {
-                                        if exp == 0 {
-                                            continue;
-                                        }
                                         let tbl = &self.f_var_tables[var_pos];
                                         // v(X) = a + b·X
                                         let a = tbl[2 * t];
                                         let b = tbl[2 * t + 1] - a;
                                         for _ in 0..exp {
-                                            Self::poly_mul_affine_inplace(&mut term_poly, a, b);
+                                            Self::poly_mul_affine_inplace(&mut term_poly, a, b, current_deg);
+                                            current_deg += 1;
                                         }
                                     }
-                                    for i in 0..=deg_max {
+                                    for i in 0..=core::cmp::min(current_deg, deg_max) {
                                         inner[i] += term_poly[i];
                                     }
                                 }
@@ -1787,19 +1783,18 @@ impl RowStreamState {
                         for term in &self.f_terms {
                             term_poly.fill(K::ZERO);
                             term_poly[0] = term.coeff;
+                            let mut current_deg = 0usize;
                             for &(var_pos, exp) in &term.vars {
-                                if exp == 0 {
-                                    continue;
-                                }
                                 let tbl = &self.f_var_tables[var_pos];
                                 // v(X) = a + b·X
                                 let a = tbl[2 * t];
                                 let b = tbl[2 * t + 1] - a;
                                 for _ in 0..exp {
-                                    Self::poly_mul_affine_inplace(&mut term_poly, a, b);
+                                    Self::poly_mul_affine_inplace(&mut term_poly, a, b, current_deg);
+                                    current_deg += 1;
                                 }
                             }
-                            for i in 0..=deg_max {
+                            for i in 0..=core::cmp::min(current_deg, deg_max) {
                                 inner[i] += term_poly[i];
                             }
                         }
@@ -2206,7 +2201,6 @@ where
     /// Precompute all data that depends only on r' (not on α') for row phase optimization.
     /// This eliminates redundant v_j recomputation across all boolean α' assignments.
     fn precompute_for_r(&self, r_prime: &[K]) -> RPrecomp {
-        let k_total = self.mcs_witnesses.len() + self.me_witnesses.len();
         let t = self.s.t();
 
         // Build χ_r table over the Boolean row domain.
@@ -2285,9 +2279,6 @@ where
         }
         let f_prime = self.s.f.eval_in_ext::<K>(&m_vals);
 
-        // Precompute Y_eval[i][j][ρ] = (Z_i · v_j)[ρ] for all instances and matrices
-        let mut y_eval = vec![vec![[K::ZERO; D]; t]; k_total];
-
         let all_witnesses: Vec<&Mat<F>> = self
             .mcs_witnesses
             .iter()
@@ -2295,17 +2286,53 @@ where
             .chain(self.me_witnesses.iter())
             .collect();
 
-        for (idx, Zi) in all_witnesses.iter().enumerate() {
-            for j in 0..t {
-                for rho in 0..D {
-                    let mut acc = K::ZERO;
-                    for &(c, v) in &vjs_nz[j] {
-                        acc += v.scale_base_k(K::from(Zi[(rho, c)]));
-                    }
-                    y_eval[idx][j][rho] = acc;
-                }
+        // Precompute Y_eval[i][j][ρ] = (Z_i · v_j)[ρ] for all instances and matrices.
+        let y_eval: Vec<Vec<[K; D]>> = {
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+            {
+                all_witnesses
+                    .par_iter()
+                    .map(|Zi| {
+                        (0..t)
+                            .map(|j| {
+                                let mut y_row = [K::ZERO; D];
+                                for rho in 0..D {
+                                    let mut acc = K::ZERO;
+                                    let z_row = Zi.row(rho);
+                                    for &(c, v) in &vjs_nz[j] {
+                                        acc += v.scale_base_k(K::from(z_row[c]));
+                                    }
+                                    y_row[rho] = acc;
+                                }
+                                y_row
+                            })
+                            .collect()
+                    })
+                    .collect()
             }
-        }
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            {
+                all_witnesses
+                    .iter()
+                    .map(|Zi| {
+                        (0..t)
+                            .map(|j| {
+                                let mut y_row = [K::ZERO; D];
+                                for rho in 0..D {
+                                    let mut acc = K::ZERO;
+                                    let z_row = Zi.row(rho);
+                                    for &(c, v) in &vjs_nz[j] {
+                                        acc += v.scale_base_k(K::from(z_row[c]));
+                                    }
+                                    y_row[rho] = acc;
+                                }
+                                y_row
+                            })
+                            .collect()
+                    })
+                    .collect()
+            }
+        };
 
         RPrecomp {
             y_eval,
