@@ -72,9 +72,10 @@ fn elapsed_duration(start: TimePoint) -> Duration {
     }
 }
 
-/// Default instruction cap for trace runs when `max_steps` is not specified.
+/// Hard instruction cap for trace-wiring mode (Option C).
 ///
-/// The runner still requires that the guest halts before this bound.
+/// Trace mode is currently single-shot (one CCS step), so longer executions should
+/// use the chunked RV32B1 path for true multi-step IVC.
 const DEFAULT_RV32_TRACE_MAX_STEPS: usize = 1 << 20;
 
 fn max_ram_addr_from_exec(exec: &Rv32ExecTable) -> Option<u64> {
@@ -395,6 +396,12 @@ impl Rv32TraceWiring {
         if self.program_bytes.is_empty() {
             return Err(PiCcsError::InvalidInput("program_bytes must be non-empty".into()));
         }
+        if self.min_trace_len > DEFAULT_RV32_TRACE_MAX_STEPS {
+            return Err(PiCcsError::InvalidInput(format!(
+                "min_trace_len={} exceeds trace-mode hard cap {} (single-shot mode). Use the chunked RV32B1 runner for longer executions.",
+                self.min_trace_len, DEFAULT_RV32_TRACE_MAX_STEPS
+            )));
+        }
         if self.program_bytes.len() % 4 != 0 {
             return Err(PiCcsError::InvalidInput(
                 "program_bytes must be 4-byte aligned (RVC is not supported)".into(),
@@ -417,9 +424,15 @@ impl Rv32TraceWiring {
                 if n == 0 {
                     return Err(PiCcsError::InvalidInput("max_steps must be non-zero".into()));
                 }
+                if n > DEFAULT_RV32_TRACE_MAX_STEPS {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "max_steps={} exceeds trace-mode hard cap {} (single-shot mode). Use the chunked RV32B1 runner for longer executions.",
+                        n, DEFAULT_RV32_TRACE_MAX_STEPS
+                    )));
+                }
                 n
             }
-            None => DEFAULT_RV32_TRACE_MAX_STEPS.max(program.len()),
+            None => DEFAULT_RV32_TRACE_MAX_STEPS,
         };
         let ram_init_map = self.ram_init.clone();
         let reg_init_map = self.reg_init.clone();
@@ -459,6 +472,12 @@ impl Rv32TraceWiring {
         }
 
         let target_len = trace.steps.len().max(self.min_trace_len);
+        if target_len > DEFAULT_RV32_TRACE_MAX_STEPS {
+            return Err(PiCcsError::InvalidInput(format!(
+                "trace length {} exceeds trace-mode hard cap {} (single-shot mode). Use the chunked RV32B1 runner for longer executions.",
+                target_len, DEFAULT_RV32_TRACE_MAX_STEPS
+            )));
+        }
         let exec = Rv32ExecTable::from_trace_padded(&trace, target_len)
             .map_err(|e| PiCcsError::InvalidInput(format!("Rv32ExecTable::from_trace_padded failed: {e}")))?;
         exec.validate_cycle_chain()

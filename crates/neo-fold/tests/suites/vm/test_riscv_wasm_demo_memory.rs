@@ -1,5 +1,6 @@
 #![allow(non_snake_case)]
 
+#[path = "riscv_wasm_demo/mod.rs"]
 mod riscv_wasm_demo;
 
 use neo_fold::riscv_shard::Rv32B1;

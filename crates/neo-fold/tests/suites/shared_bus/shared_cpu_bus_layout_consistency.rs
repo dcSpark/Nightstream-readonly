@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-#[path = "common/fixtures.rs"]
+#[path = "../../common/fixtures.rs"]
 mod fixtures;
 
 use fixtures::{build_twist_shout_2step_fixture, prove};

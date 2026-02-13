@@ -1,0 +1,7 @@
+mod riscv_trace_twist_no_shared_cpu_bus_e2e;
+mod riscv_trace_twist_no_shared_cpu_bus_linkage_redteam;
+mod twist_lane_pinning;
+mod twist_multi_write_per_step;
+mod twist_shout_fibonacci_cycle_trace;
+mod twist_shout_power_tests;
+mod twist_shout_soundness;

@@ -139,3 +139,43 @@ fn rv32_trace_wiring_runner_main_ccs_has_no_bus_tail() {
         "main trace CCS still appears to include extra width (bus tail)"
     );
 }
+
+#[test]
+fn rv32_trace_wiring_runner_rejects_max_steps_above_trace_cap() {
+    let program = vec![RiscvInstruction::Halt];
+    let program_bytes = encode_program(&program);
+
+    let err = match Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .max_steps((1usize << 20) + 1)
+        .prove()
+    {
+        Ok(_) => panic!("max_steps above trace cap must be rejected"),
+        Err(e) => e,
+    };
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("max_steps=") && msg.contains("trace-mode hard cap"),
+        "unexpected error message: {msg}"
+    );
+}
+
+#[test]
+fn rv32_trace_wiring_runner_rejects_min_trace_len_above_trace_cap() {
+    let program = vec![RiscvInstruction::Halt];
+    let program_bytes = encode_program(&program);
+
+    let err = match Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .min_trace_len((1usize << 20) + 1)
+        .prove()
+    {
+        Ok(_) => panic!("min_trace_len above trace cap must be rejected"),
+        Err(e) => e,
+    };
+
+    let msg = err.to_string();
+    assert!(
+        msg.contains("min_trace_len=") && msg.contains("trace-mode hard cap"),
+        "unexpected error message: {msg}"
+    );
+}

@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 #![allow(deprecated)]
 
-#[path = "common/fixtures.rs"]
+#[path = "../../common/fixtures.rs"]
 mod fixtures;
 
 use fixtures::{

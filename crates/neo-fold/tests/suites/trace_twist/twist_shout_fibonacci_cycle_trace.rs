@@ -41,7 +41,7 @@
 //! value stored in Twist memory `mem[0]`, and we attach an output-binding proof so the verifier
 //! checks that claim (not just that the execution is internally consistent).
 
-#[path = "common/fib_twist_shout_vm.rs"]
+#[path = "../../common/fib_twist_shout_vm.rs"]
 mod fib_twist_shout_vm;
 
 use std::collections::HashMap;

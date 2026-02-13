@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-#[path = "common/riscv_shout_event_table_packed.rs"]
+#[path = "../../../common/riscv_shout_event_table_packed.rs"]
 mod event_table_packed;
 
 use std::collections::BTreeMap;
@@ -15,11 +15,11 @@ use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::shard::{fold_shard_prove, fold_shard_verify, CommitMixers};
 use neo_math::ring::Rq as RqEl;
 use neo_math::{D, F};
-use neo_memory::cpu::build_bus_layout_for_instances_with_shout_and_twist_lanes;
 use neo_memory::riscv::ccs::{build_rv32_trace_wiring_ccs, rv32_trace_ccs_witness_from_exec_table, Rv32TraceCcsLayout};
 use neo_memory::riscv::exec_table::{Rv32ExecTable, Rv32ShoutEventRow, Rv32ShoutEventTable};
 use neo_memory::riscv::lookups::{
-    decode_program, encode_program, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode, RiscvShoutTables, PROG_ID,
+    decode_program, encode_program, BranchCondition, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode,
+    RiscvShoutTables, PROG_ID,
 };
 use neo_memory::witness::{LutInstance, LutTableSpec, LutWitness, StepInstanceBundle, StepWitnessBundle};
 use neo_params::NeoParams;
@@ -78,50 +78,111 @@ fn default_mixers() -> Mixers {
     }
 }
 
-fn flip_time_bit0_for_all_events(
-    z: &mut [F],
-    m: usize,
-    m_in: usize,
-    steps: usize,
-    ell_addr: usize,
-) -> Result<(), String> {
-    let bus = build_bus_layout_for_instances_with_shout_and_twist_lanes(
-        m,
-        m_in,
-        steps,
-        core::iter::once((ell_addr, /*lanes=*/ 1usize)),
-        core::iter::empty::<(usize, usize)>(),
-    )?;
-    let cols = &bus.shout_cols[0].lanes[0];
-    let time_bit0_col = cols.addr_bits.start;
-    for j in 0..steps {
-        let idx = bus.bus_cell(time_bit0_col, j);
-        z[idx] = if z[idx] == F::ZERO { F::ONE } else { F::ZERO };
-    }
-    Ok(())
-}
-
 #[test]
-fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_event_table_linkage_redteam() {
-    // Minimal program; we tamper with an event-table time bit so the hash linkage fails.
+fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_event_table_packed_prove_verify() {
+    // Program:
+    // - RV32I bitwise/shifts/compares (includes EQ branches).
+    // - HALT
     let program = vec![
+        // x1 = 0x8000_0001
+        RiscvInstruction::Lui { rd: 1, imm: 0x80000 },
         RiscvInstruction::IAlu {
-            op: RiscvOpcode::Add,
+            op: RiscvOpcode::Xor,
             rd: 1,
-            rs1: 0,
-            imm: 5,
+            rs1: 1,
+            imm: 1,
         },
+        // x2 = 37 (shamt=5)
         RiscvInstruction::IAlu {
             op: RiscvOpcode::Add,
             rd: 2,
             rs1: 0,
-            imm: 7,
+            imm: 37,
         },
+        // Shifts.
         RiscvInstruction::RAlu {
-            op: RiscvOpcode::Or,
+            op: RiscvOpcode::Sll,
             rd: 3,
             rs1: 1,
             rs2: 2,
+        },
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Srl,
+            rd: 4,
+            rs1: 1,
+            rs2: 2,
+        },
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Sra,
+            rd: 5,
+            rs1: 1,
+            rs2: 2,
+        },
+        // Bitwise.
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Or,
+            rd: 6,
+            rs1: 3,
+            rs2: 1,
+        },
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::And,
+            rd: 7,
+            rs1: 6,
+            rs2: 1,
+        },
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Xor,
+            rd: 8,
+            rs1: 6,
+            rs2: 1,
+        },
+        // Sub + compares.
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Sub,
+            rd: 9,
+            rs1: 1,
+            rs2: 2,
+        },
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Slt,
+            rd: 10,
+            rs1: 1,
+            rs2: 2,
+        },
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Sltu,
+            rd: 11,
+            rs1: 1,
+            rs2: 2,
+        },
+        // Build x17 = x1 - 4096 to get nontrivial EQ/NEQ rows.
+        // LUI x17, 1 => 4096; SUB x17, x1, x17 => x1 - 4096.
+        RiscvInstruction::Lui { rd: 17, imm: 1 },
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Sub,
+            rd: 17,
+            rs1: 1,
+            rs2: 17,
+        },
+        // EQ/NEQ branches (imm=4 keeps control flow linear).
+        RiscvInstruction::Branch {
+            cond: BranchCondition::Eq,
+            rs1: 1,
+            rs2: 1,
+            imm: 4,
+        },
+        RiscvInstruction::Branch {
+            cond: BranchCondition::Eq,
+            rs1: 1,
+            rs2: 17,
+            imm: 4,
+        },
+        RiscvInstruction::Branch {
+            cond: BranchCondition::Ne,
+            rs1: 1,
+            rs2: 17,
+            imm: 4,
         },
         RiscvInstruction::Halt,
     ];
@@ -191,27 +252,41 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_event_table_linkage_redteam() 
     assert!(ell_n >= 3, "event-table packed requires ell_n>=3 (got ell_n={ell_n})");
     assert!(ell_n <= 64, "event-table packed requires ell_n<=64 (got ell_n={ell_n})");
 
+    let tables = RiscvShoutTables::new(32);
+    let expected: BTreeMap<u32, (RiscvOpcode, usize)> = [
+        (RiscvOpcode::And, 1usize),
+        (RiscvOpcode::Xor, 2),
+        (RiscvOpcode::Or, 1),
+        (RiscvOpcode::Add, 1),
+        (RiscvOpcode::Sub, 2),
+        (RiscvOpcode::Slt, 1),
+        (RiscvOpcode::Sltu, 1),
+        (RiscvOpcode::Sll, 1),
+        (RiscvOpcode::Srl, 1),
+        (RiscvOpcode::Sra, 1),
+        (RiscvOpcode::Eq, 3),
+    ]
+    .into_iter()
+    .map(|(op, count)| (tables.opcode_to_id(op).0, (op, count)))
+    .collect();
+    let got: BTreeMap<u32, (RiscvOpcode, usize)> = by_id
+        .iter()
+        .map(|(shout_id, (opcode, rows))| (*shout_id, (*opcode, rows.len())))
+        .collect();
+    assert_eq!(got, expected, "unexpected event-table opcode coverage");
+
     let mut lut_instances: Vec<(LutInstance<Cmt, F>, LutWitness<F>)> = Vec::new();
-    let mut did_tamper = false;
     for (_shout_id, (opcode, rows)) in by_id.into_iter() {
         let steps = rows.len();
+        let z = event_table_packed::build_shout_event_table_bus_z(ccs.m, layout.m_in, steps, ell_n, opcode, &rows, &x)
+            .unwrap_or_else(|e| panic!("event-table z build failed (opcode={opcode:?}): {e}"));
+        let Z = neo_memory::ajtai::encode_vector_balanced_to_mat(&params, &z);
+        let c = l.commit(&Z);
+
+        // `d = time_bits + base_d(opcode)`
         let base_d =
             event_table_packed::rv32_packed_base_d(opcode).unwrap_or_else(|e| panic!("opcode {opcode:?}: {e}"));
         let d = ell_n + base_d;
-        let ell_addr = d;
-
-        let mut z =
-            event_table_packed::build_shout_event_table_bus_z(ccs.m, layout.m_in, steps, ell_n, opcode, &rows, &x)
-                .unwrap_or_else(|e| panic!("event-table z build failed (opcode={opcode:?}): {e}"));
-
-        // Tamper with the time-bit prefix of the first instance only (keeps booleanity).
-        if !did_tamper {
-            flip_time_bit0_for_all_events(&mut z, ccs.m, layout.m_in, steps, ell_addr).expect("tamper time bit");
-            did_tamper = true;
-        }
-
-        let Z = neo_memory::ajtai::encode_vector_balanced_to_mat(&params, &z);
-        let c = l.commit(&Z);
 
         let inst = LutInstance::<Cmt, F> {
             comms: vec![c],
@@ -231,7 +306,6 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_event_table_linkage_redteam() 
         let wit = LutWitness { mats: vec![Z] };
         lut_instances.push((inst, wit));
     }
-    assert!(did_tamper, "expected to tamper at least one Shout instance");
 
     let steps_witness = vec![StepWitnessBundle {
         mcs,
@@ -242,7 +316,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_event_table_linkage_redteam() 
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =
         steps_witness.iter().map(StepInstanceBundle::from).collect();
 
-    let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-event-table-packed-redteam");
+    let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-event-table-packed");
     let proof = fold_shard_prove(
         FoldingMode::PaperExact,
         &mut tr_prove,
@@ -256,8 +330,23 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_event_table_linkage_redteam() 
     )
     .expect("prove");
 
-    let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-event-table-packed-redteam");
-    let err = fold_shard_verify(
+    assert!(
+        !proof.steps[0].mem.shout_me_claims_time.is_empty(),
+        "expected Shout ME(time) claims in no-shared-bus mode"
+    );
+    assert_eq!(
+        proof.steps[0].mem.shout_me_claims_time.len(),
+        steps_witness[0].lut_instances.len(),
+        "expected 1 Shout ME(time) claim per Shout instance"
+    );
+    assert_eq!(
+        proof.steps[0].shout_time_fold.len(),
+        steps_witness[0].lut_instances.len(),
+        "expected 1 shout_time_fold per Shout instance"
+    );
+
+    let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-event-table-packed");
+    let _ = fold_shard_verify(
         FoldingMode::PaperExact,
         &mut tr_verify,
         &params,
@@ -267,8 +356,5 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_event_table_linkage_redteam() 
         &proof,
         mixers,
     )
-    .expect_err("verification should fail due to event-table hash linkage mismatch");
-
-    // Keep the assertion stable but informative.
-    let _ = err;
+    .expect("verify");
 }
