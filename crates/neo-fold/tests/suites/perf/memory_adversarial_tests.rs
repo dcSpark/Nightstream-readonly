@@ -53,16 +53,7 @@ fn setup_ajtai_pp(m: usize, seed: u64) -> AjtaiSModule {
 }
 
 fn default_mixers() -> Mixers {
-    fn mix_rhos_commits(_rhos: &[Mat<F>], _cs: &[Cmt]) -> Cmt {
-        Cmt::zeros(D, 1)
-    }
-    fn combine_b_pows(_cs: &[Cmt], _b: u32) -> Cmt {
-        Cmt::zeros(D, 1)
-    }
-    CommitMixers {
-        mix_rhos_commits,
-        combine_b_pows,
-    }
+    crate::common_setup::default_mixers()
 }
 
 fn create_identity_ccs(n: usize) -> CcsStructure<F> {

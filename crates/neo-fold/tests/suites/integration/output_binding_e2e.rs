@@ -11,7 +11,7 @@ use neo_fold::output_binding::OutputBindingConfig;
 use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::shard::{fold_shard_prove_with_output_binding, fold_shard_verify_with_output_binding, CommitMixers};
 use neo_fold::PiCcsError;
-use neo_math::{D, F, K};
+use neo_math::{F, K};
 use neo_memory::cpu::build_bus_layout_for_instances;
 use neo_memory::cpu::constraints::{extend_ccs_with_shared_cpu_bus_constraints, TwistCpuBinding};
 use neo_memory::output_check::ProgramIO;
@@ -20,6 +20,8 @@ use neo_memory::MemInit;
 use neo_params::NeoParams;
 use neo_transcript::{Poseidon2Transcript, Transcript};
 use p3_field::PrimeCharacteristicRing;
+
+type Mixers = CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32) -> Cmt>;
 
 #[derive(Clone, Copy, Default)]
 struct DummyCommit;
@@ -41,17 +43,8 @@ impl SModuleHomomorphism<F, Cmt> for DummyCommit {
     }
 }
 
-fn default_mixers() -> CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32) -> Cmt> {
-    fn mix_rhos_commits(_rhos: &[Mat<F>], _cs: &[Cmt]) -> Cmt {
-        Cmt::zeros(D, 1)
-    }
-    fn combine_b_pows(_cs: &[Cmt], _b: u32) -> Cmt {
-        Cmt::zeros(D, 1)
-    }
-    CommitMixers {
-        mix_rhos_commits,
-        combine_b_pows,
-    }
+fn default_mixers() -> Mixers {
+    crate::common_setup::default_mixers()
 }
 
 fn empty_identity_first_r1cs_ccs(n: usize) -> CcsStructure<F> {

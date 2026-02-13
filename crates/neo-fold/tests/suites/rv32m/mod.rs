@@ -1,3 +1,2 @@
 mod riscv_rv32m_mul_divu_remu_prove_verify;
-mod rv32m_sidecar_linkage;
 mod rv32m_sidecar_sparse_steps;

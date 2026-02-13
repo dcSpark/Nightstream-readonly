@@ -12,7 +12,7 @@ use neo_fold::finalize::{FinalizeReport, ObligationFinalizer};
 use neo_fold::shard::CommitMixers;
 use neo_fold::shard::{fold_shard_prove, fold_shard_verify, fold_shard_verify_and_finalize, ShardObligations};
 use neo_fold::PiCcsError;
-use neo_math::{D, K};
+use neo_math::K;
 use neo_memory::plain::{PlainLutTrace, PlainMemLayout, PlainMemTrace};
 use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
 use neo_memory::MemInit;
@@ -312,16 +312,7 @@ fn write_bus_for_chunk(
 }
 
 fn default_mixers() -> Mixers {
-    fn mix_rhos_commits(_rhos: &[Mat<F>], _cs: &[Cmt]) -> Cmt {
-        Cmt::zeros(D, 1)
-    }
-    fn combine_b_pows(_cs: &[Cmt], _b: u32) -> Cmt {
-        Cmt::zeros(D, 1)
-    }
-    CommitMixers {
-        mix_rhos_commits,
-        combine_b_pows,
-    }
+    crate::common_setup::default_mixers()
 }
 
 fn build_single_chunk_inputs() -> (

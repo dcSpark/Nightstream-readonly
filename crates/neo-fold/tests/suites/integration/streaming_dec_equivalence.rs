@@ -25,27 +25,7 @@ fn create_identity_ccs(n: usize) -> CcsStructure<F> {
 }
 
 fn mixers() -> CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32) -> Cmt> {
-    fn mix_rhos_commits(_rhos: &[Mat<F>], cs: &[Cmt]) -> Cmt {
-        assert_eq!(cs.len(), 1, "test mixers expect k=1");
-        cs[0].clone()
-    }
-    fn combine_b_pows(cs: &[Cmt], b: u32) -> Cmt {
-        assert!(!cs.is_empty(), "combine_b_pows: empty commitments");
-        let mut acc = cs[0].clone();
-        let b_f = F::from_u64(b as u64);
-        let mut pow = b_f;
-        for i in 1..cs.len() {
-            for (a, &x) in acc.data.iter_mut().zip(cs[i].data.iter()) {
-                *a += x * pow;
-            }
-            pow *= b_f;
-        }
-        acc
-    }
-    CommitMixers {
-        mix_rhos_commits,
-        combine_b_pows,
-    }
+    crate::common_setup::default_mixers()
 }
 
 fn build_single_step_bundle(params: &NeoParams, l: &AjtaiSModule, m: usize) -> StepWitnessBundle<Cmt, F, K> {
