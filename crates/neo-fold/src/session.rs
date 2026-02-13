@@ -1680,6 +1680,309 @@ where
         Ok(true)
     }
 
+    /// Verify a proof using externally supplied step instance bundles.
+    ///
+    /// Unlike [`verify`] and [`verify_collected`] which use the session's internal
+    /// collected steps (populated by execution), this method takes the step bundles
+    /// directly.  This enables **verify-only** flows where the verifier never
+    /// executes the program -- the steps come from the proof package.
+    pub fn verify_with_external_steps(
+        &self,
+        s: &CcsStructure<F>,
+        steps_public: &[StepInstanceBundle<Cmt, F, K>],
+        run: &FoldRun,
+    ) -> Result<bool, PiCcsError> {
+        let mut tr = Poseidon2Transcript::new(b"neo.fold/session");
+        self.verify_with_external_steps_transcript(&mut tr, s, steps_public, run)
+    }
+
+    /// Like [`verify_with_external_steps`] but with output binding.
+    pub fn verify_with_external_steps_and_output_binding(
+        &self,
+        s: &CcsStructure<F>,
+        steps_public: &[StepInstanceBundle<Cmt, F, K>],
+        run: &FoldRun,
+        ob_cfg: &crate::output_binding::OutputBindingConfig,
+    ) -> Result<bool, PiCcsError> {
+        let mut tr = Poseidon2Transcript::new(b"neo.fold/session");
+        self.verify_with_external_steps_and_output_binding_transcript(&mut tr, s, steps_public, run, ob_cfg)
+    }
+
+    /// Internal: verify with external steps + transcript.
+    fn verify_with_external_steps_transcript(
+        &self,
+        tr: &mut Poseidon2Transcript,
+        s: &CcsStructure<F>,
+        steps_public: &[StepInstanceBundle<Cmt, F, K>],
+        run: &FoldRun,
+    ) -> Result<bool, PiCcsError> {
+        let src_ptr = (s as *const CcsStructure<F>) as usize;
+        let verifier_cache = self
+            .verifier_ctx
+            .as_ref()
+            .filter(|cache| cache.src_ptr == src_ptr);
+        let verifier_ctx = verifier_cache.map(|cache| &cache.ctx);
+
+        let m_in_steps = steps_public.first().map(|inst| inst.mcs_inst.m_in).unwrap_or(0);
+        let s_prepared = self.prepared_ccs_for_accumulator(s)?;
+
+        let seed_me: &[MeInstance<Cmt, F, K>] = match &self.acc0 {
+            Some(acc) => {
+                acc.check(&self.params, s_prepared)?;
+                let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
+                if acc_m_in != m_in_steps {
+                    return Err(PiCcsError::InvalidInput(
+                        "initial Accumulator.m_in must match steps' m_in".into(),
+                    ));
+                }
+                &acc.me
+            }
+            None => &[],
+        };
+
+        let step_linking = self
+            .step_linking
+            .as_ref()
+            .filter(|cfg| !cfg.prev_next_equalities.is_empty());
+
+        let outputs = if steps_public.len() > 1 {
+            match step_linking {
+                Some(cfg) => match verifier_ctx {
+                    Some(ctx) => shard::fold_shard_verify_with_step_linking_with_context(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s,
+                        steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        cfg,
+                        ctx,
+                    )?,
+                    None => shard::fold_shard_verify_with_step_linking(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s,
+                        steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        cfg,
+                    )?,
+                },
+                None if self.allow_unlinked_steps => match verifier_ctx {
+                    Some(ctx) => shard::fold_shard_verify_with_context(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s,
+                        steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        ctx,
+                    )?,
+                    None => shard::fold_shard_verify(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s,
+                        steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                    )?,
+                },
+                None => {
+                    let mut msg =
+                        "multi-step verification requires step linking; call FoldingSession::set_step_linking(...)"
+                            .to_string();
+                    if let Some(diag) = &self.auto_step_linking_error {
+                        msg.push_str(&format!(" (auto step-linking from StepSpec failed: {diag})"));
+                    }
+                    return Err(PiCcsError::InvalidInput(msg));
+                }
+            }
+        } else {
+            match verifier_ctx {
+                Some(ctx) => shard::fold_shard_verify_with_context(
+                    self.mode.clone(),
+                    tr,
+                    &self.params,
+                    s,
+                    steps_public,
+                    seed_me,
+                    run,
+                    self.mixers,
+                    ctx,
+                )?,
+                None => shard::fold_shard_verify(
+                    self.mode.clone(),
+                    tr,
+                    &self.params,
+                    s,
+                    steps_public,
+                    seed_me,
+                    run,
+                    self.mixers,
+                )?,
+            }
+        };
+
+        // Detect twist/shout from the provided steps (self.steps is empty for verify-only).
+        let has_twist_or_shout = steps_public.iter().any(|s| !s.mem_insts.is_empty())
+            || steps_public.iter().any(|s| !s.lut_insts.is_empty());
+        if !has_twist_or_shout && !outputs.obligations.val.is_empty() {
+            return Err(PiCcsError::ProtocolError(
+                "CCS-only session verification produced unexpected val-lane obligations".into(),
+            ));
+        }
+        Ok(true)
+    }
+
+    /// Internal: verify with external steps + output binding + transcript.
+    fn verify_with_external_steps_and_output_binding_transcript(
+        &self,
+        tr: &mut Poseidon2Transcript,
+        s: &CcsStructure<F>,
+        steps_public: &[StepInstanceBundle<Cmt, F, K>],
+        run: &FoldRun,
+        ob_cfg: &crate::output_binding::OutputBindingConfig,
+    ) -> Result<bool, PiCcsError> {
+        let src_ptr = (s as *const CcsStructure<F>) as usize;
+        let verifier_cache = self
+            .verifier_ctx
+            .as_ref()
+            .filter(|cache| cache.src_ptr == src_ptr);
+        let verifier_ctx = verifier_cache.map(|cache| &cache.ctx);
+
+        let m_in_steps = steps_public.first().map(|inst| inst.mcs_inst.m_in).unwrap_or(0);
+        let s_prepared = self.prepared_ccs_for_accumulator(s)?;
+
+        let seed_me: &[MeInstance<Cmt, F, K>] = match &self.acc0 {
+            Some(acc) => {
+                acc.check(&self.params, s_prepared)?;
+                let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
+                if acc_m_in != m_in_steps {
+                    return Err(PiCcsError::InvalidInput(
+                        "initial Accumulator.m_in must match steps' m_in".into(),
+                    ));
+                }
+                &acc.me
+            }
+            None => &[],
+        };
+
+        let step_linking = self
+            .step_linking
+            .as_ref()
+            .filter(|cfg| !cfg.prev_next_equalities.is_empty());
+
+        let outputs = if steps_public.len() > 1 {
+            match step_linking {
+                Some(cfg) => match verifier_ctx {
+                    Some(ctx) => shard::fold_shard_verify_with_output_binding_and_step_linking_with_context(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s,
+                        steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        ob_cfg,
+                        cfg,
+                        ctx,
+                    )?,
+                    None => shard::fold_shard_verify_with_output_binding_and_step_linking(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s,
+                        steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        ob_cfg,
+                        cfg,
+                    )?,
+                },
+                None if self.allow_unlinked_steps => match verifier_ctx {
+                    Some(ctx) => shard::fold_shard_verify_with_output_binding_with_context(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s,
+                        steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        ob_cfg,
+                        ctx,
+                    )?,
+                    None => shard::fold_shard_verify_with_output_binding(
+                        self.mode.clone(),
+                        tr,
+                        &self.params,
+                        s,
+                        steps_public,
+                        seed_me,
+                        run,
+                        self.mixers,
+                        ob_cfg,
+                    )?,
+                },
+                None => {
+                    let mut msg =
+                        "multi-step verification with output binding requires step linking"
+                            .to_string();
+                    if let Some(diag) = &self.auto_step_linking_error {
+                        msg.push_str(&format!(" (auto step-linking from StepSpec failed: {diag})"));
+                    }
+                    return Err(PiCcsError::InvalidInput(msg));
+                }
+            }
+        } else {
+            match verifier_ctx {
+                Some(ctx) => shard::fold_shard_verify_with_output_binding_with_context(
+                    self.mode.clone(),
+                    tr,
+                    &self.params,
+                    s,
+                    steps_public,
+                    seed_me,
+                    run,
+                    self.mixers,
+                    ob_cfg,
+                    ctx,
+                )?,
+                None => shard::fold_shard_verify_with_output_binding(
+                    self.mode.clone(),
+                    tr,
+                    &self.params,
+                    s,
+                    steps_public,
+                    seed_me,
+                    run,
+                    self.mixers,
+                    ob_cfg,
+                )?,
+            }
+        };
+
+        let has_twist_or_shout = !steps_public.is_empty()
+            && (steps_public.iter().any(|s| !s.lut_insts.is_empty())
+                || steps_public.iter().any(|s| !s.mem_insts.is_empty()));
+        if !has_twist_or_shout && !outputs.obligations.val.is_empty() {
+            return Err(PiCcsError::ProtocolError(
+                "CCS-only session verification produced unexpected val-lane obligations".into(),
+            ));
+        }
+        Ok(true)
+    }
+
     /// Verify with output binding, managing the transcript internally.
     pub fn verify_with_output_binding_simple(
         &self,

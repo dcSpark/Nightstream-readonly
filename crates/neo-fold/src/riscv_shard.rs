@@ -373,6 +373,147 @@ impl Rv32B1 {
         self
     }
 
+    /// Build only the verification context (CCS + session) without executing the program or proving.
+    ///
+    /// This performs the same validation, program decoding, memory layout setup, CCS construction
+    /// (including shared-bus wiring), and session creation that `prove()` does -- but stops before
+    /// any RISC-V execution or folding.
+    ///
+    /// The returned [`Rv32B1Verifier`] can verify a `ShardProof` given the public MCS instances
+    /// (`mcss_public`) that were produced by the prover.
+    ///
+    /// **Cost:** circuit synthesis only (~ms).  No RISC-V execution, no folding.
+    pub fn build_verifier(self) -> Result<Rv32B1Verifier, PiCcsError> {
+        // --- Input validation (same as prove) ---
+        if self.xlen != 32 {
+            return Err(PiCcsError::InvalidInput(format!(
+                "RV32 B1 MVP requires xlen == 32 (got {})",
+                self.xlen
+            )));
+        }
+        if self.program_bytes.is_empty() {
+            return Err(PiCcsError::InvalidInput("program_bytes must be non-empty".into()));
+        }
+        if self.chunk_size == 0 {
+            return Err(PiCcsError::InvalidInput("chunk_size must be non-zero".into()));
+        }
+        if self.ram_bytes == 0 {
+            return Err(PiCcsError::InvalidInput("ram_bytes must be non-zero".into()));
+        }
+        if self.program_base != 0 {
+            return Err(PiCcsError::InvalidInput(
+                "RV32 B1 MVP requires program_base == 0 (addresses are indices into PROG/RAM layouts)".into(),
+            ));
+        }
+        if self.program_bytes.len() % 4 != 0 {
+            return Err(PiCcsError::InvalidInput(
+                "program_bytes must be 4-byte aligned (RV32 B1 runner does not support RVC)".into(),
+            ));
+        }
+        for (i, chunk) in self.program_bytes.chunks_exact(4).enumerate() {
+            let first_half = u16::from_le_bytes([chunk[0], chunk[1]]);
+            if (first_half & 0b11) != 0b11 {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "RV32 B1 runner does not support compressed instructions (RVC): found compressed encoding at word index {i}"
+                )));
+            }
+        }
+
+        // --- Program decoding + memory layouts (same as prove, minus VM/Twist init) ---
+        let program = decode_program(&self.program_bytes)
+            .map_err(|e| PiCcsError::InvalidInput(format!("decode_program failed: {e}")))?;
+
+        let (prog_layout, initial_mem) = neo_memory::riscv::rom_init::prog_rom_layout_and_init_words(
+            PROG_ID,
+            /*base_addr=*/ 0,
+            &self.program_bytes,
+        )
+        .map_err(|e| PiCcsError::InvalidInput(format!("prog_rom_layout_and_init_words failed: {e}")))?;
+        let mut initial_mem = initial_mem;
+        for (&addr, &value) in &self.ram_init {
+            let value = value as u32 as u64;
+            initial_mem.insert((neo_memory::riscv::lookups::RAM_ID.0, addr), F::from_u64(value));
+        }
+
+        let (k_ram, d_ram) = pow2_ceil_k(self.ram_bytes.max(4));
+        let mem_layouts = HashMap::from([
+            (
+                neo_memory::riscv::lookups::RAM_ID.0,
+                PlainMemLayout {
+                    k: k_ram,
+                    d: d_ram,
+                    n_side: 2,
+                    lanes: 1,
+                },
+            ),
+            (PROG_ID.0, prog_layout),
+        ]);
+
+        // --- Shout tables (same as prove) ---
+        let mut shout_ops = match &self.shout_ops {
+            Some(ops) => ops.clone(),
+            None if self.shout_auto_minimal => infer_required_shout_opcodes(&program),
+            None => all_shout_opcodes(),
+        };
+        shout_ops.insert(RiscvOpcode::Add);
+
+        let shout = RiscvShoutTables::new(self.xlen);
+        let mut table_specs: HashMap<u32, LutTableSpec> = HashMap::new();
+        for op in shout_ops {
+            let table_id = shout.opcode_to_id(op).0;
+            table_specs.insert(
+                table_id,
+                LutTableSpec::RiscvOpcode {
+                    opcode: op,
+                    xlen: self.xlen,
+                },
+            );
+        }
+        let mut shout_table_ids: Vec<u32> = table_specs.keys().copied().collect();
+        shout_table_ids.sort_unstable();
+
+        // --- CCS + Session (same as prove) ---
+        let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, self.chunk_size)
+            .map_err(|e| PiCcsError::InvalidInput(format!("build_rv32_b1_step_ccs failed: {e}")))?;
+
+        let mut session = FoldingSession::<AjtaiSModule>::new_ajtai(self.mode.clone(), &ccs_base)?;
+        let params = session.params().clone();
+        let committer = session.committer().clone();
+
+        let empty_tables: HashMap<u32, LutTable<F>> = HashMap::new();
+
+        // Build R1csCpu for CCS with shared-bus wiring (same as prove; no execution).
+        let mut cpu = R1csCpu::new(
+            ccs_base,
+            params,
+            committer,
+            layout.m_in,
+            &empty_tables,
+            &table_specs,
+            rv32_b1_chunk_to_witness(layout.clone()),
+        );
+        cpu = cpu
+            .with_shared_cpu_bus(
+                rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts.clone(), initial_mem.clone())
+                    .map_err(|e| PiCcsError::InvalidInput(format!("rv32_b1_shared_cpu_bus_config failed: {e}")))?,
+                self.chunk_size,
+            )
+            .map_err(|e| PiCcsError::InvalidInput(format!("shared bus inject failed: {e}")))?;
+
+        session.set_step_linking(rv32_b1_step_linking_config(&layout));
+
+        let ccs = cpu.ccs.clone();
+
+        // No execution, no fold_and_prove -- just the verification context.
+        Ok(Rv32B1Verifier {
+            session,
+            ccs,
+            _layout: layout,
+            ram_num_bits: d_ram,
+            output_claims: self.output_claims,
+        })
+    }
+
     pub fn prove(self) -> Result<Rv32B1Run, PiCcsError> {
         if self.xlen != 32 {
             return Err(PiCcsError::InvalidInput(format!(
@@ -569,6 +710,40 @@ impl Rv32B1 {
     }
 }
 
+/// Verification context for RV32 B1 proofs.
+///
+/// Created by [`Rv32B1::build_verifier`].  Contains the CCS structure and folding session
+/// needed to verify a `ShardProof` without executing the RISC-V program.
+pub struct Rv32B1Verifier {
+    session: FoldingSession<AjtaiSModule>,
+    ccs: CcsStructure<F>,
+    _layout: Rv32B1Layout,
+    ram_num_bits: usize,
+    output_claims: ProgramIO<F>,
+}
+
+impl Rv32B1Verifier {
+    /// Verify a `ShardProof` using the provided public step instance bundles.
+    ///
+    /// `steps_public` must be the step instance bundles produced by the prover (via
+    /// `Rv32B1Run::steps_public()`).  The verifier checks the folding proof
+    /// against these instances and the CCS structure -- no RISC-V execution
+    /// is performed.
+    pub fn verify(
+        &self,
+        proof: &ShardProof,
+        steps_public: &[StepInstanceBundle<Cmt, F, K>],
+    ) -> Result<bool, PiCcsError> {
+        if self.output_claims.is_empty() {
+            self.session.verify_with_external_steps(&self.ccs, steps_public, proof)
+        } else {
+            let ob_cfg = OutputBindingConfig::new(self.ram_num_bits, self.output_claims.clone());
+            self.session
+                .verify_with_external_steps_and_output_binding(&self.ccs, steps_public, proof, &ob_cfg)
+        }
+    }
+}
+
 pub struct Rv32B1Run {
     session: FoldingSession<AjtaiSModule>,
     proof: ShardProof,
@@ -621,6 +796,15 @@ impl Rv32B1Run {
 
     pub fn steps_public(&self) -> Vec<StepInstanceBundle<Cmt, F, K>> {
         self.session.steps_public()
+    }
+
+    /// Return the public MCS instances for inclusion in a proof package.
+    ///
+    /// These instances must be transmitted alongside the `ShardProof` so that
+    /// a standalone verifier (via [`Rv32B1Verifier::verify`]) can check the proof
+    /// without re-executing the RISC-V program.
+    pub fn mcss_public(&self) -> Vec<neo_ccs::McsInstance<Cmt, F>> {
+        self.session.mcss_public()
     }
 
     pub fn final_boundary_state(&self) -> Result<Rv32BoundaryState, PiCcsError> {
