@@ -10,9 +10,9 @@ use crate::riscv::lookups::{PROG_ID, RAM_ID, REG_ID};
 use super::config::{derive_mem_ids_and_ell_addrs, derive_shout_ids_and_ell_addrs};
 use super::constants::{
     ADD_TABLE_ID, AND_TABLE_ID, EQ_TABLE_ID, NEQ_TABLE_ID, OR_TABLE_ID, SLL_TABLE_ID, SLTU_TABLE_ID, SLT_TABLE_ID,
-    SRA_TABLE_ID, SRL_TABLE_ID, SUB_TABLE_ID, XOR_TABLE_ID,
+    SRA_TABLE_ID, SRL_TABLE_ID, SUB_TABLE_ID, XOR_TABLE_ID, RV32_XLEN,
 };
-use super::Rv32B1Layout;
+use super::{Rv32B1Layout, Rv32TraceCcsLayout};
 
 fn shout_cpu_binding(layout: &Rv32B1Layout, table_id: u32) -> ShoutCpuBinding {
     // NOTE: We intentionally do *not* bind Shout addr_bits to a packed CPU scalar here.
@@ -142,6 +142,273 @@ fn twist_cpu_binding(layout: &Rv32B1Layout, mem_id: u32) -> TwistCpuBinding {
             inc: None,
         }
     }
+}
+
+#[inline]
+fn trace_cpu_col(layout: &Rv32TraceCcsLayout, trace_col: usize) -> usize {
+    layout.cell(trace_col, 0)
+}
+
+#[inline]
+fn trace_zero_col(layout: &Rv32TraceCcsLayout) -> usize {
+    // Tier 2.1 scope lock enforces op_amo == 0 on all rows.
+    trace_cpu_col(layout, layout.trace.op_amo)
+}
+
+fn trace_shout_cpu_binding(layout: &Rv32TraceCcsLayout, table_id: u32) -> Result<ShoutCpuBinding, String> {
+    let has_lookup = match table_id {
+        AND_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[0]),
+        XOR_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[1]),
+        OR_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[2]),
+        ADD_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[3]),
+        SUB_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[4]),
+        SLT_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[5]),
+        SLTU_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[6]),
+        SLL_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[7]),
+        SRL_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[8]),
+        SRA_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[9]),
+        EQ_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[10]),
+        NEQ_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[11]),
+        _ => return Err(format!("RV32 trace shared bus: unsupported shout table_id={table_id}")),
+    };
+    Ok(ShoutCpuBinding {
+        has_lookup,
+        addr: None,
+        val: trace_cpu_col(layout, layout.trace.shout_val),
+    })
+}
+
+#[inline]
+fn trace_disabled_twist_binding(layout: &Rv32TraceCcsLayout) -> TwistCpuBinding {
+    let zero = trace_zero_col(layout);
+    TwistCpuBinding {
+        has_read: zero,
+        has_write: zero,
+        read_addr: zero,
+        write_addr: zero,
+        rv: zero,
+        wv: zero,
+        inc: None,
+    }
+}
+
+#[inline]
+fn trace_twist_primary_binding(layout: &Rv32TraceCcsLayout, mem_id: u32) -> TwistCpuBinding {
+    let active = trace_cpu_col(layout, layout.trace.active);
+    let zero = trace_zero_col(layout);
+    if mem_id == RAM_ID.0 {
+        TwistCpuBinding {
+            has_read: trace_cpu_col(layout, layout.trace.ram_has_read),
+            has_write: trace_cpu_col(layout, layout.trace.ram_has_write),
+            read_addr: trace_cpu_col(layout, layout.trace.ram_addr),
+            write_addr: trace_cpu_col(layout, layout.trace.ram_addr),
+            rv: trace_cpu_col(layout, layout.trace.ram_rv),
+            wv: trace_cpu_col(layout, layout.trace.ram_wv),
+            inc: None,
+        }
+    } else if mem_id == PROG_ID.0 {
+        TwistCpuBinding {
+            has_read: active,
+            has_write: zero,
+            read_addr: trace_cpu_col(layout, layout.trace.prog_addr),
+            write_addr: zero,
+            rv: trace_cpu_col(layout, layout.trace.prog_value),
+            wv: zero,
+            inc: None,
+        }
+    } else if mem_id == REG_ID.0 {
+        TwistCpuBinding {
+            has_read: active,
+            has_write: trace_cpu_col(layout, layout.trace.rd_has_write),
+            read_addr: trace_cpu_col(layout, layout.trace.rs1_addr),
+            write_addr: trace_cpu_col(layout, layout.trace.rd_addr),
+            rv: trace_cpu_col(layout, layout.trace.rs1_val),
+            wv: trace_cpu_col(layout, layout.trace.rd_val),
+            inc: None,
+        }
+    } else {
+        trace_disabled_twist_binding(layout)
+    }
+}
+
+/// Shared CPU-bus bindings for the RV32 trace-wiring step circuit.
+pub fn rv32_trace_shared_cpu_bus_config(
+    layout: &Rv32TraceCcsLayout,
+    shout_table_ids: &[u32],
+    mem_layouts: HashMap<u32, PlainMemLayout>,
+    initial_mem: HashMap<(u32, u64), F>,
+) -> Result<SharedCpuBusConfig<F>, String> {
+    let mut table_ids = shout_table_ids.to_vec();
+    table_ids.sort_unstable();
+    table_ids.dedup();
+
+    let mut shout_cpu = HashMap::new();
+    for table_id in table_ids {
+        shout_cpu.insert(table_id, vec![trace_shout_cpu_binding(layout, table_id)?]);
+    }
+
+    let mut mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
+    mem_ids.sort_unstable();
+    let mut twist_cpu = HashMap::new();
+    for mem_id in mem_ids {
+        let lanes = mem_layouts
+            .get(&mem_id)
+            .map(|l| l.lanes.max(1))
+            .ok_or_else(|| format!("RV32 trace shared bus: missing mem layout for mem_id={mem_id}"))?;
+        if mem_id == REG_ID.0 {
+            if lanes < 2 {
+                return Err(format!(
+                    "RV32 trace shared bus: REG_ID requires lanes>=2 (got lanes={lanes})"
+                ));
+            }
+            let mut bindings = Vec::with_capacity(lanes);
+            bindings.push(trace_twist_primary_binding(layout, mem_id));
+            let zero = trace_zero_col(layout);
+            bindings.push(TwistCpuBinding {
+                has_read: trace_cpu_col(layout, layout.trace.active),
+                has_write: zero,
+                read_addr: trace_cpu_col(layout, layout.trace.rs2_addr),
+                write_addr: zero,
+                rv: trace_cpu_col(layout, layout.trace.rs2_val),
+                wv: zero,
+                inc: None,
+            });
+            let disabled = trace_disabled_twist_binding(layout);
+            for _ in 2..lanes {
+                bindings.push(disabled.clone());
+            }
+            twist_cpu.insert(mem_id, bindings);
+        } else {
+            let primary = trace_twist_primary_binding(layout, mem_id);
+            let disabled = trace_disabled_twist_binding(layout);
+            let mut bindings = Vec::with_capacity(lanes);
+            bindings.push(primary);
+            for _ in 1..lanes {
+                bindings.push(disabled.clone());
+            }
+            twist_cpu.insert(mem_id, bindings);
+        }
+    }
+
+    Ok(SharedCpuBusConfig {
+        mem_layouts,
+        initial_mem,
+        const_one_col: layout.const_one,
+        shout_cpu,
+        twist_cpu,
+    })
+}
+
+/// Return `(bus_region_len, reserved_rows)` required by trace shared-bus mode.
+pub fn rv32_trace_shared_bus_requirements(
+    layout: &Rv32TraceCcsLayout,
+    shout_table_ids: &[u32],
+    mem_layouts: &HashMap<u32, PlainMemLayout>,
+) -> Result<(usize, usize), String> {
+    let mut table_ids = shout_table_ids.to_vec();
+    table_ids.sort_unstable();
+    table_ids.dedup();
+    for &table_id in &table_ids {
+        let _ = trace_shout_cpu_binding(layout, table_id)?;
+    }
+
+    let mut mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
+    mem_ids.sort_unstable();
+
+    let shout_cols: usize = table_ids
+        .iter()
+        .map(|_| 2 * RV32_XLEN + 2)
+        .sum();
+    let mut twist_cols = 0usize;
+    let mut twist_shapes = Vec::with_capacity(mem_ids.len());
+    for mem_id in &mem_ids {
+        let mem_layout = mem_layouts
+            .get(mem_id)
+            .ok_or_else(|| format!("RV32 trace shared bus: missing mem layout for mem_id={mem_id}"))?;
+        if mem_layout.n_side == 0 || !mem_layout.n_side.is_power_of_two() {
+            return Err(format!(
+                "RV32 trace shared bus: mem_id={mem_id} n_side={} must be power-of-two",
+                mem_layout.n_side
+            ));
+        }
+        let ell = mem_layout.n_side.trailing_zeros() as usize;
+        let ell_addr = mem_layout.d * ell;
+        let lanes = mem_layout.lanes.max(1);
+        if *mem_id == REG_ID.0 && lanes < 2 {
+            return Err(format!(
+                "RV32 trace shared bus: REG_ID requires lanes>=2 (got lanes={lanes})"
+            ));
+        }
+        twist_cols = twist_cols
+            .checked_add((2 * ell_addr + 5) * lanes)
+            .ok_or_else(|| "RV32 trace shared bus: twist bus column overflow".to_string())?;
+        twist_shapes.push((ell_addr, lanes));
+    }
+    let bus_cols = shout_cols
+        .checked_add(twist_cols)
+        .ok_or_else(|| "RV32 trace shared bus: bus column overflow".to_string())?;
+    let bus_region_len = bus_cols
+        .checked_mul(layout.t)
+        .ok_or_else(|| "RV32 trace shared bus: bus region overflow".to_string())?;
+    let m_total = layout
+        .m
+        .checked_add(bus_region_len)
+        .ok_or_else(|| "RV32 trace shared bus: total m overflow".to_string())?;
+
+    let bus = crate::cpu::bus_layout::build_bus_layout_for_instances_with_shout_and_twist_lanes(
+        m_total,
+        layout.m_in,
+        layout.t,
+        table_ids.iter().map(|_| (2 * RV32_XLEN, 1usize)),
+        twist_shapes.iter().copied(),
+    )?;
+
+    let mut builder = CpuConstraintBuilder::<F>::new(m_total, m_total, layout.const_one);
+
+    for (i, &table_id) in table_ids.iter().enumerate() {
+        let cpu = trace_shout_cpu_binding(layout, table_id)?;
+        builder.add_shout_instance_bound(&bus, &bus.shout_cols[i].lanes[0], &cpu);
+    }
+    for (i, &mem_id) in mem_ids.iter().enumerate() {
+        let inst = &bus.twist_cols[i];
+        if inst.lanes.is_empty() {
+            continue;
+        }
+        if mem_id == REG_ID.0 {
+            let lane0 = trace_twist_primary_binding(layout, mem_id);
+            builder.add_twist_instance_bound(&bus, &inst.lanes[0], &lane0);
+            let zero = trace_zero_col(layout);
+            let lane1 = TwistCpuBinding {
+                has_read: trace_cpu_col(layout, layout.trace.active),
+                has_write: zero,
+                read_addr: trace_cpu_col(layout, layout.trace.rs2_addr),
+                write_addr: zero,
+                rv: trace_cpu_col(layout, layout.trace.rs2_val),
+                wv: zero,
+                inc: None,
+            };
+            if inst.lanes.len() >= 2 {
+                builder.add_twist_instance_bound(&bus, &inst.lanes[1], &lane1);
+            }
+            if inst.lanes.len() > 2 {
+                let disabled = trace_disabled_twist_binding(layout);
+                for lane_cols in &inst.lanes[2..] {
+                    builder.add_twist_instance_bound(&bus, lane_cols, &disabled);
+                }
+            }
+        } else {
+            let lane0 = trace_twist_primary_binding(layout, mem_id);
+            builder.add_twist_instance_bound(&bus, &inst.lanes[0], &lane0);
+            if inst.lanes.len() > 1 {
+                let disabled = trace_disabled_twist_binding(layout);
+                for lane_cols in &inst.lanes[1..] {
+                    builder.add_twist_instance_bound(&bus, lane_cols, &disabled);
+                }
+            }
+        }
+    }
+
+    Ok((bus_region_len, builder.constraints().len()))
 }
 
 pub(super) fn injected_bus_constraints_len(layout: &Rv32B1Layout, table_ids: &[u32], mem_ids: &[u32]) -> usize {

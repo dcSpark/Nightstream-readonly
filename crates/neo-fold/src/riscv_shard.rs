@@ -668,6 +668,8 @@ impl Rv32B1 {
         let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, chunk_size)
             .map_err(|e| PiCcsError::InvalidInput(format!("build_rv32_b1_step_ccs failed: {e}")))?;
 
+        let phases_start = time_now();
+
         // Session + Ajtai committer + params (auto-picked for this CCS).
         let mut session = FoldingSession::<AjtaiSModule>::new_ajtai(self.mode.clone(), &ccs_base)?;
         let params = session.params().clone();
@@ -702,6 +704,7 @@ impl Rv32B1 {
         session.set_step_linking(rv32_b1_step_linking_config(&layout));
 
         // Execute + collect step bundles (and aux for output binding).
+        let build_start = time_now();
         session.execute_shard_shared_cpu_bus(
             vm,
             twist,
@@ -715,6 +718,7 @@ impl Rv32B1 {
             &initial_mem,
             &cpu,
         )?;
+        let build_commit_duration = elapsed_duration(build_start);
         if using_default_max_steps {
             let aux = session
                 .shared_bus_aux()
@@ -729,6 +733,10 @@ impl Rv32B1 {
         // Enforce that the *statement* initial memory matches chunk 0's public MemInit.
         let steps_public = session.steps_public();
         rv32_b1_enforce_chunk0_mem_init_matches_statement(&mem_layouts, &initial_mem, &steps_public)?;
+        let setup_plus_build_duration = elapsed_duration(phases_start);
+        let setup_duration = setup_plus_build_duration
+            .checked_sub(build_commit_duration)
+            .unwrap_or(Duration::ZERO);
 
         let ccs = cpu.ccs.clone();
 
@@ -923,6 +931,11 @@ impl Rv32B1 {
             (proof, Some(ob_cfg))
         };
         let prove_duration = elapsed_duration(prove_start);
+        let prove_phase_durations = Rv32B1ProvePhaseDurations {
+            setup: setup_duration,
+            build_commit: build_commit_duration,
+            fold_and_prove: prove_duration,
+        };
 
         let proof_bundle = Rv32B1ProofBundle {
             main,
@@ -943,6 +956,7 @@ impl Rv32B1 {
             output_binding_cfg,
             proof_bundle,
             prove_duration,
+            prove_phase_durations,
             verify_duration: None,
         })
     }
@@ -972,6 +986,13 @@ pub struct Rv32B1ProofBundle {
     pub rv32m: Option<Vec<Rv32B1Rv32mEventSidecarChunkProof>>,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Rv32B1ProvePhaseDurations {
+    pub setup: Duration,
+    pub build_commit: Duration,
+    pub fold_and_prove: Duration,
+}
+
 pub struct Rv32B1Run {
     program_base: u64,
     program_bytes: Vec<u8>,
@@ -984,6 +1005,7 @@ pub struct Rv32B1Run {
     output_binding_cfg: Option<OutputBindingConfig>,
     proof_bundle: Rv32B1ProofBundle,
     prove_duration: Duration,
+    prove_phase_durations: Rv32B1ProvePhaseDurations,
     verify_duration: Option<Duration>,
 }
 
@@ -1053,6 +1075,10 @@ impl Rv32B1Run {
         }
 
         Ok(trace)
+    }
+
+    pub fn prove_phase_durations(&self) -> Rv32B1ProvePhaseDurations {
+        self.prove_phase_durations
     }
 
     /// Build a padded-to-power-of-two RV32 execution table from the replayed trace.

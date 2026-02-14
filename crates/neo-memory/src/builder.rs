@@ -106,12 +106,42 @@ where
     Ok(bundles)
 }
 
-/// Like `build_shard_witness_shared_cpu_bus`, but also returns auxiliary outputs useful for
-/// higher-level APIs (e.g. output binding that needs the terminal Twist memory state).
-pub fn build_shard_witness_shared_cpu_bus_with_aux<V, Cmt, K, A, Tw, Sh>(
-    vm: V,
-    twist: Tw,
-    shout: Sh,
+/// Build shard witness bundles for **shared CPU bus** mode from an already-executed VM trace.
+///
+/// This is equivalent to `build_shard_witness_shared_cpu_bus(...)`, but avoids re-running the VM
+/// when the caller already has a `VmTrace` available.
+pub fn build_shard_witness_shared_cpu_bus_from_trace<Cmt, K, A>(
+    trace: &VmTrace<u64, u64>,
+    max_steps: usize,
+    chunk_size: usize,
+    mem_layouts: &HashMap<u32, PlainMemLayout>,
+    lut_tables: &HashMap<u32, LutTable<Goldilocks>>,
+    lut_table_specs: &HashMap<u32, LutTableSpec>,
+    lut_lanes: &HashMap<u32, usize>,
+    initial_mem: &HashMap<(u32, u64), Goldilocks>,
+    cpu_arith: &A,
+) -> Result<Vec<StepWitnessBundle<Cmt, Goldilocks, K>>, ShardBuildError>
+where
+    A: CpuArithmetization<Goldilocks, Cmt>,
+{
+    let (bundles, _aux) = build_shard_witness_shared_cpu_bus_from_trace_with_aux(
+        trace,
+        max_steps,
+        chunk_size,
+        mem_layouts,
+        lut_tables,
+        lut_table_specs,
+        lut_lanes,
+        initial_mem,
+        cpu_arith,
+    )?;
+    Ok(bundles)
+}
+
+/// Like `build_shard_witness_shared_cpu_bus_from_trace`, but also returns auxiliary outputs useful
+/// for higher-level APIs (e.g. output binding that needs terminal Twist memory states).
+pub fn build_shard_witness_shared_cpu_bus_from_trace_with_aux<Cmt, K, A>(
+    trace: &VmTrace<u64, u64>,
     max_steps: usize,
     chunk_size: usize,
     mem_layouts: &HashMap<u32, PlainMemLayout>,
@@ -122,32 +152,18 @@ pub fn build_shard_witness_shared_cpu_bus_with_aux<V, Cmt, K, A, Tw, Sh>(
     cpu_arith: &A,
 ) -> Result<(Vec<StepWitnessBundle<Cmt, Goldilocks, K>>, ShardWitnessAux), ShardBuildError>
 where
-    V: neo_vm_trace::VmCpu<u64, u64>,
-    Tw: neo_vm_trace::Twist<u64, u64>,
-    Sh: neo_vm_trace::Shout<u64>,
     A: CpuArithmetization<Goldilocks, Cmt>,
 {
     if chunk_size == 0 {
         return Err(ShardBuildError::InvalidChunkSize("chunk_size must be >= 1".into()));
     }
-
-    // 1) Run VM and collect the executed trace for this shard (up to `max_steps`).
-    //
-    // NOTE: We intentionally do **not** pad out to `max_steps` here. Padding is handled at the
-    // per-chunk level by the CPU arithmetization via `is_active`, so the last chunk may be partial.
-    //
-    // This keeps the proof size proportional to the executed trace length instead of the caller's
-    // safety bound.
-    let trace = neo_vm_trace::trace_program(vm, twist, shout, max_steps)
-        .map_err(|e| ShardBuildError::VmError(e.to_string()))?;
-    let original_len = trace.steps.len();
-    let did_halt = trace.did_halt();
-    debug_assert!(
-        original_len <= max_steps,
-        "trace_program must not exceed max_steps (got {}, max_steps={})",
-        original_len,
-        max_steps
-    );
+    if trace.steps.len() > max_steps {
+        return Err(ShardBuildError::InvalidChunkSize(format!(
+            "trace length {} exceeds max_steps {}",
+            trace.steps.len(),
+            max_steps
+        )));
+    }
 
     // Shared-bus mode does not support "silent dropping" of trace events: if the trace contains
     // Twist/Shout events, the corresponding instance metadata must be provided so the prover
@@ -178,6 +194,8 @@ where
         }
     }
 
+    let original_len = trace.steps.len();
+    let did_halt = trace.did_halt();
     let steps_len = trace.steps.len();
     let chunks_len = steps_len.div_ceil(chunk_size);
 
@@ -194,7 +212,7 @@ where
 
     // 3) CPU arithmetization chunks.
     let mcss = cpu_arith
-        .build_ccs_chunks(&trace, chunk_size)
+        .build_ccs_chunks(trace, chunk_size)
         .map_err(|e| ShardBuildError::CcsError(e.to_string()))?;
     if mcss.len() != chunks_len {
         return Err(ShardBuildError::CcsError(format!(
@@ -381,4 +399,51 @@ where
         final_mem_states: mem_states,
     };
     Ok((step_bundles, aux))
+}
+
+/// Like `build_shard_witness_shared_cpu_bus`, but also returns auxiliary outputs useful for
+/// higher-level APIs (e.g. output binding that needs the terminal Twist memory state).
+pub fn build_shard_witness_shared_cpu_bus_with_aux<V, Cmt, K, A, Tw, Sh>(
+    vm: V,
+    twist: Tw,
+    shout: Sh,
+    max_steps: usize,
+    chunk_size: usize,
+    mem_layouts: &HashMap<u32, PlainMemLayout>,
+    lut_tables: &HashMap<u32, LutTable<Goldilocks>>,
+    lut_table_specs: &HashMap<u32, LutTableSpec>,
+    lut_lanes: &HashMap<u32, usize>,
+    initial_mem: &HashMap<(u32, u64), Goldilocks>,
+    cpu_arith: &A,
+) -> Result<(Vec<StepWitnessBundle<Cmt, Goldilocks, K>>, ShardWitnessAux), ShardBuildError>
+where
+    V: neo_vm_trace::VmCpu<u64, u64>,
+    Tw: neo_vm_trace::Twist<u64, u64>,
+    Sh: neo_vm_trace::Shout<u64>,
+    A: CpuArithmetization<Goldilocks, Cmt>,
+{
+    if chunk_size == 0 {
+        return Err(ShardBuildError::InvalidChunkSize("chunk_size must be >= 1".into()));
+    }
+
+    // 1) Run VM and collect the executed trace for this shard (up to `max_steps`).
+    //
+    // NOTE: We intentionally do **not** pad out to `max_steps` here. Padding is handled at the
+    // per-chunk level by the CPU arithmetization via `is_active`, so the last chunk may be partial.
+    //
+    // This keeps the proof size proportional to the executed trace length instead of the caller's
+    // safety bound.
+    let trace = neo_vm_trace::trace_program(vm, twist, shout, max_steps)
+        .map_err(|e| ShardBuildError::VmError(e.to_string()))?;
+    build_shard_witness_shared_cpu_bus_from_trace_with_aux(
+        &trace,
+        max_steps,
+        chunk_size,
+        mem_layouts,
+        lut_tables,
+        lut_table_specs,
+        lut_lanes,
+        initial_mem,
+        cpu_arith,
+    )
 }

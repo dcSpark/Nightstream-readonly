@@ -350,6 +350,11 @@ where
 
     // Precompute χ_r(time_index(j)) weights for the bus time rows.
     let time_weights = precompute_contiguous_time_weights(&me.r, bus.time_index(0), bus.chunk_size, n_pad);
+    let weighted_rows: Vec<(usize, K)> = time_weights
+        .into_iter()
+        .enumerate()
+        .filter_map(|(j, w)| (w != K::ZERO).then_some((j, w)))
+        .collect();
 
     // Base-b powers for recomposition.
     let bK = K::from(F::from_u64(params.b as u64));
@@ -363,23 +368,19 @@ where
     // Append bus openings in canonical col_id order so `bus_y_base = y_scalars.len() - bus_cols`
     // remains valid.
     for col_id in 0..bus.bus_cols {
+        let z_indices: Vec<usize> = weighted_rows
+            .iter()
+            .map(|(j, _)| bus.bus_cell(col_id, *j))
+            .collect();
         let mut y_row = vec![K::ZERO; y_pad];
-        for rho in 0..d {
-            let mut acc = K::ZERO;
-            for j in 0..bus.chunk_size {
-                let w = time_weights[j];
-                if w == K::ZERO {
-                    continue;
-                }
-                let z_idx = bus.bus_cell(col_id, j);
-                acc += w * K::from(Z[(rho, z_idx)]);
-            }
-            y_row[rho] = acc;
-        }
-
         let mut y_scalar = K::ZERO;
         for rho in 0..d {
-            y_scalar += y_row[rho] * pow_b[rho];
+            let mut acc = K::ZERO;
+            for ((_, w), &z_idx) in weighted_rows.iter().zip(z_indices.iter()) {
+                acc += *w * K::from(Z[(rho, z_idx)]);
+            }
+            y_row[rho] = acc;
+            y_scalar += acc * pow_b[rho];
         }
 
         me.y.push(y_row);
@@ -496,6 +497,12 @@ where
         }
         out
     };
+    let weighted_rows: Vec<(usize, K)> = js
+        .iter()
+        .copied()
+        .zip(time_weights.iter().copied())
+        .filter_map(|(j, w)| (w != K::ZERO).then_some((j, w)))
+        .collect();
 
     // Base-b powers for recomposition.
     let bK = K::from(F::from_u64(params.b as u64));
@@ -509,22 +516,19 @@ where
     // Append bus openings in canonical col_id order so `bus_y_base = y_scalars.len() - bus_cols`
     // remains valid.
     for col_id in 0..bus.bus_cols {
+        let z_indices: Vec<usize> = weighted_rows
+            .iter()
+            .map(|(j, _)| bus.bus_cell(col_id, *j))
+            .collect();
         let mut y_row = vec![K::ZERO; y_pad];
+        let mut y_scalar = K::ZERO;
         for rho in 0..d {
             let mut acc = K::ZERO;
-            for (w, &j) in time_weights.iter().zip(js.iter()) {
-                if *w == K::ZERO {
-                    continue;
-                }
-                let z_idx = bus.bus_cell(col_id, j);
+            for ((_, w), &z_idx) in weighted_rows.iter().zip(z_indices.iter()) {
                 acc += *w * K::from(Z[(rho, z_idx)]);
             }
             y_row[rho] = acc;
-        }
-
-        let mut y_scalar = K::ZERO;
-        for rho in 0..d {
-            y_scalar += y_row[rho] * pow_b[rho];
+            y_scalar += acc * pow_b[rho];
         }
 
         me.y.push(y_row);
@@ -638,6 +642,11 @@ where
 
     // Precompute χ_r(m_in + j) weights for the time rows.
     let time_weights = precompute_contiguous_time_weights(&me.r, m_in, t_len, n_pad);
+    let weighted_rows: Vec<(usize, K)> = time_weights
+        .into_iter()
+        .enumerate()
+        .filter_map(|(j, w)| (w != K::ZERO).then_some((j, w)))
+        .collect();
 
     // Base-b powers for recomposition.
     let bK = K::from(F::from_u64(params.b as u64));
@@ -652,33 +661,28 @@ where
         let col_offset = col_id
             .checked_mul(t_len)
             .ok_or_else(|| PiCcsError::InvalidInput("trace col_id * t_len overflow".into()))?;
-
-        let mut y_row = vec![K::ZERO; y_pad];
-        for rho in 0..d {
-            let mut acc = K::ZERO;
-            for j in 0..t_len {
-                let w = time_weights[j];
-                if w == K::ZERO {
-                    continue;
-                }
-                let z_idx = col_base
-                    .checked_add(col_offset)
-                    .and_then(|x| x.checked_add(j))
-                    .ok_or_else(|| PiCcsError::InvalidInput("trace z index overflow".into()))?;
-                if z_idx >= Z.cols() {
-                    return Err(PiCcsError::InvalidInput(format!(
-                        "trace openings: z_idx out of range (z_idx={z_idx}, m={})",
-                        Z.cols()
-                    )));
-                }
-                acc += w * K::from(Z[(rho, z_idx)]);
-            }
-            y_row[rho] = acc;
+        let col_start = col_base
+            .checked_add(col_offset)
+            .ok_or_else(|| PiCcsError::InvalidInput("trace col_base + col_offset overflow".into()))?;
+        let col_end = col_start
+            .checked_add(t_len - 1)
+            .ok_or_else(|| PiCcsError::InvalidInput("trace col_end overflow".into()))?;
+        if col_end >= Z.cols() {
+            return Err(PiCcsError::InvalidInput(format!(
+                "trace openings: column span out of range (col_start={col_start}, col_end={col_end}, m={})",
+                Z.cols()
+            )));
         }
 
+        let mut y_row = vec![K::ZERO; y_pad];
         let mut y_scalar = K::ZERO;
         for rho in 0..d {
-            y_scalar += y_row[rho] * pow_b[rho];
+            let mut acc = K::ZERO;
+            for (j, w) in weighted_rows.iter() {
+                acc += *w * K::from(Z[(rho, col_start + *j)]);
+            }
+            y_row[rho] = acc;
+            y_scalar += acc * pow_b[rho];
         }
 
         me.y.push(y_row);
@@ -808,6 +812,10 @@ where
         }
         out
     };
+    let weighted_rows: Vec<(usize, K)> = time_weights
+        .into_iter()
+        .filter_map(|(j, w)| (w != K::ZERO).then_some((j, w)))
+        .collect();
 
     // Base-b powers for recomposition.
     let bK = K::from(F::from_u64(params.b as u64));
@@ -822,32 +830,28 @@ where
         let col_offset = col_id
             .checked_mul(t_len)
             .ok_or_else(|| PiCcsError::InvalidInput("trace col_id * t_len overflow".into()))?;
-
-        let mut y_row = vec![K::ZERO; y_pad];
-        for rho in 0..d {
-            let mut acc = K::ZERO;
-            for &(j, w) in time_weights.iter() {
-                if w == K::ZERO {
-                    continue;
-                }
-                let z_idx = col_base
-                    .checked_add(col_offset)
-                    .and_then(|x| x.checked_add(j))
-                    .ok_or_else(|| PiCcsError::InvalidInput("trace z index overflow".into()))?;
-                if z_idx >= Z.cols() {
-                    return Err(PiCcsError::InvalidInput(format!(
-                        "trace openings: z_idx out of range (z_idx={z_idx}, m={})",
-                        Z.cols()
-                    )));
-                }
-                acc += w * K::from(Z[(rho, z_idx)]);
-            }
-            y_row[rho] = acc;
+        let col_start = col_base
+            .checked_add(col_offset)
+            .ok_or_else(|| PiCcsError::InvalidInput("trace col_base + col_offset overflow".into()))?;
+        let col_end = col_start
+            .checked_add(t_len - 1)
+            .ok_or_else(|| PiCcsError::InvalidInput("trace col_end overflow".into()))?;
+        if col_end >= Z.cols() {
+            return Err(PiCcsError::InvalidInput(format!(
+                "trace openings: column span out of range (col_start={col_start}, col_end={col_end}, m={})",
+                Z.cols()
+            )));
         }
 
+        let mut y_row = vec![K::ZERO; y_pad];
         let mut y_scalar = K::ZERO;
         for rho in 0..d {
-            y_scalar += y_row[rho] * pow_b[rho];
+            let mut acc = K::ZERO;
+            for (j, w) in weighted_rows.iter() {
+                acc += *w * K::from(Z[(rho, col_start + *j)]);
+            }
+            y_row[rho] = acc;
+            y_scalar += acc * pow_b[rho];
         }
 
         me.y.push(y_row);

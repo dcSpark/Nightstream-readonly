@@ -337,6 +337,43 @@ fn push_tier21_value_semantics(
         true,
         vec![(tr(l.shout_table_id, i), F::ONE)],
     ));
+    cons.push(Constraint::terms(
+        one,
+        false,
+        vec![
+            (tr(l.shout_table_has_lookup[0], i), F::ONE),
+            (tr(l.shout_table_has_lookup[1], i), F::ONE),
+            (tr(l.shout_table_has_lookup[2], i), F::ONE),
+            (tr(l.shout_table_has_lookup[3], i), F::ONE),
+            (tr(l.shout_table_has_lookup[4], i), F::ONE),
+            (tr(l.shout_table_has_lookup[5], i), F::ONE),
+            (tr(l.shout_table_has_lookup[6], i), F::ONE),
+            (tr(l.shout_table_has_lookup[7], i), F::ONE),
+            (tr(l.shout_table_has_lookup[8], i), F::ONE),
+            (tr(l.shout_table_has_lookup[9], i), F::ONE),
+            (tr(l.shout_table_has_lookup[10], i), F::ONE),
+            (tr(l.shout_table_has_lookup[11], i), F::ONE),
+            (shout_has_lookup, -F::ONE),
+        ],
+    ));
+    cons.push(Constraint::terms(
+        one,
+        false,
+        vec![
+            (tr(l.shout_table_id, i), F::ONE),
+            (tr(l.shout_table_has_lookup[1], i), -F::from_u64(1)),
+            (tr(l.shout_table_has_lookup[2], i), -F::from_u64(2)),
+            (tr(l.shout_table_has_lookup[3], i), -F::from_u64(3)),
+            (tr(l.shout_table_has_lookup[4], i), -F::from_u64(4)),
+            (tr(l.shout_table_has_lookup[5], i), -F::from_u64(5)),
+            (tr(l.shout_table_has_lookup[6], i), -F::from_u64(6)),
+            (tr(l.shout_table_has_lookup[7], i), -F::from_u64(7)),
+            (tr(l.shout_table_has_lookup[8], i), -F::from_u64(8)),
+            (tr(l.shout_table_has_lookup[9], i), -F::from_u64(9)),
+            (tr(l.shout_table_has_lookup[10], i), -F::from_u64(10)),
+            (tr(l.shout_table_has_lookup[11], i), -F::from_u64(11)),
+        ],
+    ));
 
     // ALU lookup binding.
     cons.push(Constraint::terms_or(
@@ -498,6 +535,13 @@ fn push_tier21_value_semantics(
 
 /// Build the base trace CCS (wiring invariants + partial ISA semantics guards).
 pub fn build_rv32_trace_wiring_ccs(layout: &Rv32TraceCcsLayout) -> Result<CcsStructure<F>, String> {
+    build_rv32_trace_wiring_ccs_with_reserved_rows(layout, 0)
+}
+
+pub fn build_rv32_trace_wiring_ccs_with_reserved_rows(
+    layout: &Rv32TraceCcsLayout,
+    reserved_rows: usize,
+) -> Result<CcsStructure<F>, String> {
     let one = layout.const_one;
     let t = layout.t;
     let tr = |c: usize, i: usize| -> usize { layout.cell(c, i) };
@@ -578,6 +622,9 @@ pub fn build_rv32_trace_wiring_ccs(layout: &Rv32TraceCcsLayout) -> Result<CcsStr
         cons.push(bool01(ram_has_read));
         cons.push(bool01(ram_has_write));
         cons.push(bool01(shout_has_lookup));
+        for &f in &l.shout_table_has_lookup {
+            cons.push(bool01(tr(f, i)));
+        }
         for &b in &l.rd_bit {
             cons.push(bool01(tr(b, i)));
         }
@@ -675,6 +722,18 @@ pub fn build_rv32_trace_wiring_ccs(layout: &Rv32TraceCcsLayout) -> Result<CcsStr
             l.shout_lhs,
             l.shout_rhs,
             l.shout_table_id,
+            l.shout_table_has_lookup[0],
+            l.shout_table_has_lookup[1],
+            l.shout_table_has_lookup[2],
+            l.shout_table_has_lookup[3],
+            l.shout_table_has_lookup[4],
+            l.shout_table_has_lookup[5],
+            l.shout_table_has_lookup[6],
+            l.shout_table_has_lookup[7],
+            l.shout_table_has_lookup[8],
+            l.shout_table_has_lookup[9],
+            l.shout_table_has_lookup[10],
+            l.shout_table_has_lookup[11],
             l.is_lb,
             l.is_lbu,
             l.is_lh,
@@ -1539,5 +1598,9 @@ pub fn build_rv32_trace_wiring_ccs(layout: &Rv32TraceCcsLayout) -> Result<CcsStr
         ));
     }
 
-    build_r1cs_ccs(&cons, cons.len(), layout.m, layout.const_one)
+    let n = cons
+        .len()
+        .checked_add(reserved_rows)
+        .ok_or_else(|| "RV32 trace CCS: n overflow".to_string())?;
+    build_r1cs_ccs(&cons, n, layout.m, layout.const_one)
 }

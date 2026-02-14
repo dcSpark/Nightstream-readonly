@@ -5,19 +5,14 @@ use neo_fold::riscv_trace_shard::Rv32TraceWiring;
 use neo_memory::riscv::lookups::{encode_program, BranchCondition, RiscvInstruction, RiscvOpcode};
 
 #[test]
-#[ignore = "perf-style test: run with `cargo test -p neo-fold --release --test perf -- --ignored --nocapture compare_single_addi_metrics_nightstream_only`"]
-fn compare_single_addi_metrics_nightstream_only() {
-    let instruction_label = "ADDI x1,x0,1";
+#[ignore = "perf-style test: run with `cargo test -p neo-fold --release --test perf -- --ignored --nocapture compare_single_mixed_metrics_nightstream_only`"]
+fn compare_single_mixed_metrics_nightstream_only() {
+    let instruction_label = "Mixed sequence (ADD/AND/OR/XOR/SLT/SLTU/SLL/SRL/SRA/BNE)";
 
-    let ns_program = vec![RiscvInstruction::IAlu {
-        op: RiscvOpcode::Add,
-        rd: 1,
-        rs1: 0,
-        imm: 1,
-    }];
+    let ns_program = mixed_instruction_sequence();
     let ns_program_bytes = encode_program(&ns_program);
-    let ns_chunk_size = 1usize;
-    let ns_max_steps = 1usize;
+    let ns_chunk_size = ns_program.len();
+    let ns_max_steps = ns_program.len();
     let ns_ram_bytes = 4usize;
 
     let ns_total_start = Instant::now();
@@ -201,22 +196,15 @@ fn mixed_instruction_sequence() -> Vec<RiscvInstruction> {
 }
 
 #[test]
-#[ignore = "perf-style test: NS_DEBUG_N=256 cargo test -p neo-fold --release --test perf -- --ignored --nocapture debug_trace_single_n_addi_only"]
-fn debug_trace_single_n_addi_only() {
+#[ignore = "perf-style test: NS_DEBUG_N=256 cargo test -p neo-fold --release --test perf -- --ignored --nocapture debug_trace_single_n_mixed_ops"]
+fn debug_trace_single_n_mixed_ops() {
     let n = env_usize("NS_DEBUG_N", 256);
     let chunk_rows = env_usize("NS_TRACE_CHUNK_ROWS", n + 1);
     assert!(n > 0);
     assert!(chunk_rows > 0);
 
-    let mut program = vec![
-        RiscvInstruction::IAlu {
-            op: RiscvOpcode::Add,
-            rd: 1,
-            rs1: 1,
-            imm: 1,
-        };
-        n
-    ];
+    let base = mixed_instruction_sequence();
+    let mut program: Vec<RiscvInstruction> = (0..n).map(|i| base[i % base.len()].clone()).collect();
     program.push(RiscvInstruction::Halt);
     let program_bytes = encode_program(&program);
     let steps = n + 1;
@@ -254,20 +242,13 @@ fn debug_trace_single_n_addi_only() {
 }
 
 #[test]
-#[ignore = "perf-style test: NS_DEBUG_N=256 cargo test -p neo-fold --release --test perf -- --ignored --nocapture debug_chunked_single_n_addi_only"]
-fn debug_chunked_single_n_addi_only() {
+#[ignore = "perf-style test: NS_DEBUG_N=256 cargo test -p neo-fold --release --test perf -- --ignored --nocapture debug_chunked_single_n_mixed_ops"]
+fn debug_chunked_single_n_mixed_ops() {
     let n = env_usize("NS_DEBUG_N", 256);
     assert!(n > 0);
 
-    let mut program = vec![
-        RiscvInstruction::IAlu {
-            op: RiscvOpcode::Add,
-            rd: 1,
-            rs1: 1,
-            imm: 1,
-        };
-        n
-    ];
+    let base = mixed_instruction_sequence();
+    let mut program: Vec<RiscvInstruction> = (0..n).map(|i| base[i % base.len()].clone()).collect();
     program.push(RiscvInstruction::Halt);
     let program_bytes = encode_program(&program);
     let steps = n + 1;
@@ -284,9 +265,10 @@ fn debug_chunked_single_n_addi_only() {
     let verify_time = run.verify_duration().expect("chunked verify duration");
     let total_time = total_start.elapsed();
     let trace_len = run.riscv_trace_len().expect("trace len");
+    let phases = run.prove_phase_durations();
 
     println!(
-        "CHUNKED n={} ccs_n={} ccs_m={} n_p2={} m_p2={} trace_len={} folds={} prove={} verify={} total={}",
+        "CHUNKED n={} ccs_n={} ccs_m={} n_p2={} m_p2={} trace_len={} folds={} prove={} verify={} total={} phases(setup={}, build_commit={}, fold={})",
         n,
         run.ccs_num_constraints(),
         run.ccs_num_variables(),
@@ -297,6 +279,9 @@ fn debug_chunked_single_n_addi_only() {
         fmt_duration(prove_time),
         fmt_duration(verify_time),
         fmt_duration(total_time),
+        fmt_duration(phases.setup),
+        fmt_duration(phases.build_commit),
+        fmt_duration(phases.fold_and_prove),
     );
 }
 
@@ -323,6 +308,7 @@ fn debug_trace_vs_chunked_single_n_mixed_ops() {
         .prove()
         .expect("chunked prove (mixed)");
     let chunk_prove = chunk_run.prove_duration();
+    let chunk_phases = chunk_run.prove_phase_durations();
     chunk_run.verify().expect("chunked verify (mixed)");
     let chunk_verify = chunk_run
         .verify_duration()
@@ -341,19 +327,26 @@ fn debug_trace_vs_chunked_single_n_mixed_ops() {
             trace_run.verify().expect("trace verify (mixed)");
             let trace_verify = trace_run.verify_duration().expect("trace verify duration");
             let trace_total = trace_total_start.elapsed();
+            let trace_phases = trace_run.prove_phase_durations();
             println!(
-                "MIXED n={} TRACE(prove={}, verify={}, total={}, n_p2={}, m_p2={}) CHUNKED(prove={}, verify={}, total={}, n_p2={}, m_p2={}) ratio_prove={:.2}x",
+                "MIXED n={} TRACE(prove={}, verify={}, total={}, n_p2={}, m_p2={}, phases: setup={}, chunk_commit={}, fold={}) CHUNKED(prove={}, verify={}, total={}, n_p2={}, m_p2={}, phases: setup={}, build_commit={}, fold={}) ratio_prove={:.2}x",
                 n,
                 fmt_duration(trace_prove),
                 fmt_duration(trace_verify),
                 fmt_duration(trace_total),
                 trace_run.ccs_num_constraints().next_power_of_two(),
                 trace_run.ccs_num_variables().next_power_of_two(),
+                fmt_duration(trace_phases.setup),
+                fmt_duration(trace_phases.chunk_build_commit),
+                fmt_duration(trace_phases.fold_and_prove),
                 fmt_duration(chunk_prove),
                 fmt_duration(chunk_verify),
                 fmt_duration(chunk_total),
                 chunk_run.ccs_num_constraints().next_power_of_two(),
                 chunk_run.ccs_num_variables().next_power_of_two(),
+                fmt_duration(chunk_phases.setup),
+                fmt_duration(chunk_phases.build_commit),
+                fmt_duration(chunk_phases.fold_and_prove),
                 trace_prove.as_secs_f64() / chunk_prove.as_secs_f64(),
             );
         }
@@ -369,5 +362,146 @@ fn debug_trace_vs_chunked_single_n_mixed_ops() {
                 chunk_run.ccs_num_variables().next_power_of_two(),
             );
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PerfSample {
+    end_to_end: Duration,
+    prove: Duration,
+    verify: Duration,
+    setup: Duration,
+    build_commit: Duration,
+    fold: Duration,
+}
+
+fn median_duration(values: &[Duration]) -> Duration {
+    let mut nanos: Vec<u128> = values.iter().map(|d| d.as_nanos()).collect();
+    nanos.sort_unstable();
+    Duration::from_nanos(nanos[nanos.len() / 2] as u64)
+}
+
+fn spread_pct(values: &[Duration], median: Duration) -> f64 {
+    if values.is_empty() || median.is_zero() {
+        return 0.0;
+    }
+    let med = median.as_secs_f64();
+    let max_abs = values
+        .iter()
+        .map(|v| (v.as_secs_f64() - med).abs())
+        .fold(0.0f64, f64::max);
+    (max_abs / med) * 100.0
+}
+
+fn build_mixed_program(n: usize) -> Vec<RiscvInstruction> {
+    let base = mixed_instruction_sequence();
+    let mut program: Vec<RiscvInstruction> = (0..n).map(|i| base[i % base.len()].clone()).collect();
+    program.push(RiscvInstruction::Halt);
+    program
+}
+
+fn run_trace_sample(program: &[RiscvInstruction]) -> PerfSample {
+    let steps = program.len();
+    let program_bytes = encode_program(program);
+    let total_start = Instant::now();
+    let mut run = Rv32TraceWiring::from_rom(0, &program_bytes)
+        .min_trace_len(steps)
+        .max_steps(steps)
+        .chunk_rows(steps)
+        .prove()
+        .expect("trace prove");
+    let prove = run.prove_duration();
+    let phases = run.prove_phase_durations();
+    run.verify().expect("trace verify");
+    let verify = run.verify_duration().expect("trace verify duration");
+    PerfSample {
+        end_to_end: total_start.elapsed(),
+        prove,
+        verify,
+        setup: phases.setup,
+        build_commit: phases.chunk_build_commit,
+        fold: phases.fold_and_prove,
+    }
+}
+
+fn run_chunked_sample(program: &[RiscvInstruction]) -> PerfSample {
+    let steps = program.len();
+    let program_bytes = encode_program(program);
+    let total_start = Instant::now();
+    let mut run = Rv32B1::from_rom(0, &program_bytes)
+        .chunk_size(steps)
+        .ram_bytes(4)
+        .max_steps(steps)
+        .prove()
+        .expect("chunked prove");
+    let prove = run.prove_duration();
+    let phases = run.prove_phase_durations();
+    run.verify().expect("chunked verify");
+    let verify = run.verify_duration().expect("chunked verify duration");
+    PerfSample {
+        end_to_end: total_start.elapsed(),
+        prove,
+        verify,
+        setup: phases.setup,
+        build_commit: phases.build_commit,
+        fold: phases.fold_and_prove,
+    }
+}
+
+fn report_samples(label: &str, samples: &[PerfSample]) {
+    let end_vals: Vec<Duration> = samples.iter().map(|s| s.end_to_end).collect();
+    let prove_vals: Vec<Duration> = samples.iter().map(|s| s.prove).collect();
+    let verify_vals: Vec<Duration> = samples.iter().map(|s| s.verify).collect();
+    let setup_vals: Vec<Duration> = samples.iter().map(|s| s.setup).collect();
+    let build_vals: Vec<Duration> = samples.iter().map(|s| s.build_commit).collect();
+    let fold_vals: Vec<Duration> = samples.iter().map(|s| s.fold).collect();
+    let prove_window_vals: Vec<Duration> = samples
+        .iter()
+        .map(|s| s.setup + s.build_commit + s.fold)
+        .collect();
+
+    let end_med = median_duration(&end_vals);
+    let prove_med = median_duration(&prove_vals);
+    let verify_med = median_duration(&verify_vals);
+    let setup_med = median_duration(&setup_vals);
+    let build_med = median_duration(&build_vals);
+    let fold_med = median_duration(&fold_vals);
+    let prove_window_med = median_duration(&prove_window_vals);
+
+    println!(
+        "{}: median(end={}, prove_api={}, prove_window={}, verify={}, setup={}, build_commit={}, fold={}) spread(end={:.2}%, prove_window={:.2}%, fold={:.2}%)",
+        label,
+        fmt_duration(end_med),
+        fmt_duration(prove_med),
+        fmt_duration(prove_window_med),
+        fmt_duration(verify_med),
+        fmt_duration(setup_med),
+        fmt_duration(build_med),
+        fmt_duration(fold_med),
+        spread_pct(&end_vals, end_med),
+        spread_pct(&prove_window_vals, prove_window_med),
+        spread_pct(&fold_vals, fold_med),
+    );
+}
+
+#[test]
+#[ignore = "perf baseline report: cargo test -p neo-fold --release --test perf -- --ignored --nocapture report_trace_vs_chunked_medians"]
+fn report_trace_vs_chunked_medians() {
+    const RUNS: usize = 5;
+    let cases = [
+        ("mixed", 10usize, build_mixed_program(10)),
+        ("mixed", 256usize, build_mixed_program(256)),
+    ];
+
+    for (kind, n, program) in cases {
+        let mut trace_samples = Vec::with_capacity(RUNS);
+        let mut chunked_samples = Vec::with_capacity(RUNS);
+        for _ in 0..RUNS {
+            trace_samples.push(run_trace_sample(&program));
+            chunked_samples.push(run_chunked_sample(&program));
+        }
+        println!("CASE kind={} n={} runs={}", kind, n, RUNS);
+        report_samples("TRACE", &trace_samples);
+        report_samples("CHUNKED", &chunked_samples);
     }
 }

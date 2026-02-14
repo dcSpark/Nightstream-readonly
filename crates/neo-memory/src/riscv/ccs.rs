@@ -52,11 +52,13 @@ mod layout;
 mod trace;
 mod witness;
 
-pub use bus_bindings::rv32_b1_shared_cpu_bus_config;
+pub use bus_bindings::{
+    rv32_b1_shared_cpu_bus_config, rv32_trace_shared_bus_requirements, rv32_trace_shared_cpu_bus_config,
+};
 pub use layout::Rv32B1Layout;
 pub use trace::{
-    build_rv32_trace_wiring_ccs, rv32_trace_ccs_witness_from_exec_table, rv32_trace_ccs_witness_from_trace_witness,
-    Rv32TraceCcsLayout,
+    build_rv32_trace_wiring_ccs, build_rv32_trace_wiring_ccs_with_reserved_rows, rv32_trace_ccs_witness_from_exec_table,
+    rv32_trace_ccs_witness_from_trace_witness, Rv32TraceCcsLayout,
 };
 pub use witness::{
     rv32_b1_chunk_to_full_witness, rv32_b1_chunk_to_full_witness_checked, rv32_b1_chunk_to_witness,
@@ -86,6 +88,22 @@ pub const RV32_B1_SHOUT_PROFILE_MIN3: &[u32] = &[ADD_TABLE_ID, EQ_TABLE_ID, NEQ_
 
 /// Full RV32I Shout table set (ids 0..=11).
 pub const RV32_B1_SHOUT_PROFILE_FULL12: &[u32] = &[
+    AND_TABLE_ID,
+    XOR_TABLE_ID,
+    OR_TABLE_ID,
+    ADD_TABLE_ID,
+    SUB_TABLE_ID,
+    SLT_TABLE_ID,
+    SLTU_TABLE_ID,
+    SLL_TABLE_ID,
+    SRL_TABLE_ID,
+    SRA_TABLE_ID,
+    EQ_TABLE_ID,
+    NEQ_TABLE_ID,
+];
+
+/// Full RV32I Shout table set for trace-wiring mode (ids 0..=11).
+pub const RV32_TRACE_SHOUT_PROFILE_FULL12: &[u32] = &[
     AND_TABLE_ID,
     XOR_TABLE_ID,
     OR_TABLE_ID,

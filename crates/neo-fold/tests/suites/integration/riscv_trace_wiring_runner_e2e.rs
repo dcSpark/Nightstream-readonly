@@ -118,7 +118,7 @@ fn rv32_trace_wiring_runner_prove_verify_without_insecure_ack() {
 }
 
 #[test]
-fn rv32_trace_wiring_runner_main_ccs_has_no_bus_tail() {
+fn rv32_trace_wiring_runner_shared_bus_default_and_legacy_fallback_differ() {
     let program = vec![
         RiscvInstruction::IAlu {
             op: RiscvOpcode::Add,
@@ -130,15 +130,30 @@ fn rv32_trace_wiring_runner_main_ccs_has_no_bus_tail() {
     ];
     let program_bytes = encode_program(&program);
 
-    let run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+    let run_shared = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
         .min_trace_len(1)
         .prove()
         .expect("trace wiring prove");
 
+    let run_legacy = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .shared_cpu_bus(false)
+        .min_trace_len(1)
+        .prove()
+        .expect("trace wiring prove (legacy no-shared fallback)");
+
+    assert!(
+        run_shared.ccs_num_variables() > run_legacy.ccs_num_variables(),
+        "shared-bus trace path must reserve bus-tail columns in the main CCS"
+    );
     assert_eq!(
-        run.ccs_num_variables(),
-        run.layout().m,
-        "main trace CCS still appears to include extra width (bus tail)"
+        run_shared.ccs_num_variables(),
+        run_shared.layout().m,
+        "shared-bus trace layout width must match CCS width"
+    );
+    assert_eq!(
+        run_legacy.ccs_num_variables(),
+        run_legacy.layout().m,
+        "legacy trace layout width must match CCS width"
     );
 }
 
@@ -203,6 +218,7 @@ fn rv32_trace_wiring_runner_chunked_ivc_step_linking() {
     let program_bytes = encode_program(&program);
 
     let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .shared_cpu_bus(false)
         .chunk_rows(2)
         .prove()
         .expect("trace wiring prove with chunked ivc");
@@ -247,6 +263,7 @@ fn rv32_trace_wiring_runner_chunked_ivc_batches_no_shared_val_lanes_per_mem() {
     let program_bytes = encode_program(&program);
 
     let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .shared_cpu_bus(false)
         .chunk_rows(2)
         .prove()
         .expect("trace wiring prove with chunked ivc");
@@ -312,6 +329,17 @@ fn prove_verify_trace_program(program: Vec<RiscvInstruction>) {
         .prove()
         .expect("trace wiring prove");
     run.verify().expect("trace wiring verify");
+}
+
+fn prove_verify_trace_program_legacy_no_shared(program: Vec<RiscvInstruction>) {
+    let program_bytes = encode_program(&program);
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .shared_cpu_bus(false)
+        .min_trace_len(program.len())
+        .max_steps(program.len())
+        .prove()
+        .expect("trace wiring prove (legacy no-shared)");
+    run.verify().expect("trace wiring verify (legacy no-shared)");
 }
 
 #[test]
@@ -439,5 +467,6 @@ fn rv32_trace_wiring_runner_accepts_full_mixed_sequence_halt() {
         },
     ];
     program.push(RiscvInstruction::Halt);
-    prove_verify_trace_program(program);
+    prove_verify_trace_program(program.clone());
+    prove_verify_trace_program_legacy_no_shared(program);
 }

@@ -10,7 +10,7 @@
 
 #![allow(non_snake_case)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::marker::PhantomData;
 use std::time::Duration;
 
@@ -26,15 +26,22 @@ use neo_ccs::CcsStructure;
 use neo_math::{F, K};
 use neo_memory::cpu::build_bus_layout_for_instances_with_shout_and_twist_lanes;
 use neo_memory::output_check::ProgramIO;
-use neo_memory::riscv::ccs::{build_rv32_trace_wiring_ccs, rv32_trace_ccs_witness_from_exec_table, Rv32TraceCcsLayout};
-use neo_memory::riscv::exec_table::Rv32ExecTable;
-use neo_memory::riscv::lookups::{decode_program, RiscvCpu, RiscvMemory, RiscvShoutTables, PROG_ID, RAM_ID, REG_ID};
+use neo_memory::plain::{LutTable, PlainMemLayout};
+use neo_memory::riscv::ccs::{
+    build_rv32_trace_wiring_ccs, build_rv32_trace_wiring_ccs_with_reserved_rows,
+    rv32_trace_ccs_witness_from_exec_table, rv32_trace_shared_bus_requirements, rv32_trace_shared_cpu_bus_config,
+    Rv32TraceCcsLayout,
+};
+use neo_memory::riscv::exec_table::{Rv32ExecRow, Rv32ExecTable};
+use neo_memory::riscv::lookups::{
+    decode_program, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID, REG_ID,
+};
 use neo_memory::riscv::rom_init::prog_rom_layout_and_init_words;
 use neo_memory::riscv::trace::{extract_twist_lanes_over_time, TwistLaneOverTime};
 use neo_memory::witness::{LutInstance, LutWitness, MemInstance, MemWitness, StepWitnessBundle};
-use neo_memory::MemInit;
+use neo_memory::{LutTableSpec, MemInit, R1csCpu};
 use neo_params::NeoParams;
-use neo_vm_trace::{Twist as _, TwistOpKind};
+use neo_vm_trace::{StepTrace, Twist as _, TwistOpKind};
 use p3_field::PrimeCharacteristicRing;
 
 #[cfg(target_arch = "wasm32")]
@@ -395,6 +402,88 @@ fn split_exec_into_fixed_chunks(exec: &Rv32ExecTable, chunk_rows: usize) -> Resu
     Ok(out)
 }
 
+fn rv32_trace_chunk_to_witness(
+    layout: Rv32TraceCcsLayout,
+) -> Box<dyn Fn(&[StepTrace<u64, u64>]) -> Vec<F> + Send + Sync> {
+    Box::new(move |chunk: &[StepTrace<u64, u64>]| {
+        rv32_trace_chunk_to_witness_checked(&layout, chunk)
+            .unwrap_or_else(|e| panic!("rv32_trace_chunk_to_witness failed for chunk_len={}: {e}", chunk.len()))
+    })
+}
+
+fn rv32_trace_chunk_to_witness_checked(
+    layout: &Rv32TraceCcsLayout,
+    chunk: &[StepTrace<u64, u64>],
+) -> Result<Vec<F>, String> {
+    if chunk.is_empty() {
+        return Err("trace chunk witness: chunk must contain at least one step".into());
+    }
+    if chunk.len() > layout.t {
+        return Err(format!(
+            "trace chunk witness: chunk.len()={} exceeds layout.t={}",
+            chunk.len(),
+            layout.t
+        ));
+    }
+
+    let mut rows = Vec::with_capacity(layout.t);
+    for step in chunk {
+        rows.push(Rv32ExecRow::from_step(step)?);
+    }
+
+    let mut cycle = rows
+        .last()
+        .ok_or_else(|| "trace chunk witness: empty rows after conversion".to_string())?
+        .cycle;
+    let pad_pc = rows.last().expect("rows non-empty").pc_after;
+    let pad_halted = rows.last().expect("rows non-empty").halted;
+    while rows.len() < layout.t {
+        cycle = cycle
+            .checked_add(1)
+            .ok_or_else(|| "trace chunk witness: cycle overflow while padding".to_string())?;
+        rows.push(Rv32ExecRow::inactive(cycle, pad_pc, pad_halted));
+    }
+
+    let exec = Rv32ExecTable { rows };
+    let (x, w) = rv32_trace_ccs_witness_from_exec_table(layout, &exec)?;
+    Ok(x.into_iter().chain(w).collect())
+}
+
+fn infer_required_trace_shout_opcodes(program: &[RiscvInstruction]) -> HashSet<RiscvOpcode> {
+    let mut ops = HashSet::new();
+    // Required for shared wiring (address/PC arithmetic).
+    ops.insert(RiscvOpcode::Add);
+    for instr in program {
+        match instr {
+            RiscvInstruction::RAlu { op, .. } | RiscvInstruction::IAlu { op, .. } => {
+                ops.insert(*op);
+            }
+            RiscvInstruction::Branch { cond, .. } => {
+                ops.insert(cond.to_shout_opcode());
+            }
+            // Address arithmetic in these classes uses ADD shout semantics.
+            RiscvInstruction::Load { .. }
+            | RiscvInstruction::Store { .. }
+            | RiscvInstruction::Jalr { .. }
+            | RiscvInstruction::Auipc { .. } => {
+                ops.insert(RiscvOpcode::Add);
+            }
+            _ => {}
+        }
+    }
+    ops
+}
+
+fn rv32_trace_table_specs(program: &[RiscvInstruction]) -> HashMap<u32, LutTableSpec> {
+    let shout = RiscvShoutTables::new(32);
+    let mut table_specs = HashMap::new();
+    for op in infer_required_trace_shout_opcodes(program) {
+        let table_id = shout.opcode_to_id(op).0;
+        table_specs.insert(table_id, LutTableSpec::RiscvOpcode { opcode: op, xlen: 32 });
+    }
+    table_specs
+}
+
 /// High-level builder for proving/verifying the RV32 trace wiring CCS.
 ///
 /// This path is intentionally narrow:
@@ -423,6 +512,7 @@ pub struct Rv32TraceWiring {
     max_steps: Option<usize>,
     min_trace_len: usize,
     chunk_rows: Option<usize>,
+    shared_cpu_bus: bool,
     mode: FoldingMode,
     ram_init: HashMap<u64, u64>,
     reg_init: HashMap<u64, u64>,
@@ -440,6 +530,7 @@ impl Rv32TraceWiring {
             max_steps: None,
             min_trace_len: 4,
             chunk_rows: None,
+            shared_cpu_bus: true,
             mode: FoldingMode::Optimized,
             ram_init: HashMap::new(),
             reg_init: HashMap::new(),
@@ -467,6 +558,14 @@ impl Rv32TraceWiring {
     /// and step-linking enforces `pc_final -> pc0`.
     pub fn chunk_rows(mut self, chunk_rows: usize) -> Self {
         self.chunk_rows = Some(chunk_rows);
+        self
+    }
+
+    /// Toggle shared-CPU-bus trace proving mode.
+    ///
+    /// `true` is the intended production default; `false` keeps the legacy no-shared-bus path.
+    pub fn shared_cpu_bus(mut self, enabled: bool) -> Self {
+        self.shared_cpu_bus = enabled;
         self
     }
 
@@ -582,7 +681,7 @@ impl Rv32TraceWiring {
         let output_target = self.output_target;
 
         let mut vm = RiscvCpu::new(self.xlen);
-        vm.load_program(/*base=*/ 0, program);
+        vm.load_program(/*base=*/ 0, program.clone());
 
         let mut twist =
             RiscvMemory::with_program_in_twist(self.xlen, PROG_ID, /*base_addr=*/ 0, &self.program_bytes);
@@ -638,10 +737,8 @@ impl Rv32TraceWiring {
         let step_rows = requested_chunk_rows.min(exec.rows.len().max(1));
         let exec_chunks = split_exec_into_fixed_chunks(&exec, step_rows)?;
 
-        let layout = Rv32TraceCcsLayout::new(step_rows)
+        let mut layout = Rv32TraceCcsLayout::new(step_rows)
             .map_err(|e| PiCcsError::InvalidInput(format!("Rv32TraceCcsLayout::new failed: {e}")))?;
-        let ccs = build_rv32_trace_wiring_ccs(&layout)
-            .map_err(|e| PiCcsError::InvalidInput(format!("build_rv32_trace_wiring_ccs failed: {e}")))?;
 
         let prove_start = time_now();
         let setup_start = prove_start;
@@ -663,6 +760,53 @@ impl Rv32TraceWiring {
             .checked_shl(ram_d as u32)
             .ok_or_else(|| PiCcsError::InvalidInput(format!("RAM address width too large: d={ram_d}")))?;
 
+        let mem_layouts: HashMap<u32, PlainMemLayout> = HashMap::from([
+            (
+                RAM_ID.0,
+                PlainMemLayout {
+                    k: ram_k,
+                    d: ram_d,
+                    n_side: 2,
+                    lanes: 1,
+                },
+            ),
+            (
+                REG_ID.0,
+                PlainMemLayout {
+                    k: 32,
+                    d: 5,
+                    n_side: 2,
+                    lanes: 2,
+                },
+            ),
+            (PROG_ID.0, prog_layout.clone()),
+        ]);
+
+        let table_specs = rv32_trace_table_specs(&program);
+        let mut shout_table_ids: Vec<u32> = table_specs.keys().copied().collect();
+        shout_table_ids.sort_unstable();
+
+        let mut ccs_reserved_rows = 0usize;
+        if self.shared_cpu_bus {
+            let (bus_region_len, reserved_rows) =
+                rv32_trace_shared_bus_requirements(&layout, &shout_table_ids, &mem_layouts)
+                    .map_err(|e| PiCcsError::InvalidInput(format!("rv32_trace_shared_bus_requirements failed: {e}")))?;
+            layout.m = layout
+                .m
+                .checked_add(bus_region_len)
+                .ok_or_else(|| PiCcsError::InvalidInput("trace layout m overflow after bus tail reservation".into()))?;
+            ccs_reserved_rows = reserved_rows;
+        }
+
+        let mut ccs = if ccs_reserved_rows == 0 {
+            build_rv32_trace_wiring_ccs(&layout)
+                .map_err(|e| PiCcsError::InvalidInput(format!("build_rv32_trace_wiring_ccs failed: {e}")))?
+        } else {
+            build_rv32_trace_wiring_ccs_with_reserved_rows(&layout, ccs_reserved_rows).map_err(|e| {
+                PiCcsError::InvalidInput(format!("build_rv32_trace_wiring_ccs_with_reserved_rows failed: {e}"))
+            })?
+        };
+
         let mut session = FoldingSession::<AjtaiSModule>::new_ajtai(self.mode.clone(), &ccs)?;
         session.set_step_linking(StepLinkingConfig::new(vec![(layout.pc_final, layout.pc0)]));
 
@@ -676,146 +820,236 @@ impl Rv32TraceWiring {
         } else {
             MemInit::Sparse(prog_init_pairs)
         };
-        // P0 bridge: keep the main CPU witness as pure trace columns (no bus tail), and attach
-        // PROG/REG/RAM as separately committed no-shared-bus Twist instances linked at r_time.
-        let mut reg_state = init_reg_state(&reg_init_map)?;
-        let mut ram_state = init_ram_state(&ram_init_map, ram_d)?;
+        let mut initial_mem: HashMap<(u32, u64), F> = HashMap::new();
+        if let MemInit::Sparse(pairs) = &prog_mem_init {
+            for &(addr, value) in pairs {
+                if value != F::ZERO {
+                    initial_mem.insert((PROG_ID.0, addr), value);
+                }
+            }
+        }
+        for (&reg, &value) in &reg_init_map {
+            let v = F::from_u64(value as u32 as u64);
+            if v != F::ZERO {
+                initial_mem.insert((REG_ID.0, reg), v);
+            }
+        }
+        for (&addr, &value) in &ram_init_map {
+            let v = F::from_u64(value as u32 as u64);
+            if v != F::ZERO {
+                initial_mem.insert((RAM_ID.0, addr), v);
+            }
+        }
+
         let setup_duration = elapsed_duration(setup_start);
         let mut chunk_build_commit_duration = Duration::ZERO;
-        for exec_chunk in &exec_chunks {
+        if self.shared_cpu_bus {
             let chunk_start = time_now();
-            let reg_init_chunk = reg_state_to_sparse_map(&reg_state);
-            let ram_init_chunk = ram_state.clone();
 
-            let reg_mem_init = mem_init_from_u64_sparse(&reg_init_chunk, 32, "REG")?;
-            let ram_mem_init = mem_init_from_u64_sparse(&ram_init_chunk, ram_k, "RAM")?;
-            let twist_lanes = extract_twist_lanes_over_time(exec_chunk, &reg_init_chunk, &ram_init_chunk, ram_d)
-                .map_err(|e| PiCcsError::InvalidInput(format!("extract_twist_lanes_over_time failed: {e}")))?;
+            let empty_tables: HashMap<u32, LutTable<F>> = HashMap::new();
+            let lut_lanes: HashMap<u32, usize> = HashMap::new();
 
-            let (x, w) = rv32_trace_ccs_witness_from_exec_table(&layout, exec_chunk)
-                .map_err(|e| PiCcsError::InvalidInput(format!("rv32_trace_ccs_witness_from_exec_table failed: {e}")))?;
-            let z_cpu: Vec<F> = x.iter().copied().chain(w.iter().copied()).collect();
-            let Z_cpu = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &z_cpu);
-            let c_cpu = session.committer().commit(&Z_cpu);
-            let mcs = (
-                McsInstance {
-                    c: c_cpu,
-                    x: x.clone(),
-                    m_in: layout.m_in,
-                },
-                McsWitness { w, Z: Z_cpu },
-            );
-
-            let prog_mem_inst = MemInstance {
-                mem_id: PROG_ID.0,
-                comms: Vec::new(),
-                k: prog_layout.k,
-                d: prog_layout.d,
-                n_side: prog_layout.n_side,
-                steps: layout.t,
-                lanes: 1,
-                ell: 1,
-                init: prog_mem_init.clone(),
-            };
-            let reg_mem_inst = MemInstance {
-                mem_id: REG_ID.0,
-                comms: Vec::new(),
-                k: 32,
-                d: 5,
-                n_side: 2,
-                steps: layout.t,
-                lanes: 2,
-                ell: 1,
-                init: reg_mem_init,
-            };
-            let ram_mem_inst = MemInstance {
-                mem_id: RAM_ID.0,
-                comms: Vec::new(),
-                k: ram_k,
-                d: ram_d,
-                n_side: 2,
-                steps: layout.t,
-                lanes: 1,
-                ell: 1,
-                init: ram_mem_init,
-            };
-
-            let prog_z = build_twist_only_bus_z(
-                ccs.m,
+            let mut cpu = R1csCpu::new(
+                ccs.clone(),
+                session.params().clone(),
+                session.committer().clone(),
                 layout.m_in,
-                layout.t,
-                prog_mem_inst.d * prog_mem_inst.ell,
-                prog_mem_inst.lanes,
-                std::slice::from_ref(&twist_lanes.prog),
-                &x,
+                &empty_tables,
+                &table_specs,
+                rv32_trace_chunk_to_witness(layout.clone()),
             )
-            .map_err(|e| PiCcsError::InvalidInput(format!("build PROG twist z failed: {e}")))?;
-            let prog_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &prog_z);
-            let prog_c = session.committer().commit(&prog_Z);
-            let prog_mem_inst = MemInstance {
-                comms: vec![prog_c],
-                ..prog_mem_inst
-            };
-            let prog_mem_wit = MemWitness { mats: vec![prog_Z] };
+            .map_err(|e| PiCcsError::InvalidInput(format!("R1csCpu::new failed: {e}")))?;
+            cpu = cpu
+                .with_shared_cpu_bus(
+                    rv32_trace_shared_cpu_bus_config(
+                        &layout,
+                        &shout_table_ids,
+                        mem_layouts.clone(),
+                        initial_mem.clone(),
+                    )
+                    .map_err(|e| PiCcsError::InvalidInput(format!("rv32_trace_shared_cpu_bus_config failed: {e}")))?,
+                    layout.t,
+                )
+                .map_err(|e| PiCcsError::InvalidInput(format!("shared bus inject failed: {e}")))?;
 
-            let reg_z = build_twist_only_bus_z(
-                ccs.m,
-                layout.m_in,
+            ccs = cpu.ccs.clone();
+
+            session.execute_shard_shared_cpu_bus_from_trace(
+                &trace,
+                max_steps,
                 layout.t,
-                reg_mem_inst.d * reg_mem_inst.ell,
-                reg_mem_inst.lanes,
-                &[twist_lanes.reg_lane0.clone(), twist_lanes.reg_lane1.clone()],
-                &x,
-            )
-            .map_err(|e| PiCcsError::InvalidInput(format!("build REG twist z failed: {e}")))?;
-            let reg_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &reg_z);
-            let reg_c = session.committer().commit(&reg_Z);
-            let reg_mem_inst = MemInstance {
-                comms: vec![reg_c],
-                ..reg_mem_inst
-            };
-            let reg_mem_wit = MemWitness { mats: vec![reg_Z] };
-
-            let ram_z = build_twist_only_bus_z(
-                ccs.m,
-                layout.m_in,
-                layout.t,
-                ram_mem_inst.d * ram_mem_inst.ell,
-                ram_mem_inst.lanes,
-                std::slice::from_ref(&twist_lanes.ram),
-                &x,
-            )
-            .map_err(|e| PiCcsError::InvalidInput(format!("build RAM twist z failed: {e}")))?;
-            let ram_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &ram_z);
-            let ram_c = session.committer().commit(&ram_Z);
-            let ram_mem_inst = MemInstance {
-                comms: vec![ram_c],
-                ..ram_mem_inst
-            };
-            let ram_mem_wit = MemWitness { mats: vec![ram_Z] };
-
-            session.add_step_bundle(StepWitnessBundle {
-                mcs,
-                lut_instances: Vec::<(LutInstance<_, _>, LutWitness<F>)>::new(),
-                mem_instances: vec![
-                    (prog_mem_inst, prog_mem_wit),
-                    (reg_mem_inst, reg_mem_wit),
-                    (ram_mem_inst, ram_mem_wit),
-                ],
-                _phantom: PhantomData::<K>,
-            });
-
-            apply_exec_chunk_writes_to_state(exec_chunk, &mut reg_state, &mut ram_state)?;
+                &mem_layouts,
+                &empty_tables,
+                &table_specs,
+                &lut_lanes,
+                &initial_mem,
+                &cpu,
+            )?;
             chunk_build_commit_duration += elapsed_duration(chunk_start);
+        } else {
+            // Route-A legacy fallback: keep the main CPU witness as pure trace columns (no bus tail),
+            // and attach PROG/REG/RAM as separately committed no-shared-bus Twist instances linked at r_time.
+            let mut reg_state = init_reg_state(&reg_init_map)?;
+            let mut ram_state = init_ram_state(&ram_init_map, ram_d)?;
+            for exec_chunk in &exec_chunks {
+                let chunk_start = time_now();
+                let reg_init_chunk = reg_state_to_sparse_map(&reg_state);
+                let ram_init_chunk = ram_state.clone();
+
+                let reg_mem_init = mem_init_from_u64_sparse(&reg_init_chunk, 32, "REG")?;
+                let ram_mem_init = mem_init_from_u64_sparse(&ram_init_chunk, ram_k, "RAM")?;
+                let twist_lanes = extract_twist_lanes_over_time(exec_chunk, &reg_init_chunk, &ram_init_chunk, ram_d)
+                    .map_err(|e| PiCcsError::InvalidInput(format!("extract_twist_lanes_over_time failed: {e}")))?;
+
+                let (x, w) = rv32_trace_ccs_witness_from_exec_table(&layout, exec_chunk).map_err(|e| {
+                    PiCcsError::InvalidInput(format!("rv32_trace_ccs_witness_from_exec_table failed: {e}"))
+                })?;
+                let z_cpu: Vec<F> = x.iter().copied().chain(w.iter().copied()).collect();
+                let Z_cpu = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &z_cpu);
+                let c_cpu = session.committer().commit(&Z_cpu);
+                let mcs = (
+                    McsInstance {
+                        c: c_cpu,
+                        x: x.clone(),
+                        m_in: layout.m_in,
+                    },
+                    McsWitness { w, Z: Z_cpu },
+                );
+
+                let prog_mem_inst = MemInstance {
+                    mem_id: PROG_ID.0,
+                    comms: Vec::new(),
+                    k: prog_layout.k,
+                    d: prog_layout.d,
+                    n_side: prog_layout.n_side,
+                    steps: layout.t,
+                    lanes: 1,
+                    ell: 1,
+                    init: prog_mem_init.clone(),
+                };
+                let reg_mem_inst = MemInstance {
+                    mem_id: REG_ID.0,
+                    comms: Vec::new(),
+                    k: 32,
+                    d: 5,
+                    n_side: 2,
+                    steps: layout.t,
+                    lanes: 2,
+                    ell: 1,
+                    init: reg_mem_init,
+                };
+                let ram_mem_inst = MemInstance {
+                    mem_id: RAM_ID.0,
+                    comms: Vec::new(),
+                    k: ram_k,
+                    d: ram_d,
+                    n_side: 2,
+                    steps: layout.t,
+                    lanes: 1,
+                    ell: 1,
+                    init: ram_mem_init,
+                };
+
+                let prog_z = build_twist_only_bus_z(
+                    ccs.m,
+                    layout.m_in,
+                    layout.t,
+                    prog_mem_inst.d * prog_mem_inst.ell,
+                    prog_mem_inst.lanes,
+                    std::slice::from_ref(&twist_lanes.prog),
+                    &x,
+                )
+                .map_err(|e| PiCcsError::InvalidInput(format!("build PROG twist z failed: {e}")))?;
+                let prog_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &prog_z);
+                let prog_c = session.committer().commit(&prog_Z);
+                let prog_mem_inst = MemInstance {
+                    comms: vec![prog_c],
+                    ..prog_mem_inst
+                };
+                let prog_mem_wit = MemWitness { mats: vec![prog_Z] };
+
+                let reg_z = build_twist_only_bus_z(
+                    ccs.m,
+                    layout.m_in,
+                    layout.t,
+                    reg_mem_inst.d * reg_mem_inst.ell,
+                    reg_mem_inst.lanes,
+                    &[twist_lanes.reg_lane0.clone(), twist_lanes.reg_lane1.clone()],
+                    &x,
+                )
+                .map_err(|e| PiCcsError::InvalidInput(format!("build REG twist z failed: {e}")))?;
+                let reg_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &reg_z);
+                let reg_c = session.committer().commit(&reg_Z);
+                let reg_mem_inst = MemInstance {
+                    comms: vec![reg_c],
+                    ..reg_mem_inst
+                };
+                let reg_mem_wit = MemWitness { mats: vec![reg_Z] };
+
+                let ram_z = build_twist_only_bus_z(
+                    ccs.m,
+                    layout.m_in,
+                    layout.t,
+                    ram_mem_inst.d * ram_mem_inst.ell,
+                    ram_mem_inst.lanes,
+                    std::slice::from_ref(&twist_lanes.ram),
+                    &x,
+                )
+                .map_err(|e| PiCcsError::InvalidInput(format!("build RAM twist z failed: {e}")))?;
+                let ram_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &ram_z);
+                let ram_c = session.committer().commit(&ram_Z);
+                let ram_mem_inst = MemInstance {
+                    comms: vec![ram_c],
+                    ..ram_mem_inst
+                };
+                let ram_mem_wit = MemWitness { mats: vec![ram_Z] };
+
+                session.add_step_bundle(StepWitnessBundle {
+                    mcs,
+                    lut_instances: Vec::<(LutInstance<_, _>, LutWitness<F>)>::new(),
+                    mem_instances: vec![
+                        (prog_mem_inst, prog_mem_wit),
+                        (reg_mem_inst, reg_mem_wit),
+                        (ram_mem_inst, ram_mem_wit),
+                    ],
+                    _phantom: PhantomData::<K>,
+                });
+
+                apply_exec_chunk_writes_to_state(exec_chunk, &mut reg_state, &mut ram_state)?;
+                chunk_build_commit_duration += elapsed_duration(chunk_start);
+            }
         }
+
+        let mem_order = session
+            .steps_public()
+            .first()
+            .map(|s| {
+                s.mem_insts
+                    .iter()
+                    .map(|inst| inst.mem_id)
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        let ram_ob_mem_idx = mem_order
+            .iter()
+            .position(|&id| id == RAM_ID.0)
+            .ok_or_else(|| PiCcsError::ProtocolError("missing RAM mem instance for output binding".into()))?;
+        let reg_ob_mem_idx = mem_order
+            .iter()
+            .position(|&id| id == REG_ID.0)
+            .ok_or_else(|| PiCcsError::ProtocolError("missing REG mem instance for output binding".into()))?;
 
         let fold_start = time_now();
         let (proof, output_binding_cfg) = if output_claims.is_empty() {
             (session.fold_and_prove(&ccs)?, None)
         } else {
             let (ob_mem_idx, ob_num_bits, final_memory_state) = match output_target {
-                OutputTarget::Ram => (2usize, ram_d, final_ram_state_dense(&exec, &ram_init_map, ram_k)?),
-                OutputTarget::Reg => (1usize, 5usize, final_reg_state_dense(&exec, &reg_init_map)?),
+                OutputTarget::Ram => (
+                    ram_ob_mem_idx,
+                    ram_d,
+                    final_ram_state_dense(&exec, &ram_init_map, ram_k)?,
+                ),
+                OutputTarget::Reg => (reg_ob_mem_idx, 5usize, final_reg_state_dense(&exec, &reg_init_map)?),
             };
             let ob_cfg = OutputBindingConfig::new(ob_num_bits, output_claims).with_mem_idx(ob_mem_idx);
             let proof = session.fold_and_prove_with_output_binding_simple(&ccs, &ob_cfg, &final_memory_state)?;

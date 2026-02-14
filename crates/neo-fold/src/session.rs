@@ -36,7 +36,10 @@ use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
 use neo_math::ring::Rq as RqEl;
 use neo_math::{D, F, K};
 use neo_memory::ajtai::encode_vector_balanced_to_mat;
-use neo_memory::builder::{build_shard_witness_shared_cpu_bus_with_aux, CpuArithmetization, ShardWitnessAux};
+use neo_memory::builder::{
+    build_shard_witness_shared_cpu_bus_from_trace_with_aux, build_shard_witness_shared_cpu_bus_with_aux,
+    CpuArithmetization, ShardWitnessAux,
+};
 use neo_memory::plain::{LutTable, PlainMemLayout};
 use neo_memory::witness::LutTableSpec;
 use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
@@ -52,6 +55,7 @@ use crate::shard::{self, CommitMixers, ShardProof as FoldRun, ShardProverContext
 use crate::PiCcsError;
 use neo_reductions::engines::optimized_engine::oracle::SparseCache;
 use neo_reductions::engines::utils;
+use neo_vm_trace::VmTrace;
 
 #[inline]
 fn mode_uses_sparse_cache(mode: &FoldingMode) -> bool {
@@ -1048,6 +1052,42 @@ where
             vm,
             twist,
             shout,
+            max_steps,
+            chunk_size,
+            mem_layouts,
+            lut_tables,
+            lut_table_specs,
+            lut_lanes,
+            initial_mem,
+            cpu_arith,
+        )
+        .map_err(|e| PiCcsError::InvalidInput(format!("shared-bus witness build failed: {e:?}")))?;
+
+        self.add_step_bundles(bundles);
+        self.shared_bus_aux = Some(aux);
+        Ok(())
+    }
+
+    /// Add shared-CPU-bus step bundles from an already-executed trace.
+    ///
+    /// This avoids re-running `trace_program` when the caller already has a `VmTrace`.
+    pub fn execute_shard_shared_cpu_bus_from_trace<A>(
+        &mut self,
+        trace: &VmTrace<u64, u64>,
+        max_steps: usize,
+        chunk_size: usize,
+        mem_layouts: &HashMap<u32, PlainMemLayout>,
+        lut_tables: &HashMap<u32, LutTable<F>>,
+        lut_table_specs: &HashMap<u32, LutTableSpec>,
+        lut_lanes: &HashMap<u32, usize>,
+        initial_mem: &HashMap<(u32, u64), F>,
+        cpu_arith: &A,
+    ) -> Result<(), PiCcsError>
+    where
+        A: CpuArithmetization<F, Cmt>,
+    {
+        let (bundles, aux) = build_shard_witness_shared_cpu_bus_from_trace_with_aux(
+            trace,
             max_steps,
             chunk_size,
             mem_layouts,
