@@ -344,10 +344,23 @@ fn push_tier21_value_semantics(
         false,
         vec![(tr(l.shout_lhs, i), F::ONE), (tr(l.rs1_val, i), -F::ONE)],
     ));
+    // Shift-immediate rows (funct3=001/101) use rs2 (shamt bits) as shout RHS.
+    // delta = (is_slli + is_srli_srai) * (rs2 - imm_i)
+    cons.push(Constraint {
+        condition_col: f3(1),
+        negate_condition: false,
+        additional_condition_cols: vec![f3(5)],
+        b_terms: vec![(tr(l.rs2, i), F::ONE), (tr(l.imm_i, i), -F::ONE)],
+        c_terms: vec![(tr(l.alu_imm_shift_rhs_delta, i), F::ONE)],
+    });
     cons.push(Constraint::terms(
         tr(l.op_alu_imm, i),
         false,
-        vec![(tr(l.shout_rhs, i), F::ONE), (tr(l.imm_i, i), -F::ONE)],
+        vec![
+            (tr(l.shout_rhs, i), F::ONE),
+            (tr(l.imm_i, i), -F::ONE),
+            (tr(l.alu_imm_shift_rhs_delta, i), -F::ONE),
+        ],
     ));
     cons.push(Constraint::terms(
         tr(l.op_alu_reg, i),
@@ -687,6 +700,7 @@ pub fn build_rv32_trace_wiring_ccs(layout: &Rv32TraceCcsLayout) -> Result<CcsStr
             l.funct3_is[7],
             l.alu_reg_table_delta,
             l.alu_imm_table_delta,
+            l.alu_imm_shift_rhs_delta,
             l.ram_rv_q16,
             l.rs2_q16,
             l.ram_rv_low_bit[0],

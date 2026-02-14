@@ -204,6 +204,9 @@ impl Rv32TraceWitness {
             let f3_is_5 = if is_active && funct3_u64 == 5 { 1 } else { 0 };
             wit.cols[layout.alu_reg_table_delta][i] = F::from_u64(funct7_b5 * (f3_is_0 + f3_is_5));
             wit.cols[layout.alu_imm_table_delta][i] = F::from_u64(funct7_b5 * f3_is_5);
+            let shift_f3_sel = wit.cols[layout.funct3_is[1]][i] + wit.cols[layout.funct3_is[5]][i];
+            wit.cols[layout.alu_imm_shift_rhs_delta][i] =
+                shift_f3_sel * (wit.cols[layout.rs2][i] - wit.cols[layout.imm_i][i]);
 
             let one_minus_b0 = F::ONE - wit.cols[layout.rd_bit[0]][i];
             let one_minus_b1 = F::ONE - wit.cols[layout.rd_bit[1]][i];

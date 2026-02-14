@@ -230,6 +230,41 @@ fn chi_for_row_index(r: &[K], idx: usize) -> K {
     acc
 }
 
+#[inline]
+fn precompute_contiguous_time_weights(r: &[K], start_row: usize, len: usize, n_pad: usize) -> Vec<K> {
+    if len == 0 {
+        return Vec::new();
+    }
+
+    // For large contiguous windows, build χ_r over the full boolean domain once and slice.
+    // This avoids repeated per-index basis recomputation in hot Route-A paths.
+    const FULL_CHI_MAX_PAD: usize = 1 << 20;
+    let naive_ops = len.saturating_mul(r.len().max(1));
+    let use_full_table = len >= 1024 && n_pad <= FULL_CHI_MAX_PAD && naive_ops >= n_pad;
+
+    if use_full_table {
+        let mut chi = Vec::with_capacity(n_pad);
+        chi.push(K::ONE);
+        for &ri in r {
+            let one_minus_ri = K::ONE - ri;
+            let cur_len = chi.len();
+            chi.reserve(cur_len);
+            for i in 0..cur_len {
+                let v = chi[i];
+                chi[i] = v * one_minus_ri;
+                chi.push(v * ri);
+            }
+        }
+        return chi[start_row..start_row + len].to_vec();
+    }
+
+    let mut out = Vec::with_capacity(len);
+    for off in 0..len {
+        out.push(chi_for_row_index(r, start_row + off));
+    }
+    out
+}
+
 pub(crate) fn append_bus_openings_to_me_instance<Cmt>(
     params: &NeoParams,
     bus: &BusLayout,
@@ -314,10 +349,7 @@ where
     }
 
     // Precompute χ_r(time_index(j)) weights for the bus time rows.
-    let mut time_weights = Vec::with_capacity(bus.chunk_size);
-    for j in 0..bus.chunk_size {
-        time_weights.push(chi_for_row_index(&me.r, bus.time_index(j)));
-    }
+    let time_weights = precompute_contiguous_time_weights(&me.r, bus.time_index(0), bus.chunk_size, n_pad);
 
     // Base-b powers for recomposition.
     let bK = K::from(F::from_u64(params.b as u64));
@@ -449,10 +481,21 @@ where
     }
 
     // Precompute χ_r(time_index(j)) weights for the selected bus rows.
-    let mut time_weights: Vec<K> = Vec::with_capacity(js.len());
-    for &j in js {
-        time_weights.push(chi_for_row_index(&me.r, bus.time_index(j)));
-    }
+    let dense_selection = js.len().saturating_mul(3) >= bus.chunk_size;
+    let time_weights: Vec<K> = if dense_selection {
+        let all = precompute_contiguous_time_weights(&me.r, bus.time_index(0), bus.chunk_size, n_pad);
+        let mut out = Vec::with_capacity(js.len());
+        for &j in js {
+            out.push(all[j]);
+        }
+        out
+    } else {
+        let mut out = Vec::with_capacity(js.len());
+        for &j in js {
+            out.push(chi_for_row_index(&me.r, bus.time_index(j)));
+        }
+        out
+    };
 
     // Base-b powers for recomposition.
     let bK = K::from(F::from_u64(params.b as u64));
@@ -594,10 +637,7 @@ where
     }
 
     // Precompute χ_r(m_in + j) weights for the time rows.
-    let mut time_weights = Vec::with_capacity(t_len);
-    for j in 0..t_len {
-        time_weights.push(chi_for_row_index(&me.r, m_in + j));
-    }
+    let time_weights = precompute_contiguous_time_weights(&me.r, m_in, t_len, n_pad);
 
     // Base-b powers for recomposition.
     let bK = K::from(F::from_u64(params.b as u64));
@@ -753,10 +793,21 @@ where
     }
 
     // Precompute χ_r(m_in + j) weights for the selected time rows.
-    let mut time_weights = Vec::with_capacity(js.len());
-    for &j in js {
-        time_weights.push((j, chi_for_row_index(&me.r, m_in + j)));
-    }
+    let dense_selection = js.len().saturating_mul(3) >= t_len;
+    let time_weights: Vec<(usize, K)> = if dense_selection {
+        let all = precompute_contiguous_time_weights(&me.r, m_in, t_len, n_pad);
+        let mut out = Vec::with_capacity(js.len());
+        for &j in js {
+            out.push((j, all[j]));
+        }
+        out
+    } else {
+        let mut out = Vec::with_capacity(js.len());
+        for &j in js {
+            out.push((j, chi_for_row_index(&me.r, m_in + j)));
+        }
+        out
+    };
 
     // Base-b powers for recomposition.
     let bK = K::from(F::from_u64(params.b as u64));

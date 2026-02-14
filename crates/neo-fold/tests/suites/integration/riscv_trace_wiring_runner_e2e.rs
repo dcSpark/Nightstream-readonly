@@ -1,5 +1,7 @@
 use neo_fold::riscv_trace_shard::Rv32TraceWiring;
-use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvOpcode, PROG_ID, RAM_ID, REG_ID};
+use neo_memory::riscv::lookups::{
+    encode_program, BranchCondition, RiscvInstruction, RiscvOpcode, PROG_ID, RAM_ID, REG_ID,
+};
 use p3_field::PrimeCharacteristicRing;
 
 #[test]
@@ -225,6 +227,67 @@ fn rv32_trace_wiring_runner_chunked_ivc_step_linking() {
 }
 
 #[test]
+fn rv32_trace_wiring_runner_chunked_ivc_batches_no_shared_val_lanes_per_mem() {
+    // Program: ADDI x1, x0, 1; ADDI x2, x1, 2; HALT
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 1,
+            imm: 2,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .chunk_rows(2)
+        .prove()
+        .expect("trace wiring prove with chunked ivc");
+    run.verify().expect("trace wiring verify with chunked ivc");
+
+    let steps_public = run.steps_public();
+    let shard_proof = run.proof();
+    assert_eq!(steps_public.len(), 2, "expected two public steps");
+    assert_eq!(shard_proof.steps.len(), 2, "expected two proof steps");
+
+    // Step 0: no previous step, so there is one val claim per mem instance.
+    let mem_count_step0 = steps_public[0].mem_insts.len();
+    let proof_step0 = &shard_proof.steps[0];
+    assert_eq!(
+        proof_step0.mem.val_me_claims.len(),
+        mem_count_step0,
+        "step0 must emit one current val claim per mem instance"
+    );
+    assert_eq!(
+        proof_step0.val_fold.len(),
+        mem_count_step0,
+        "step0 must emit one val-fold proof per mem instance"
+    );
+
+    // Step 1: has previous step, so val claims are [current..., previous...], but
+    // proof lanes are batched per mem instance.
+    let mem_count_step1 = steps_public[1].mem_insts.len();
+    let proof_step1 = &shard_proof.steps[1];
+    assert_eq!(
+        proof_step1.mem.val_me_claims.len(),
+        mem_count_step1 * 2,
+        "step1 must emit current+previous val claims per mem instance"
+    );
+    assert_eq!(
+        proof_step1.val_fold.len(),
+        mem_count_step1,
+        "step1 must batch val-fold proofs per mem instance"
+    );
+}
+
+#[test]
 fn rv32_trace_wiring_runner_rejects_zero_chunk_rows() {
     let program = vec![RiscvInstruction::Halt];
     let program_bytes = encode_program(&program);
@@ -288,5 +351,93 @@ fn rv32_trace_wiring_runner_accepts_mixed_addi_ori_halt() {
         },
         RiscvInstruction::Halt,
     ];
+    prove_verify_trace_program(program);
+}
+
+#[test]
+fn rv32_trace_wiring_runner_accepts_mixed_with_srai_halt() {
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Sra,
+            rd: 2,
+            rs1: 1,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    prove_verify_trace_program(program);
+}
+
+#[test]
+fn rv32_trace_wiring_runner_accepts_full_mixed_sequence_halt() {
+    let mut program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::And,
+            rd: 2,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Or,
+            rd: 3,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Xor,
+            rd: 4,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Slt,
+            rd: 6,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Sltu,
+            rd: 7,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Sll,
+            rd: 8,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Srl,
+            rd: 9,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Sra,
+            rd: 10,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Branch {
+            cond: BranchCondition::Ne,
+            rs1: 0,
+            rs2: 0,
+            imm: 8,
+        },
+    ];
+    program.push(RiscvInstruction::Halt);
     prove_verify_trace_program(program);
 }

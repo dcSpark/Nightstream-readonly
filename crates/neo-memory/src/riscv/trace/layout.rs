@@ -87,6 +87,8 @@ pub struct Rv32TraceLayout {
     pub funct3_is: [usize; 8],
     pub alu_reg_table_delta: usize,
     pub alu_imm_table_delta: usize,
+    // (funct3==001 || funct3==101) * (rs2 - imm_i), used to bind shift-immediate shout rhs.
+    pub alu_imm_shift_rhs_delta: usize,
 
     // Low-bit helpers for load/store subword semantics.
     pub ram_rv_q16: usize,
@@ -208,6 +210,7 @@ impl Rv32TraceLayout {
         let funct3_is_7 = take();
         let alu_reg_table_delta = take();
         let alu_imm_table_delta = take();
+        let alu_imm_shift_rhs_delta = take();
         let ram_rv_q16 = take();
         let rs2_q16 = take();
         let ram_rv_b0 = take();
@@ -368,6 +371,7 @@ impl Rv32TraceLayout {
             ],
             alu_reg_table_delta,
             alu_imm_table_delta,
+            alu_imm_shift_rhs_delta,
             ram_rv_q16,
             rs2_q16,
             ram_rv_low_bit: [

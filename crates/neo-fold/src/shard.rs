@@ -321,6 +321,34 @@ fn validate_me_batch_invariants(batch: &[MeInstance<Cmt, F, K>], context: &str) 
     Ok(())
 }
 
+#[inline]
+fn twist_route_a_signature<C>(mem_inst: &neo_memory::witness::MemInstance<C, F>) -> (usize, usize, usize) {
+    (mem_inst.steps, mem_inst.d * mem_inst.ell, mem_inst.lanes.max(1))
+}
+
+fn build_twist_only_route_a_bus(
+    s: &CcsStructure<F>,
+    m_in: usize,
+    steps: usize,
+    ell_addr: usize,
+    lanes: usize,
+) -> Result<neo_memory::cpu::BusLayout, PiCcsError> {
+    let bus = neo_memory::cpu::build_bus_layout_for_instances_with_shout_and_twist_lanes(
+        s.m,
+        m_in,
+        steps,
+        core::iter::empty::<(usize, usize)>(),
+        core::iter::once((ell_addr, lanes)),
+    )
+    .map_err(|e| PiCcsError::InvalidInput(format!("Twist(Route A): bus layout failed: {e}")))?;
+    if bus.twist_cols.len() != 1 || !bus.shout_cols.is_empty() {
+        return Err(PiCcsError::ProtocolError(
+            "Twist(Route A): expected a twist-only bus layout with 1 instance".into(),
+        ));
+    }
+    Ok(bus)
+}
+
 #[derive(Clone, Copy, Debug)]
 enum RlcLane {
     Main,
@@ -2932,14 +2960,43 @@ where
             dec_children: children,
         } = main_fold;
 
+        let n_mem = step.mem_instances.len();
+        let has_prev = prev_step.is_some();
+
+        // Cache per-mem twist-only bus layouts once per step for no-shared-bus Route A.
+        let twist_route_a_buses = if shared_cpu_bus {
+            None
+        } else {
+            let mut buses = Vec::<neo_memory::cpu::BusLayout>::with_capacity(n_mem);
+            for (mem_idx, (mem_inst, _)) in step.mem_instances.iter().enumerate() {
+                let (steps_cur, ell_addr_cur, lanes_cur) = twist_route_a_signature(mem_inst);
+                if has_prev {
+                    let prev = prev_step.ok_or_else(|| {
+                        PiCcsError::ProtocolError("missing prev_step for Twist val-lane batching".into())
+                    })?;
+                    let (prev_inst, _) = prev
+                        .mem_instances
+                        .get(mem_idx)
+                        .ok_or_else(|| PiCcsError::ProtocolError("prev mem_idx out of range".into()))?;
+                    let (steps_prev, ell_addr_prev, lanes_prev) = twist_route_a_signature(prev_inst);
+                    if (steps_cur, ell_addr_cur, lanes_cur) != (steps_prev, ell_addr_prev, lanes_prev) {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "Twist(Route A): step/prev mem layout mismatch at mem_idx={mem_idx} (cur: steps={steps_cur}, ell_addr={ell_addr_cur}, lanes={lanes_cur}; prev: steps={steps_prev}, ell_addr={ell_addr_prev}, lanes={lanes_prev})"
+                        )));
+                    }
+                }
+                let bus = build_twist_only_route_a_bus(&s, mcs_inst.m_in, steps_cur, ell_addr_cur, lanes_cur)?;
+                buses.push(bus);
+            }
+            Some(buses)
+        };
+
         // --------------------------------------------------------------------
         // Phase 2: Second folding lane for Twist val-eval ME claims at r_val.
         // --------------------------------------------------------------------
         let mut val_fold: Vec<RlcDecProof> = Vec::new();
         if !mem_proof.val_me_claims.is_empty() {
             tr.append_message(b"fold/val_lane_start", &(step_idx as u64).to_le_bytes());
-            let n_mem = step.mem_instances.len();
-            let has_prev = prev_step.is_some();
 
             if shared_cpu_bus {
                 let expected = 1usize + usize::from(has_prev);
@@ -2950,20 +3007,9 @@ where
                         expected
                     )));
                 }
-            } else {
-                let expected = n_mem * (1 + usize::from(has_prev));
-                if mem_proof.val_me_claims.len() != expected {
-                    return Err(PiCcsError::ProtocolError(format!(
-                        "Twist(val) claim count mismatch (have {}, expected {})",
-                        mem_proof.val_me_claims.len(),
-                        expected
-                    )));
-                }
-            }
 
-            for (claim_idx, me) in mem_proof.val_me_claims.iter().enumerate() {
-                let (wit, ctx) = if shared_cpu_bus {
-                    match claim_idx {
+                for (claim_idx, me) in mem_proof.val_me_claims.iter().enumerate() {
+                    let (wit, ctx) = match claim_idx {
                         0 => (&mcs_wit.Z, "cpu"),
                         1 => {
                             let prev = prev_step
@@ -2975,34 +3021,11 @@ where
                                 "unexpected extra r_val ME claim in shared-bus mode".into(),
                             ));
                         }
-                    }
-                } else {
-                    let is_prev = has_prev && claim_idx >= n_mem;
-                    let mem_idx = if is_prev { claim_idx - n_mem } else { claim_idx };
-                    let step_for_wit = if is_prev {
-                        prev_step
-                            .ok_or_else(|| PiCcsError::ProtocolError("missing prev_step for r_val claim".into()))?
-                    } else {
-                        step
                     };
-                    let mat = step_for_wit
-                        .mem_instances
-                        .get(mem_idx)
-                        .ok_or_else(|| PiCcsError::ProtocolError("mem_idx out of range".into()))?
-                        .1
-                        .mats
-                        .get(0)
-                        .ok_or_else(|| PiCcsError::ProtocolError("missing mem witness mat".into()))?;
-                    (mat, "twist")
-                };
+                    tr.append_message(b"fold/val_lane_claim_idx", &(claim_idx as u64).to_le_bytes());
+                    tr.append_message(b"fold/val_lane_claim_ctx", ctx.as_bytes());
 
-                tr.append_message(b"fold/val_lane_claim_idx", &(claim_idx as u64).to_le_bytes());
-                tr.append_message(b"fold/val_lane_claim_ctx", ctx.as_bytes());
-
-                // No-shared-bus: the Twist ME already includes per-mem bus openings. Pass a local
-                // bus layout so Π_DEC propagates those extra y/y_scalars rows to children.
-                let (proof, mut Z_split_val) = if shared_cpu_bus {
-                    prove_rlc_dec_lane(
+                    let (proof, mut Z_split_val) = prove_rlc_dec_lane(
                         &mode,
                         RlcLane::Val,
                         tr,
@@ -3020,60 +3043,97 @@ where
                         collect_val_lane_wits,
                         l,
                         mixers,
-                    )?
-                } else {
-                    let is_prev = has_prev && claim_idx >= n_mem;
-                    let mem_idx = if is_prev { claim_idx - n_mem } else { claim_idx };
-                    let step_for_wit = if is_prev {
-                        prev_step
-                            .ok_or_else(|| PiCcsError::ProtocolError("missing prev_step for r_val claim".into()))?
-                    } else {
-                        step
-                    };
-                    let mem_inst = &step_for_wit
+                    )?;
+                    if collect_val_lane_wits {
+                        val_lane_wits.extend(Z_split_val.drain(..));
+                    }
+                    val_fold.push(proof);
+                }
+            } else {
+                let expected_claims = n_mem * (1 + usize::from(has_prev));
+                if mem_proof.val_me_claims.len() != expected_claims {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "Twist(val) claim count mismatch (have {}, expected {})",
+                        mem_proof.val_me_claims.len(),
+                        expected_claims
+                    )));
+                }
+                let buses = twist_route_a_buses
+                    .as_ref()
+                    .ok_or_else(|| PiCcsError::ProtocolError("missing cached twist Route-A buses".into()))?;
+                if buses.len() != n_mem {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "Twist(Route A): cached bus count mismatch (have {}, expected {})",
+                        buses.len(),
+                        n_mem
+                    )));
+                }
+
+                for mem_idx in 0..n_mem {
+                    tr.append_message(b"fold/val_lane_mem_idx", &(mem_idx as u64).to_le_bytes());
+
+                    let me_cur = mem_proof
+                        .val_me_claims
+                        .get(mem_idx)
+                        .ok_or_else(|| PiCcsError::ProtocolError("missing current Twist ME(val) claim".into()))?;
+                    let wit_cur = step
                         .mem_instances
                         .get(mem_idx)
                         .ok_or_else(|| PiCcsError::ProtocolError("mem_idx out of range".into()))?
-                        .0;
-                    let ell_addr = mem_inst.d * mem_inst.ell;
-                    let bus = neo_memory::cpu::build_bus_layout_for_instances_with_shout_and_twist_lanes(
-                        s.m,
-                        mcs_inst.m_in,
-                        mem_inst.steps,
-                        core::iter::empty::<(usize, usize)>(),
-                        core::iter::once((ell_addr, mem_inst.lanes.max(1))),
-                    )
-                    .map_err(|e| PiCcsError::InvalidInput(format!("Twist(Route A): bus layout failed: {e}")))?;
-                    if bus.twist_cols.len() != 1 || !bus.shout_cols.is_empty() {
-                        return Err(PiCcsError::ProtocolError(
-                            "Twist(Route A): expected a twist-only bus layout with 1 instance".into(),
-                        ));
+                        .1
+                        .mats
+                        .get(0)
+                        .ok_or_else(|| PiCcsError::ProtocolError("missing mem witness mat".into()))?;
+
+                    let mut claims = Vec::with_capacity(1 + usize::from(has_prev));
+                    let mut wits: Vec<&Mat<F>> = Vec::with_capacity(1 + usize::from(has_prev));
+                    claims.push(me_cur.clone());
+                    wits.push(wit_cur);
+
+                    if has_prev {
+                        let me_prev = mem_proof
+                            .val_me_claims
+                            .get(n_mem + mem_idx)
+                            .ok_or_else(|| PiCcsError::ProtocolError("missing prev Twist ME(val) claim".into()))?;
+                        let prev = prev_step.ok_or_else(|| {
+                            PiCcsError::ProtocolError("missing prev_step for Twist val-lane batching".into())
+                        })?;
+                        let wit_prev = prev
+                            .mem_instances
+                            .get(mem_idx)
+                            .ok_or_else(|| PiCcsError::ProtocolError("prev mem_idx out of range".into()))?
+                            .1
+                            .mats
+                            .get(0)
+                            .ok_or_else(|| PiCcsError::ProtocolError("missing prev mem witness mat".into()))?;
+                        claims.push(me_prev.clone());
+                        wits.push(wit_prev);
                     }
-                    prove_rlc_dec_lane(
+
+                    let (proof, mut Z_split_val) = prove_rlc_dec_lane(
                         &mode,
                         RlcLane::Val,
                         tr,
                         params,
                         &s,
                         ccs_sparse_cache.as_deref(),
-                        Some(&bus),
+                        Some(&buses[mem_idx]),
                         &ring,
                         ell_d,
                         k_dec,
                         step_idx,
                         None,
-                        core::slice::from_ref(me),
-                        core::slice::from_ref(&wit),
+                        &claims,
+                        &wits,
                         collect_val_lane_wits,
                         l,
                         mixers,
-                    )?
-                };
-
-                if collect_val_lane_wits {
-                    val_lane_wits.extend(Z_split_val.drain(..));
+                    )?;
+                    if collect_val_lane_wits {
+                        val_lane_wits.extend(Z_split_val.drain(..));
+                    }
+                    val_fold.push(proof);
                 }
-                val_fold.push(proof);
             }
         }
 
@@ -3093,6 +3153,17 @@ where
                 )));
             }
 
+            let buses = twist_route_a_buses
+                .as_ref()
+                .ok_or_else(|| PiCcsError::ProtocolError("missing cached twist Route-A buses".into()))?;
+            if buses.len() != step.mem_instances.len() {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "Twist(Route A): cached bus count mismatch (have {}, expected {})",
+                    buses.len(),
+                    step.mem_instances.len()
+                )));
+            }
+
             tr.append_message(b"fold/twist_time_lane_start", &(step_idx as u64).to_le_bytes());
             for (mem_idx, me) in mem_proof.twist_me_claims_time.iter().enumerate() {
                 let mat = step
@@ -3105,25 +3176,6 @@ where
                     .ok_or_else(|| PiCcsError::ProtocolError("missing mem witness mat".into()))?;
 
                 tr.append_message(b"fold/twist_time_lane_mem_idx", &(mem_idx as u64).to_le_bytes());
-                let mem_inst = &step
-                    .mem_instances
-                    .get(mem_idx)
-                    .ok_or_else(|| PiCcsError::ProtocolError("mem_idx out of range".into()))?
-                    .0;
-                let ell_addr = mem_inst.d * mem_inst.ell;
-                let bus = neo_memory::cpu::build_bus_layout_for_instances_with_shout_and_twist_lanes(
-                    s.m,
-                    mcs_inst.m_in,
-                    mem_inst.steps,
-                    core::iter::empty::<(usize, usize)>(),
-                    core::iter::once((ell_addr, mem_inst.lanes.max(1))),
-                )
-                .map_err(|e| PiCcsError::InvalidInput(format!("Twist(Route A): bus layout failed: {e}")))?;
-                if bus.twist_cols.len() != 1 || !bus.shout_cols.is_empty() {
-                    return Err(PiCcsError::ProtocolError(
-                        "Twist(Route A): expected a twist-only bus layout with 1 instance".into(),
-                    ));
-                }
                 let (proof, mut Z_split_val) = prove_rlc_dec_lane(
                     &mode,
                     RlcLane::Val,
@@ -3131,7 +3183,7 @@ where
                     params,
                     &s,
                     ccs_sparse_cache.as_deref(),
-                    Some(&bus),
+                    Some(&buses[mem_idx]),
                     &ring,
                     ell_d,
                     k_dec,
@@ -3690,6 +3742,7 @@ where
         let step_idx = step_idx_offset
             .checked_add(idx)
             .ok_or_else(|| PiCcsError::InvalidInput("step index overflow".into()))?;
+        let has_prev = idx > 0;
         absorb_step_memory(tr, step);
 
         let include_ob = ob_cfg.is_some() && (idx + 1 == steps.len());
@@ -4234,7 +4287,7 @@ where
 
         accumulator = step_proof.fold.dec_children.clone();
 
-        // Phase 2: Verify per-claim folding lanes for ME claims evaluated at r_val.
+        // Phase 2: Verify folding lanes for ME claims evaluated at r_val.
         if step_proof.mem.val_me_claims.is_empty() {
             if !step_proof.val_fold.is_empty() {
                 return Err(PiCcsError::ProtocolError(format!(
@@ -4243,25 +4296,34 @@ where
                 )));
             }
         } else {
-            if step_proof.val_fold.len() != step_proof.mem.val_me_claims.len() {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "step {}: val_fold count mismatch (have {}, expected {})",
-                    idx,
-                    step_proof.val_fold.len(),
-                    step_proof.mem.val_me_claims.len()
-                )));
-            }
-
             tr.append_message(b"fold/val_lane_start", &(step_idx as u64).to_le_bytes());
-            for (claim_idx, (me, proof)) in step_proof
-                .mem
-                .val_me_claims
-                .iter()
-                .zip(step_proof.val_fold.iter())
-                .enumerate()
-            {
-                let ctx = if shared_cpu_bus {
-                    match claim_idx {
+            if shared_cpu_bus {
+                let expected = 1usize + usize::from(has_prev);
+                if step_proof.mem.val_me_claims.len() != expected {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: val_me_claims count mismatch in shared-bus mode (have {}, expected {})",
+                        idx,
+                        step_proof.mem.val_me_claims.len(),
+                        expected
+                    )));
+                }
+                if step_proof.val_fold.len() != expected {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: val_fold count mismatch in shared-bus mode (have {}, expected {})",
+                        idx,
+                        step_proof.val_fold.len(),
+                        expected
+                    )));
+                }
+
+                for (claim_idx, (me, proof)) in step_proof
+                    .mem
+                    .val_me_claims
+                    .iter()
+                    .zip(step_proof.val_fold.iter())
+                    .enumerate()
+                {
+                    let ctx = match claim_idx {
                         0 => "cpu",
                         1 => "cpu_prev",
                         _ => {
@@ -4269,28 +4331,89 @@ where
                                 "unexpected extra r_val ME claim in shared-bus mode".into(),
                             ));
                         }
-                    }
-                } else {
-                    "twist"
-                };
+                    };
+                    tr.append_message(b"fold/val_lane_claim_idx", &(claim_idx as u64).to_le_bytes());
+                    tr.append_message(b"fold/val_lane_claim_ctx", ctx.as_bytes());
+                    verify_rlc_dec_lane(
+                        RlcLane::Val,
+                        tr,
+                        params,
+                        &s,
+                        &ring,
+                        ell_d,
+                        mixers,
+                        step_idx,
+                        core::slice::from_ref(me),
+                        &proof.rlc_rhos,
+                        &proof.rlc_parent,
+                        &proof.dec_children,
+                    )?;
+                    val_lane_obligations.extend_from_slice(&proof.dec_children);
+                }
+            } else {
+                let n_mem = step.mem_insts.len();
+                let expected_claims = n_mem * (1 + usize::from(has_prev));
+                if step_proof.mem.val_me_claims.len() != expected_claims {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: val_me_claims count mismatch in no-shared-bus mode (have {}, expected {})",
+                        idx,
+                        step_proof.mem.val_me_claims.len(),
+                        expected_claims
+                    )));
+                }
+                if step_proof.val_fold.len() != n_mem {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: val_fold count mismatch in no-shared-bus mode (have {}, expected {})",
+                        idx,
+                        step_proof.val_fold.len(),
+                        n_mem
+                    )));
+                }
 
-                tr.append_message(b"fold/val_lane_claim_idx", &(claim_idx as u64).to_le_bytes());
-                tr.append_message(b"fold/val_lane_claim_ctx", ctx.as_bytes());
-                verify_rlc_dec_lane(
-                    RlcLane::Val,
-                    tr,
-                    params,
-                    &s,
-                    &ring,
-                    ell_d,
-                    mixers,
-                    step_idx,
-                    core::slice::from_ref(me),
-                    &proof.rlc_rhos,
-                    &proof.rlc_parent,
-                    &proof.dec_children,
-                )?;
-                val_lane_obligations.extend_from_slice(&proof.dec_children);
+                for (mem_idx, proof) in step_proof.val_fold.iter().enumerate() {
+                    tr.append_message(b"fold/val_lane_mem_idx", &(mem_idx as u64).to_le_bytes());
+                    let me_cur = step_proof.mem.val_me_claims.get(mem_idx).ok_or_else(|| {
+                        PiCcsError::ProtocolError("missing current Twist ME(val) claim".into())
+                    })?;
+                    if has_prev {
+                        let me_prev = step_proof
+                            .mem
+                            .val_me_claims
+                            .get(n_mem + mem_idx)
+                            .ok_or_else(|| PiCcsError::ProtocolError("missing prev Twist ME(val) claim".into()))?;
+                        let claims = [me_cur.clone(), me_prev.clone()];
+                        verify_rlc_dec_lane(
+                            RlcLane::Val,
+                            tr,
+                            params,
+                            &s,
+                            &ring,
+                            ell_d,
+                            mixers,
+                            step_idx,
+                            &claims,
+                            &proof.rlc_rhos,
+                            &proof.rlc_parent,
+                            &proof.dec_children,
+                        )?;
+                    } else {
+                        verify_rlc_dec_lane(
+                            RlcLane::Val,
+                            tr,
+                            params,
+                            &s,
+                            &ring,
+                            ell_d,
+                            mixers,
+                            step_idx,
+                            core::slice::from_ref(me_cur),
+                            &proof.rlc_rhos,
+                            &proof.rlc_parent,
+                            &proof.dec_children,
+                        )?;
+                    }
+                    val_lane_obligations.extend_from_slice(&proof.dec_children);
+                }
             }
         }
 

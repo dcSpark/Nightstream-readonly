@@ -97,12 +97,6 @@ fn required_bits_for_max_addr(max_addr: u64) -> usize {
     }
 }
 
-fn write_u64_bits_lsb(dst_bits: &mut [F], x: u64) {
-    for (i, b) in dst_bits.iter_mut().enumerate() {
-        *b = if ((x >> i) & 1) == 1 { F::ONE } else { F::ZERO };
-    }
-}
-
 fn build_twist_only_bus_z(
     m: usize,
     m_in: usize,
@@ -158,17 +152,13 @@ fn build_twist_only_bus_z(
             z[bus.bus_cell(cols.wv, j)] = if has_w { F::from_u64(lane.wv[j]) } else { F::ZERO };
             z[bus.bus_cell(cols.inc, j)] = if has_w { lane.inc_at_write_addr[j] } else { F::ZERO };
 
-            {
-                let mut tmp = vec![F::ZERO; ell_addr];
-                write_u64_bits_lsb(&mut tmp, lane.ra[j]);
-                for (bit_idx, col_id) in cols.ra_bits.clone().enumerate() {
-                    z[bus.bus_cell(col_id, j)] = tmp[bit_idx];
-                }
-                tmp.fill(F::ZERO);
-                write_u64_bits_lsb(&mut tmp, lane.wa[j]);
-                for (bit_idx, col_id) in cols.wa_bits.clone().enumerate() {
-                    z[bus.bus_cell(col_id, j)] = tmp[bit_idx];
-                }
+            for (bit_idx, col_id) in cols.ra_bits.clone().enumerate() {
+                let bit_is_set = bit_idx < (u64::BITS as usize) && ((lane.ra[j] >> bit_idx) & 1) == 1;
+                z[bus.bus_cell(col_id, j)] = if bit_is_set { F::ONE } else { F::ZERO };
+            }
+            for (bit_idx, col_id) in cols.wa_bits.clone().enumerate() {
+                let bit_is_set = bit_idx < (u64::BITS as usize) && ((lane.wa[j] >> bit_idx) & 1) == 1;
+                z[bus.bus_cell(col_id, j)] = if bit_is_set { F::ONE } else { F::ZERO };
             }
         }
     }
@@ -418,6 +408,13 @@ enum OutputTarget {
     Reg,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Rv32TraceProvePhaseDurations {
+    pub setup: Duration,
+    pub chunk_build_commit: Duration,
+    pub fold_and_prove: Duration,
+}
+
 #[derive(Clone, Debug)]
 pub struct Rv32TraceWiring {
     program_base: u64,
@@ -647,6 +644,7 @@ impl Rv32TraceWiring {
             .map_err(|e| PiCcsError::InvalidInput(format!("build_rv32_trace_wiring_ccs failed: {e}")))?;
 
         let prove_start = time_now();
+        let setup_start = prove_start;
         let (prog_layout, prog_init_words) =
             prog_rom_layout_and_init_words::<F>(PROG_ID, /*base_addr=*/ 0, &self.program_bytes)
                 .map_err(|e| PiCcsError::InvalidInput(format!("prog_rom_layout_and_init_words failed: {e}")))?;
@@ -682,7 +680,10 @@ impl Rv32TraceWiring {
         // PROG/REG/RAM as separately committed no-shared-bus Twist instances linked at r_time.
         let mut reg_state = init_reg_state(&reg_init_map)?;
         let mut ram_state = init_ram_state(&ram_init_map, ram_d)?;
+        let setup_duration = elapsed_duration(setup_start);
+        let mut chunk_build_commit_duration = Duration::ZERO;
         for exec_chunk in &exec_chunks {
+            let chunk_start = time_now();
             let reg_init_chunk = reg_state_to_sparse_map(&reg_state);
             let ram_init_chunk = ram_state.clone();
 
@@ -805,8 +806,10 @@ impl Rv32TraceWiring {
             });
 
             apply_exec_chunk_writes_to_state(exec_chunk, &mut reg_state, &mut ram_state)?;
+            chunk_build_commit_duration += elapsed_duration(chunk_start);
         }
 
+        let fold_start = time_now();
         let (proof, output_binding_cfg) = if output_claims.is_empty() {
             (session.fold_and_prove(&ccs)?, None)
         } else {
@@ -818,7 +821,13 @@ impl Rv32TraceWiring {
             let proof = session.fold_and_prove_with_output_binding_simple(&ccs, &ob_cfg, &final_memory_state)?;
             (proof, Some(ob_cfg))
         };
+        let fold_and_prove_duration = elapsed_duration(fold_start);
         let prove_duration = elapsed_duration(prove_start);
+        let prove_phase_durations = Rv32TraceProvePhaseDurations {
+            setup: setup_duration,
+            chunk_build_commit: chunk_build_commit_duration,
+            fold_and_prove: fold_and_prove_duration,
+        };
 
         Ok(Rv32TraceWiringRun {
             session,
@@ -828,6 +837,7 @@ impl Rv32TraceWiring {
             proof,
             output_binding_cfg,
             prove_duration,
+            prove_phase_durations,
             verify_duration: None,
         })
     }
@@ -842,6 +852,7 @@ pub struct Rv32TraceWiringRun {
     proof: ShardProof,
     output_binding_cfg: Option<OutputBindingConfig>,
     prove_duration: Duration,
+    prove_phase_durations: Rv32TraceProvePhaseDurations,
     verify_duration: Option<Duration>,
 }
 
@@ -910,6 +921,10 @@ impl Rv32TraceWiringRun {
 
     pub fn prove_duration(&self) -> Duration {
         self.prove_duration
+    }
+
+    pub fn prove_phase_durations(&self) -> Rv32TraceProvePhaseDurations {
+        self.prove_phase_durations
     }
 
     pub fn verify_duration(&self) -> Option<Duration> {
