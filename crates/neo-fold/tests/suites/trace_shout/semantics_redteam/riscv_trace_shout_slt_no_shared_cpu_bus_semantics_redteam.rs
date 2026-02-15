@@ -246,7 +246,7 @@ fn riscv_trace_no_shared_cpu_bus_shout_slt_semantics_redteam() {
     // - reject because the tampered witness no longer satisfies the protocol invariants, or
     // - emit a proof that fails verification.
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-slt-semantics-redteam");
-    let Ok(proof) = fold_shard_prove(
+    if let Ok(proof) = fold_shard_prove(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -256,20 +256,18 @@ fn riscv_trace_no_shared_cpu_bus_shout_slt_semantics_redteam() {
         &[],
         &l,
         mixers,
-    ) else {
-        return;
-    };
-
-    let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-slt-semantics-redteam");
-    fold_shard_verify(
-        FoldingMode::PaperExact,
-        &mut tr_verify,
-        &params,
-        &ccs,
-        &steps_instance,
-        &[],
-        &proof,
-        mixers,
-    )
-    .expect_err("tampered packed SLT diff bit must be caught by Route-A time constraints");
+    ) {
+        let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-slt-semantics-redteam");
+        fold_shard_verify(
+            FoldingMode::PaperExact,
+            &mut tr_verify,
+            &params,
+            &ccs,
+            &steps_instance,
+            &[],
+            &proof,
+            mixers,
+        )
+        .expect_err("tampered packed SLT diff bit must be caught by Route-A time constraints");
+    }
 }

@@ -11,6 +11,23 @@ use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as F;
 
 #[test]
+fn rv32_trace_layout_removes_fixed_shout_table_selector_lanes() {
+    let layout = Rv32TraceCcsLayout::new(/*t=*/ 4).expect("trace CCS layout");
+
+    assert_eq!(layout.trace.cols, 148, "trace width regression: expected 148 columns");
+    assert_eq!(
+        layout.trace.is_lb,
+        layout.trace.shout_table_id + 1,
+        "fixed shout_table_has_lookup lanes should be absent from the trace layout"
+    );
+    assert_eq!(
+        layout.trace.cols,
+        layout.trace.jalr_drop_bit[1] + 1,
+        "trace layout should remain densely packed"
+    );
+}
+
+#[test]
 fn rv32_trace_wiring_ccs_satisfies_addi_halt() {
     // Program: ADDI x1, x0, 1; HALT
     let program = vec![
@@ -1525,7 +1542,7 @@ fn rv32_trace_wiring_ccs_rejects_rv32m_in_trace_scope() {
 }
 
 #[test]
-fn rv32_trace_wiring_ccs_rejects_amo_in_trace_scope() {
+fn rv32_trace_wiring_ccs_allows_amo_when_scope_lock_is_sidecar_owned() {
     let program = vec![
         RiscvInstruction::IAlu {
             op: RiscvOpcode::Add,
@@ -1558,7 +1575,7 @@ fn rv32_trace_wiring_ccs_rejects_amo_in_trace_scope() {
     let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
 
     assert!(
-        check_ccs_rowwise_zero(&ccs, &x, &w).is_err(),
-        "AMO must be rejected in Tier 2.1 trace scope"
+        check_ccs_rowwise_zero(&ccs, &x, &w).is_ok(),
+        "N0 CCS should accept AMO rows when the Tier 2.1 scope lock is sidecar-owned (WB/W2)"
     );
 }

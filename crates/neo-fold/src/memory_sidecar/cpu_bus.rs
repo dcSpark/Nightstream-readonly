@@ -327,7 +327,7 @@ where
     let want_len = core_t
         .checked_add(bus.bus_cols)
         .ok_or_else(|| PiCcsError::InvalidInput("core_t + bus_cols overflow".into()))?;
-    if me.y.len() == want_len && me.y_scalars.len() == want_len {
+    if me.y.len() >= want_len && me.y_scalars.len() >= want_len && me.y.len() == me.y_scalars.len() {
         return Ok(());
     }
     if me.y.len() != core_t || me.y_scalars.len() != core_t {
@@ -368,16 +368,20 @@ where
     // Append bus openings in canonical col_id order so `bus_y_base = y_scalars.len() - bus_cols`
     // remains valid.
     for col_id in 0..bus.bus_cols {
-        let z_indices: Vec<usize> = weighted_rows
-            .iter()
-            .map(|(j, _)| bus.bus_cell(col_id, *j))
-            .collect();
+        let col_base = bus
+            .bus_base
+            .checked_add(
+                col_id
+                    .checked_mul(bus.chunk_size)
+                    .ok_or_else(|| PiCcsError::InvalidInput("bus col_id * chunk_size overflow".into()))?,
+            )
+            .ok_or_else(|| PiCcsError::InvalidInput("bus col_base overflow".into()))?;
         let mut y_row = vec![K::ZERO; y_pad];
         let mut y_scalar = K::ZERO;
         for rho in 0..d {
             let mut acc = K::ZERO;
-            for ((_, w), &z_idx) in weighted_rows.iter().zip(z_indices.iter()) {
-                acc += *w * K::from(Z[(rho, z_idx)]);
+            for &(j, w) in weighted_rows.iter() {
+                acc += w * K::from(Z[(rho, col_base + j)]);
             }
             y_row[rho] = acc;
             y_scalar += acc * pow_b[rho];
@@ -460,7 +464,7 @@ where
     let want_len = core_t
         .checked_add(bus.bus_cols)
         .ok_or_else(|| PiCcsError::InvalidInput("core_t + bus_cols overflow".into()))?;
-    if me.y.len() == want_len && me.y_scalars.len() == want_len {
+    if me.y.len() >= want_len && me.y_scalars.len() >= want_len && me.y.len() == me.y_scalars.len() {
         return Ok(());
     }
     if me.y.len() != core_t || me.y_scalars.len() != core_t {
@@ -516,16 +520,20 @@ where
     // Append bus openings in canonical col_id order so `bus_y_base = y_scalars.len() - bus_cols`
     // remains valid.
     for col_id in 0..bus.bus_cols {
-        let z_indices: Vec<usize> = weighted_rows
-            .iter()
-            .map(|(j, _)| bus.bus_cell(col_id, *j))
-            .collect();
+        let col_base = bus
+            .bus_base
+            .checked_add(
+                col_id
+                    .checked_mul(bus.chunk_size)
+                    .ok_or_else(|| PiCcsError::InvalidInput("bus col_id * chunk_size overflow".into()))?,
+            )
+            .ok_or_else(|| PiCcsError::InvalidInput("bus col_base overflow".into()))?;
         let mut y_row = vec![K::ZERO; y_pad];
         let mut y_scalar = K::ZERO;
         for rho in 0..d {
             let mut acc = K::ZERO;
-            for ((_, w), &z_idx) in weighted_rows.iter().zip(z_indices.iter()) {
-                acc += *w * K::from(Z[(rho, z_idx)]);
+            for &(j, w) in weighted_rows.iter() {
+                acc += w * K::from(Z[(rho, col_base + j)]);
             }
             y_row[rho] = acc;
             y_scalar += acc * pow_b[rho];
@@ -994,19 +1002,25 @@ fn required_bus_binding_cols_for_layout(layout: &BusLayout) -> Vec<BusColLabel> 
     // - trace linkage checks (`verify_route_a_memory_step_no_shared_cpu_bus`) that bind the
     //   CPU trace's `(shout_has_lookup, shout_val, shout_lhs, shout_rhs)` to the sidecar openings.
     //
-    // So the critical CPU→bus requirement here is that the CPU CCS binds `has_lookup` and `val`
-    // outside padding rows; requiring `addr_bits` outside padding rows would force CPUs to
-    // materialize a packed 64-bit key scalar, which can violate Neo's Ajtai encoding bounds
-    // (d=54 with balanced base-b digits).
+    // In RV32 trace shared-bus mode, Shout table-linkage ownership is moved to reduction-time
+    // aggregate checks, so the shared-bus adapter may intentionally omit CPU-linkage equalities
+    // for Shout lanes. Keep only canonical Shout padding/bitness constraints in the CPU CCS and
+    // exempt all Shout columns from the "outside-padding binding" guard.
     let shout_addr_cols: HashSet<usize> = layout
         .shout_cols
         .iter()
         .flat_map(|inst| inst.lanes.iter().flat_map(|s| s.addr_bits.clone()))
         .collect();
+    let shout_selector_and_val_cols: HashSet<usize> = layout
+        .shout_cols
+        .iter()
+        .flat_map(|inst| inst.lanes.iter().flat_map(|s| [s.has_lookup, s.val]))
+        .collect();
     required_bus_cols_for_layout(layout)
         .into_iter()
         .filter(|c| !inc_cols.contains(&c.col_id))
         .filter(|c| !shout_addr_cols.contains(&c.col_id))
+        .filter(|c| !shout_selector_and_val_cols.contains(&c.col_id))
         .collect()
 }
 

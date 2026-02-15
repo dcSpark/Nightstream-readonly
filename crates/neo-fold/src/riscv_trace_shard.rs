@@ -474,10 +474,23 @@ fn infer_required_trace_shout_opcodes(program: &[RiscvInstruction]) -> HashSet<R
     ops
 }
 
-fn rv32_trace_table_specs(program: &[RiscvInstruction]) -> HashMap<u32, LutTableSpec> {
+fn program_requires_ram_sidecar(program: &[RiscvInstruction]) -> bool {
+    program.iter().any(|instr| {
+        matches!(
+            instr,
+            RiscvInstruction::Load { .. }
+                | RiscvInstruction::Store { .. }
+                | RiscvInstruction::LoadReserved { .. }
+                | RiscvInstruction::StoreConditional { .. }
+                | RiscvInstruction::Amo { .. }
+        )
+    })
+}
+
+fn rv32_trace_table_specs(shout_ops: &HashSet<RiscvOpcode>) -> HashMap<u32, LutTableSpec> {
     let shout = RiscvShoutTables::new(32);
     let mut table_specs = HashMap::new();
-    for op in infer_required_trace_shout_opcodes(program) {
+    for &op in shout_ops {
         let table_id = shout.opcode_to_id(op).0;
         table_specs.insert(table_id, LutTableSpec::RiscvOpcode { opcode: op, xlen: 32 });
     }
@@ -518,6 +531,7 @@ pub struct Rv32TraceWiring {
     reg_init: HashMap<u64, u64>,
     output_claims: ProgramIO<F>,
     output_target: OutputTarget,
+    shout_ops: Option<HashSet<RiscvOpcode>>,
 }
 
 impl Rv32TraceWiring {
@@ -536,6 +550,7 @@ impl Rv32TraceWiring {
             reg_init: HashMap::new(),
             output_claims: ProgramIO::new(),
             output_target: OutputTarget::Ram,
+            shout_ops: None,
         }
     }
 
@@ -619,6 +634,20 @@ impl Rv32TraceWiring {
             self.output_claims = ProgramIO::new();
         }
         self.output_claims = self.output_claims.with_output(reg, expected);
+        self
+    }
+
+    /// Use the default program-inferred minimal shout set.
+    pub fn shout_auto_minimal(mut self) -> Self {
+        self.shout_ops = None;
+        self
+    }
+
+    /// Optional override for shout tables.
+    ///
+    /// The override must be a superset of the program-inferred required shout set.
+    pub fn shout_ops(mut self, ops: impl IntoIterator<Item = RiscvOpcode>) -> Self {
+        self.shout_ops = Some(ops.into_iter().collect());
         self
     }
 
@@ -750,6 +779,7 @@ impl Rv32TraceWiring {
         if let Some(max_init_addr) = ram_init_map.keys().copied().max() {
             max_ram_addr = max_ram_addr.max(max_init_addr);
         }
+        let wants_ram_output = matches!(output_target, OutputTarget::Ram) && !output_claims.is_empty();
         if matches!(output_target, OutputTarget::Ram) {
             if let Some(max_claim_addr) = output_claims.claimed_addresses().max() {
                 max_ram_addr = max_ram_addr.max(max_claim_addr);
@@ -759,17 +789,12 @@ impl Rv32TraceWiring {
         let ram_k = 1usize
             .checked_shl(ram_d as u32)
             .ok_or_else(|| PiCcsError::InvalidInput(format!("RAM address width too large: d={ram_d}")))?;
+        // Track A used-set derivation must be deterministic from public inputs/config.
+        // Do not derive RAM inclusion from runtime witness/events.
+        let include_ram_sidecar =
+            program_requires_ram_sidecar(&program) || !ram_init_map.is_empty() || wants_ram_output;
 
-        let mem_layouts: HashMap<u32, PlainMemLayout> = HashMap::from([
-            (
-                RAM_ID.0,
-                PlainMemLayout {
-                    k: ram_k,
-                    d: ram_d,
-                    n_side: 2,
-                    lanes: 1,
-                },
-            ),
+        let mut mem_layouts: HashMap<u32, PlainMemLayout> = HashMap::from([
             (
                 REG_ID.0,
                 PlainMemLayout {
@@ -781,8 +806,38 @@ impl Rv32TraceWiring {
             ),
             (PROG_ID.0, prog_layout.clone()),
         ]);
+        if include_ram_sidecar {
+            mem_layouts.insert(
+                RAM_ID.0,
+                PlainMemLayout {
+                    k: ram_k,
+                    d: ram_d,
+                    n_side: 2,
+                    lanes: 1,
+                },
+            );
+        }
 
-        let table_specs = rv32_trace_table_specs(&program);
+        let inferred_shout_ops = infer_required_trace_shout_opcodes(&program);
+        let shout_ops = match &self.shout_ops {
+            Some(override_ops) => {
+                let missing: HashSet<RiscvOpcode> = inferred_shout_ops
+                    .difference(override_ops)
+                    .copied()
+                    .collect();
+                if !missing.is_empty() {
+                    let mut missing_names: Vec<String> = missing.into_iter().map(|op| format!("{op:?}")).collect();
+                    missing_names.sort_unstable();
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "trace shout_ops override must be a superset of required opcodes; missing [{}]",
+                        missing_names.join(", ")
+                    )));
+                }
+                override_ops.clone()
+            }
+            None => inferred_shout_ops,
+        };
+        let table_specs = rv32_trace_table_specs(&shout_ops);
         let mut shout_table_ids: Vec<u32> = table_specs.keys().copied().collect();
         shout_table_ids.sort_unstable();
 
@@ -938,7 +993,7 @@ impl Rv32TraceWiring {
                     ell: 1,
                     init: reg_mem_init,
                 };
-                let ram_mem_inst = MemInstance {
+                let ram_mem_inst = include_ram_sidecar.then_some(MemInstance {
                     mem_id: RAM_ID.0,
                     comms: Vec::new(),
                     k: ram_k,
@@ -948,7 +1003,7 @@ impl Rv32TraceWiring {
                     lanes: 1,
                     ell: 1,
                     init: ram_mem_init,
-                };
+                });
 
                 let prog_z = build_twist_only_bus_z(
                     ccs.m,
@@ -986,32 +1041,37 @@ impl Rv32TraceWiring {
                 };
                 let reg_mem_wit = MemWitness { mats: vec![reg_Z] };
 
-                let ram_z = build_twist_only_bus_z(
-                    ccs.m,
-                    layout.m_in,
-                    layout.t,
-                    ram_mem_inst.d * ram_mem_inst.ell,
-                    ram_mem_inst.lanes,
-                    std::slice::from_ref(&twist_lanes.ram),
-                    &x,
-                )
-                .map_err(|e| PiCcsError::InvalidInput(format!("build RAM twist z failed: {e}")))?;
-                let ram_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &ram_z);
-                let ram_c = session.committer().commit(&ram_Z);
-                let ram_mem_inst = MemInstance {
-                    comms: vec![ram_c],
-                    ..ram_mem_inst
+                let ram_mem = if let Some(ram_mem_inst) = ram_mem_inst {
+                    let ram_z = build_twist_only_bus_z(
+                        ccs.m,
+                        layout.m_in,
+                        layout.t,
+                        ram_mem_inst.d * ram_mem_inst.ell,
+                        ram_mem_inst.lanes,
+                        std::slice::from_ref(&twist_lanes.ram),
+                        &x,
+                    )
+                    .map_err(|e| PiCcsError::InvalidInput(format!("build RAM twist z failed: {e}")))?;
+                    let ram_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &ram_z);
+                    let ram_c = session.committer().commit(&ram_Z);
+                    let ram_mem_inst = MemInstance {
+                        comms: vec![ram_c],
+                        ..ram_mem_inst
+                    };
+                    Some((ram_mem_inst, MemWitness { mats: vec![ram_Z] }))
+                } else {
+                    None
                 };
-                let ram_mem_wit = MemWitness { mats: vec![ram_Z] };
+
+                let mut mem_instances = vec![(prog_mem_inst, prog_mem_wit), (reg_mem_inst, reg_mem_wit)];
+                if let Some(ram_mem) = ram_mem {
+                    mem_instances.push(ram_mem);
+                }
 
                 session.add_step_bundle(StepWitnessBundle {
                     mcs,
                     lut_instances: Vec::<(LutInstance<_, _>, LutWitness<F>)>::new(),
-                    mem_instances: vec![
-                        (prog_mem_inst, prog_mem_wit),
-                        (reg_mem_inst, reg_mem_wit),
-                        (ram_mem_inst, ram_mem_wit),
-                    ],
+                    mem_instances,
                     _phantom: PhantomData::<K>,
                 });
 
@@ -1030,10 +1090,16 @@ impl Rv32TraceWiring {
                     .collect::<Vec<_>>()
             })
             .unwrap_or_default();
-        let ram_ob_mem_idx = mem_order
-            .iter()
-            .position(|&id| id == RAM_ID.0)
-            .ok_or_else(|| PiCcsError::ProtocolError("missing RAM mem instance for output binding".into()))?;
+        let ram_ob_mem_idx = if wants_ram_output {
+            Some(
+                mem_order
+                    .iter()
+                    .position(|&id| id == RAM_ID.0)
+                    .ok_or_else(|| PiCcsError::ProtocolError("missing RAM mem instance for output binding".into()))?,
+            )
+        } else {
+            None
+        };
         let reg_ob_mem_idx = mem_order
             .iter()
             .position(|&id| id == REG_ID.0)
@@ -1045,7 +1111,9 @@ impl Rv32TraceWiring {
         } else {
             let (ob_mem_idx, ob_num_bits, final_memory_state) = match output_target {
                 OutputTarget::Ram => (
-                    ram_ob_mem_idx,
+                    ram_ob_mem_idx.ok_or_else(|| {
+                        PiCcsError::ProtocolError("missing RAM mem instance for output binding".into())
+                    })?,
                     ram_d,
                     final_ram_state_dense(&exec, &ram_init_map, ram_k)?,
                 ),
@@ -1063,12 +1131,17 @@ impl Rv32TraceWiring {
             fold_and_prove: fold_and_prove_duration,
         };
 
+        let mut used_mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
+        used_mem_ids.sort_unstable();
+
         Ok(Rv32TraceWiringRun {
             session,
             ccs,
             layout,
             exec,
             proof,
+            used_mem_ids,
+            used_shout_table_ids: shout_table_ids,
             output_binding_cfg,
             prove_duration,
             prove_phase_durations,
@@ -1084,6 +1157,8 @@ pub struct Rv32TraceWiringRun {
     layout: Rv32TraceCcsLayout,
     exec: Rv32ExecTable,
     proof: ShardProof,
+    used_mem_ids: Vec<u32>,
+    used_shout_table_ids: Vec<u32>,
     output_binding_cfg: Option<OutputBindingConfig>,
     prove_duration: Duration,
     prove_phase_durations: Rv32TraceProvePhaseDurations,
@@ -1113,6 +1188,16 @@ impl Rv32TraceWiringRun {
 
     pub fn proof(&self) -> &ShardProof {
         &self.proof
+    }
+
+    /// Auto-derived memory sidecar IDs used by this run (`S_memory`).
+    pub fn used_memory_ids(&self) -> &[u32] {
+        &self.used_mem_ids
+    }
+
+    /// Auto-derived shout lookup table IDs used by this run (`S_lookup`).
+    pub fn used_shout_table_ids(&self) -> &[u32] {
+        &self.used_shout_table_ids
     }
 
     pub fn verify_proof(&self, proof: &ShardProof) -> Result<(), PiCcsError> {

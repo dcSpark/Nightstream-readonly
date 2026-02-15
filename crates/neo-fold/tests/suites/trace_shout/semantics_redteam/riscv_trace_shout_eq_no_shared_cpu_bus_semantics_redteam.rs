@@ -242,7 +242,7 @@ fn riscv_trace_no_shared_cpu_bus_shout_eq_semantics_redteam() {
     // - reject because the witness no longer satisfies the protocol invariants, or
     // - emit a proof that fails verification.
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-eq-semantics-redteam");
-    let Ok(proof) = fold_shard_prove(
+    if let Ok(proof) = fold_shard_prove(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -252,20 +252,18 @@ fn riscv_trace_no_shared_cpu_bus_shout_eq_semantics_redteam() {
         &[],
         &l,
         mixers,
-    ) else {
-        return;
-    };
-
-    let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-eq-semantics-redteam");
-    fold_shard_verify(
-        FoldingMode::PaperExact,
-        &mut tr_verify,
-        &params,
-        &ccs,
-        &steps_instance,
-        &[],
-        &proof,
-        mixers,
-    )
-    .expect_err("tampered packed EQ borrow witness must be caught by Route-A time constraints");
+    ) {
+        let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-eq-semantics-redteam");
+        fold_shard_verify(
+            FoldingMode::PaperExact,
+            &mut tr_verify,
+            &params,
+            &ccs,
+            &steps_instance,
+            &[],
+            &proof,
+            mixers,
+        )
+        .expect_err("tampered packed EQ borrow witness must be caught by Route-A time constraints");
+    }
 }

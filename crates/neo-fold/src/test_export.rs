@@ -604,6 +604,12 @@ pub fn estimate_proof(proof: &crate::shard::ShardProof) -> TestExportProofEstima
         for val in &step.shout_time_fold {
             val_lane_commitments = val_lane_commitments.saturating_add(val.dec_children.len() + 1);
         }
+        for val in &step.wb_fold {
+            val_lane_commitments = val_lane_commitments.saturating_add(val.dec_children.len() + 1);
+        }
+        for val in &step.wp_fold {
+            val_lane_commitments = val_lane_commitments.saturating_add(val.dec_children.len() + 1);
+        }
     }
     let total_commitments: usize = fold_lane_commitments
         .saturating_add(mem_cpu_val_claim_commitments)

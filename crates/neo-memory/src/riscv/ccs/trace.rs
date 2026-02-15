@@ -142,22 +142,7 @@ fn push_tier21_value_semantics(
     let lh_sign_coeff = F::from_u64((1u64 << 32) - (1u64 << 15));
     let f3 = |k: usize| tr(l.funct3_is[k], i);
 
-    // funct3 one-hot helpers: active -> exactly one; always pack to funct3.
-    cons.push(Constraint::terms(
-        active,
-        false,
-        vec![
-            (f3(0), F::ONE),
-            (f3(1), F::ONE),
-            (f3(2), F::ONE),
-            (f3(3), F::ONE),
-            (f3(4), F::ONE),
-            (f3(5), F::ONE),
-            (f3(6), F::ONE),
-            (f3(7), F::ONE),
-            (one, -F::ONE),
-        ],
-    ));
+    // funct3 one-hot helpers are enforced in the W2 decode-residual WB stage.
     cons.push(Constraint::terms(
         one,
         false,
@@ -205,18 +190,7 @@ fn push_tier21_value_semantics(
             vec![(tr(flag, i), F::ONE), (tr(l.op_load, i), -F::ONE)],
         ));
     }
-    cons.push(Constraint::terms(
-        one,
-        false,
-        vec![
-            (tr(l.is_lb, i), F::ONE),
-            (tr(l.is_lbu, i), F::ONE),
-            (tr(l.is_lh, i), F::ONE),
-            (tr(l.is_lhu, i), F::ONE),
-            (tr(l.is_lw, i), F::ONE),
-            (tr(l.op_load, i), -F::ONE),
-        ],
-    ));
+    // Load selector sum is enforced in the W2 decode-residual WB stage.
     cons.push(Constraint::terms(
         tr(l.op_load, i),
         false,
@@ -236,16 +210,7 @@ fn push_tier21_value_semantics(
             vec![(tr(flag, i), F::ONE), (tr(l.op_store, i), -F::ONE)],
         ));
     }
-    cons.push(Constraint::terms(
-        one,
-        false,
-        vec![
-            (tr(l.is_sb, i), F::ONE),
-            (tr(l.is_sh, i), F::ONE),
-            (tr(l.is_sw, i), F::ONE),
-            (tr(l.op_store, i), -F::ONE),
-        ],
-    ));
+    // Store selector sum is enforced in the W2 decode-residual WB stage.
     cons.push(Constraint::terms(
         tr(l.op_store, i),
         false,
@@ -313,8 +278,7 @@ fn push_tier21_value_semantics(
         ));
     }
 
-    // Tier 2.1 scope lock: RV32I only in trace mode.
-    cons.push(Constraint::terms(one, false, vec![(tr(l.op_amo, i), F::ONE)]));
+    // Tier 2.1 scope lock (`op_amo == 0`) is enforced in the W2 decode-residual WB stage.
     cons.push(Constraint::terms(
         tr(l.op_alu_reg, i),
         false,
@@ -336,43 +300,6 @@ fn push_tier21_value_semantics(
         shout_has_lookup,
         true,
         vec![(tr(l.shout_table_id, i), F::ONE)],
-    ));
-    cons.push(Constraint::terms(
-        one,
-        false,
-        vec![
-            (tr(l.shout_table_has_lookup[0], i), F::ONE),
-            (tr(l.shout_table_has_lookup[1], i), F::ONE),
-            (tr(l.shout_table_has_lookup[2], i), F::ONE),
-            (tr(l.shout_table_has_lookup[3], i), F::ONE),
-            (tr(l.shout_table_has_lookup[4], i), F::ONE),
-            (tr(l.shout_table_has_lookup[5], i), F::ONE),
-            (tr(l.shout_table_has_lookup[6], i), F::ONE),
-            (tr(l.shout_table_has_lookup[7], i), F::ONE),
-            (tr(l.shout_table_has_lookup[8], i), F::ONE),
-            (tr(l.shout_table_has_lookup[9], i), F::ONE),
-            (tr(l.shout_table_has_lookup[10], i), F::ONE),
-            (tr(l.shout_table_has_lookup[11], i), F::ONE),
-            (shout_has_lookup, -F::ONE),
-        ],
-    ));
-    cons.push(Constraint::terms(
-        one,
-        false,
-        vec![
-            (tr(l.shout_table_id, i), F::ONE),
-            (tr(l.shout_table_has_lookup[1], i), -F::from_u64(1)),
-            (tr(l.shout_table_has_lookup[2], i), -F::from_u64(2)),
-            (tr(l.shout_table_has_lookup[3], i), -F::from_u64(3)),
-            (tr(l.shout_table_has_lookup[4], i), -F::from_u64(4)),
-            (tr(l.shout_table_has_lookup[5], i), -F::from_u64(5)),
-            (tr(l.shout_table_has_lookup[6], i), -F::from_u64(6)),
-            (tr(l.shout_table_has_lookup[7], i), -F::from_u64(7)),
-            (tr(l.shout_table_has_lookup[8], i), -F::from_u64(8)),
-            (tr(l.shout_table_has_lookup[9], i), -F::from_u64(9)),
-            (tr(l.shout_table_has_lookup[10], i), -F::from_u64(10)),
-            (tr(l.shout_table_has_lookup[11], i), -F::from_u64(11)),
-        ],
     ));
 
     // ALU lookup binding.
@@ -546,26 +473,6 @@ pub fn build_rv32_trace_wiring_ccs_with_reserved_rows(
     let t = layout.t;
     let tr = |c: usize, i: usize| -> usize { layout.cell(c, i) };
     let l = &layout.trace;
-    let opcode_flags = [
-        l.op_lui,
-        l.op_auipc,
-        l.op_jal,
-        l.op_jalr,
-        l.op_branch,
-        l.op_load,
-        l.op_store,
-        l.op_alu_imm,
-        l.op_alu_reg,
-        l.op_misc_mem,
-        l.op_system,
-        l.op_amo,
-    ];
-
-    let bool01 = |x: usize| -> Constraint<F> {
-        // x * (x - 1) = 0
-        Constraint::terms(x, false, vec![(x, F::ONE), (one, -F::ONE)])
-    };
-
     let signext_imm12 = F::from_u64((1u64 << 32) - (1u64 << 11));
     let signext_imm13 = F::from_u64((1u64 << 32) - (1u64 << 12));
     let signext_imm21 = F::from_u64((1u64 << 32) - (1u64 << 20));
@@ -615,224 +522,7 @@ pub fn build_rv32_trace_wiring_ccs_with_reserved_rows(
             vec![(tr(l.one, i), F::ONE), (one, -F::ONE)],
         ));
 
-        // Booleans.
-        cons.push(bool01(active));
-        cons.push(bool01(halted));
-        cons.push(bool01(rd_has_write));
-        cons.push(bool01(ram_has_read));
-        cons.push(bool01(ram_has_write));
-        cons.push(bool01(shout_has_lookup));
-        for &f in &l.shout_table_has_lookup {
-            cons.push(bool01(tr(f, i)));
-        }
-        for &b in &l.rd_bit {
-            cons.push(bool01(tr(b, i)));
-        }
-        for &b in &l.funct3_bit {
-            cons.push(bool01(tr(b, i)));
-        }
-        for &b in &l.rs1_bit {
-            cons.push(bool01(tr(b, i)));
-        }
-        for &b in &l.rs2_bit {
-            cons.push(bool01(tr(b, i)));
-        }
-        for &b in &l.funct7_bit {
-            cons.push(bool01(tr(b, i)));
-        }
-        cons.push(bool01(tr(l.branch_taken, i)));
-        cons.push(bool01(tr(l.branch_invert_shout, i)));
-        cons.push(bool01(tr(l.branch_f3b1_op, i)));
-        cons.push(bool01(tr(l.branch_invert_shout_prod, i)));
-        cons.push(bool01(tr(l.jalr_drop_bit[0], i)));
-        cons.push(bool01(tr(l.jalr_drop_bit[1], i)));
-        for &f in &opcode_flags {
-            cons.push(bool01(tr(f, i)));
-        }
-        for &f in &[
-            l.is_lb,
-            l.is_lbu,
-            l.is_lh,
-            l.is_lhu,
-            l.is_lw,
-            l.is_sb,
-            l.is_sh,
-            l.is_sw,
-            l.op_lui_write,
-            l.op_alu_imm_write,
-            l.op_alu_reg_write,
-            l.is_lb_write,
-            l.is_lbu_write,
-            l.is_lh_write,
-            l.is_lhu_write,
-            l.is_lw_write,
-        ] {
-            cons.push(bool01(tr(f, i)));
-        }
-        for &f in &l.funct3_is {
-            cons.push(bool01(tr(f, i)));
-        }
-        for &b in &l.ram_rv_low_bit {
-            cons.push(bool01(tr(b, i)));
-        }
-        for &b in &l.rs2_low_bit {
-            cons.push(bool01(tr(b, i)));
-        }
-        // Inactive padding invariants: (1 - active) * col = 0.
-        for &c in &[
-            l.instr_word,
-            l.opcode,
-            l.funct3,
-            l.funct7,
-            l.rd,
-            l.rs1,
-            l.rs2,
-            l.op_lui,
-            l.op_auipc,
-            l.op_jal,
-            l.op_jalr,
-            l.op_branch,
-            l.op_load,
-            l.op_store,
-            l.op_alu_imm,
-            l.op_alu_reg,
-            l.op_misc_mem,
-            l.op_system,
-            l.op_amo,
-            l.op_lui_write,
-            l.op_auipc_write,
-            l.op_jal_write,
-            l.op_jalr_write,
-            l.prog_addr,
-            l.prog_value,
-            l.rs1_addr,
-            l.rs1_val,
-            l.rs2_addr,
-            l.rs2_val,
-            l.rd_has_write,
-            l.rd_addr,
-            l.rd_val,
-            l.ram_has_read,
-            l.ram_has_write,
-            l.ram_addr,
-            l.ram_rv,
-            l.ram_wv,
-            l.shout_has_lookup,
-            l.shout_val,
-            l.shout_lhs,
-            l.shout_rhs,
-            l.shout_table_id,
-            l.shout_table_has_lookup[0],
-            l.shout_table_has_lookup[1],
-            l.shout_table_has_lookup[2],
-            l.shout_table_has_lookup[3],
-            l.shout_table_has_lookup[4],
-            l.shout_table_has_lookup[5],
-            l.shout_table_has_lookup[6],
-            l.shout_table_has_lookup[7],
-            l.shout_table_has_lookup[8],
-            l.shout_table_has_lookup[9],
-            l.shout_table_has_lookup[10],
-            l.shout_table_has_lookup[11],
-            l.is_lb,
-            l.is_lbu,
-            l.is_lh,
-            l.is_lhu,
-            l.is_lw,
-            l.is_sb,
-            l.is_sh,
-            l.is_sw,
-            l.op_alu_imm_write,
-            l.op_alu_reg_write,
-            l.is_lb_write,
-            l.is_lbu_write,
-            l.is_lh_write,
-            l.is_lhu_write,
-            l.is_lw_write,
-            l.funct3_is[0],
-            l.funct3_is[1],
-            l.funct3_is[2],
-            l.funct3_is[3],
-            l.funct3_is[4],
-            l.funct3_is[5],
-            l.funct3_is[6],
-            l.funct3_is[7],
-            l.alu_reg_table_delta,
-            l.alu_imm_table_delta,
-            l.alu_imm_shift_rhs_delta,
-            l.ram_rv_q16,
-            l.rs2_q16,
-            l.ram_rv_low_bit[0],
-            l.ram_rv_low_bit[1],
-            l.ram_rv_low_bit[2],
-            l.ram_rv_low_bit[3],
-            l.ram_rv_low_bit[4],
-            l.ram_rv_low_bit[5],
-            l.ram_rv_low_bit[6],
-            l.ram_rv_low_bit[7],
-            l.ram_rv_low_bit[8],
-            l.ram_rv_low_bit[9],
-            l.ram_rv_low_bit[10],
-            l.ram_rv_low_bit[11],
-            l.ram_rv_low_bit[12],
-            l.ram_rv_low_bit[13],
-            l.ram_rv_low_bit[14],
-            l.ram_rv_low_bit[15],
-            l.rs2_low_bit[0],
-            l.rs2_low_bit[1],
-            l.rs2_low_bit[2],
-            l.rs2_low_bit[3],
-            l.rs2_low_bit[4],
-            l.rs2_low_bit[5],
-            l.rs2_low_bit[6],
-            l.rs2_low_bit[7],
-            l.rs2_low_bit[8],
-            l.rs2_low_bit[9],
-            l.rs2_low_bit[10],
-            l.rs2_low_bit[11],
-            l.rs2_low_bit[12],
-            l.rs2_low_bit[13],
-            l.rs2_low_bit[14],
-            l.rs2_low_bit[15],
-            l.rd_bit[0],
-            l.rd_bit[1],
-            l.rd_bit[2],
-            l.rd_bit[3],
-            l.rd_bit[4],
-            l.funct3_bit[0],
-            l.funct3_bit[1],
-            l.funct3_bit[2],
-            l.rs1_bit[0],
-            l.rs1_bit[1],
-            l.rs1_bit[2],
-            l.rs1_bit[3],
-            l.rs1_bit[4],
-            l.rs2_bit[0],
-            l.rs2_bit[1],
-            l.rs2_bit[2],
-            l.rs2_bit[3],
-            l.rs2_bit[4],
-            l.funct7_bit[0],
-            l.funct7_bit[1],
-            l.funct7_bit[2],
-            l.funct7_bit[3],
-            l.funct7_bit[4],
-            l.funct7_bit[5],
-            l.funct7_bit[6],
-            l.imm_i,
-            l.imm_s,
-            l.imm_b,
-            l.imm_j,
-            l.branch_taken,
-            l.branch_invert_shout,
-            l.branch_taken_imm,
-            l.branch_f3b1_op,
-            l.branch_invert_shout_prod,
-            l.jalr_drop_bit[0],
-            l.jalr_drop_bit[1],
-        ] {
-            cons.push(Constraint::terms(active, true, vec![(tr(c, i), F::ONE)]));
-        }
+        // Booleanity and inactive-row quiescence are enforced by WB/WP sidecar stages.
 
         // rd packing: rd == Σ 2^k * rd_bit[k].
         cons.push(Constraint::terms(
@@ -898,14 +588,7 @@ pub fn build_rv32_trace_wiring_ccs_with_reserved_rows(
             ],
         ));
 
-        // Opcode-class one-hot on active rows.
-        {
-            let mut terms = vec![(active, -F::ONE)];
-            for &f in &opcode_flags {
-                terms.push((tr(f, i), F::ONE));
-            }
-            cons.push(Constraint::terms(one, false, terms));
-        }
+        // Opcode-class one-hot is enforced in the W2 decode-residual WB stage.
 
         // opcode must match opcode-class one-hot.
         cons.push(Constraint::terms(
@@ -1037,12 +720,7 @@ pub fn build_rv32_trace_wiring_ccs_with_reserved_rows(
             ],
         ));
 
-        // Branch helper products.
-        cons.push(Constraint::mul(
-            tr(l.funct3_bit[1], i),
-            tr(l.funct3_bit[2], i),
-            tr(l.branch_f3b1_op, i),
-        ));
+        // `branch_f3b1_op` decode linkage is enforced in the W2 decode-residual WB stage.
         cons.push(Constraint::mul(
             tr(l.branch_invert_shout, i),
             tr(l.shout_val, i),

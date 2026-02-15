@@ -42,6 +42,7 @@ use neo_reductions::sumcheck::{BatchedClaim, RoundOracle};
 use neo_transcript::{Poseidon2Transcript, Transcript};
 use p3_field::Field;
 use p3_field::PrimeCharacteristicRing;
+use std::collections::{BTreeMap, BTreeSet};
 
 // ============================================================================
 // Transcript binding
@@ -731,6 +732,548 @@ struct TraceCpuLinkOpenings {
     shout_table_id: K,
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct ShoutTraceLinkSums {
+    has_lookup: K,
+    val: K,
+    lhs: K,
+    rhs: K,
+    table_id: K,
+}
+
+#[inline]
+fn verify_non_event_trace_shout_linkage(cpu: TraceCpuLinkOpenings, sums: ShoutTraceLinkSums) -> Result<(), PiCcsError> {
+    if sums.has_lookup != cpu.shout_has_lookup {
+        return Err(PiCcsError::ProtocolError(
+            "trace linkage failed: Shout has_lookup mismatch".into(),
+        ));
+    }
+    if sums.val != cpu.shout_val {
+        return Err(PiCcsError::ProtocolError(
+            "trace linkage failed: Shout val mismatch".into(),
+        ));
+    }
+    if sums.lhs != cpu.shout_lhs {
+        return Err(PiCcsError::ProtocolError(
+            "trace linkage failed: Shout lhs mismatch".into(),
+        ));
+    }
+    if sums.rhs != cpu.shout_rhs {
+        return Err(PiCcsError::ProtocolError(
+            "trace linkage failed: Shout rhs mismatch".into(),
+        ));
+    }
+    if sums.table_id != cpu.shout_table_id {
+        return Err(PiCcsError::ProtocolError(
+            "trace linkage failed: Shout table_id mismatch".into(),
+        ));
+    }
+    Ok(())
+}
+
+#[inline]
+fn chi_at_bool_index(point: &[K], idx: usize) -> K {
+    let mut out = K::ONE;
+    for (bit_idx, &r) in point.iter().enumerate() {
+        let bit = if ((idx >> bit_idx) & 1) == 1 { K::ONE } else { K::ZERO };
+        out *= eq_bit_affine(bit, r);
+    }
+    out
+}
+
+#[inline]
+fn eq_single_k(a: K, b: K) -> K {
+    a * b + (K::ONE - a) * (K::ONE - b)
+}
+
+fn chi_cycle_children(r_cycle: &[K], bit_idx: usize, prefix_eq: K, pair_idx: usize) -> (K, K) {
+    let mut suffix = K::ONE;
+    let mut shift = bit_idx + 1;
+    let mut idx = pair_idx;
+    while shift < r_cycle.len() {
+        let bit = idx & 1;
+        let bit_k = if bit == 1 { K::ONE } else { K::ZERO };
+        suffix *= eq_bit_affine(bit_k, r_cycle[shift]);
+        idx >>= 1;
+        shift += 1;
+    }
+
+    let r = r_cycle[bit_idx];
+    let child0 = prefix_eq * (K::ONE - r) * suffix;
+    let child1 = prefix_eq * r * suffix;
+    (child0, child1)
+}
+
+#[inline]
+fn wb_weight_vector(r_cycle: &[K], len: usize) -> Vec<K> {
+    bitness_weights(r_cycle, len, 0x5742_5F42_4F4F_4Cu64)
+}
+
+#[inline]
+fn w2_decode_pack_weight_vector(r_cycle: &[K], len: usize) -> Vec<K> {
+    bitness_weights(r_cycle, len, 0x5732_5F50_4143_4Bu64)
+}
+
+#[inline]
+fn wp_weight_vector(r_cycle: &[K], len: usize) -> Vec<K> {
+    bitness_weights(r_cycle, len, 0x5750_5F51_5549_4553u64)
+}
+
+pub(crate) fn rv32_trace_wb_columns(layout: &Rv32TraceLayout) -> Vec<usize> {
+    let mut out = vec![
+        layout.active,
+        layout.halted,
+        layout.rd_has_write,
+        layout.ram_has_read,
+        layout.ram_has_write,
+        layout.shout_has_lookup,
+        layout.branch_taken,
+        layout.branch_invert_shout,
+        layout.branch_f3b1_op,
+        layout.branch_invert_shout_prod,
+        layout.jalr_drop_bit[0],
+        layout.jalr_drop_bit[1],
+        layout.op_lui,
+        layout.op_auipc,
+        layout.op_jal,
+        layout.op_jalr,
+        layout.op_branch,
+        layout.op_load,
+        layout.op_store,
+        layout.op_alu_imm,
+        layout.op_alu_reg,
+        layout.op_misc_mem,
+        layout.op_system,
+        layout.op_amo,
+        layout.is_lb,
+        layout.is_lbu,
+        layout.is_lh,
+        layout.is_lhu,
+        layout.is_lw,
+        layout.is_sb,
+        layout.is_sh,
+        layout.is_sw,
+        layout.op_lui_write,
+        layout.op_alu_imm_write,
+        layout.op_alu_reg_write,
+        layout.is_lb_write,
+        layout.is_lbu_write,
+        layout.is_lh_write,
+        layout.is_lhu_write,
+        layout.is_lw_write,
+    ];
+    out.extend_from_slice(&layout.rd_bit);
+    out.extend_from_slice(&layout.funct3_bit);
+    out.extend_from_slice(&layout.rs1_bit);
+    out.extend_from_slice(&layout.rs2_bit);
+    out.extend_from_slice(&layout.funct7_bit);
+    out.extend_from_slice(&layout.funct3_is);
+    out.extend_from_slice(&layout.ram_rv_low_bit);
+    out.extend_from_slice(&layout.rs2_low_bit);
+    out
+}
+
+#[inline]
+fn w2_decode_selector_residuals(
+    active: K,
+    opcode_flags: [K; 12],
+    funct3_is: [K; 8],
+    funct3_bits: [K; 3],
+    branch_f3b1_op: K,
+    op_load: K,
+    load_flags: [K; 5],
+    op_store: K,
+    store_flags: [K; 3],
+    op_amo: K,
+) -> [K; 9] {
+    let opcode_one_hot = opcode_flags.into_iter().fold(K::ZERO, |acc, v| acc + v) - active;
+    let funct3_one_hot = funct3_is.into_iter().fold(K::ZERO, |acc, v| acc + v) - active;
+    let funct3_bit0_link = (funct3_is[1] + funct3_is[3] + funct3_is[5] + funct3_is[7]) - funct3_bits[0];
+    let funct3_bit1_link = (funct3_is[2] + funct3_is[3] + funct3_is[6] + funct3_is[7]) - funct3_bits[1];
+    let funct3_bit2_link = (funct3_is[4] + funct3_is[5] + funct3_is[6] + funct3_is[7]) - funct3_bits[2];
+    let branch_f3b1_link = (funct3_is[6] + funct3_is[7]) - branch_f3b1_op;
+    let load_selector = load_flags.into_iter().fold(K::ZERO, |acc, v| acc + v) - op_load;
+    let store_selector = store_flags.into_iter().fold(K::ZERO, |acc, v| acc + v) - op_store;
+    // Tier-2.1 trace mode lock: op_amo must be zero on every row.
+    let amo_forbidden = op_amo;
+
+    [
+        opcode_one_hot,
+        funct3_one_hot,
+        funct3_bit0_link,
+        funct3_bit1_link,
+        funct3_bit2_link,
+        branch_f3b1_link,
+        load_selector,
+        store_selector,
+        amo_forbidden,
+    ]
+}
+
+fn rv32_trace_wp_columns(layout: &Rv32TraceLayout) -> Vec<usize> {
+    vec![
+        layout.instr_word,
+        layout.opcode,
+        layout.funct3,
+        layout.funct7,
+        layout.rd,
+        layout.rs1,
+        layout.rs2,
+        layout.op_lui,
+        layout.op_auipc,
+        layout.op_jal,
+        layout.op_jalr,
+        layout.op_branch,
+        layout.op_load,
+        layout.op_store,
+        layout.op_alu_imm,
+        layout.op_alu_reg,
+        layout.op_misc_mem,
+        layout.op_system,
+        layout.op_amo,
+        layout.op_lui_write,
+        layout.op_auipc_write,
+        layout.op_jal_write,
+        layout.op_jalr_write,
+        layout.prog_addr,
+        layout.prog_value,
+        layout.rs1_addr,
+        layout.rs1_val,
+        layout.rs2_addr,
+        layout.rs2_val,
+        layout.rd_has_write,
+        layout.rd_addr,
+        layout.rd_val,
+        layout.ram_has_read,
+        layout.ram_has_write,
+        layout.ram_addr,
+        layout.ram_rv,
+        layout.ram_wv,
+        layout.shout_has_lookup,
+        layout.shout_val,
+        layout.shout_lhs,
+        layout.shout_rhs,
+        layout.shout_table_id,
+        layout.is_lb,
+        layout.is_lbu,
+        layout.is_lh,
+        layout.is_lhu,
+        layout.is_lw,
+        layout.is_sb,
+        layout.is_sh,
+        layout.is_sw,
+        layout.op_alu_imm_write,
+        layout.op_alu_reg_write,
+        layout.is_lb_write,
+        layout.is_lbu_write,
+        layout.is_lh_write,
+        layout.is_lhu_write,
+        layout.is_lw_write,
+        layout.funct3_is[0],
+        layout.funct3_is[1],
+        layout.funct3_is[2],
+        layout.funct3_is[3],
+        layout.funct3_is[4],
+        layout.funct3_is[5],
+        layout.funct3_is[6],
+        layout.funct3_is[7],
+        layout.alu_reg_table_delta,
+        layout.alu_imm_table_delta,
+        layout.alu_imm_shift_rhs_delta,
+        layout.ram_rv_q16,
+        layout.rs2_q16,
+        layout.ram_rv_low_bit[0],
+        layout.ram_rv_low_bit[1],
+        layout.ram_rv_low_bit[2],
+        layout.ram_rv_low_bit[3],
+        layout.ram_rv_low_bit[4],
+        layout.ram_rv_low_bit[5],
+        layout.ram_rv_low_bit[6],
+        layout.ram_rv_low_bit[7],
+        layout.ram_rv_low_bit[8],
+        layout.ram_rv_low_bit[9],
+        layout.ram_rv_low_bit[10],
+        layout.ram_rv_low_bit[11],
+        layout.ram_rv_low_bit[12],
+        layout.ram_rv_low_bit[13],
+        layout.ram_rv_low_bit[14],
+        layout.ram_rv_low_bit[15],
+        layout.rs2_low_bit[0],
+        layout.rs2_low_bit[1],
+        layout.rs2_low_bit[2],
+        layout.rs2_low_bit[3],
+        layout.rs2_low_bit[4],
+        layout.rs2_low_bit[5],
+        layout.rs2_low_bit[6],
+        layout.rs2_low_bit[7],
+        layout.rs2_low_bit[8],
+        layout.rs2_low_bit[9],
+        layout.rs2_low_bit[10],
+        layout.rs2_low_bit[11],
+        layout.rs2_low_bit[12],
+        layout.rs2_low_bit[13],
+        layout.rs2_low_bit[14],
+        layout.rs2_low_bit[15],
+        layout.rd_bit[0],
+        layout.rd_bit[1],
+        layout.rd_bit[2],
+        layout.rd_bit[3],
+        layout.rd_bit[4],
+        layout.funct3_bit[0],
+        layout.funct3_bit[1],
+        layout.funct3_bit[2],
+        layout.rs1_bit[0],
+        layout.rs1_bit[1],
+        layout.rs1_bit[2],
+        layout.rs1_bit[3],
+        layout.rs1_bit[4],
+        layout.rs2_bit[0],
+        layout.rs2_bit[1],
+        layout.rs2_bit[2],
+        layout.rs2_bit[3],
+        layout.rs2_bit[4],
+        layout.funct7_bit[0],
+        layout.funct7_bit[1],
+        layout.funct7_bit[2],
+        layout.funct7_bit[3],
+        layout.funct7_bit[4],
+        layout.funct7_bit[5],
+        layout.funct7_bit[6],
+        layout.imm_i,
+        layout.imm_s,
+        layout.imm_b,
+        layout.imm_j,
+        layout.branch_taken,
+        layout.branch_invert_shout,
+        layout.branch_taken_imm,
+        layout.branch_f3b1_op,
+        layout.branch_invert_shout_prod,
+        layout.jalr_drop_bit[0],
+        layout.jalr_drop_bit[1],
+    ]
+}
+
+pub(crate) fn rv32_trace_wp_opening_columns(layout: &Rv32TraceLayout) -> Vec<usize> {
+    let mut out = Vec::with_capacity(1 + 160);
+    out.push(layout.active);
+    out.extend(rv32_trace_wp_columns(layout));
+    out
+}
+
+pub(crate) fn infer_rv32_trace_t_len_for_wb_wp(
+    step: &StepWitnessBundle<Cmt, F, K>,
+    trace: &Rv32TraceLayout,
+) -> Result<usize, PiCcsError> {
+    if let Some((inst, _)) = step.mem_instances.first() {
+        return Ok(inst.steps);
+    }
+    if let Some((inst, _)) = step.lut_instances.first() {
+        return Ok(inst.steps);
+    }
+
+    let m_in = step.mcs.0.m_in;
+    let m = step.mcs.1.Z.cols();
+    let w = m
+        .checked_sub(m_in)
+        .ok_or_else(|| PiCcsError::InvalidInput("trace width underflow while inferring t_len".into()))?;
+    if trace.cols == 0 || w % trace.cols != 0 {
+        return Err(PiCcsError::InvalidInput(
+            "cannot infer RV32 trace t_len for WB/WP (missing mem/lut instances and non-divisible witness width)"
+                .into(),
+        ));
+    }
+    let t_len = w / trace.cols;
+    if t_len == 0 {
+        return Err(PiCcsError::InvalidInput(
+            "RV32 trace t_len must be >= 1 for WB/WP".into(),
+        ));
+    }
+    Ok(t_len)
+}
+
+fn decode_trace_col_values_batch(
+    params: &NeoParams,
+    step: &StepWitnessBundle<Cmt, F, K>,
+    t_len: usize,
+    col_ids: &[usize],
+) -> Result<BTreeMap<usize, Vec<K>>, PiCcsError> {
+    let m_in = step.mcs.0.m_in;
+    let m = step.mcs.1.Z.cols();
+    let d = neo_math::D;
+    let z = &step.mcs.1.Z;
+    if z.rows() != d {
+        return Err(PiCcsError::InvalidInput(format!(
+            "WB/WP: CPU witness Z.rows()={} != D={d}",
+            z.rows()
+        )));
+    }
+
+    let trace_base = m_in;
+    let b_k = K::from(F::from_u64(params.b as u64));
+    let mut pow_b = Vec::with_capacity(d);
+    let mut cur = K::ONE;
+    for _ in 0..d {
+        pow_b.push(cur);
+        cur *= b_k;
+    }
+
+    let unique_col_ids: BTreeSet<usize> = col_ids.iter().copied().collect();
+    let mut decoded = BTreeMap::<usize, Vec<K>>::new();
+    for col_id in unique_col_ids {
+        let col_start = trace_base
+            .checked_add(
+                col_id
+                    .checked_mul(t_len)
+                    .ok_or_else(|| PiCcsError::InvalidInput("WB/WP: col_id * t_len overflow".into()))?,
+            )
+            .ok_or_else(|| PiCcsError::InvalidInput("WB/WP: trace column start overflow".into()))?;
+
+        let mut out = Vec::with_capacity(t_len);
+        for j in 0..t_len {
+            let idx = col_start
+                .checked_add(j)
+                .ok_or_else(|| PiCcsError::InvalidInput("WB/WP: trace z idx overflow".into()))?;
+            if idx >= m {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "WB/WP: trace z idx out of range (idx={idx}, m={m})"
+                )));
+            }
+            let mut acc = K::ZERO;
+            for rho in 0..d {
+                acc += pow_b[rho] * K::from(z[(rho, idx)]);
+            }
+            out.push(acc);
+        }
+        decoded.insert(col_id, out);
+    }
+
+    Ok(decoded)
+}
+
+fn sparse_trace_col_from_values(m_in: usize, ell_n: usize, values: &[K]) -> Result<SparseIdxVec<K>, PiCcsError> {
+    let pow2_cycle = 1usize
+        .checked_shl(ell_n as u32)
+        .ok_or_else(|| PiCcsError::InvalidInput("WB/WP: 2^ell_n overflow".into()))?;
+    let t_len = values.len();
+    if m_in
+        .checked_add(t_len)
+        .ok_or_else(|| PiCcsError::InvalidInput("WB/WP: m_in + t_len overflow".into()))?
+        > pow2_cycle
+    {
+        return Err(PiCcsError::InvalidInput(format!(
+            "WB/WP: trace rows out of range (m_in={m_in}, t_len={t_len}, 2^ell_n={pow2_cycle})"
+        )));
+    }
+    let mut entries = Vec::new();
+    for (j, &v) in values.iter().enumerate() {
+        if v != K::ZERO {
+            entries.push((m_in + j, v));
+        }
+    }
+    Ok(SparseIdxVec::from_entries(pow2_cycle, entries))
+}
+
+struct WeightedMaskOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    active: SparseIdxVec<K>,
+    cols: Vec<SparseIdxVec<K>>,
+    weights: Vec<K>,
+}
+
+impl WeightedMaskOracleSparseTime {
+    fn new(active: SparseIdxVec<K>, cols: Vec<SparseIdxVec<K>>, weights: Vec<K>, r_cycle: &[K]) -> Self {
+        debug_assert_eq!(cols.len(), weights.len());
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            active,
+            cols,
+            weights,
+        }
+    }
+}
+
+impl RoundOracle for WeightedMaskOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.cols.is_empty() {
+            return vec![K::ZERO; points.len()];
+        }
+
+        if self.active.len() == 1 {
+            let gate = K::ONE - self.active.singleton_value();
+            let mut acc = K::ZERO;
+            for (col, w) in self.cols.iter().zip(self.weights.iter()) {
+                acc += *w * col.singleton_value();
+            }
+            return vec![self.prefix_eq * gate * acc; points.len()];
+        }
+
+        let mut pairs = gather_pairs_from_sparse(self.active.entries());
+        for col in self.cols.iter() {
+            pairs.extend(gather_pairs_from_sparse(col.entries()));
+        }
+        pairs.sort_unstable();
+        pairs.dedup();
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = K::ONE - self.active.get(child0);
+            let gate1 = K::ONE - self.active.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+                let mut sum_x = K::ZERO;
+                for (col, w) in self.cols.iter().zip(self.weights.iter()) {
+                    let c0 = col.get(child0);
+                    let c1 = col.get(child1);
+                    if c0 == K::ZERO && c1 == K::ZERO {
+                        continue;
+                    }
+                    sum_x += *w * interp(c0, c1, x);
+                }
+                ys[i] += chi_x * gate_x * sum_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        3
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single_k(r, self.r_cycle[self.bit_idx]);
+        self.active.fold_round_in_place(r);
+        for col in self.cols.iter_mut() {
+            col.fold_round_in_place(r);
+        }
+        self.bit_idx += 1;
+    }
+}
+
 #[inline]
 fn pack_bits_lsb(bits: &[K]) -> K {
     let two = K::from(F::from_u64(2));
@@ -767,6 +1310,7 @@ fn unpack_interleaved_halves_lsb(addr_bits: &[K]) -> Result<(K, K), PiCcsError> 
 fn extract_trace_cpu_link_openings(
     m: usize,
     core_t: usize,
+    y_prefix_cols: usize,
     step: &StepInstanceBundle<Cmt, F, K>,
     ccs_out0: &MeInstance<Cmt, F, K>,
 ) -> Result<Option<TraceCpuLinkOpenings>, PiCcsError> {
@@ -855,18 +1399,19 @@ fn extract_trace_cpu_link_openings(
         )));
     }
     let expected_y_len = core_t
-        .checked_add(trace_cols_to_open.len())
-        .ok_or_else(|| PiCcsError::InvalidInput("core_t + trace_openings overflow".into()))?;
+        .checked_add(y_prefix_cols)
+        .and_then(|v| v.checked_add(trace_cols_to_open.len()))
+        .ok_or_else(|| PiCcsError::InvalidInput("core_t + y_prefix_cols + trace_openings overflow".into()))?;
     if ccs_out0.y_scalars.len() != expected_y_len {
         return Err(PiCcsError::InvalidInput(format!(
-            "no-shared-bus trace linkage expects CPU ME output to contain exactly core_t + trace_openings y_scalars (have {}, expected {expected_y_len})",
+            "trace linkage expects CPU ME output to contain exactly core_t + y_prefix_cols + trace_openings y_scalars (have {}, expected {expected_y_len})",
             ccs_out0.y_scalars.len(),
         )));
     }
     let cpu_open = |idx: usize| -> Result<K, PiCcsError> {
         ccs_out0
             .y_scalars
-            .get(core_t + idx)
+            .get(core_t + y_prefix_cols + idx)
             .copied()
             .ok_or_else(|| PiCcsError::ProtocolError("missing CPU trace linkage opening".into()))
     };
@@ -4107,6 +4652,470 @@ impl<'o> TimeBatchedClaims for TwistRouteAProtocol<'o> {
     }
 }
 
+#[inline]
+pub(crate) fn wb_wp_required_for_rv32_trace_mode_m_in(m_in: usize) -> bool {
+    // Track A RV32 trace wiring mode binds CPU core columns at m_in=5 and requires
+    // WB/WP to be present; these stages are not prover-optional.
+    m_in == 5
+}
+
+pub(crate) fn build_route_a_wb_wp_time_claims(
+    params: &NeoParams,
+    step: &StepWitnessBundle<Cmt, F, K>,
+    r_cycle: &[K],
+) -> Result<
+    (
+        Option<(Box<dyn RoundOracle>, K)>,
+        Option<(Box<dyn RoundOracle>, K)>,
+    ),
+    PiCcsError,
+> {
+    if !wb_wp_required_for_rv32_trace_mode_m_in(step.mcs.0.m_in) {
+        return Ok((None, None));
+    }
+
+    let trace = Rv32TraceLayout::new();
+    let t_len = infer_rv32_trace_t_len_for_wb_wp(step, &trace)?;
+    let m_in = step.mcs.0.m_in;
+    let ell_n = r_cycle.len();
+    let wb_bool_cols = rv32_trace_wb_columns(&trace);
+    let wp_cols = rv32_trace_wp_columns(&trace);
+
+    let mut decode_cols = Vec::with_capacity(1 + wb_bool_cols.len() + wp_cols.len());
+    decode_cols.push(trace.active);
+    decode_cols.extend(wb_bool_cols.iter().copied());
+    decode_cols.extend(wp_cols.iter().copied());
+    let decoded = decode_trace_col_values_batch(params, step, t_len, &decode_cols)?;
+
+    let wb_weights = wb_weight_vector(r_cycle, wb_bool_cols.len());
+    let mut wb_bool_decoded_cols: Vec<&Vec<K>> = Vec::with_capacity(wb_bool_cols.len());
+    let mut wb_bool_sparse_cols: Vec<SparseIdxVec<K>> = Vec::with_capacity(wb_bool_cols.len());
+    for &col_id in wb_bool_cols.iter() {
+        let vals = decoded.get(&col_id).ok_or_else(|| {
+            PiCcsError::ProtocolError(format!("WB/W2: missing decoded bool column {col_id}"))
+        })?;
+        wb_bool_sparse_cols.push(sparse_trace_col_from_values(m_in, ell_n, vals)?);
+        wb_bool_decoded_cols.push(vals);
+    }
+
+    let mut wb_claim = K::ZERO;
+    for j in 0..t_len {
+        let t = m_in + j;
+        let chi = chi_at_bool_index(r_cycle, t);
+        let mut row_acc = K::ZERO;
+        for (vals, w) in wb_bool_decoded_cols.iter().zip(wb_weights.iter()) {
+            let b = vals[j];
+            row_acc += *w * b * (b - K::ONE);
+        }
+        wb_claim += chi * row_acc;
+    }
+    let wb_oracle = LazyWeightedBitnessOracleSparseTime::new_with_cycle(r_cycle, wb_bool_sparse_cols, wb_weights);
+
+    // W2 bootstrap: add decode/selector residual checks using existing WB-opened columns,
+    // so proof shape stays unchanged while the decode offload path comes online.
+    let wb_col_idx: BTreeMap<usize, usize> = wb_bool_cols
+        .iter()
+        .copied()
+        .enumerate()
+        .map(|(idx, col_id)| (col_id, idx))
+        .collect();
+    let wb_bool_value_at = |col_id: usize, row: usize| -> Result<K, PiCcsError> {
+        let idx = wb_col_idx.get(&col_id).copied().ok_or_else(|| {
+            PiCcsError::ProtocolError(format!(
+                "WB/W2: missing required bool column {} in wb column set",
+                col_id
+            ))
+        })?;
+        Ok(wb_bool_decoded_cols[idx][row])
+    };
+
+    let w2_residual_count = 9usize;
+    let w2_weights = w2_decode_pack_weight_vector(r_cycle, w2_residual_count);
+    let mut residual_vals: Vec<Vec<K>> = (0..w2_residual_count)
+        .map(|_| Vec::with_capacity(t_len))
+        .collect();
+    let mut w2_claim = K::ZERO;
+    for j in 0..t_len {
+        let residuals = w2_decode_selector_residuals(
+            wb_bool_value_at(trace.active, j)?,
+            [
+                wb_bool_value_at(trace.op_lui, j)?,
+                wb_bool_value_at(trace.op_auipc, j)?,
+                wb_bool_value_at(trace.op_jal, j)?,
+                wb_bool_value_at(trace.op_jalr, j)?,
+                wb_bool_value_at(trace.op_branch, j)?,
+                wb_bool_value_at(trace.op_load, j)?,
+                wb_bool_value_at(trace.op_store, j)?,
+                wb_bool_value_at(trace.op_alu_imm, j)?,
+                wb_bool_value_at(trace.op_alu_reg, j)?,
+                wb_bool_value_at(trace.op_misc_mem, j)?,
+                wb_bool_value_at(trace.op_system, j)?,
+                wb_bool_value_at(trace.op_amo, j)?,
+            ],
+            [
+                wb_bool_value_at(trace.funct3_is[0], j)?,
+                wb_bool_value_at(trace.funct3_is[1], j)?,
+                wb_bool_value_at(trace.funct3_is[2], j)?,
+                wb_bool_value_at(trace.funct3_is[3], j)?,
+                wb_bool_value_at(trace.funct3_is[4], j)?,
+                wb_bool_value_at(trace.funct3_is[5], j)?,
+                wb_bool_value_at(trace.funct3_is[6], j)?,
+                wb_bool_value_at(trace.funct3_is[7], j)?,
+            ],
+            [
+                wb_bool_value_at(trace.funct3_bit[0], j)?,
+                wb_bool_value_at(trace.funct3_bit[1], j)?,
+                wb_bool_value_at(trace.funct3_bit[2], j)?,
+            ],
+            wb_bool_value_at(trace.branch_f3b1_op, j)?,
+            wb_bool_value_at(trace.op_load, j)?,
+            [
+                wb_bool_value_at(trace.is_lb, j)?,
+                wb_bool_value_at(trace.is_lbu, j)?,
+                wb_bool_value_at(trace.is_lh, j)?,
+                wb_bool_value_at(trace.is_lhu, j)?,
+                wb_bool_value_at(trace.is_lw, j)?,
+            ],
+            wb_bool_value_at(trace.op_store, j)?,
+            [
+                wb_bool_value_at(trace.is_sb, j)?,
+                wb_bool_value_at(trace.is_sh, j)?,
+                wb_bool_value_at(trace.is_sw, j)?,
+            ],
+            wb_bool_value_at(trace.op_amo, j)?,
+        );
+
+        let mut row_acc = K::ZERO;
+        for (k, r) in residuals.iter().enumerate() {
+            residual_vals[k].push(*r);
+            row_acc += w2_weights[k] * *r;
+        }
+        let t = m_in + j;
+        let chi = chi_at_bool_index(r_cycle, t);
+        w2_claim += chi * row_acc;
+    }
+
+    let mut residual_sparse_cols = Vec::with_capacity(residual_vals.len());
+    for vals in residual_vals.iter() {
+        residual_sparse_cols.push(sparse_trace_col_from_values(m_in, ell_n, vals)?);
+    }
+    let pow2_cycle = 1usize
+        .checked_shl(ell_n as u32)
+        .ok_or_else(|| PiCcsError::InvalidInput("WB/W2: 2^ell_n overflow".into()))?;
+    let active_zero = SparseIdxVec::from_entries(pow2_cycle, Vec::new());
+    let w2_oracle = WeightedMaskOracleSparseTime::new(active_zero, residual_sparse_cols, w2_weights, r_cycle);
+    let wb_claim_full = wb_claim + w2_claim;
+    let wb_round_oracle = SumRoundOracle::new(vec![Box::new(wb_oracle), Box::new(w2_oracle)]);
+
+    let wp_cols = rv32_trace_wp_columns(&trace);
+    let weights = wp_weight_vector(r_cycle, wp_cols.len());
+    let active_vals = decoded.get(&trace.active).ok_or_else(|| {
+        PiCcsError::ProtocolError(format!(
+            "WP: missing decoded active column {}",
+            trace.active
+        ))
+    })?;
+    let active = sparse_trace_col_from_values(m_in, ell_n, &active_vals)?;
+
+    let mut decoded_cols: Vec<&Vec<K>> = Vec::with_capacity(wp_cols.len());
+    let mut sparse_cols: Vec<SparseIdxVec<K>> = Vec::with_capacity(wp_cols.len());
+    for &col_id in wp_cols.iter() {
+        let vals = decoded.get(&col_id).ok_or_else(|| {
+            PiCcsError::ProtocolError(format!("WP: missing decoded column {col_id}"))
+        })?;
+        sparse_cols.push(sparse_trace_col_from_values(m_in, ell_n, &vals)?);
+        decoded_cols.push(vals);
+    }
+
+    let mut claim = K::ZERO;
+    for j in 0..t_len {
+        let t = m_in + j;
+        let chi = chi_at_bool_index(r_cycle, t);
+        let gate_j = K::ONE - active_vals[j];
+        let mut row_acc = K::ZERO;
+        for (vals, w) in decoded_cols.iter().zip(weights.iter()) {
+            row_acc += *w * vals[j];
+        }
+        claim += chi * gate_j * row_acc;
+    }
+
+    let oracle = WeightedMaskOracleSparseTime::new(active, sparse_cols, weights, r_cycle);
+    Ok((
+        Some((Box::new(wb_round_oracle), wb_claim_full)),
+        Some((Box::new(oracle), claim)),
+    ))
+}
+
+fn emit_route_a_wb_wp_me_claims(
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s: &CcsStructure<F>,
+    step: &StepWitnessBundle<Cmt, F, K>,
+    r_time: &[K],
+) -> Result<(Vec<MeInstance<Cmt, F, K>>, Vec<MeInstance<Cmt, F, K>>), PiCcsError> {
+    if !wb_wp_required_for_rv32_trace_mode_m_in(step.mcs.0.m_in) {
+        return Ok((Vec::new(), Vec::new()));
+    }
+
+    let trace = Rv32TraceLayout::new();
+    let t_len = infer_rv32_trace_t_len_for_wb_wp(step, &trace)?;
+    let m_in = step.mcs.0.m_in;
+    let core_t = s.t();
+    let (mcs_inst, mcs_wit) = &step.mcs;
+
+    let wb_cols = rv32_trace_wb_columns(&trace);
+    let mut wb_claims = ts::emit_me_claims_for_mats(
+        tr,
+        b"cpu/me_digest_wb_time",
+        params,
+        s,
+        core::slice::from_ref(&mcs_inst.c),
+        core::slice::from_ref(&mcs_wit.Z),
+        r_time,
+        m_in,
+    )?;
+    if wb_claims.len() != 1 {
+        return Err(PiCcsError::ProtocolError(format!(
+            "WB expects exactly one CPU ME claim at r_time, got {}",
+            wb_claims.len()
+        )));
+    }
+    crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
+        params,
+        m_in,
+        t_len,
+        m_in,
+        &wb_cols,
+        core_t,
+        &mcs_wit.Z,
+        &mut wb_claims[0],
+    )?;
+
+    let wp_cols = rv32_trace_wp_opening_columns(&trace);
+    let mut wp_claims = ts::emit_me_claims_for_mats(
+        tr,
+        b"cpu/me_digest_wp_time",
+        params,
+        s,
+        core::slice::from_ref(&mcs_inst.c),
+        core::slice::from_ref(&mcs_wit.Z),
+        r_time,
+        m_in,
+    )?;
+    if wp_claims.len() != 1 {
+        return Err(PiCcsError::ProtocolError(format!(
+            "WP expects exactly one CPU ME claim at r_time, got {}",
+            wp_claims.len()
+        )));
+    }
+    crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
+        params,
+        m_in,
+        t_len,
+        m_in,
+        &wp_cols,
+        core_t,
+        &mcs_wit.Z,
+        &mut wp_claims[0],
+    )?;
+
+    Ok((wb_claims, wp_claims))
+}
+
+fn verify_route_a_wb_wp_terminals(
+    core_t: usize,
+    step: &StepInstanceBundle<Cmt, F, K>,
+    r_time: &[K],
+    r_cycle: &[K],
+    batched_final_values: &[K],
+    claim_plan: &RouteATimeClaimPlan,
+    mem_proof: &MemSidecarProof<Cmt, F, K>,
+) -> Result<(), PiCcsError> {
+    let trace = Rv32TraceLayout::new();
+
+    if let Some(claim_idx) = claim_plan.wb_bool {
+        if claim_idx >= batched_final_values.len() {
+            return Err(PiCcsError::ProtocolError(
+                "wb/booleanity claim index out of range".into(),
+            ));
+        }
+        if mem_proof.wb_me_claims.len() != 1 {
+            return Err(PiCcsError::ProtocolError(format!(
+                "WB expects exactly one ME claim at r_time (got {})",
+                mem_proof.wb_me_claims.len()
+            )));
+        }
+        let me = &mem_proof.wb_me_claims[0];
+        if me.r.as_slice() != r_time {
+            return Err(PiCcsError::ProtocolError(
+                "WB ME claim r mismatch (expected r_time)".into(),
+            ));
+        }
+        if me.c != step.mcs_inst.c {
+            return Err(PiCcsError::ProtocolError("WB ME claim commitment mismatch".into()));
+        }
+        if me.m_in != step.mcs_inst.m_in {
+            return Err(PiCcsError::ProtocolError("WB ME claim m_in mismatch".into()));
+        }
+
+        let wb_bool_cols = rv32_trace_wb_columns(&trace);
+        let need = core_t
+            .checked_add(wb_bool_cols.len())
+            .ok_or_else(|| PiCcsError::InvalidInput("WB opening count overflow".into()))?;
+        if me.y_scalars.len() != need {
+            return Err(PiCcsError::ProtocolError(format!(
+                "WB ME opening length mismatch (got {}, expected {need})",
+                me.y_scalars.len()
+            )));
+        }
+
+        let wb_bool_open = &me.y_scalars[core_t..];
+        let wb_weights = wb_weight_vector(r_cycle, wb_bool_cols.len());
+        let mut wb_weighted_bitness = K::ZERO;
+        for (&b, &w) in wb_bool_open.iter().zip(wb_weights.iter()) {
+            wb_weighted_bitness += w * b * (b - K::ONE);
+        }
+
+        let wb_open_col = |col_id: usize| -> Result<K, PiCcsError> {
+            let idx = wb_bool_cols
+                .iter()
+                .position(|&c| c == col_id)
+                .ok_or_else(|| {
+                    PiCcsError::ProtocolError(format!("WB/W2 terminal: missing required opening column {}", col_id))
+                })?;
+            Ok(wb_bool_open[idx])
+        };
+
+        let residuals = w2_decode_selector_residuals(
+            wb_open_col(trace.active)?,
+            [
+                wb_open_col(trace.op_lui)?,
+                wb_open_col(trace.op_auipc)?,
+                wb_open_col(trace.op_jal)?,
+                wb_open_col(trace.op_jalr)?,
+                wb_open_col(trace.op_branch)?,
+                wb_open_col(trace.op_load)?,
+                wb_open_col(trace.op_store)?,
+                wb_open_col(trace.op_alu_imm)?,
+                wb_open_col(trace.op_alu_reg)?,
+                wb_open_col(trace.op_misc_mem)?,
+                wb_open_col(trace.op_system)?,
+                wb_open_col(trace.op_amo)?,
+            ],
+            [
+                wb_open_col(trace.funct3_is[0])?,
+                wb_open_col(trace.funct3_is[1])?,
+                wb_open_col(trace.funct3_is[2])?,
+                wb_open_col(trace.funct3_is[3])?,
+                wb_open_col(trace.funct3_is[4])?,
+                wb_open_col(trace.funct3_is[5])?,
+                wb_open_col(trace.funct3_is[6])?,
+                wb_open_col(trace.funct3_is[7])?,
+            ],
+            [
+                wb_open_col(trace.funct3_bit[0])?,
+                wb_open_col(trace.funct3_bit[1])?,
+                wb_open_col(trace.funct3_bit[2])?,
+            ],
+            wb_open_col(trace.branch_f3b1_op)?,
+            wb_open_col(trace.op_load)?,
+            [
+                wb_open_col(trace.is_lb)?,
+                wb_open_col(trace.is_lbu)?,
+                wb_open_col(trace.is_lh)?,
+                wb_open_col(trace.is_lhu)?,
+                wb_open_col(trace.is_lw)?,
+            ],
+            wb_open_col(trace.op_store)?,
+            [
+                wb_open_col(trace.is_sb)?,
+                wb_open_col(trace.is_sh)?,
+                wb_open_col(trace.is_sw)?,
+            ],
+            wb_open_col(trace.op_amo)?,
+        );
+        let w2_weights = w2_decode_pack_weight_vector(r_cycle, residuals.len());
+        let mut w2_weighted_residual = K::ZERO;
+        for (r, w) in residuals.iter().zip(w2_weights.iter()) {
+            w2_weighted_residual += *w * *r;
+        }
+
+        let expected_terminal = eq_points(r_time, r_cycle) * (wb_weighted_bitness + w2_weighted_residual);
+        let observed_terminal = batched_final_values[claim_idx];
+        if observed_terminal != expected_terminal {
+            return Err(PiCcsError::ProtocolError(
+                "wb/booleanity terminal value mismatch".into(),
+            ));
+        }
+    } else if !mem_proof.wb_me_claims.is_empty() {
+        return Err(PiCcsError::ProtocolError(
+            "unexpected WB ME claims: wb/booleanity stage is not enabled".into(),
+        ));
+    }
+
+    if let Some(claim_idx) = claim_plan.wp_quiescence {
+        if claim_idx >= batched_final_values.len() {
+            return Err(PiCcsError::ProtocolError(
+                "wp/quiescence claim index out of range".into(),
+            ));
+        }
+        if mem_proof.wp_me_claims.len() != 1 {
+            return Err(PiCcsError::ProtocolError(format!(
+                "WP expects exactly one ME claim at r_time (got {})",
+                mem_proof.wp_me_claims.len()
+            )));
+        }
+        let me = &mem_proof.wp_me_claims[0];
+        if me.r.as_slice() != r_time {
+            return Err(PiCcsError::ProtocolError(
+                "WP ME claim r mismatch (expected r_time)".into(),
+            ));
+        }
+        if me.c != step.mcs_inst.c {
+            return Err(PiCcsError::ProtocolError("WP ME claim commitment mismatch".into()));
+        }
+        if me.m_in != step.mcs_inst.m_in {
+            return Err(PiCcsError::ProtocolError("WP ME claim m_in mismatch".into()));
+        }
+
+        let wp_open_cols = rv32_trace_wp_opening_columns(&trace);
+        let need = core_t
+            .checked_add(wp_open_cols.len())
+            .ok_or_else(|| PiCcsError::InvalidInput("WP opening count overflow".into()))?;
+        if me.y_scalars.len() != need {
+            return Err(PiCcsError::ProtocolError(format!(
+                "WP ME opening length mismatch (got {}, expected {need})",
+                me.y_scalars.len()
+            )));
+        }
+
+        let active_open = me
+            .y_scalars
+            .get(core_t)
+            .copied()
+            .ok_or_else(|| PiCcsError::ProtocolError("WP missing active opening".into()))?;
+        let wp_open = &me.y_scalars[(core_t + 1)..];
+        let wp_weights = wp_weight_vector(r_cycle, wp_open.len());
+        let mut wp_weighted_sum = K::ZERO;
+        for (&v, &w) in wp_open.iter().zip(wp_weights.iter()) {
+            wp_weighted_sum += w * v;
+        }
+        let expected_terminal = eq_points(r_time, r_cycle) * (K::ONE - active_open) * wp_weighted_sum;
+        let observed_terminal = batched_final_values[claim_idx];
+        if observed_terminal != expected_terminal {
+            return Err(PiCcsError::ProtocolError(
+                "wp/quiescence terminal value mismatch".into(),
+            ));
+        }
+    } else if !mem_proof.wp_me_claims.is_empty() {
+        return Err(PiCcsError::ProtocolError(
+            "unexpected WP ME claims: wp/quiescence stage is not enabled".into(),
+        ));
+    }
+
+    Ok(())
+}
+
 pub(crate) fn finalize_route_a_memory_prover(
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
@@ -4368,6 +5377,8 @@ pub(crate) fn finalize_route_a_memory_prover(
     let mut shout_me_claims_time: Vec<MeInstance<Cmt, F, K>> = Vec::new();
     let mut twist_me_claims_time: Vec<MeInstance<Cmt, F, K>> = Vec::new();
     let mut val_me_claims: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let mut wb_me_claims: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let mut wp_me_claims: Vec<MeInstance<Cmt, F, K>> = Vec::new();
     let mut proofs: Vec<MemOrLutProof> = Vec::new();
 
     // --------------------------------------------------------------------
@@ -4942,10 +5953,16 @@ pub(crate) fn finalize_route_a_memory_prover(
         }
     }
 
+    let (wb_claims, wp_claims) = emit_route_a_wb_wp_me_claims(tr, params, s, step, r_time)?;
+    wb_me_claims.extend(wb_claims);
+    wp_me_claims.extend(wp_claims);
+
     Ok(MemSidecarProof {
         shout_me_claims_time,
         twist_me_claims_time,
         val_me_claims,
+        wb_me_claims,
+        wp_me_claims,
         shout_addr_pre: shout_addr_pre.clone(),
         proofs,
     })
@@ -4995,6 +6012,18 @@ pub fn verify_route_a_memory_step(
     if ccs_out0.r.as_slice() != r_time {
         return Err(PiCcsError::ProtocolError(
             "CPU ME output r mismatch (expected shared r_time)".into(),
+        ));
+    }
+    let cpu_link = if wb_wp_required_for_rv32_trace_mode_m_in(step.mcs_inst.m_in) {
+        extract_trace_cpu_link_openings(m, core_t, cpu_bus.bus_cols, step, ccs_out0)?
+    } else {
+        None
+    };
+    let enforce_trace_shout_linkage =
+        wb_wp_required_for_rv32_trace_mode_m_in(step.mcs_inst.m_in) && !step.lut_insts.is_empty();
+    if enforce_trace_shout_linkage && cpu_link.is_none() {
+        return Err(PiCcsError::ProtocolError(
+            "missing CPU trace linkage openings in shared-bus mode".into(),
         ));
     }
     let has_prev = prev_step.is_some();
@@ -5068,15 +6097,21 @@ pub fn verify_route_a_memory_step(
     }
 
     let bus_y_base_time = if cpu_bus.bus_cols > 0 {
-        ccs_out0
-            .y_scalars
-            .len()
-            .checked_sub(cpu_bus.bus_cols)
-            .ok_or_else(|| PiCcsError::InvalidInput("CPU y_scalars too short for bus openings".into()))?
+        let min_len = core_t
+            .checked_add(cpu_bus.bus_cols)
+            .ok_or_else(|| PiCcsError::InvalidInput("core_t + bus_cols overflow".into()))?;
+        if ccs_out0.y_scalars.len() < min_len {
+            return Err(PiCcsError::InvalidInput(
+                "CPU y_scalars too short for shared-bus openings".into(),
+            ));
+        }
+        core_t
     } else {
         0usize
     };
-    let claim_plan = RouteATimeClaimPlan::build(step, claim_idx_start)?;
+    let wb_enabled = wb_wp_required_for_rv32_trace_mode_m_in(step.mcs_inst.m_in);
+    let wp_enabled = wb_wp_required_for_rv32_trace_mode_m_in(step.mcs_inst.m_in);
+    let claim_plan = RouteATimeClaimPlan::build(step, claim_idx_start, wb_enabled, wp_enabled)?;
     if claim_plan.claim_idx_end > batched_final_values.len() {
         return Err(PiCcsError::InvalidInput(format!(
             "batched_final_values too short (need at least {}, have {})",
@@ -5120,6 +6155,7 @@ pub fn verify_route_a_memory_step(
 
     // Shout instances first.
     let mut shout_lane_base: usize = 0;
+    let mut shout_trace_sums = ShoutTraceLinkSums::default();
     for (proof_idx, inst) in step.lut_insts.iter().enumerate() {
         match &proofs_mem[proof_idx] {
             MemOrLutProof::Shout(_proof) => {}
@@ -5136,6 +6172,13 @@ pub fn verify_route_a_memory_step(
 
         let ell_addr = inst.d * inst.ell;
         let expected_lanes = inst.lanes.max(1);
+        let lane_table_id = if enforce_trace_shout_linkage {
+            Some(K::from(F::from_u64(
+                rv32_shout_table_id_from_spec(&inst.table_spec)? as u64
+            )))
+        } else {
+            None
+        };
 
         let inst_cols = cpu_bus
             .shout_cols
@@ -5233,6 +6276,15 @@ pub fn verify_route_a_memory_step(
         }
 
         for (lane_idx, lane) in lane_opens.iter().enumerate() {
+            if let Some(lane_table_id) = lane_table_id {
+                shout_trace_sums.has_lookup += lane.has_lookup;
+                shout_trace_sums.val += lane.val;
+                shout_trace_sums.table_id += lane.has_lookup * lane_table_id;
+                let (lhs, rhs) = unpack_interleaved_halves_lsb(&lane.addr_bits)?;
+                shout_trace_sums.lhs += lhs;
+                shout_trace_sums.rhs += rhs;
+            }
+
             let pre = shout_pre.get(shout_lane_base + lane_idx).ok_or_else(|| {
                 PiCcsError::InvalidInput(format!(
                     "missing pre-time Shout lane data at index {}",
@@ -5300,6 +6352,11 @@ pub fn verify_route_a_memory_step(
         return Err(PiCcsError::ProtocolError(
             "shout pre-time lanes not fully consumed".into(),
         ));
+    }
+    if !step.lut_insts.is_empty() && enforce_trace_shout_linkage {
+        let cpu = cpu_link
+            .ok_or_else(|| PiCcsError::ProtocolError("missing CPU trace linkage openings in shared-bus mode".into()))?;
+        verify_non_event_trace_shout_linkage(cpu, shout_trace_sums)?;
     }
 
     // Twist instances next.
@@ -5839,6 +6896,16 @@ pub fn verify_route_a_memory_step(
         }
     }
 
+    verify_route_a_wb_wp_terminals(
+        core_t,
+        step,
+        r_time,
+        r_cycle,
+        batched_final_values,
+        &claim_plan,
+        mem_proof,
+    )?;
+
     Ok(RouteAMemoryVerifyOutput {
         claim_idx_end: claim_plan.claim_idx_end,
         twist_time_openings,
@@ -5862,7 +6929,7 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
     twist_pre: &[TwistAddrPreVerifyData],
     step_idx: usize,
 ) -> Result<RouteAMemoryVerifyOutput, PiCcsError> {
-    let cpu_link = extract_trace_cpu_link_openings(m, core_t, step, ccs_out0)?;
+    let cpu_link = extract_trace_cpu_link_openings(m, core_t, 0, step, ccs_out0)?;
 
     let chi_cycle_at_r_time = eq_points(r_time, r_cycle);
     if ccs_out0.r.as_slice() != r_time {
@@ -5948,7 +7015,9 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
         }
     }
 
-    let claim_plan = RouteATimeClaimPlan::build(step, claim_idx_start)?;
+    let wb_enabled = wb_wp_required_for_rv32_trace_mode_m_in(step.mcs_inst.m_in);
+    let wp_enabled = wb_wp_required_for_rv32_trace_mode_m_in(step.mcs_inst.m_in);
+    let claim_plan = RouteATimeClaimPlan::build(step, claim_idx_start, wb_enabled, wp_enabled)?;
     if claim_plan.claim_idx_end > batched_final_values.len() || claim_plan.claim_idx_end > batched_claimed_sums.len() {
         return Err(PiCcsError::InvalidInput(
             "batched final_values / claimed_sums too short for claim plan".into(),
@@ -7336,31 +8405,16 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
                 ));
             }
         } else {
-            if shout_has_sum != cpu.shout_has_lookup {
-                return Err(PiCcsError::ProtocolError(
-                    "trace linkage failed: Shout has_lookup mismatch".into(),
-                ));
-            }
-            if shout_val_sum != cpu.shout_val {
-                return Err(PiCcsError::ProtocolError(
-                    "trace linkage failed: Shout val mismatch".into(),
-                ));
-            }
-            if shout_lhs_sum != cpu.shout_lhs {
-                return Err(PiCcsError::ProtocolError(
-                    "trace linkage failed: Shout lhs mismatch".into(),
-                ));
-            }
-            if shout_rhs_sum != cpu.shout_rhs {
-                return Err(PiCcsError::ProtocolError(
-                    "trace linkage failed: Shout rhs mismatch".into(),
-                ));
-            }
-            if shout_table_id_sum != cpu.shout_table_id {
-                return Err(PiCcsError::ProtocolError(
-                    "trace linkage failed: Shout table_id mismatch".into(),
-                ));
-            }
+            verify_non_event_trace_shout_linkage(
+                cpu,
+                ShoutTraceLinkSums {
+                    has_lookup: shout_has_sum,
+                    val: shout_val_sum,
+                    lhs: shout_lhs_sum,
+                    rhs: shout_rhs_sum,
+                    table_id: shout_table_id_sum,
+                },
+            )?;
         }
     }
 
@@ -7506,23 +8560,19 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
         // Trace linkage at r_time: bind Twist(PROG/REG/RAM) to CPU trace columns.
         //
         // We key off `mem_id` (not instance ordering) so this remains robust if upstream reorders
-        // instances, while still enforcing the RV32 trace path expects exactly these 3 memories.
-        if step.mem_insts.len() != 3 {
-            return Err(PiCcsError::InvalidInput(format!(
-                "no-shared-bus trace linkage expects exactly 3 mem instances (PROG, REG, RAM), got {}",
-                step.mem_insts.len()
-            )));
-        }
+        // instances. Track-A default allows used-memory instantiation, so RAM may be absent when
+        // the trace has no RAM traffic and no RAM output/init obligations.
         {
             let mut ids = std::collections::BTreeSet::<u32>::new();
             for inst in step.mem_insts.iter() {
                 ids.insert(inst.mem_id);
             }
-            let required = std::collections::BTreeSet::from([PROG_ID.0, REG_ID.0, RAM_ID.0]);
-            if ids != required {
+            let required = std::collections::BTreeSet::from([PROG_ID.0, REG_ID.0]);
+            let allowed = std::collections::BTreeSet::from([PROG_ID.0, REG_ID.0, RAM_ID.0]);
+            if !required.is_subset(&ids) || !ids.is_subset(&allowed) {
                 return Err(PiCcsError::InvalidInput(format!(
-                    "no-shared-bus trace linkage expects mem_id set {{PROG_ID={}, REG_ID={}, RAM_ID={}}}, got {:?}",
-                    PROG_ID.0, REG_ID.0, RAM_ID.0, ids
+                    "no-shared-bus trace linkage expects mem_id superset {{PROG_ID={}, REG_ID={}}} within allowed set {{PROG_ID={}, REG_ID={}, RAM_ID={}}}, got {:?}",
+                    PROG_ID.0, REG_ID.0, PROG_ID.0, REG_ID.0, RAM_ID.0, ids
                 )));
             }
         }
@@ -7770,6 +8820,16 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
 
     verify_no_shared_bus_twist_val_eval_phase(
         tr, m, step, prev_step, proofs_mem, mem_proof, twist_pre, step_idx, r_time,
+    )?;
+
+    verify_route_a_wb_wp_terminals(
+        core_t,
+        step,
+        r_time,
+        r_cycle,
+        batched_final_values,
+        &claim_plan,
+        mem_proof,
     )?;
 
     Ok(RouteAMemoryVerifyOutput {

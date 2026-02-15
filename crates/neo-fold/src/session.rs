@@ -1725,10 +1725,16 @@ where
             }
         };
 
-        // For CCS-only sessions (no Twist/Shout), val-lane obligations should be empty
-        // For Twist+Shout sessions, val-lane obligations are expected and valid
+        // Val-lane obligations are expected when the session carries any sidecar val lane:
+        // Twist/Shout folds, or WB/WP folds over RV32 trace openings.
         let has_twist_or_shout = self.has_twist_instances() || self.has_shout_instances();
-        if !has_twist_or_shout && !outputs.obligations.val.is_empty() {
+        let has_wb_or_wp = run.steps.iter().any(|step| {
+            !step.mem.wb_me_claims.is_empty()
+                || !step.mem.wp_me_claims.is_empty()
+                || !step.wb_fold.is_empty()
+                || !step.wp_fold.is_empty()
+        });
+        if !(has_twist_or_shout || has_wb_or_wp) && !outputs.obligations.val.is_empty() {
             return Err(PiCcsError::ProtocolError(
                 "CCS-only session verification produced unexpected val-lane obligations".into(),
             ));
@@ -1894,7 +1900,13 @@ where
         };
 
         let has_twist_or_shout = self.has_twist_instances() || self.has_shout_instances();
-        if !has_twist_or_shout && !outputs.obligations.val.is_empty() {
+        let has_wb_or_wp = run.steps.iter().any(|step| {
+            !step.mem.wb_me_claims.is_empty()
+                || !step.mem.wp_me_claims.is_empty()
+                || !step.wb_fold.is_empty()
+                || !step.wp_fold.is_empty()
+        });
+        if !(has_twist_or_shout || has_wb_or_wp) && !outputs.obligations.val.is_empty() {
             return Err(PiCcsError::ProtocolError(
                 "CCS-only session verification produced unexpected val-lane obligations".into(),
             ));

@@ -155,6 +155,10 @@ pub struct MemSidecarProof<C, FF, KK> {
     /// - In **no shared CPU bus** mode, these are Twist ME openings at `r_val` for each Twist instance
     ///   (and optionally the previous step's instances for rollover).
     pub val_me_claims: Vec<MeInstance<C, FF, KK>>,
+    /// CPU ME openings at `r_time` used to bind WB booleanity terminals to committed trace columns.
+    pub wb_me_claims: Vec<MeInstance<C, FF, KK>>,
+    /// CPU ME openings at `r_time` used to bind WP quiescence terminals to committed trace columns.
+    pub wp_me_claims: Vec<MeInstance<C, FF, KK>>,
     /// Route A Shout address pre-time proofs batched across all Shout instances in the step.
     pub shout_addr_pre: ShoutAddrPreProof<KK>,
     pub proofs: Vec<MemOrLutProof>,
@@ -204,6 +208,10 @@ pub struct StepProof {
     ///
     /// Each proof is an independent Π_RLC→Π_DEC lane (k=1 in current usage).
     pub shout_time_fold: Vec<RlcDecProof>,
+    /// Reserved WB folding lane(s) for staged booleanity claims.
+    pub wb_fold: Vec<RlcDecProof>,
+    /// Reserved WP folding lane(s) for staged quiescence claims.
+    pub wp_fold: Vec<RlcDecProof>,
 }
 
 #[derive(Clone, Debug)]
@@ -250,6 +258,12 @@ impl ShardProof {
                 val.extend_from_slice(&p.dec_children);
             }
             for p in &step.shout_time_fold {
+                val.extend_from_slice(&p.dec_children);
+            }
+            for p in &step.wb_fold {
+                val.extend_from_slice(&p.dec_children);
+            }
+            for p in &step.wp_fold {
                 val.extend_from_slice(&p.dec_children);
             }
         }

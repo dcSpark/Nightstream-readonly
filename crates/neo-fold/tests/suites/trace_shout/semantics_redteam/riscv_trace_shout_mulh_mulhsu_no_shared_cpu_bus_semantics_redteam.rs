@@ -12,8 +12,8 @@ use neo_memory::cpu::build_bus_layout_for_instances_with_shout_and_twist_lanes;
 use neo_memory::riscv::ccs::{build_rv32_trace_wiring_ccs, rv32_trace_ccs_witness_from_exec_table, Rv32TraceCcsLayout};
 use neo_memory::riscv::exec_table::Rv32ExecTable;
 use neo_memory::riscv::lookups::{
-    decode_program, encode_program, interleave_bits, uninterleave_bits, RiscvCpu, RiscvInstruction, RiscvMemory,
-    RiscvOpcode, RiscvShoutTables, PROG_ID,
+    decode_program, encode_program, uninterleave_bits, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode,
+    RiscvShoutTables, PROG_ID,
 };
 use neo_memory::riscv::trace::extract_shout_lanes_over_time;
 use neo_memory::witness::{LutInstance, LutTableSpec, LutWitness, StepInstanceBundle, StepWitnessBundle};
@@ -21,7 +21,6 @@ use neo_params::NeoParams;
 use neo_transcript::Poseidon2Transcript;
 use neo_transcript::Transcript;
 use neo_vm_trace::trace_program;
-use neo_vm_trace::ShoutEvent;
 use p3_field::PrimeCharacteristicRing;
 
 use crate::suite::{default_mixers, setup_ajtai_committer};
@@ -281,43 +280,80 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_mulh_mulhsu_semantics_redteam(
     let tables = RiscvShoutTables::new(32);
     let mulh_id = tables.opcode_to_id(RiscvOpcode::Mulh);
     let mulhsu_id = tables.opcode_to_id(RiscvOpcode::Mulhsu);
-    let mut injected_mulh = false;
-    let mut injected_mulhsu = false;
     for row in exec.rows.iter_mut() {
-        if !row.active {
-            continue;
-        }
-        row.shout_events.clear();
-        let Some(RiscvInstruction::RAlu { op, .. }) = row.decoded else {
-            continue;
-        };
-        let rs1 = row.reg_read_lane0.as_ref().map(|io| io.value).unwrap_or(0) as u32;
-        let rs2 = row.reg_read_lane1.as_ref().map(|io| io.value).unwrap_or(0) as u32;
-        let key = interleave_bits(rs1 as u64, rs2 as u64) as u64;
-        match op {
-            RiscvOpcode::Mulh => {
-                let hi = mulh_hi_signed(rs1, rs2);
-                row.shout_events.push(ShoutEvent {
-                    shout_id: mulh_id,
-                    key,
-                    value: hi as u64,
-                });
-                injected_mulh = true;
-            }
-            RiscvOpcode::Mulhsu => {
-                let hi = mulhsu_hi_signed(rs1, rs2);
-                row.shout_events.push(ShoutEvent {
-                    shout_id: mulhsu_id,
-                    key,
-                    value: hi as u64,
-                });
-                injected_mulhsu = true;
-            }
-            _ => {}
+        if row.active {
+            row.shout_events
+                .retain(|ev| ev.shout_id == mulh_id || ev.shout_id == mulhsu_id);
         }
     }
-    assert!(injected_mulh, "expected to inject a MULH Shout event");
-    assert!(injected_mulhsu, "expected to inject a MULHSU Shout event");
+    let mulh_rows = exec
+        .rows
+        .iter()
+        .filter(|row| {
+            row.active
+                && matches!(
+                    row.decoded,
+                    Some(RiscvInstruction::RAlu {
+                        op: RiscvOpcode::Mulh,
+                        ..
+                    })
+                )
+        })
+        .count();
+    let mulh_shout_rows = exec
+        .rows
+        .iter()
+        .filter(|row| {
+            row.active
+                && matches!(
+                    row.decoded,
+                    Some(RiscvInstruction::RAlu {
+                        op: RiscvOpcode::Mulh,
+                        ..
+                    })
+                )
+                && row.shout_events.iter().any(|ev| ev.shout_id == mulh_id)
+        })
+        .count();
+    let mulhsu_rows = exec
+        .rows
+        .iter()
+        .filter(|row| {
+            row.active
+                && matches!(
+                    row.decoded,
+                    Some(RiscvInstruction::RAlu {
+                        op: RiscvOpcode::Mulhsu,
+                        ..
+                    })
+                )
+        })
+        .count();
+    let mulhsu_shout_rows = exec
+        .rows
+        .iter()
+        .filter(|row| {
+            row.active
+                && matches!(
+                    row.decoded,
+                    Some(RiscvInstruction::RAlu {
+                        op: RiscvOpcode::Mulhsu,
+                        ..
+                    })
+                )
+                && row.shout_events.iter().any(|ev| ev.shout_id == mulhsu_id)
+        })
+        .count();
+    assert!(mulh_rows > 0, "expected at least one MULH row");
+    assert!(mulhsu_rows > 0, "expected at least one MULHSU row");
+    assert_eq!(
+        mulh_shout_rows, mulh_rows,
+        "native MULH shout coverage mismatch (mulh_rows={mulh_rows}, mulh_shout_rows={mulh_shout_rows})"
+    );
+    assert_eq!(
+        mulhsu_shout_rows, mulhsu_rows,
+        "native MULHSU shout coverage mismatch (mulhsu_rows={mulhsu_rows}, mulhsu_shout_rows={mulhsu_shout_rows})"
+    );
     exec.validate_cycle_chain().expect("cycle chain");
     exec.validate_pc_chain().expect("pc chain");
     exec.validate_halted_tail().expect("halted tail");
@@ -441,9 +477,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_mulh_mulhsu_semantics_redteam(
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =
         steps_witness.iter().map(StepInstanceBundle::from).collect();
 
-    // The prover may either reject, or emit a proof that fails verification.
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-mulh-mulhsu-semantics-redteam");
-    let Ok(proof) = fold_shard_prove(
+    if let Ok(proof) = fold_shard_prove(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -453,20 +488,18 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_mulh_mulhsu_semantics_redteam(
         &[],
         &l,
         mixers,
-    ) else {
-        return;
-    };
-
-    let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-mulh-mulhsu-semantics-redteam");
-    fold_shard_verify(
-        FoldingMode::PaperExact,
-        &mut tr_verify,
-        &params,
-        &ccs,
-        &steps_instance,
-        &[],
-        &proof,
-        mixers,
-    )
-    .expect_err("tampered packed MULH lo bit must be caught by Route-A time constraints");
+    ) {
+        let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-mulh-mulhsu-semantics-redteam");
+        fold_shard_verify(
+            FoldingMode::PaperExact,
+            &mut tr_verify,
+            &params,
+            &ccs,
+            &steps_instance,
+            &[],
+            &proof,
+            mixers,
+        )
+        .expect_err("tampered packed MULH lo bit must be caught by Route-A time constraints");
+    }
 }

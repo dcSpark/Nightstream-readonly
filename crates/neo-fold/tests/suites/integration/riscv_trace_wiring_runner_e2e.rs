@@ -1,6 +1,7 @@
 use neo_fold::riscv_trace_shard::Rv32TraceWiring;
 use neo_memory::riscv::lookups::{
-    encode_program, BranchCondition, RiscvInstruction, RiscvOpcode, PROG_ID, RAM_ID, REG_ID,
+    encode_program, BranchCondition, RiscvInstruction, RiscvMemOp, RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID,
+    REG_ID,
 };
 use p3_field::PrimeCharacteristicRing;
 
@@ -53,10 +54,22 @@ fn rv32_trace_wiring_runner_prove_verify() {
         .collect();
     mem_ids.sort_unstable();
     let mut expected_mem_ids = vec![PROG_ID.0, RAM_ID.0, REG_ID.0];
+    expected_mem_ids.retain(|&id| id != RAM_ID.0);
     expected_mem_ids.sort_unstable();
     assert_eq!(
         mem_ids, expected_mem_ids,
-        "trace runner should include PROG/REG/RAM sidecar instances even without output binding"
+        "trace runner should default to used-sidecar instantiation (no RAM sidecar when unused)"
+    );
+    assert_eq!(
+        run.used_memory_ids(),
+        expected_mem_ids.as_slice(),
+        "run artifact should record auto-derived S_memory"
+    );
+    let add_table_id = RiscvShoutTables::new(32).opcode_to_id(RiscvOpcode::Add).0;
+    assert_eq!(
+        run.used_shout_table_ids(),
+        [add_table_id].as_slice(),
+        "run artifact should record auto-derived S_lookup"
     );
 }
 
@@ -154,6 +167,33 @@ fn rv32_trace_wiring_runner_shared_bus_default_and_legacy_fallback_differ() {
         run_legacy.ccs_num_variables(),
         run_legacy.layout().m,
         "legacy trace layout width must match CCS width"
+    );
+}
+
+#[test]
+fn rv32_trace_wiring_runner_shout_override_must_superset_inferred_set() {
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let err = match Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .shout_ops([RiscvOpcode::Xor])
+        .prove()
+    {
+        Ok(_) => panic!("shout override that misses required tables must fail"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("superset") && msg.contains("Add"),
+        "unexpected error message: {msg}"
     );
 }
 
@@ -305,6 +345,59 @@ fn rv32_trace_wiring_runner_chunked_ivc_batches_no_shared_val_lanes_per_mem() {
 }
 
 #[test]
+fn rv32_trace_wiring_runner_wb_wp_folds_are_emitted_and_required() {
+    // Program: ADDI x1, x0, 1; HALT
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .prove()
+        .expect("trace wiring prove");
+    run.verify().expect("trace wiring verify");
+
+    let proof = run.proof().clone();
+    assert_eq!(proof.steps.len(), 1, "expected one step proof");
+    assert!(
+        !proof.steps[0].mem.wb_me_claims.is_empty(),
+        "expected WB ME claims for RV32 trace route-A"
+    );
+    assert!(
+        !proof.steps[0].mem.wp_me_claims.is_empty(),
+        "expected WP ME claims for RV32 trace route-A"
+    );
+    assert!(
+        !proof.steps[0].wb_fold.is_empty(),
+        "expected wb_fold proofs for RV32 trace route-A"
+    );
+    assert!(
+        !proof.steps[0].wp_fold.is_empty(),
+        "expected wp_fold proofs for RV32 trace route-A"
+    );
+
+    let mut proof_missing_wb = proof.clone();
+    proof_missing_wb.steps[0].wb_fold.clear();
+    assert!(
+        run.verify_proof(&proof_missing_wb).is_err(),
+        "missing wb_fold must fail verification"
+    );
+
+    let mut proof_missing_wp = proof.clone();
+    proof_missing_wp.steps[0].wp_fold.clear();
+    assert!(
+        run.verify_proof(&proof_missing_wp).is_err(),
+        "missing wp_fold must fail verification"
+    );
+}
+
+#[test]
 fn rv32_trace_wiring_runner_rejects_zero_chunk_rows() {
     let program = vec![RiscvInstruction::Halt];
     let program_bytes = encode_program(&program);
@@ -319,6 +412,35 @@ fn rv32_trace_wiring_runner_rejects_zero_chunk_rows() {
 
     let msg = err.to_string();
     assert!(msg.contains("chunk_rows"), "unexpected error message: {msg}");
+}
+
+#[test]
+fn rv32_trace_wiring_runner_rejects_amo_via_wb_w2_scope_lock() {
+    // Program includes one AMO row. In Tier 2.1 trace mode this is rejected by WB/W2
+    // decode residuals (scope lock), not by the N0 main-trace CCS.
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 5,
+        },
+        RiscvInstruction::Amo {
+            op: RiscvMemOp::AmoaddW,
+            rd: 2,
+            rs1: 0,
+            rs2: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    assert!(
+        Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+            .prove()
+            .is_err(),
+        "AMO must be rejected in Tier 2.1 trace mode via WB/W2 scope lock"
+    );
 }
 
 fn prove_verify_trace_program(program: Vec<RiscvInstruction>) {
@@ -339,7 +461,8 @@ fn prove_verify_trace_program_legacy_no_shared(program: Vec<RiscvInstruction>) {
         .max_steps(program.len())
         .prove()
         .expect("trace wiring prove (legacy no-shared)");
-    run.verify().expect("trace wiring verify (legacy no-shared)");
+    run.verify()
+        .expect("trace wiring verify (legacy no-shared)");
 }
 
 #[test]

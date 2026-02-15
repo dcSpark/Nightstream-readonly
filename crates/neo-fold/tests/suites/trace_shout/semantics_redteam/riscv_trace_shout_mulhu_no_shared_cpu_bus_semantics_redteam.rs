@@ -12,8 +12,8 @@ use neo_memory::cpu::build_bus_layout_for_instances_with_shout_and_twist_lanes;
 use neo_memory::riscv::ccs::{build_rv32_trace_wiring_ccs, rv32_trace_ccs_witness_from_exec_table, Rv32TraceCcsLayout};
 use neo_memory::riscv::exec_table::Rv32ExecTable;
 use neo_memory::riscv::lookups::{
-    decode_program, encode_program, interleave_bits, uninterleave_bits, RiscvCpu, RiscvInstruction, RiscvMemory,
-    RiscvOpcode, RiscvShoutTables, PROG_ID,
+    decode_program, encode_program, uninterleave_bits, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode,
+    RiscvShoutTables, PROG_ID,
 };
 use neo_memory::riscv::trace::extract_shout_lanes_over_time;
 use neo_memory::witness::{LutInstance, LutTableSpec, LutWitness, StepInstanceBundle, StepWitnessBundle};
@@ -21,7 +21,6 @@ use neo_params::NeoParams;
 use neo_transcript::Poseidon2Transcript;
 use neo_transcript::Transcript;
 use neo_vm_trace::trace_program;
-use neo_vm_trace::ShoutEvent;
 use p3_field::PrimeCharacteristicRing;
 
 use crate::suite::{default_mixers, setup_ajtai_committer};
@@ -135,36 +134,46 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_mulhu_semantics_redteam() {
     let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 16).expect("trace_program");
 
     let mut exec = Rv32ExecTable::from_trace_padded_pow2(&trace, /*min_len=*/ 4).expect("from_trace_padded_pow2");
-    // RV32 B1 does not currently emit MULHU Shout events. Inject one so we can red-team the packed-key semantics.
     let mulhu_id = RiscvShoutTables::new(32).opcode_to_id(RiscvOpcode::Mulhu);
-    let mut injected = false;
     for row in exec.rows.iter_mut() {
-        if !row.active {
-            continue;
+        if row.active {
+            row.shout_events.retain(|ev| ev.shout_id == mulhu_id);
         }
-        let Some(RiscvInstruction::RAlu {
-            op: RiscvOpcode::Mulhu, ..
-        }) = row.decoded
-        else {
-            continue;
-        };
-        if !row.shout_events.is_empty() {
-            continue;
-        }
-        let rs1 = row.reg_read_lane0.as_ref().map(|io| io.value).unwrap_or(0) as u32;
-        let rs2 = row.reg_read_lane1.as_ref().map(|io| io.value).unwrap_or(0) as u32;
-        let wide = (rs1 as u64) * (rs2 as u64);
-        let hi = (wide >> 32) as u32;
-        let key = interleave_bits(rs1 as u64, rs2 as u64) as u64;
-        row.shout_events.push(ShoutEvent {
-            shout_id: mulhu_id,
-            key,
-            value: hi as u64,
-        });
-        injected = true;
-        break;
     }
-    assert!(injected, "expected to inject at least one MULHU Shout event");
+    let mulhu_rows = exec
+        .rows
+        .iter()
+        .filter(|row| {
+            row.active
+                && matches!(
+                    row.decoded,
+                    Some(RiscvInstruction::RAlu {
+                        op: RiscvOpcode::Mulhu,
+                        ..
+                    })
+                )
+        })
+        .count();
+    let mulhu_shout_rows = exec
+        .rows
+        .iter()
+        .filter(|row| {
+            row.active
+                && matches!(
+                    row.decoded,
+                    Some(RiscvInstruction::RAlu {
+                        op: RiscvOpcode::Mulhu,
+                        ..
+                    })
+                )
+                && row.shout_events.iter().any(|ev| ev.shout_id == mulhu_id)
+        })
+        .count();
+    assert!(mulhu_rows > 0, "expected at least one MULHU row");
+    assert_eq!(
+        mulhu_shout_rows, mulhu_rows,
+        "native MULHU shout coverage mismatch (mulhu_rows={mulhu_rows}, shout_rows={mulhu_shout_rows})"
+    );
     exec.validate_cycle_chain().expect("cycle chain");
     exec.validate_pc_chain().expect("pc chain");
     exec.validate_halted_tail().expect("halted tail");
@@ -267,11 +276,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_mulhu_semantics_redteam() {
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =
         steps_witness.iter().map(StepInstanceBundle::from).collect();
 
-    // The prover may either:
-    // - reject because the tampered witness no longer satisfies the protocol invariants, or
-    // - emit a proof that fails verification.
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-mulhu-semantics-redteam");
-    let Ok(proof) = fold_shard_prove(
+    if let Ok(proof) = fold_shard_prove(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -281,20 +287,18 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_mulhu_semantics_redteam() {
         &[],
         &l,
         mixers,
-    ) else {
-        return;
-    };
-
-    let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-mulhu-semantics-redteam");
-    fold_shard_verify(
-        FoldingMode::PaperExact,
-        &mut tr_verify,
-        &params,
-        &ccs,
-        &steps_instance,
-        &[],
-        &proof,
-        mixers,
-    )
-    .expect_err("tampered packed MULHU lo bit must be caught by Route-A time constraints");
+    ) {
+        let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-mulhu-semantics-redteam");
+        fold_shard_verify(
+            FoldingMode::PaperExact,
+            &mut tr_verify,
+            &params,
+            &ccs,
+            &steps_instance,
+            &[],
+            &proof,
+            mixers,
+        )
+        .expect_err("tampered packed MULHU lo bit must be caught by Route-A time constraints");
+    }
 }

@@ -6,7 +6,9 @@
 use crate::addr::write_addr_bits_dim_major_le_into_bus;
 use crate::builder::CpuArithmetization;
 use crate::cpu::bus_layout::{build_bus_layout_for_instances_with_shout_and_twist_lanes, BusLayout};
-use crate::cpu::constraints::{extend_ccs_with_shared_cpu_bus_constraints, ShoutCpuBinding, TwistCpuBinding};
+use crate::cpu::constraints::{
+    extend_ccs_with_shared_cpu_bus_constraints_optional_shout, ShoutCpuBinding, TwistCpuBinding,
+};
 use crate::mem_init::MemInit;
 use crate::plain::LutTable;
 use crate::plain::PlainMemLayout;
@@ -41,8 +43,9 @@ pub struct SharedCpuBusConfig<F> {
     ///
     /// The bus tail contains one Shout instance per `table_id` known to this CPU (from `tables` in `R1csCpu::new`).
     ///
-    /// Each Shout instance may have multiple lookup lanes; this map must provide one `ShoutCpuBinding`
-    /// per lane in lane-index order.
+    /// Each Shout instance may have multiple lookup lanes.
+    /// - Non-empty vector: CPU linkage bindings in lane-index order.
+    /// - Empty vector: no CPU linkage for that table's bus lanes (padding/bitness only).
     pub shout_cpu: HashMap<u32, Vec<ShoutCpuBinding>>,
     /// Per-memory CPU→bus bindings (twist_id -> binding).
     ///
@@ -180,13 +183,9 @@ where
             let lanes = bus
                 .shout_cpu
                 .get(table_id)
-                .ok_or_else(|| format!("shared_cpu_bus: missing shout_cpu binding for table_id={table_id}"))?
-                .len();
-            if lanes == 0 {
-                return Err(format!(
-                    "shared_cpu_bus: shout_cpu bindings for table_id={table_id} must be non-empty"
-                ));
-            }
+                .map(|v| v.len())
+                .unwrap_or(0)
+                .max(1);
             shout_ell_addrs_and_lanes.push((ell_addr, lanes));
         }
 
@@ -271,18 +270,14 @@ where
         // Build per-lane binding vectors in canonical order (id-sorted, then lane index).
         let total_shout_lanes: usize = table_ids
             .iter()
-            .map(|id| cfg.shout_cpu.get(id).map(|v| v.len()).unwrap_or(0))
+            .map(|id| cfg.shout_cpu.get(id).map(|v| v.len().max(1)).unwrap_or(1))
             .sum();
-        let mut shout_cpu: Vec<ShoutCpuBinding> = Vec::with_capacity(total_shout_lanes);
+        let mut shout_cpu: Vec<Option<ShoutCpuBinding>> = Vec::with_capacity(total_shout_lanes);
         for table_id in &table_ids {
-            let bindings = cfg
-                .shout_cpu
-                .get(table_id)
-                .ok_or_else(|| format!("shared_cpu_bus: missing shout_cpu binding for table_id={table_id}"))?;
+            let bindings = cfg.shout_cpu.get(table_id).map(Vec::as_slice).unwrap_or(&[]);
             if bindings.is_empty() {
-                return Err(format!(
-                    "shared_cpu_bus: shout_cpu bindings for table_id={table_id} must be non-empty"
-                ));
+                shout_cpu.push(None);
+                continue;
             }
             for (lane_idx, b) in bindings.iter().enumerate() {
                 let mut cols = vec![("has_lookup", b.has_lookup), ("val", b.val)];
@@ -296,7 +291,7 @@ where
                     chunk_size,
                     &cols,
                 )?;
-                shout_cpu.push(b.clone());
+                shout_cpu.push(Some(b.clone()));
             }
         }
         let total_twist_lanes: usize = mem_ids
@@ -371,8 +366,8 @@ where
             let lanes = cfg
                 .shout_cpu
                 .get(table_id)
-                .ok_or_else(|| format!("shared_cpu_bus: missing shout_cpu binding for table_id={table_id}"))?
-                .len()
+                .map(|v| v.len())
+                .unwrap_or(0)
                 .max(1);
             lut_insts.push(LutInstance {
                 comms: Vec::new(),
@@ -407,7 +402,7 @@ where
             });
         }
 
-        self.ccs = extend_ccs_with_shared_cpu_bus_constraints(
+        self.ccs = extend_ccs_with_shared_cpu_bus_constraints_optional_shout(
             &self.ccs,
             self.m_in,
             cfg.const_one_col,

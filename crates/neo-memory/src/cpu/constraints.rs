@@ -512,6 +512,17 @@ impl<F: Field> CpuConstraintBuilder<F> {
 
     /// Add constraints for a Shout (lookup) instance using an explicit per-instance CPU binding.
     pub fn add_shout_instance_bound(&mut self, layout: &BusLayout, shout: &ShoutCols, cpu: &ShoutCpuBinding) {
+        self.add_shout_instance_linkage_bound(layout, shout, cpu);
+        self.add_shout_instance_padding(layout, shout);
+    }
+
+    /// Add Shout CPU linkage constraints only (no selector bitness / inactive padding).
+    pub fn add_shout_instance_linkage_bound(
+        &mut self,
+        layout: &BusLayout,
+        shout: &ShoutCols,
+        cpu: &ShoutCpuBinding,
+    ) {
         for j in 0..layout.chunk_size {
             // Bus column indices
             let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
@@ -520,9 +531,6 @@ impl<F: Field> CpuConstraintBuilder<F> {
             // CPU columns are assumed to be chunked (contiguous, per-step): col(j) = col_base + j.
             let cpu_has_lookup = cpu.has_lookup + j;
             let cpu_val = cpu.val + j;
-
-            // Ensure bus selector is boolean so gated-bit constraints imply true {0,1} bitness.
-            self.add_boolean_constraint(CpuConstraintLabel::ShoutHasLookupBoolean, bus_has_lookup);
 
             // Value binding: is_lookup * (lookup_output - bus_val) = 0
             self.constraints.push(CpuConstraint::new_eq(
@@ -549,6 +557,17 @@ impl<F: Field> CpuConstraintBuilder<F> {
                     pack_addr_bits::<F>(cpu_addr, shout.addr_bits.clone(), layout, j),
                 ));
             }
+        }
+    }
+
+    /// Add Shout selector/bitness/padding constraints only (no CPU linkage).
+    pub fn add_shout_instance_padding(&mut self, layout: &BusLayout, shout: &ShoutCols) {
+        for j in 0..layout.chunk_size {
+            let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
+            let bus_val = layout.bus_cell(shout.val, j);
+
+            // Ensure bus selector is boolean so gated-bit constraints imply true {0,1} bitness.
+            self.add_boolean_constraint(CpuConstraintLabel::ShoutHasLookupBoolean, bus_has_lookup);
 
             // Padding: (1 - has_lookup) * val = 0
             self.constraints.push(CpuConstraint::new_zero_negated(
@@ -850,6 +869,34 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints<F: Field + PrimeCharacteristic
     lut_insts: &[LutInstance<Cmt, F>],
     mem_insts: &[MemInstance<Cmt, F>],
 ) -> Result<CcsStructure<F>, String> {
+    let shout_cpu: Vec<Option<ShoutCpuBinding>> = shout_cpu.iter().cloned().map(Some).collect();
+    extend_ccs_with_shared_cpu_bus_constraints_optional_shout(
+        base_ccs,
+        m_in,
+        const_one_col,
+        &shout_cpu,
+        twist_cpu,
+        lut_insts,
+        mem_insts,
+    )
+}
+
+/// Extend a CPU CCS with shared-bus constraints, allowing per-lane Shout linkage opt-out.
+///
+/// When a Shout lane binding is `None`, only canonical Shout padding/bitness constraints are
+/// injected for that lane (no CPU selector/value/key linkage equalities).
+pub fn extend_ccs_with_shared_cpu_bus_constraints_optional_shout<
+    F: Field + PrimeCharacteristicRing + Copy + Eq + Send + Sync,
+    Cmt,
+>(
+    base_ccs: &CcsStructure<F>,
+    m_in: usize,
+    const_one_col: usize,
+    shout_cpu: &[Option<ShoutCpuBinding>],
+    twist_cpu: &[TwistCpuBinding],
+    lut_insts: &[LutInstance<Cmt, F>],
+    mem_insts: &[MemInstance<Cmt, F>],
+) -> Result<CcsStructure<F>, String> {
     let total_shout_lanes: usize = lut_insts.iter().map(|l| l.lanes.max(1)).sum();
     if shout_cpu.len() != total_shout_lanes {
         return Err(format!(
@@ -922,7 +969,11 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints<F: Field + PrimeCharacteristic
             let cpu = shout_cpu
                 .get(shout_lane_idx)
                 .ok_or_else(|| format!("missing shout_cpu binding at lane_idx={shout_lane_idx}"))?;
-            builder.add_shout_instance_bound(&layout, lane_cols, cpu);
+            if let Some(cpu) = cpu {
+                builder.add_shout_instance_bound(&layout, lane_cols, cpu);
+            } else {
+                builder.add_shout_instance_padding(&layout, lane_cols);
+            }
             shout_lane_idx += 1;
         }
     }

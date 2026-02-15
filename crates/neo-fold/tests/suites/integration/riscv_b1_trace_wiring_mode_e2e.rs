@@ -171,3 +171,20 @@ fn rv32_b1_trace_wiring_mode_chunked_ivc() {
         .expect("trace wiring verify with chunked ivc via Rv32B1");
     assert_eq!(run.fold_count(), 2, "expected two fold steps with trace_chunk_rows=2");
 }
+
+#[test]
+fn rv32_b1_shout_override_must_superset_inferred_set() {
+    let program_bytes = trace_mode_program_bytes();
+    let err = match Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+        .shout_ops([RiscvOpcode::Xor])
+        .prove()
+    {
+        Ok(_) => panic!("shout override that misses required tables must fail"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("superset") && msg.contains("Add"),
+        "unexpected error message: {msg}"
+    );
+}

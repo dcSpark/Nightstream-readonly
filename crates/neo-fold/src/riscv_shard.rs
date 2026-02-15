@@ -633,9 +633,21 @@ impl Rv32B1 {
         ]);
 
         // Shout tables (either inferred, all, or explicitly provided).
+        let inferred_shout_ops = infer_required_shout_opcodes(&program);
         let mut shout_ops = match &self.shout_ops {
-            Some(ops) => ops.clone(),
-            None if self.shout_auto_minimal => infer_required_shout_opcodes(&program),
+            Some(ops) => {
+                let missing: HashSet<RiscvOpcode> = inferred_shout_ops.difference(ops).copied().collect();
+                if !missing.is_empty() {
+                    let mut missing_names: Vec<String> = missing.into_iter().map(|op| format!("{op:?}")).collect();
+                    missing_names.sort_unstable();
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "shout_ops override must be a superset of required opcodes; missing [{}]",
+                        missing_names.join(", ")
+                    )));
+                }
+                ops.clone()
+            }
+            None if self.shout_auto_minimal => inferred_shout_ops,
             None => all_shout_opcodes(),
         };
         // The ADD table is required even for programs without explicit ADD/ADDI due to address/PC wiring.
@@ -943,6 +955,8 @@ impl Rv32B1 {
             semantics,
             rv32m,
         };
+        let mut used_mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
+        used_mem_ids.sort_unstable();
 
         Ok(Rv32B1Run {
             program_base: self.program_base,
@@ -952,6 +966,8 @@ impl Rv32B1 {
             ccs,
             layout,
             mem_layouts,
+            used_mem_ids,
+            used_shout_table_ids: shout_table_ids,
             initial_mem,
             output_binding_cfg,
             proof_bundle,
@@ -1001,6 +1017,8 @@ pub struct Rv32B1Run {
     ccs: CcsStructure<F>,
     layout: Rv32B1Layout,
     mem_layouts: HashMap<u32, PlainMemLayout>,
+    used_mem_ids: Vec<u32>,
+    used_shout_table_ids: Vec<u32>,
     initial_mem: HashMap<(u32, u64), F>,
     output_binding_cfg: Option<OutputBindingConfig>,
     proof_bundle: Rv32B1ProofBundle,
@@ -1024,6 +1042,16 @@ impl Rv32B1Run {
 
     pub fn layout(&self) -> &Rv32B1Layout {
         &self.layout
+    }
+
+    /// Auto-derived memory sidecar IDs used by this run (`S_memory`).
+    pub fn used_memory_ids(&self) -> &[u32] {
+        &self.used_mem_ids
+    }
+
+    /// Auto-derived shout lookup table IDs used by this run (`S_lookup`).
+    pub fn used_shout_table_ids(&self) -> &[u32] {
+        &self.used_shout_table_ids
     }
 
     /// Deterministically re-run the VM to recover the executed trace.

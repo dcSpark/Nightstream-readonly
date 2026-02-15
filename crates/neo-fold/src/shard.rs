@@ -396,6 +396,50 @@ fn f_from_i64(x: i64) -> F {
     }
 }
 
+#[inline]
+fn verify_me_y_scalars_canonical(
+    me: &MeInstance<Cmt, F, K>,
+    b: u32,
+    step_idx: usize,
+    context: &str,
+) -> Result<(), PiCcsError> {
+    if me.y_scalars.len() != me.y.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "step {}: {}: y_scalars.len()={} must equal y.len()={}",
+            step_idx,
+            context,
+            me.y_scalars.len(),
+            me.y.len()
+        )));
+    }
+    let bK = K::from(F::from_u64(b as u64));
+    for (j, row) in me.y.iter().enumerate() {
+        if row.len() < D {
+            return Err(PiCcsError::InvalidInput(format!(
+                "step {}: {}: y[{}].len()={} must be >= D={}",
+                step_idx,
+                context,
+                j,
+                row.len(),
+                D
+            )));
+        }
+        let mut expect = K::ZERO;
+        let mut pow = K::ONE;
+        for rho in 0..D {
+            expect += pow * row[rho];
+            pow *= bK;
+        }
+        if me.y_scalars[j] != expect {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: {}: non-canonical y_scalars at row {}",
+                step_idx, context, j
+            )));
+        }
+    }
+    Ok(())
+}
+
 fn dec_stream_no_witness<MB>(
     params: &NeoParams,
     s: &CcsStructure<F>,
@@ -1332,31 +1376,63 @@ fn bind_rlc_inputs(
         tr.append_u64s(b"m_in", &[me.m_in as u64]);
         tr.append_message(b"me_fold_digest", &me.fold_digest);
 
-        for limb in &me.r {
-            tr.append_fields(b"r_limb", &limb.as_coeffs());
-        }
+        let r_coeffs_per_limb = me.r.first().map(|v| v.as_coeffs().len()).unwrap_or(0);
+        tr.append_fields_iter(
+            b"r_limb",
+            me.r.len()
+                .checked_mul(r_coeffs_per_limb)
+                .ok_or_else(|| PiCcsError::ProtocolError("r_limb length overflow".into()))?,
+            me.r.iter().flat_map(|limb| limb.as_coeffs()),
+        );
 
         tr.append_u64s(b"s_col_len", &[me.s_col.len() as u64]);
-        for sc in &me.s_col {
-            tr.append_fields(b"s_col_elem", &sc.as_coeffs());
-        }
+        let s_col_coeffs_per_elem = me.s_col.first().map(|v| v.as_coeffs().len()).unwrap_or(0);
+        tr.append_fields_iter(
+            b"s_col_elem",
+            me.s_col
+                .len()
+                .checked_mul(s_col_coeffs_per_elem)
+                .ok_or_else(|| PiCcsError::ProtocolError("s_col_elem length overflow".into()))?,
+            me.s_col.iter().flat_map(|sc| sc.as_coeffs()),
+        );
 
         tr.append_u64s(b"y_zcol_len", &[me.y_zcol.len() as u64]);
-        for yz in &me.y_zcol {
-            tr.append_fields(b"y_zcol_elem", &yz.as_coeffs());
-        }
+        let y_zcol_coeffs_per_elem = me.y_zcol.first().map(|v| v.as_coeffs().len()).unwrap_or(0);
+        tr.append_fields_iter(
+            b"y_zcol_elem",
+            me.y_zcol
+                .len()
+                .checked_mul(y_zcol_coeffs_per_elem)
+                .ok_or_else(|| PiCcsError::ProtocolError("y_zcol_elem length overflow".into()))?,
+            me.y_zcol.iter().flat_map(|yz| yz.as_coeffs()),
+        );
 
         tr.append_fields(b"X", me.X.as_slice());
 
-        for yj in &me.y {
-            for &y_elem in yj {
-                tr.append_fields(b"y_elem", &y_elem.as_coeffs());
-            }
-        }
+        let y_elem_coeffs_per_elem = me
+            .y
+            .iter()
+            .find_map(|row| row.first())
+            .map(|v| v.as_coeffs().len())
+            .unwrap_or(0);
+        let y_elem_count = me.y.iter().map(Vec::len).sum::<usize>();
+        tr.append_fields_iter(
+            b"y_elem",
+            y_elem_count
+                .checked_mul(y_elem_coeffs_per_elem)
+                .ok_or_else(|| PiCcsError::ProtocolError("y_elem length overflow".into()))?,
+            me.y.iter().flat_map(|row| row.iter().flat_map(|v| v.as_coeffs())),
+        );
 
-        for ysc in &me.y_scalars {
-            tr.append_fields(b"y_scalar", &ysc.as_coeffs());
-        }
+        let y_scalar_coeffs_per_elem = me.y_scalars.first().map(|v| v.as_coeffs().len()).unwrap_or(0);
+        tr.append_fields_iter(
+            b"y_scalar",
+            me.y_scalars
+                .len()
+                .checked_mul(y_scalar_coeffs_per_elem)
+                .ok_or_else(|| PiCcsError::ProtocolError("y_scalar length overflow".into()))?,
+            me.y_scalars.iter().flat_map(|ysc| ysc.as_coeffs()),
+        );
 
         tr.append_u64s(b"c_step_coords_len", &[me.c_step_coords.len() as u64]);
         tr.append_fields(b"c_step_coords", &me.c_step_coords);
@@ -1429,7 +1505,6 @@ where
         let inputs_c = vec![inp.c.clone()];
         let c = (mixers.mix_rhos_commits)(&rlc_rhos, &inputs_c);
 
-        // Recompute y_scalars from digits (canonical).
         let t = inp.y.len();
         if t < s.t() {
             return Err(PiCcsError::InvalidInput(format!(
@@ -1450,17 +1525,7 @@ where
                 )));
             }
         }
-        let bK = K::from(F::from_u64(params.b as u64));
-        let mut y_scalars = Vec::with_capacity(t);
-        for j in 0..t {
-            let mut sc = K::ZERO;
-            let mut pow = K::ONE;
-            for rho in 0..D {
-                sc += pow * inp.y[j][rho];
-                pow *= bK;
-            }
-            y_scalars.push(sc);
-        }
+        verify_me_y_scalars_canonical(inp, params.b, step_idx, "Π_RLC(k=1)")?;
 
         let out = MeInstance::<Cmt, F, K> {
             c_step_coords: vec![],
@@ -1471,7 +1536,7 @@ where
             r: inp.r.clone(),
             s_col: inp.s_col.clone(),
             y: inp.y.clone(),
-            y_scalars,
+            y_scalars: inp.y_scalars.clone(),
             y_zcol: inp.y_zcol.clone(),
             m_in: inp.m_in,
             fold_digest: inp.fold_digest,
@@ -1531,39 +1596,40 @@ where
         && !cpu_bus.map(|b| b.bus_cols > 0).unwrap_or(false)
         && !inputs_have_extra_y;
 
-    let (mut dec_children, ok_y, ok_X, ok_c, maybe_wits) = if can_stream_dec {
-        // Memory-optimized DEC: compute children + commitments without materializing Z_split.
-        //
-        // This is only used when we don't need to carry digit witnesses forward.
-        let (children, _child_cs, ok_y, ok_X, ok_c) = dec_stream_no_witness(
-            params,
-            s,
-            &rlc_parent,
-            Z_mix,
-            ell_d,
-            k_dec,
-            mixers.combine_b_pows,
-            ccs_sparse_cache,
-        )?;
-        (children, ok_y, ok_X, ok_c, Vec::new())
-    } else {
+    let materialize_dec = || -> Result<(Vec<MeInstance<Cmt, F, K>>, bool, bool, bool, Vec<Mat<F>>), PiCcsError> {
         // Standard DEC: materialize digit matrices (needed when carrying witnesses forward).
         let (Z_split, digit_nonzero) = ccs::split_b_matrix_k_with_nonzero_flags(Z_mix, k_dec, params.b)?;
         let zero_c = Cmt::zeros(rlc_parent.c.d, rlc_parent.c.kappa);
         let child_cs: Vec<Cmt> = {
             #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             {
-                Z_split
-                    .par_iter()
-                    .enumerate()
-                    .map(|(idx, Zi)| {
-                        if digit_nonzero[idx] {
-                            l.commit(Zi)
-                        } else {
-                            zero_c.clone()
-                        }
-                    })
-                    .collect()
+                const PAR_CHILD_COMMIT_THRESHOLD: usize = 32;
+                let use_parallel = Z_split.len() >= PAR_CHILD_COMMIT_THRESHOLD && rayon::current_num_threads() > 1;
+                if use_parallel {
+                    Z_split
+                        .par_iter()
+                        .enumerate()
+                        .map(|(idx, Zi)| {
+                            if digit_nonzero[idx] {
+                                l.commit(Zi)
+                            } else {
+                                zero_c.clone()
+                            }
+                        })
+                        .collect()
+                } else {
+                    Z_split
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, Zi)| {
+                            if digit_nonzero[idx] {
+                                l.commit(Zi)
+                            } else {
+                                zero_c.clone()
+                            }
+                        })
+                        .collect()
+                }
             }
             #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
             {
@@ -1591,7 +1657,30 @@ where
             mixers.combine_b_pows,
             ccs_sparse_cache,
         );
-        (dec_children, ok_y, ok_X, ok_c, Z_split)
+        Ok((dec_children, ok_y, ok_X, ok_c, Z_split))
+    };
+
+    let (mut dec_children, ok_y, ok_X, ok_c, maybe_wits) = if can_stream_dec {
+        // Memory-optimized DEC: compute children + commitments without materializing Z_split.
+        // If public consistency checks fail (e.g. global PP mismatch vs local committer),
+        // fall back to the materialized path for correctness.
+        let (children, _child_cs, ok_y, ok_X, ok_c) = dec_stream_no_witness(
+            params,
+            s,
+            &rlc_parent,
+            Z_mix,
+            ell_d,
+            k_dec,
+            mixers.combine_b_pows,
+            ccs_sparse_cache,
+        )?;
+        if ok_y && ok_X && ok_c {
+            (children, ok_y, ok_X, ok_c, Vec::new())
+        } else {
+            materialize_dec()?
+        }
+    } else {
+        materialize_dec()?
     };
     if !(ok_y && ok_X && ok_c) {
         let lane_label = match lane {
@@ -1622,10 +1711,11 @@ where
         }
     }
 
-    // No shared CPU bus tail: if the main lane carries RV32 trace linkage openings, propagate them
-    // through Π_DEC so child instances keep the same extra y/y_scalars length.
-    if matches!(lane, RlcLane::Main) && cpu_bus.is_none() {
+    // If the main lane carries RV32 trace linkage openings, propagate them through Π_DEC so child
+    // instances keep the same extra y/y_scalars length (after optional shared-bus openings).
+    if matches!(lane, RlcLane::Main) && trace_linkage_t_len.is_some() {
         let core_t = s.t();
+        let trace_open_base = core_t + cpu_bus.map_or(0usize, |bus| bus.bus_cols);
         let trace = Rv32TraceLayout::new();
         let trace_cols_to_open: Vec<usize> = vec![
             trace.active,
@@ -1650,10 +1740,11 @@ where
             trace.shout_table_id,
         ];
 
-        let want_len = core_t + trace_cols_to_open.len();
-        let has_core_only = rlc_parent.y.len() == core_t && rlc_parent.y_scalars.len() == core_t;
+        let want_len = trace_open_base + trace_cols_to_open.len();
+        let has_base_only =
+            rlc_parent.y.len() == trace_open_base && rlc_parent.y_scalars.len() == trace_open_base;
         let has_trace_openings = rlc_parent.y.len() == want_len && rlc_parent.y_scalars.len() == want_len;
-        if has_core_only || has_trace_openings {
+        if has_base_only || has_trace_openings {
             let m_in = rlc_parent.m_in;
             if m_in != 5 {
                 return Err(PiCcsError::InvalidInput(format!(
@@ -1685,7 +1776,7 @@ where
                 t_len,
                 /*col_base=*/ m_in,
                 &trace_cols_to_open,
-                core_t,
+                trace_open_base,
                 Z_mix,
                 &mut rlc_parent,
             )?;
@@ -1701,15 +1792,15 @@ where
                     t_len,
                     /*col_base=*/ m_in,
                     &trace_cols_to_open,
-                    core_t,
+                    trace_open_base,
                     Zi,
                     child,
                 )?;
             }
         } else {
             return Err(PiCcsError::InvalidInput(format!(
-                "trace linkage openings expect parent y/y_scalars len to be core_t={} or core_t+trace_openings={} (got y.len()={}, y_scalars.len()={})",
-                core_t,
+                "trace linkage openings expect parent y/y_scalars len to be base={} or base+trace_openings={} (got y.len()={}, y_scalars.len()={})",
+                trace_open_base,
                 want_len,
                 rlc_parent.y.len(),
                 rlc_parent.y_scalars.len(),
@@ -1759,6 +1850,13 @@ where
             rlc_inputs.len(),
             rlc_rhos.len()
         )));
+    }
+
+    for (i, me) in rlc_inputs.iter().enumerate() {
+        verify_me_y_scalars_canonical(me, params.b, step_idx, &format!("{}RLC input[{i}]", match lane {
+            RlcLane::Main => "",
+            RlcLane::Val => "val-lane ",
+        }))?;
     }
 
     let rhos_from_tr = ccs::sample_rot_rhos_n(tr, params, ring, rlc_inputs.len())?;
@@ -1957,7 +2055,10 @@ where
     let (r_prime, alpha_prime) = ccs_proof.sumcheck_challenges.split_at(ell_n);
     let r_inputs = me_inputs.first().map(|mi| mi.r.as_slice());
 
-    if cfg.initial_sum {
+    // Crosscheck initial-sum parity is most informative once there is at least one carried ME
+    // input. For empty-accumulator starts, optimized and paper-exact route through different
+    // constant-term paths and can diverge without indicating a soundness issue.
+    if cfg.initial_sum && !me_inputs.is_empty() {
         let lhs_exact = crate::paper_exact_engine::sum_q_over_hypercube_paper_exact(
             s,
             params,
@@ -1968,14 +2069,11 @@ where
             ell_n,
             r_inputs,
         );
-        let initial_sum_prover = match ccs_proof.sc_initial_sum {
-            Some(x) => x,
-            None => ccs_proof
-                .sumcheck_rounds
-                .first()
-                .map(|p0| poly_eval_k(p0, K::ZERO) + poly_eval_k(p0, K::ONE))
-                .ok_or_else(|| PiCcsError::ProtocolError("crosscheck: missing sumcheck round 0".into()))?,
-        };
+        let initial_sum_prover = ccs_proof
+            .sumcheck_rounds
+            .first()
+            .map(|p0| poly_eval_k(p0, K::ZERO) + poly_eval_k(p0, K::ONE))
+            .ok_or_else(|| PiCcsError::ProtocolError("crosscheck: missing sumcheck round 0".into()))?;
         if lhs_exact != initial_sum_prover {
             return Err(PiCcsError::ProtocolError(format!(
                 "step {}: crosscheck initial sum mismatch (optimized vs paper-exact)",
@@ -2126,6 +2224,77 @@ where
             )?;
             for (out, Z) in out_me_ref.iter_mut().skip(1).zip(me_witnesses.iter()) {
                 crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(params, cpu_bus, core_t, Z, out)?;
+            }
+
+            let want_with_trace = core_t + cpu_bus.bus_cols + 20;
+            if ccs_out
+                .first()
+                .map(|me| me.y_scalars.len() == want_with_trace)
+                .unwrap_or(false)
+            {
+                let trace = Rv32TraceLayout::new();
+                let trace_cols_to_open: Vec<usize> = vec![
+                    trace.active,
+                    trace.prog_addr,
+                    trace.prog_value,
+                    trace.rs1_addr,
+                    trace.rs1_val,
+                    trace.rs2_addr,
+                    trace.rs2_val,
+                    trace.rd_has_write,
+                    trace.rd_addr,
+                    trace.rd_val,
+                    trace.ram_has_read,
+                    trace.ram_has_write,
+                    trace.ram_addr,
+                    trace.ram_rv,
+                    trace.ram_wv,
+                    trace.shout_has_lookup,
+                    trace.shout_val,
+                    trace.shout_lhs,
+                    trace.shout_rhs,
+                    trace.shout_table_id,
+                ];
+                let m_in = mcs_inst.m_in;
+                let bus_region_len = cpu_bus
+                    .bus_cols
+                    .checked_mul(cpu_bus.chunk_size)
+                    .ok_or_else(|| PiCcsError::ProtocolError("crosscheck bus region overflow".into()))?;
+                let trace_region = s
+                    .m
+                    .checked_sub(m_in)
+                    .and_then(|v| v.checked_sub(bus_region_len))
+                    .ok_or_else(|| PiCcsError::ProtocolError("crosscheck trace region underflow".into()))?;
+                if trace.cols == 0 || trace_region % trace.cols != 0 {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: crosscheck cannot infer trace t_len (trace_region={}, trace_cols={})",
+                        step_idx, trace_region, trace.cols
+                    )));
+                }
+                let t_len = trace_region / trace.cols;
+                let trace_open_base = core_t + cpu_bus.bus_cols;
+                crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
+                    params,
+                    m_in,
+                    t_len,
+                    m_in,
+                    &trace_cols_to_open,
+                    trace_open_base,
+                    &mcs_wit.Z,
+                    &mut out_me_ref[0],
+                )?;
+                for (out, Z) in out_me_ref.iter_mut().skip(1).zip(me_witnesses.iter()) {
+                    crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
+                        params,
+                        m_in,
+                        t_len,
+                        m_in,
+                        &trace_cols_to_open,
+                        trace_open_base,
+                        Z,
+                        out,
+                    )?;
+                }
             }
         }
 
@@ -2350,6 +2519,8 @@ where
         crate::memory_sidecar::memory::absorb_step_memory_witness(tr, step);
 
         let include_ob = ob.is_some() && (idx + 1 == steps.len());
+        let mut wb_time_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
+        let mut wp_time_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
         let mut ob_time_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
         let mut ob_r_prime: Option<Vec<K>> = None;
 
@@ -2521,6 +2692,30 @@ where
             params, step, ell_n, &r_cycle, &shout_pre, &twist_pre,
         )?;
 
+        let (wb_time_claim_built, wp_time_claim_built) =
+            crate::memory_sidecar::memory::build_route_a_wb_wp_time_claims(params, step, &r_cycle)?;
+        let wb_wp_required =
+            crate::memory_sidecar::memory::wb_wp_required_for_rv32_trace_mode_m_in(step.mcs.0.m_in);
+        if wb_wp_required && (wb_time_claim_built.is_none() || wp_time_claim_built.is_none()) {
+            return Err(PiCcsError::ProtocolError(
+                "WB/WP claims are required in RV32 trace mode but were not built".into(),
+            ));
+        }
+        if let Some((oracle, _claimed_sum)) = wb_time_claim_built {
+            wb_time_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
+                oracle,
+                claimed_sum: K::ZERO,
+                label: b"wb/booleanity",
+            });
+        }
+        if let Some((oracle, _claimed_sum)) = wp_time_claim_built {
+            wp_time_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
+                oracle,
+                claimed_sum: K::ZERO,
+                label: b"wp/quiescence",
+            });
+        }
+
         if include_ob {
             let (cfg, _final_memory_state) =
                 ob.ok_or_else(|| PiCcsError::InvalidInput("output binding enabled but config missing".into()))?;
@@ -2573,6 +2768,8 @@ where
             step,
             twist_read_claims,
             twist_write_claims,
+            wb_time_claim,
+            wp_time_claim,
             ob_time_claim,
         )?;
 
@@ -2678,20 +2875,13 @@ where
             }
         }
 
-        // No shared CPU bus tail: for the RV32 trace wiring CCS, append a small set of
-        // time-combined openings for trace columns needed to link Twist/Shout sidecars at r_time.
-        //
-        // This is the "no bus tail + linkage at r_time" bridge: we keep the CPU witness small
-        // (no bus bit columns), while still binding Twist instances to the same execution trace.
-        if cpu_bus_opt.is_none() && (!step.mem_instances.is_empty() || !step.lut_instances.is_empty()) {
+        // For RV32 trace wiring CCS, append time-combined openings for trace columns needed to
+        // link Twist/Shout sidecars at r_time. In shared-bus mode this is appended after bus
+        // openings; in no-shared mode it is appended after the core CCS rows.
+        if (!step.mem_instances.is_empty() || !step.lut_instances.is_empty()) && mcs_inst.m_in == 5 {
             // Infer that the CPU witness is the RV32 trace column-major layout:
             // z = [x (m_in) | trace_cols * t_len]
             let m_in = mcs_inst.m_in;
-            if m_in != 5 {
-                return Err(PiCcsError::InvalidInput(format!(
-                    "no-shared-bus trace linkage expects m_in=5 (got {m_in})"
-                )));
-            }
             let t_len = step
                 .mem_instances
                 .first()
@@ -2775,6 +2965,7 @@ where
                 .copied()
                 .collect();
             let core_t = s.t();
+            let trace_open_base = core_t + cpu_bus_opt.as_ref().map_or(0usize, |bus| bus.bus_cols);
             let col_base = m_in; // trace_base in the RV32 trace layout
 
             // Event-table style micro-optimization: Shout trace columns are constrained to be 0
@@ -2819,7 +3010,7 @@ where
                 t_len,
                 col_base,
                 &trace_cols_to_open_dense,
-                core_t,
+                trace_open_base,
                 &mcs_wit.Z,
                 &mut ccs_out[0],
             )?;
@@ -2829,7 +3020,7 @@ where
                 t_len,
                 col_base,
                 &trace_cols_to_open_shout,
-                core_t + trace_cols_to_open_dense.len(),
+                trace_open_base + trace_cols_to_open_dense.len(),
                 &mcs_wit.Z,
                 &mut ccs_out[0],
                 &active_shout_js,
@@ -2841,7 +3032,7 @@ where
                     t_len,
                     col_base,
                     &trace_cols_to_open_all,
-                    core_t,
+                    trace_open_base,
                     Z,
                     out,
                 )?;
@@ -2928,6 +3119,14 @@ where
             normalize_me_claims(core::slice::from_mut(me), ell_n, ell_d, t)?;
         }
         for me in mem_proof.twist_me_claims_time.iter_mut() {
+            let t = me.y.len();
+            normalize_me_claims(core::slice::from_mut(me), ell_n, ell_d, t)?;
+        }
+        for me in mem_proof.wb_me_claims.iter_mut() {
+            let t = me.y.len();
+            normalize_me_claims(core::slice::from_mut(me), ell_n, ell_d, t)?;
+        }
+        for me in mem_proof.wp_me_claims.iter_mut() {
             let t = me.y.len();
             normalize_me_claims(core::slice::from_mut(me), ell_n, ell_d, t)?;
         }
@@ -3309,6 +3508,207 @@ where
             }
         }
 
+        // Additional WB/WP folding lane(s): CPU ME openings used by wb/booleanity and
+        // wp/quiescence stages. These lanes share the same witness matrix (`mcs_wit.Z`),
+        // so precompute DEC digit witnesses + child commitments once per step.
+        let mut wb_wp_dec_wits: Option<Vec<Mat<F>>> = None;
+        let mut wb_wp_child_cs: Option<Vec<Cmt>> = None;
+        if !mem_proof.wb_me_claims.is_empty() || !mem_proof.wp_me_claims.is_empty() {
+            let (dec_wits, digit_nonzero) = ccs::split_b_matrix_k_with_nonzero_flags(&mcs_wit.Z, k_dec, params.b)?;
+            let zero_c = Cmt::zeros(mcs_inst.c.d, mcs_inst.c.kappa);
+            let child_cs: Vec<Cmt> = {
+                #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+                {
+                    const PAR_CHILD_COMMIT_THRESHOLD: usize = 32;
+                    let use_parallel = dec_wits.len() >= PAR_CHILD_COMMIT_THRESHOLD && rayon::current_num_threads() > 1;
+                    if use_parallel {
+                        dec_wits
+                            .par_iter()
+                            .enumerate()
+                            .map(|(idx, Zi)| {
+                                if digit_nonzero[idx] {
+                                    l.commit(Zi)
+                                } else {
+                                    zero_c.clone()
+                                }
+                            })
+                            .collect()
+                    } else {
+                        dec_wits
+                            .iter()
+                            .enumerate()
+                            .map(|(idx, Zi)| {
+                                if digit_nonzero[idx] {
+                                    l.commit(Zi)
+                                } else {
+                                    zero_c.clone()
+                                }
+                            })
+                            .collect()
+                    }
+                }
+                #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+                {
+                    dec_wits
+                        .iter()
+                        .enumerate()
+                        .map(|(idx, Zi)| {
+                            if digit_nonzero[idx] {
+                                l.commit(Zi)
+                            } else {
+                                zero_c.clone()
+                            }
+                        })
+                        .collect()
+                }
+            };
+            wb_wp_dec_wits = Some(dec_wits);
+            wb_wp_child_cs = Some(child_cs);
+        }
+
+        // Additional WB folding lane(s): CPU ME openings used by wb/booleanity stage.
+        let mut wb_fold: Vec<RlcDecProof> = Vec::new();
+        if !mem_proof.wb_me_claims.is_empty() {
+            let trace = Rv32TraceLayout::new();
+            let t_len = crate::memory_sidecar::memory::infer_rv32_trace_t_len_for_wb_wp(step, &trace)?;
+            let wb_cols = crate::memory_sidecar::memory::rv32_trace_wb_columns(&trace);
+            let core_t = s.t();
+            let m_in = mcs_inst.m_in;
+            let dec_wits = wb_wp_dec_wits
+                .as_ref()
+                .ok_or_else(|| PiCcsError::ProtocolError("WB fold missing shared DEC witnesses".into()))?;
+            let child_cs = wb_wp_child_cs
+                .as_ref()
+                .ok_or_else(|| PiCcsError::ProtocolError("WB fold missing shared DEC commitments".into()))?;
+            tr.append_message(b"fold/wb_lane_start", &(step_idx as u64).to_le_bytes());
+            for (claim_idx, me) in mem_proof.wb_me_claims.iter().enumerate() {
+                tr.append_message(b"fold/wb_lane_claim_idx", &(claim_idx as u64).to_le_bytes());
+                bind_rlc_inputs(tr, RlcLane::Val, step_idx, core::slice::from_ref(me))?;
+                let rlc_rhos = ccs::sample_rot_rhos_n(tr, params, &ring, 1)?;
+                let rlc_parent = ccs::rlc_public(
+                    &s,
+                    params,
+                    &rlc_rhos,
+                    core::slice::from_ref(me),
+                    mixers.mix_rhos_commits,
+                    ell_d,
+                )?;
+                let (mut dec_children, ok_y, ok_x, ok_c) = ccs::dec_children_with_commit_cached(
+                    mode.clone(),
+                    &s,
+                    params,
+                    &rlc_parent,
+                    dec_wits,
+                    ell_d,
+                    child_cs,
+                    mixers.combine_b_pows,
+                    ccs_sparse_cache.as_deref(),
+                );
+                if !(ok_y && ok_x && ok_c) {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "DEC(val) public check failed at step {} (y={}, X={}, c={})",
+                        step_idx, ok_y, ok_x, ok_c
+                    )));
+                }
+                if dec_children.len() != dec_wits.len() {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: WB fold requires materialized DEC witnesses (children={}, wits={})",
+                        step_idx,
+                        dec_children.len(),
+                        dec_wits.len()
+                    )));
+                }
+                for (child, zi) in dec_children.iter_mut().zip(dec_wits.iter()) {
+                    crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
+                        params, m_in, t_len, m_in, &wb_cols, core_t, zi, child,
+                    )?;
+                }
+                if collect_val_lane_wits {
+                    val_lane_wits.extend(dec_wits.iter().cloned());
+                }
+                wb_fold.push(RlcDecProof {
+                    rlc_rhos,
+                    rlc_parent,
+                    dec_children,
+                });
+            }
+        }
+
+        // Additional WP folding lane(s): CPU ME openings used by wp/quiescence stage.
+        let mut wp_fold: Vec<RlcDecProof> = Vec::new();
+        if !mem_proof.wp_me_claims.is_empty() {
+            let trace = Rv32TraceLayout::new();
+            let t_len = crate::memory_sidecar::memory::infer_rv32_trace_t_len_for_wb_wp(step, &trace)?;
+            let wp_open_cols = crate::memory_sidecar::memory::rv32_trace_wp_opening_columns(&trace);
+            let core_t = s.t();
+            let m_in = mcs_inst.m_in;
+            let dec_wits = wb_wp_dec_wits
+                .as_ref()
+                .ok_or_else(|| PiCcsError::ProtocolError("WP fold missing shared DEC witnesses".into()))?;
+            let child_cs = wb_wp_child_cs
+                .as_ref()
+                .ok_or_else(|| PiCcsError::ProtocolError("WP fold missing shared DEC commitments".into()))?;
+            tr.append_message(b"fold/wp_lane_start", &(step_idx as u64).to_le_bytes());
+            for (claim_idx, me) in mem_proof.wp_me_claims.iter().enumerate() {
+                tr.append_message(b"fold/wp_lane_claim_idx", &(claim_idx as u64).to_le_bytes());
+                bind_rlc_inputs(tr, RlcLane::Val, step_idx, core::slice::from_ref(me))?;
+                let rlc_rhos = ccs::sample_rot_rhos_n(tr, params, &ring, 1)?;
+                let rlc_parent = ccs::rlc_public(
+                    &s,
+                    params,
+                    &rlc_rhos,
+                    core::slice::from_ref(me),
+                    mixers.mix_rhos_commits,
+                    ell_d,
+                )?;
+                let (mut dec_children, ok_y, ok_x, ok_c) = ccs::dec_children_with_commit_cached(
+                    mode.clone(),
+                    &s,
+                    params,
+                    &rlc_parent,
+                    dec_wits,
+                    ell_d,
+                    child_cs,
+                    mixers.combine_b_pows,
+                    ccs_sparse_cache.as_deref(),
+                );
+                if !(ok_y && ok_x && ok_c) {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "DEC(val) public check failed at step {} (y={}, X={}, c={})",
+                        step_idx, ok_y, ok_x, ok_c
+                    )));
+                }
+                if dec_children.len() != dec_wits.len() {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: WP fold requires materialized DEC witnesses (children={}, wits={})",
+                        step_idx,
+                        dec_children.len(),
+                        dec_wits.len()
+                    )));
+                }
+                for (child, zi) in dec_children.iter_mut().zip(dec_wits.iter()) {
+                    crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
+                        params,
+                        m_in,
+                        t_len,
+                        m_in,
+                        &wp_open_cols,
+                        core_t,
+                        zi,
+                        child,
+                    )?;
+                }
+                if collect_val_lane_wits {
+                    val_lane_wits.extend(dec_wits.iter().cloned());
+                }
+                wp_fold.push(RlcDecProof {
+                    rlc_rhos,
+                    rlc_parent,
+                    dec_children,
+                });
+            }
+        }
+
         accumulator = children.clone();
         accumulator_wit = if want_main_wits { Z_split } else { Vec::new() };
 
@@ -3325,6 +3725,8 @@ where
             val_fold,
             twist_time_fold,
             shout_time_fold,
+            wb_fold,
+            wp_fold,
         });
 
         tr.append_message(b"fold/step_done", &(step_idx as u64).to_le_bytes());
@@ -3858,6 +4260,10 @@ where
 
         let shout_pre = crate::memory_sidecar::memory::verify_shout_addr_pre_time(tr, step, &step_proof.mem, step_idx)?;
         let twist_pre = crate::memory_sidecar::memory::verify_twist_addr_pre_time(tr, step, &step_proof.mem)?;
+        let wb_enabled =
+            crate::memory_sidecar::memory::wb_wp_required_for_rv32_trace_mode_m_in(step.mcs_inst.m_in);
+        let wp_enabled =
+            crate::memory_sidecar::memory::wb_wp_required_for_rv32_trace_mode_m_in(step.mcs_inst.m_in);
         let crate::memory_sidecar::route_a_time::RouteABatchedTimeVerifyOutput { r_time, final_values } =
             crate::memory_sidecar::route_a_time::verify_route_a_batched_time(
                 tr,
@@ -3867,6 +4273,8 @@ where
                 claimed_initial,
                 step,
                 &step_proof.batched_time,
+                wb_enabled,
+                wp_enabled,
                 ob_inc_total_degree_bound,
             )?;
 
@@ -4555,6 +4963,92 @@ where
                     "step {}: Shout ME(time) claims not fully consumed by paging plan",
                     idx
                 )));
+            }
+        }
+
+        if step_proof.mem.wb_me_claims.is_empty() {
+            if !step_proof.wb_fold.is_empty() {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: unexpected wb_fold proof(s) (no WB ME claims)",
+                    idx
+                )));
+            }
+        } else {
+            if step_proof.wb_fold.len() != step_proof.mem.wb_me_claims.len() {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: wb_fold count mismatch (have {}, expected {})",
+                    idx,
+                    step_proof.wb_fold.len(),
+                    step_proof.mem.wb_me_claims.len()
+                )));
+            }
+            tr.append_message(b"fold/wb_lane_start", &(step_idx as u64).to_le_bytes());
+            for (claim_idx, (me, proof)) in step_proof
+                .mem
+                .wb_me_claims
+                .iter()
+                .zip(step_proof.wb_fold.iter())
+                .enumerate()
+            {
+                tr.append_message(b"fold/wb_lane_claim_idx", &(claim_idx as u64).to_le_bytes());
+                verify_rlc_dec_lane(
+                    RlcLane::Val,
+                    tr,
+                    params,
+                    &s,
+                    &ring,
+                    ell_d,
+                    mixers,
+                    step_idx,
+                    core::slice::from_ref(me),
+                    &proof.rlc_rhos,
+                    &proof.rlc_parent,
+                    &proof.dec_children,
+                )?;
+                val_lane_obligations.extend_from_slice(&proof.dec_children);
+            }
+        }
+
+        if step_proof.mem.wp_me_claims.is_empty() {
+            if !step_proof.wp_fold.is_empty() {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: unexpected wp_fold proof(s) (no WP ME claims)",
+                    idx
+                )));
+            }
+        } else {
+            if step_proof.wp_fold.len() != step_proof.mem.wp_me_claims.len() {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: wp_fold count mismatch (have {}, expected {})",
+                    idx,
+                    step_proof.wp_fold.len(),
+                    step_proof.mem.wp_me_claims.len()
+                )));
+            }
+            tr.append_message(b"fold/wp_lane_start", &(step_idx as u64).to_le_bytes());
+            for (claim_idx, (me, proof)) in step_proof
+                .mem
+                .wp_me_claims
+                .iter()
+                .zip(step_proof.wp_fold.iter())
+                .enumerate()
+            {
+                tr.append_message(b"fold/wp_lane_claim_idx", &(claim_idx as u64).to_le_bytes());
+                verify_rlc_dec_lane(
+                    RlcLane::Val,
+                    tr,
+                    params,
+                    &s,
+                    &ring,
+                    ell_d,
+                    mixers,
+                    step_idx,
+                    core::slice::from_ref(me),
+                    &proof.rlc_rhos,
+                    &proof.rlc_parent,
+                    &proof.dec_children,
+                )?;
+                val_lane_obligations.extend_from_slice(&proof.dec_children);
             }
         }
 

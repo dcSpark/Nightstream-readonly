@@ -236,7 +236,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_bitwise_packed_semantics_redte
     // - reject because the tampered witness no longer satisfies the protocol invariants, or
     // - emit a proof that fails verification.
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-bitwise-packed-redteam");
-    let Ok(proof) = fold_shard_prove(
+    if let Ok(proof) = fold_shard_prove(
         FoldingMode::PaperExact,
         &mut tr_prove,
         &params,
@@ -246,20 +246,18 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_bitwise_packed_semantics_redte
         &[],
         &l,
         mixers,
-    ) else {
-        return;
-    };
-
-    let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-bitwise-packed-redteam");
-    fold_shard_verify(
-        FoldingMode::PaperExact,
-        &mut tr_verify,
-        &params,
-        &ccs,
-        &steps_instance,
-        &[],
-        &proof,
-        mixers,
-    )
-    .expect_err("tampered packed bitwise digit must be caught by Route-A time constraints");
+    ) {
+        let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-bitwise-packed-redteam");
+        fold_shard_verify(
+            FoldingMode::PaperExact,
+            &mut tr_verify,
+            &params,
+            &ccs,
+            &steps_instance,
+            &[],
+            &proof,
+            mixers,
+        )
+        .expect_err("tampered packed bitwise digit must be caught by Route-A time constraints");
+    }
 }

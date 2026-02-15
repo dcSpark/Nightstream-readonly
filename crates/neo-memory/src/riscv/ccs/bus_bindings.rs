@@ -9,8 +9,9 @@ use crate::riscv::lookups::{PROG_ID, RAM_ID, REG_ID};
 
 use super::config::{derive_mem_ids_and_ell_addrs, derive_shout_ids_and_ell_addrs};
 use super::constants::{
-    ADD_TABLE_ID, AND_TABLE_ID, EQ_TABLE_ID, NEQ_TABLE_ID, OR_TABLE_ID, SLL_TABLE_ID, SLTU_TABLE_ID, SLT_TABLE_ID,
-    SRA_TABLE_ID, SRL_TABLE_ID, SUB_TABLE_ID, XOR_TABLE_ID, RV32_XLEN,
+    ADD_TABLE_ID, AND_TABLE_ID, DIVU_TABLE_ID, DIV_TABLE_ID, EQ_TABLE_ID, MULHSU_TABLE_ID, MULHU_TABLE_ID,
+    MULH_TABLE_ID, MUL_TABLE_ID, NEQ_TABLE_ID, OR_TABLE_ID, REMU_TABLE_ID, REM_TABLE_ID, RV32_XLEN, SLL_TABLE_ID,
+    SLTU_TABLE_ID, SLT_TABLE_ID, SRA_TABLE_ID, SRL_TABLE_ID, SUB_TABLE_ID, XOR_TABLE_ID,
 };
 use super::{Rv32B1Layout, Rv32TraceCcsLayout};
 
@@ -155,27 +156,14 @@ fn trace_zero_col(layout: &Rv32TraceCcsLayout) -> usize {
     trace_cpu_col(layout, layout.trace.op_amo)
 }
 
-fn trace_shout_cpu_binding(layout: &Rv32TraceCcsLayout, table_id: u32) -> Result<ShoutCpuBinding, String> {
-    let has_lookup = match table_id {
-        AND_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[0]),
-        XOR_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[1]),
-        OR_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[2]),
-        ADD_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[3]),
-        SUB_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[4]),
-        SLT_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[5]),
-        SLTU_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[6]),
-        SLL_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[7]),
-        SRL_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[8]),
-        SRA_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[9]),
-        EQ_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[10]),
-        NEQ_TABLE_ID => trace_cpu_col(layout, layout.trace.shout_table_has_lookup[11]),
-        _ => return Err(format!("RV32 trace shared bus: unsupported shout table_id={table_id}")),
-    };
-    Ok(ShoutCpuBinding {
-        has_lookup,
-        addr: None,
-        val: trace_cpu_col(layout, layout.trace.shout_val),
-    })
+#[inline]
+fn validate_trace_shout_table_id(table_id: u32) -> Result<(), String> {
+    match table_id {
+        AND_TABLE_ID | XOR_TABLE_ID | OR_TABLE_ID | ADD_TABLE_ID | SUB_TABLE_ID | SLT_TABLE_ID | SLTU_TABLE_ID
+        | SLL_TABLE_ID | SRL_TABLE_ID | SRA_TABLE_ID | EQ_TABLE_ID | NEQ_TABLE_ID | MUL_TABLE_ID | MULH_TABLE_ID
+        | MULHU_TABLE_ID | MULHSU_TABLE_ID | DIV_TABLE_ID | DIVU_TABLE_ID | REM_TABLE_ID | REMU_TABLE_ID => Ok(()),
+        _ => Err(format!("RV32 trace shared bus: unsupported shout table_id={table_id}")),
+    }
 }
 
 #[inline]
@@ -244,7 +232,10 @@ pub fn rv32_trace_shared_cpu_bus_config(
 
     let mut shout_cpu = HashMap::new();
     for table_id in table_ids {
-        shout_cpu.insert(table_id, vec![trace_shout_cpu_binding(layout, table_id)?]);
+        validate_trace_shout_table_id(table_id)?;
+        // In trace shared-bus mode, Shout CPU-linkage is checked at Route-A reduction-time
+        // aggregates, so per-lane bus linkage is intentionally omitted.
+        shout_cpu.insert(table_id, Vec::new());
     }
 
     let mut mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
@@ -309,16 +300,13 @@ pub fn rv32_trace_shared_bus_requirements(
     table_ids.sort_unstable();
     table_ids.dedup();
     for &table_id in &table_ids {
-        let _ = trace_shout_cpu_binding(layout, table_id)?;
+        validate_trace_shout_table_id(table_id)?;
     }
 
     let mut mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
     mem_ids.sort_unstable();
 
-    let shout_cols: usize = table_ids
-        .iter()
-        .map(|_| 2 * RV32_XLEN + 2)
-        .sum();
+    let shout_cols: usize = table_ids.iter().map(|_| 2 * RV32_XLEN + 2).sum();
     let mut twist_cols = 0usize;
     let mut twist_shapes = Vec::with_capacity(mem_ids.len());
     for mem_id in &mem_ids {
@@ -365,9 +353,8 @@ pub fn rv32_trace_shared_bus_requirements(
 
     let mut builder = CpuConstraintBuilder::<F>::new(m_total, m_total, layout.const_one);
 
-    for (i, &table_id) in table_ids.iter().enumerate() {
-        let cpu = trace_shout_cpu_binding(layout, table_id)?;
-        builder.add_shout_instance_bound(&bus, &bus.shout_cols[i].lanes[0], &cpu);
+    for (i, _table_id) in table_ids.iter().enumerate() {
+        builder.add_shout_instance_padding(&bus, &bus.shout_cols[i].lanes[0]);
     }
     for (i, &mem_id) in mem_ids.iter().enumerate() {
         let inst = &bus.twist_cols[i];

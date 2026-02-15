@@ -305,21 +305,6 @@ impl Rv32TraceWitness {
                     wit.cols[layout.shout_has_lookup][i] = F::ONE;
                     wit.cols[layout.shout_val][i] = F::from_u64(ev.value);
                     wit.cols[layout.shout_table_id][i] = F::from_u64(ev.shout_id.0 as u64);
-                    let table_idx = usize::try_from(ev.shout_id.0).map_err(|_| {
-                        format!(
-                            "Shout table id does not fit usize in one-lane trace view at cycle={}: table_id={}",
-                            r.cycle, ev.shout_id.0
-                        )
-                    })?;
-                    if table_idx >= layout.shout_table_has_lookup.len() {
-                        return Err(format!(
-                            "unsupported Shout table id in one-lane trace view at cycle={}: table_id={} (supported: 0..{})",
-                            r.cycle,
-                            ev.shout_id.0,
-                            layout.shout_table_has_lookup.len() - 1
-                        ));
-                    }
-                    wit.cols[layout.shout_table_has_lookup[table_idx]][i] = F::ONE;
                     let (lhs, rhs) = uninterleave_bits(ev.key as u128);
                     wit.cols[layout.shout_lhs][i] = F::from_u64(lhs);
                     // Canonicalize shift keys: RISC-V shifts use only the low 5 bits of `rhs`.

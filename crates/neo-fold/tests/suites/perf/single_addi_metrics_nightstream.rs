@@ -2,7 +2,10 @@ use std::time::{Duration, Instant};
 
 use neo_fold::riscv_shard::Rv32B1;
 use neo_fold::riscv_trace_shard::Rv32TraceWiring;
+use neo_fold::shard::ShardProof;
+use neo_ccs::MeInstance;
 use neo_memory::riscv::lookups::{encode_program, BranchCondition, RiscvInstruction, RiscvOpcode};
+use neo_memory::riscv::ccs::{build_rv32_trace_wiring_ccs, Rv32TraceCcsLayout};
 
 #[test]
 #[ignore = "perf-style test: run with `cargo test -p neo-fold --release --test perf -- --ignored --nocapture compare_single_mixed_metrics_nightstream_only`"]
@@ -123,6 +126,70 @@ fn fmt_duration(d: Duration) -> String {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+struct OpeningSurfaceBuckets {
+    core_ccs: usize,
+    sidecars: usize,
+    claim_reduction_linkage: usize,
+    pcs_open: usize,
+}
+
+impl OpeningSurfaceBuckets {
+    fn total(self) -> usize {
+        self.core_ccs + self.sidecars + self.claim_reduction_linkage + self.pcs_open
+    }
+}
+
+fn sum_y_scalars<C, FF, KK>(claims: &[MeInstance<C, FF, KK>]) -> usize {
+    claims.iter().map(|me| me.y_scalars.len()).sum()
+}
+
+fn opening_surface_from_shard_proof(proof: &ShardProof) -> OpeningSurfaceBuckets {
+    let mut buckets = OpeningSurfaceBuckets::default();
+    for step in &proof.steps {
+        buckets.core_ccs += sum_y_scalars(&step.fold.ccs_out);
+
+        buckets.sidecars += sum_y_scalars(&step.mem.shout_me_claims_time);
+        buckets.sidecars += sum_y_scalars(&step.mem.twist_me_claims_time);
+        buckets.sidecars += sum_y_scalars(&step.mem.val_me_claims);
+
+        buckets.claim_reduction_linkage += sum_y_scalars(&step.mem.wb_me_claims);
+        buckets.claim_reduction_linkage += sum_y_scalars(&step.mem.wp_me_claims);
+        buckets.claim_reduction_linkage += step.batched_time.claimed_sums.len();
+
+        buckets.pcs_open += step.fold.dec_children.len();
+        buckets.pcs_open += step.val_fold.iter().map(|p| p.dec_children.len()).sum::<usize>();
+        buckets.pcs_open += step
+            .twist_time_fold
+            .iter()
+            .map(|p| p.dec_children.len())
+            .sum::<usize>();
+        buckets.pcs_open += step
+            .shout_time_fold
+            .iter()
+            .map(|p| p.dec_children.len())
+            .sum::<usize>();
+        buckets.pcs_open += step.wb_fold.iter().map(|p| p.dec_children.len()).sum::<usize>();
+        buckets.pcs_open += step.wp_fold.iter().map(|p| p.dec_children.len()).sum::<usize>();
+    }
+    buckets
+}
+
+fn opening_surface_from_rv32_b1_run(run: &neo_fold::riscv_shard::Rv32B1Run) -> OpeningSurfaceBuckets {
+    let mut buckets = opening_surface_from_shard_proof(&run.proof().main);
+    buckets.sidecars += sum_y_scalars(&run.proof().decode_plumbing.me_out);
+    buckets.sidecars += sum_y_scalars(&run.proof().semantics.me_out);
+    if let Some(rv32m) = &run.proof().rv32m {
+        for chunk in rv32m {
+            buckets.sidecars += sum_y_scalars(&chunk.me_out);
+            buckets.pcs_open += chunk.me_out.len();
+        }
+    }
+    buckets.pcs_open += run.proof().decode_plumbing.me_out.len();
+    buckets.pcs_open += run.proof().semantics.me_out.len();
+    buckets
+}
+
 fn env_usize(name: &str, default: usize) -> usize {
     match std::env::var(name) {
         Ok(v) => v.parse::<usize>().unwrap_or(default),
@@ -239,6 +306,15 @@ fn debug_trace_single_n_mixed_ops() {
         fmt_duration(phases.chunk_build_commit),
         fmt_duration(phases.fold_and_prove),
     );
+    let openings = opening_surface_from_shard_proof(run.proof());
+    println!(
+        "TRACE_OPENINGS core_ccs={} sidecars={} claim_reduction_linkage={} pcs_open={} total={}",
+        openings.core_ccs,
+        openings.sidecars,
+        openings.claim_reduction_linkage,
+        openings.pcs_open,
+        openings.total()
+    );
 }
 
 #[test]
@@ -282,6 +358,94 @@ fn debug_chunked_single_n_mixed_ops() {
         fmt_duration(phases.setup),
         fmt_duration(phases.build_commit),
         fmt_duration(phases.fold_and_prove),
+    );
+    let openings = opening_surface_from_rv32_b1_run(&run);
+    println!(
+        "CHUNKED_OPENINGS core_ccs={} sidecars={} claim_reduction_linkage={} pcs_open={} total={}",
+        openings.core_ccs,
+        openings.sidecars,
+        openings.claim_reduction_linkage,
+        openings.pcs_open,
+        openings.total()
+    );
+}
+
+#[test]
+#[ignore = "perf-style report hook: cargo test -p neo-fold --release --test perf -- --ignored --nocapture debug_trace_core_rows_per_cycle_equiv"]
+fn debug_trace_core_rows_per_cycle_equiv() {
+    let t = env_usize("NS_DEBUG_T", 257);
+    let layout = Rv32TraceCcsLayout::new(t).expect("trace layout");
+    let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace core ccs");
+    println!(
+        "TRACE_CORE t={} trace_width={} core_ccs_n={} rows_per_cycle={:.3}",
+        t,
+        layout.trace.cols,
+        ccs.n,
+        ccs.n as f64 / t as f64
+    );
+}
+
+#[test]
+#[ignore = "W0 snapshot: NS_DEBUG_N=256 cargo test -p neo-fold --release --test perf -- --ignored --nocapture report_track_a_w0_w1_snapshot"]
+fn report_track_a_w0_w1_snapshot() {
+    let n = env_usize("NS_DEBUG_N", 256);
+    assert!(n > 0);
+    let chunk_rows = n + 1;
+
+    let base = mixed_instruction_sequence();
+    let mut program: Vec<RiscvInstruction> = (0..n).map(|i| base[i % base.len()].clone()).collect();
+    program.push(RiscvInstruction::Halt);
+    let program_bytes = encode_program(&program);
+    let steps = n + 1;
+
+    let total_start = Instant::now();
+    let mut run = Rv32TraceWiring::from_rom(0, &program_bytes)
+        .min_trace_len(steps)
+        .max_steps(steps)
+        .chunk_rows(chunk_rows)
+        .prove()
+        .expect("trace prove");
+    let prove_time = run.prove_duration();
+    run.verify().expect("trace verify");
+    let verify_time = run.verify_duration().expect("trace verify duration");
+    let total_time = total_start.elapsed();
+    let openings = opening_surface_from_shard_proof(run.proof());
+
+    let layout = Rv32TraceCcsLayout::new(steps).expect("trace layout");
+    let core_ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace core ccs");
+    let rows_per_cycle = core_ccs.n as f64 / steps as f64;
+
+    // W0 lock values from spec section 7.
+    let baseline_trace_width = 160usize;
+    let baseline_rows = 425usize;
+    let post_w1_trace_width = 148usize;
+    let post_w1_rows = 399usize;
+
+    println!(
+        "W0_W1_LOCK baseline(trace_width={},rows_per_cycle={}) post_w1(trace_width={},rows_per_cycle={})",
+        baseline_trace_width, baseline_rows, post_w1_trace_width, post_w1_rows
+    );
+    println!(
+        "TRACK_A_MEASURED n={} trace_width={} core_ccs_n={} rows_per_cycle={:.3} ccs_n={} ccs_m={} prove={} verify={} total={} openings(core_ccs={},sidecars={},claim_reduction_linkage={},pcs_open={},total={})",
+        n,
+        layout.trace.cols,
+        core_ccs.n,
+        rows_per_cycle,
+        run.ccs_num_constraints(),
+        run.ccs_num_variables(),
+        fmt_duration(prove_time),
+        fmt_duration(verify_time),
+        fmt_duration(total_time),
+        openings.core_ccs,
+        openings.sidecars,
+        openings.claim_reduction_linkage,
+        openings.pcs_open,
+        openings.total()
+    );
+    println!(
+        "TRACK_A_USED_SETS memory_ids={:?} shout_table_ids={:?}",
+        run.used_memory_ids(),
+        run.used_shout_table_ids()
     );
 }
 

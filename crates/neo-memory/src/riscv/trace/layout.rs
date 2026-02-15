@@ -63,7 +63,6 @@ pub struct Rv32TraceLayout {
     pub shout_lhs: usize,
     pub shout_rhs: usize,
     pub shout_table_id: usize,
-    pub shout_table_has_lookup: [usize; 12],
 
     // Load/store sub-op decode helpers.
     pub is_lb: usize,
@@ -186,18 +185,6 @@ impl Rv32TraceLayout {
         let shout_lhs = take();
         let shout_rhs = take();
         let shout_table_id = take();
-        let shout_table_and = take();
-        let shout_table_xor = take();
-        let shout_table_or = take();
-        let shout_table_add = take();
-        let shout_table_sub = take();
-        let shout_table_slt = take();
-        let shout_table_sltu = take();
-        let shout_table_sll = take();
-        let shout_table_srl = take();
-        let shout_table_sra = take();
-        let shout_table_eq = take();
-        let shout_table_neq = take();
         let is_lb = take();
         let is_lbu = take();
         let is_lh = take();
@@ -357,20 +344,6 @@ impl Rv32TraceLayout {
             shout_lhs,
             shout_rhs,
             shout_table_id,
-            shout_table_has_lookup: [
-                shout_table_and,
-                shout_table_xor,
-                shout_table_or,
-                shout_table_add,
-                shout_table_sub,
-                shout_table_slt,
-                shout_table_sltu,
-                shout_table_sll,
-                shout_table_srl,
-                shout_table_sra,
-                shout_table_eq,
-                shout_table_neq,
-            ],
             is_lb,
             is_lbu,
             is_lh,

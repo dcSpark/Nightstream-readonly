@@ -36,6 +36,8 @@ pub fn prove_route_a_batched_time(
     step: &StepWitnessBundle<Cmt, F, K>,
     twist_read_claims: Vec<K>,
     twist_write_claims: Vec<K>,
+    wb_time_claim: Option<ExtraBatchedTimeClaim>,
+    wp_time_claim: Option<ExtraBatchedTimeClaim>,
     ob_inc_total: Option<ExtraBatchedTimeClaim>,
 ) -> Result<RouteABatchedTimeProverOutput, PiCcsError> {
     let mut claimed_sums: Vec<K> = Vec::new();
@@ -96,6 +98,48 @@ pub fn prove_route_a_batched_time(
         &mut claims,
     );
 
+    let wb_time_degree_bound = wb_time_claim.as_ref().map(|extra| extra.oracle.degree_bound());
+    let mut wb_time_label: Option<&'static [u8]> = None;
+    let mut wb_time_oracle: Option<Box<dyn RoundOracle>> = wb_time_claim.map(|extra| {
+        wb_time_label = Some(extra.label);
+        extra.oracle
+    });
+    if let Some(oracle) = wb_time_oracle.as_deref_mut() {
+        // WB is a zero-identity stage: claimed sum is verifier-known and fixed to zero.
+        let claimed_sum = K::ZERO;
+        let label = wb_time_label.expect("missing wb_time label");
+        claimed_sums.push(claimed_sum);
+        degree_bounds.push(oracle.degree_bound());
+        labels.push(label);
+        claim_is_dynamic.push(false);
+        claims.push(BatchedClaim {
+            oracle,
+            claimed_sum,
+            label,
+        });
+    }
+
+    let wp_time_degree_bound = wp_time_claim.as_ref().map(|extra| extra.oracle.degree_bound());
+    let mut wp_time_label: Option<&'static [u8]> = None;
+    let mut wp_time_oracle: Option<Box<dyn RoundOracle>> = wp_time_claim.map(|extra| {
+        wp_time_label = Some(extra.label);
+        extra.oracle
+    });
+    if let Some(oracle) = wp_time_oracle.as_deref_mut() {
+        // WP is a zero-identity stage: claimed sum is verifier-known and fixed to zero.
+        let claimed_sum = K::ZERO;
+        let label = wp_time_label.expect("missing wp_time label");
+        claimed_sums.push(claimed_sum);
+        degree_bounds.push(oracle.degree_bound());
+        labels.push(label);
+        claim_is_dynamic.push(false);
+        claims.push(BatchedClaim {
+            oracle,
+            claimed_sum,
+            label,
+        });
+    }
+
     let ob_inc_total_degree_bound = ob_inc_total
         .as_ref()
         .map(|extra| extra.oracle.degree_bound());
@@ -124,6 +168,8 @@ pub fn prove_route_a_batched_time(
         step.lut_instances.iter().map(|(inst, _)| inst),
         step.mem_instances.iter().map(|(inst, _)| inst),
         ccs_time_degree_bound,
+        wb_time_degree_bound.is_some(),
+        wp_time_degree_bound.is_some(),
         ob_inc_total_degree_bound,
     );
     let expected_degree_bounds: Vec<usize> = metas.iter().map(|m| m.degree_bound).collect();
@@ -182,9 +228,17 @@ pub fn verify_route_a_batched_time(
     claimed_initial_sum: K,
     step: &StepInstanceBundle<Cmt, F, K>,
     proof: &BatchedTimeProof,
+    wb_enabled: bool,
+    wp_enabled: bool,
     ob_inc_total_degree_bound: Option<usize>,
 ) -> Result<RouteABatchedTimeVerifyOutput, PiCcsError> {
-    let metas = RouteATimeClaimPlan::time_claim_metas_for_step(step, ccs_time_degree_bound, ob_inc_total_degree_bound);
+    let metas = RouteATimeClaimPlan::time_claim_metas_for_step(
+        step,
+        ccs_time_degree_bound,
+        wb_enabled,
+        wp_enabled,
+        ob_inc_total_degree_bound,
+    );
     let expected_degree_bounds: Vec<usize> = metas.iter().map(|m| m.degree_bound).collect();
     let expected_labels: Vec<&'static [u8]> = metas.iter().map(|m| m.label).collect();
     let claim_is_dynamic: Vec<bool> = metas.iter().map(|m| m.is_dynamic).collect();

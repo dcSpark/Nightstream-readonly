@@ -45,6 +45,8 @@ pub struct RouteATimeClaimPlan {
     pub shout: Vec<ShoutTimeClaimIdx>,
     pub shout_event_trace_hash: Option<usize>,
     pub twist: Vec<TwistTimeClaimIdx>,
+    pub wb_bool: Option<usize>,
+    pub wp_quiescence: Option<usize>,
 }
 
 impl RouteATimeClaimPlan {
@@ -52,6 +54,8 @@ impl RouteATimeClaimPlan {
         lut_insts: LI,
         mem_insts: MI,
         ccs_time_degree_bound: usize,
+        wb_enabled: bool,
+        wp_enabled: bool,
         ob_inc_total_degree_bound: Option<usize>,
     ) -> Vec<TimeClaimMeta>
     where
@@ -158,6 +162,22 @@ impl RouteATimeClaimPlan {
             });
         }
 
+        if wb_enabled {
+            out.push(TimeClaimMeta {
+                label: b"wb/booleanity",
+                degree_bound: 3,
+                is_dynamic: false,
+            });
+        }
+
+        if wp_enabled {
+            out.push(TimeClaimMeta {
+                label: b"wp/quiescence",
+                degree_bound: 3,
+                is_dynamic: false,
+            });
+        }
+
         if let Some(degree_bound) = ob_inc_total_degree_bound {
             out.push(TimeClaimMeta {
                 label: crate::output_binding::OB_INC_TOTAL_LABEL,
@@ -177,12 +197,16 @@ impl RouteATimeClaimPlan {
     pub fn time_claim_metas_for_step(
         step: &StepInstanceBundle<Cmt, F, K>,
         ccs_time_degree_bound: usize,
+        wb_enabled: bool,
+        wp_enabled: bool,
         ob_inc_total_degree_bound: Option<usize>,
     ) -> Vec<TimeClaimMeta> {
         Self::time_claim_metas_for_instances(
             step.lut_insts.iter(),
             step.mem_insts.iter(),
             ccs_time_degree_bound,
+            wb_enabled,
+            wp_enabled,
             ob_inc_total_degree_bound,
         )
     }
@@ -190,6 +214,8 @@ impl RouteATimeClaimPlan {
     pub fn build(
         step: &StepInstanceBundle<Cmt, F, K>,
         claim_idx_start: usize,
+        wb_enabled: bool,
+        wp_enabled: bool,
     ) -> Result<RouteATimeClaimPlan, PiCcsError> {
         let mut idx = claim_idx_start;
         let mut shout = Vec::with_capacity(step.lut_insts.len());
@@ -261,6 +287,22 @@ impl RouteATimeClaimPlan {
             });
         }
 
+        let wb_bool = if wb_enabled {
+            let out = idx;
+            idx += 1;
+            Some(out)
+        } else {
+            None
+        };
+
+        let wp_quiescence = if wp_enabled {
+            let out = idx;
+            idx += 1;
+            Some(out)
+        } else {
+            None
+        };
+
         if idx < claim_idx_start {
             return Err(PiCcsError::ProtocolError("RouteATimeClaimPlan index underflow".into()));
         }
@@ -271,6 +313,8 @@ impl RouteATimeClaimPlan {
             shout,
             shout_event_trace_hash,
             twist,
+            wb_bool,
+            wp_quiescence,
         })
     }
 }
