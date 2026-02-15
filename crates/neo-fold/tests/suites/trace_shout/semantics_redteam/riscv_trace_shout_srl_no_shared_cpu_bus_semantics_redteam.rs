@@ -265,7 +265,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_srl_semantics_redteam() {
     // - emit a proof that fails verification.
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-srl-semantics-redteam");
     if let Ok(proof) = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -277,7 +277,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_srl_semantics_redteam() {
     ) {
         let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-srl-semantics-redteam");
         fold_shard_verify(
-            FoldingMode::PaperExact,
+            FoldingMode::Optimized,
             &mut tr_verify,
             &params,
             &ccs,

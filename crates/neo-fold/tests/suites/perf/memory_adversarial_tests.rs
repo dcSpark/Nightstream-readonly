@@ -301,7 +301,7 @@ fn memory_cross_step_read_consistency() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"mem-cross-step");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -316,7 +316,7 @@ fn memory_cross_step_read_consistency() {
     let mut tr_verify = Poseidon2Transcript::new(b"mem-cross-step");
     let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -368,7 +368,7 @@ fn memory_read_uninitialized_returns_zero() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"mem-uninitialized");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -383,7 +383,7 @@ fn memory_read_uninitialized_returns_zero() {
     let mut tr_verify = Poseidon2Transcript::new(b"mem-uninitialized");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -438,7 +438,7 @@ fn memory_tamper_read_value_fails() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"mem-tamper-read");
     let proof_result = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -455,7 +455,7 @@ fn memory_tamper_read_value_fails() {
             let mut tr_verify = Poseidon2Transcript::new(b"mem-tamper-read");
             let steps_public = [StepInstanceBundle::from(&step_bundle)];
             let verify_result = fold_shard_verify(
-                FoldingMode::PaperExact,
+                FoldingMode::Optimized,
                 &mut tr_verify,
                 &params,
                 &ccs,
@@ -509,7 +509,7 @@ fn memory_tamper_write_increment_fails() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"mem-tamper-inc");
     let proof_result = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -526,7 +526,7 @@ fn memory_tamper_write_increment_fails() {
             let mut tr_verify = Poseidon2Transcript::new(b"mem-tamper-inc");
             let steps_public = [StepInstanceBundle::from(&step_bundle)];
             let verify_result = fold_shard_verify(
-                FoldingMode::PaperExact,
+                FoldingMode::Optimized,
                 &mut tr_verify,
                 &params,
                 &ccs,
@@ -604,7 +604,7 @@ fn memory_multiple_regions_same_step() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"mem-multi-region");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -619,7 +619,7 @@ fn memory_multiple_regions_same_step() {
     let mut tr_verify = Poseidon2Transcript::new(b"mem-multi-region");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -673,7 +673,7 @@ fn memory_sparse_initialization() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"mem-sparse-init");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -688,7 +688,7 @@ fn memory_sparse_initialization() {
     let mut tr_verify = Poseidon2Transcript::new(b"mem-sparse-init");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,

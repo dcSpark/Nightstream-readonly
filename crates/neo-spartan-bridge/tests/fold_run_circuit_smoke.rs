@@ -294,7 +294,7 @@ fn fold_run_circuit_optimized_nontrivial_satisfied() {
     };
     let initial_accumulator = acc.me.clone();
 
-    let mut session = FoldingSession::new(FoldingMode::PaperExact, params, l.clone())
+    let mut session = FoldingSession::new(FoldingMode::Optimized, params, l.clone())
         .with_initial_accumulator(acc, &ccs)
         .expect("with_initial_accumulator");
 

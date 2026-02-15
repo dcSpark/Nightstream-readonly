@@ -221,7 +221,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_eq_prove_verify() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-eq");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -235,7 +235,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_eq_prove_verify() {
 
     let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-eq");
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,

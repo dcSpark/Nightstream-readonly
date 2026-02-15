@@ -88,7 +88,7 @@ fn write_shout_lane_row(
 #[test]
 fn route_a_shout_identity_u32_range_check_two_lanes_same_value_verifies() {
     let ccs = create_identity_ccs(TEST_M);
-    let mut session = FoldingSession::<AjtaiSModule>::new_ajtai_seeded(FoldingMode::PaperExact, &ccs, [7u8; 32])
+    let mut session = FoldingSession::<AjtaiSModule>::new_ajtai_seeded(FoldingMode::Optimized, &ccs, [7u8; 32])
         .expect("new_ajtai_seeded");
     let params = session.params().clone();
 
@@ -135,7 +135,7 @@ fn route_a_shout_identity_u32_range_check_two_lanes_same_value_verifies() {
 #[test]
 fn route_a_shout_identity_u32_range_check_rejects_wrong_val() {
     let ccs = create_identity_ccs(TEST_M);
-    let mut session = FoldingSession::<AjtaiSModule>::new_ajtai_seeded(FoldingMode::PaperExact, &ccs, [8u8; 32])
+    let mut session = FoldingSession::<AjtaiSModule>::new_ajtai_seeded(FoldingMode::Optimized, &ccs, [8u8; 32])
         .expect("new_ajtai_seeded");
     let params = session.params().clone();
 

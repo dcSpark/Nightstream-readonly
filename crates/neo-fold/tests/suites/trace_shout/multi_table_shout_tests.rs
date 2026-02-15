@@ -234,7 +234,7 @@ fn multi_table_shout_two_tables() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"multi-table-two");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -249,7 +249,7 @@ fn multi_table_shout_two_tables() {
     let mut tr_verify = Poseidon2Transcript::new(b"multi-table-two");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -347,7 +347,7 @@ fn multi_table_shout_three_tables_interleaved() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"multi-table-three");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -362,7 +362,7 @@ fn multi_table_shout_three_tables_interleaved() {
     let mut tr_verify = Poseidon2Transcript::new(b"multi-table-three");
     let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -431,7 +431,7 @@ fn multi_table_wrong_table_value_fails() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"multi-table-wrong");
     let proof_result = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -450,7 +450,7 @@ fn multi_table_wrong_table_value_fails() {
             let mut tr_verify = Poseidon2Transcript::new(b"multi-table-wrong");
             let steps_public = [StepInstanceBundle::from(&step_bundle)];
             let verify_result = fold_shard_verify(
-                FoldingMode::PaperExact,
+                FoldingMode::Optimized,
                 &mut tr_verify,
                 &params,
                 &ccs,
@@ -539,7 +539,7 @@ fn multi_table_optional_lookups() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"multi-table-optional");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -554,7 +554,7 @@ fn multi_table_optional_lookups() {
     let mut tr_verify = Poseidon2Transcript::new(b"multi-table-optional");
     let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,

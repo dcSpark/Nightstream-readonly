@@ -247,7 +247,7 @@ fn riscv_trace_no_shared_cpu_bus_shout_xor_paging_linkage_redteam() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-xor-paged-redteam");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -268,7 +268,7 @@ fn riscv_trace_no_shared_cpu_bus_shout_xor_paging_linkage_redteam() {
 
     let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-xor-paged-redteam");
     let res = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -385,7 +385,7 @@ fn riscv_trace_no_shared_cpu_bus_shout_table_id_mismatch_redteam() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-table-id-redteam");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -399,7 +399,7 @@ fn riscv_trace_no_shared_cpu_bus_shout_table_id_mismatch_redteam() {
 
     let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-table-id-redteam");
     let res = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,

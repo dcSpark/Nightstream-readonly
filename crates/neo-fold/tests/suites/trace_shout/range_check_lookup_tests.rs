@@ -211,7 +211,7 @@ fn range_check_4bit_valid() {
 
         let mut tr_prove = Poseidon2Transcript::new(b"range-4bit-valid");
         let proof = fold_shard_prove(
-            FoldingMode::PaperExact,
+            FoldingMode::Optimized,
             &mut tr_prove,
             &params,
             &ccs,
@@ -226,7 +226,7 @@ fn range_check_4bit_valid() {
         let mut tr_verify = Poseidon2Transcript::new(b"range-4bit-valid");
         let steps_public = [StepInstanceBundle::from(&step_bundle)];
         let _ = fold_shard_verify(
-            FoldingMode::PaperExact,
+            FoldingMode::Optimized,
             &mut tr_verify,
             &params,
             &ccs,
@@ -266,7 +266,7 @@ fn range_check_4bit_invalid_value_fails() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"range-4bit-invalid");
     let proof_result = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -282,7 +282,7 @@ fn range_check_4bit_invalid_value_fails() {
         let steps_public = [StepInstanceBundle::from(&step_bundle)];
         assert!(
             fold_shard_verify(
-                FoldingMode::PaperExact,
+                FoldingMode::Optimized,
                 &mut tr_verify,
                 &params,
                 &ccs,
@@ -351,7 +351,7 @@ fn range_check_nibble_decomposition() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"range-nibble-decomp");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -366,7 +366,7 @@ fn range_check_nibble_decomposition() {
     let mut tr_verify = Poseidon2Transcript::new(b"range-nibble-decomp");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -448,7 +448,7 @@ fn range_check_combined_with_addition() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"range-with-addition");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -463,7 +463,7 @@ fn range_check_combined_with_addition() {
     let mut tr_verify = Poseidon2Transcript::new(b"range-with-addition");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -505,7 +505,7 @@ fn range_check_wrong_value_claimed_fails() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"range-wrong-value-claimed");
     let proof_result = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -521,7 +521,7 @@ fn range_check_wrong_value_claimed_fails() {
         let steps_public = [StepInstanceBundle::from(&step_bundle)];
         assert!(
             fold_shard_verify(
-                FoldingMode::PaperExact,
+                FoldingMode::Optimized,
                 &mut tr_verify,
                 &params,
                 &ccs,
@@ -573,7 +573,7 @@ fn range_check_boundary_values() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"range-boundary");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -588,7 +588,7 @@ fn range_check_boundary_values() {
     let mut tr_verify = Poseidon2Transcript::new(b"range-boundary");
     let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,

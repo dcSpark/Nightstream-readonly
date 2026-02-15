@@ -219,7 +219,7 @@ fn riscv_trace_no_shared_cpu_bus_shout_linkage_redteam() {
     // rejected during prove (before sidecar linkage checks).
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-redteam");
     fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,

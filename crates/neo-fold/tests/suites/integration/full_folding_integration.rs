@@ -456,7 +456,7 @@ fn full_folding_integration_single_chunk() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"full-fold");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -471,7 +471,7 @@ fn full_folding_integration_single_chunk() {
     let mut tr_verify = Poseidon2Transcript::new(b"full-fold");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let _outputs = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -615,7 +615,7 @@ fn full_folding_integration_multi_step_chunk() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"full-fold-multi-step-chunk");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -630,7 +630,7 @@ fn full_folding_integration_multi_step_chunk() {
     let mut tr_verify = Poseidon2Transcript::new(b"full-fold-multi-step-chunk");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -648,7 +648,7 @@ fn tamper_batched_claimed_sum_fails() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"full-fold-tamper-claim");
     let mut proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -666,7 +666,7 @@ fn tamper_batched_claimed_sum_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"full-fold-tamper-claim");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let result = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -685,7 +685,7 @@ fn tamper_me_opening_fails() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"full-fold-tamper-me");
     let mut proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -707,7 +707,7 @@ fn tamper_me_opening_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"full-fold-tamper-me");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let result = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -726,7 +726,7 @@ fn tamper_shout_addr_pre_round_poly_fails() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"full-fold-tamper-shout-addr-pre");
     let mut proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -751,7 +751,7 @@ fn tamper_shout_addr_pre_round_poly_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"full-fold-tamper-shout-addr-pre");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let result = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -775,7 +775,7 @@ fn tamper_twist_val_eval_round_poly_fails() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"full-fold-tamper-twist-val-eval-rounds");
     let mut proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -800,7 +800,7 @@ fn tamper_twist_val_eval_round_poly_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"full-fold-tamper-twist-val-eval-rounds");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let result = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -822,7 +822,7 @@ fn missing_val_fold_fails() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"full-fold-missing-val-fold");
     let mut proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -843,7 +843,7 @@ fn missing_val_fold_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"full-fold-missing-val-fold");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let result = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -880,7 +880,7 @@ fn verify_and_finalize_receives_val_lane() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"full-fold-finalizer");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -896,7 +896,7 @@ fn verify_and_finalize_receives_val_lane() {
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let mut fin = RequireValLane;
     fold_shard_verify_and_finalize(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -928,7 +928,7 @@ fn main_only_finalizer_is_rejected_when_val_lane_present() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"full-fold-finalizer-main-only");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -944,7 +944,7 @@ fn main_only_finalizer_is_rejected_when_val_lane_present() {
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let mut fin = MainOnly;
     let res = fold_shard_verify_and_finalize(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -985,7 +985,7 @@ fn wrong_shout_lookup_value_witness_fails() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"full-fold-wrong-shout-bus");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -1000,7 +1000,7 @@ fn wrong_shout_lookup_value_witness_fails() {
     let mut tr_verify = Poseidon2Transcript::new(b"full-fold-wrong-shout-bus");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let res = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,

@@ -186,7 +186,7 @@ fn route_a_shout_implicit_table_spec_verifies() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"implicit-shout-table-spec");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -201,7 +201,7 @@ fn route_a_shout_implicit_table_spec_verifies() {
     let mut tr_verify = Poseidon2Transcript::new(b"implicit-shout-table-spec");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -220,7 +220,7 @@ fn route_a_shout_implicit_table_spec_verifies() {
         xlen,
     });
     let err = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify_bad,
         &params,
         &ccs,
@@ -276,7 +276,7 @@ fn route_a_shout_implicit_identity_u32_table_spec_verifies() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"implicit-shout-identity-u32-table-spec");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -291,7 +291,7 @@ fn route_a_shout_implicit_identity_u32_table_spec_verifies() {
     let mut tr_verify = Poseidon2Transcript::new(b"implicit-shout-identity-u32-table-spec");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -307,7 +307,7 @@ fn route_a_shout_implicit_identity_u32_table_spec_verifies() {
     let mut steps_public_bad = [StepInstanceBundle::from(&step_bundle)];
     steps_public_bad[0].lut_insts[0].table_spec = None;
     let err = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify_bad,
         &params,
         &ccs,

@@ -343,7 +343,7 @@ fn riscv_trace_no_shared_cpu_bus_linkage_rejects_tampered_prog_addr_bits() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-linkage");
     let proof_ok = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -356,7 +356,7 @@ fn riscv_trace_no_shared_cpu_bus_linkage_rejects_tampered_prog_addr_bits() {
     .expect("prove ok");
     let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-linkage");
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -384,7 +384,7 @@ fn riscv_trace_no_shared_cpu_bus_linkage_rejects_tampered_prog_addr_bits() {
         .collect();
     let mut tr_prove_bad = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-linkage-bad");
     let proof_bad = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove_bad,
         &params,
         &ccs,
@@ -397,7 +397,7 @@ fn riscv_trace_no_shared_cpu_bus_linkage_rejects_tampered_prog_addr_bits() {
     .expect("prove bad (linkage checked by verifier)");
     let mut tr_verify_bad = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-linkage-bad");
     let err = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify_bad,
         &params,
         &ccs,

@@ -1409,22 +1409,26 @@ fn bind_rlc_inputs(
 
         tr.append_fields(b"X", me.X.as_slice());
 
-        let y_elem_coeffs_per_elem = me
-            .y
-            .iter()
-            .find_map(|row| row.first())
-            .map(|v| v.as_coeffs().len())
-            .unwrap_or(0);
+        let y_elem_coeffs_per_elem =
+            me.y.iter()
+                .find_map(|row| row.first())
+                .map(|v| v.as_coeffs().len())
+                .unwrap_or(0);
         let y_elem_count = me.y.iter().map(Vec::len).sum::<usize>();
         tr.append_fields_iter(
             b"y_elem",
             y_elem_count
                 .checked_mul(y_elem_coeffs_per_elem)
                 .ok_or_else(|| PiCcsError::ProtocolError("y_elem length overflow".into()))?,
-            me.y.iter().flat_map(|row| row.iter().flat_map(|v| v.as_coeffs())),
+            me.y.iter()
+                .flat_map(|row| row.iter().flat_map(|v| v.as_coeffs())),
         );
 
-        let y_scalar_coeffs_per_elem = me.y_scalars.first().map(|v| v.as_coeffs().len()).unwrap_or(0);
+        let y_scalar_coeffs_per_elem = me
+            .y_scalars
+            .first()
+            .map(|v| v.as_coeffs().len())
+            .unwrap_or(0);
         tr.append_fields_iter(
             b"y_scalar",
             me.y_scalars
@@ -1741,8 +1745,7 @@ where
         ];
 
         let want_len = trace_open_base + trace_cols_to_open.len();
-        let has_base_only =
-            rlc_parent.y.len() == trace_open_base && rlc_parent.y_scalars.len() == trace_open_base;
+        let has_base_only = rlc_parent.y.len() == trace_open_base && rlc_parent.y_scalars.len() == trace_open_base;
         let has_trace_openings = rlc_parent.y.len() == want_len && rlc_parent.y_scalars.len() == want_len;
         if has_base_only || has_trace_openings {
             let m_in = rlc_parent.m_in;
@@ -1853,10 +1856,18 @@ where
     }
 
     for (i, me) in rlc_inputs.iter().enumerate() {
-        verify_me_y_scalars_canonical(me, params.b, step_idx, &format!("{}RLC input[{i}]", match lane {
-            RlcLane::Main => "",
-            RlcLane::Val => "val-lane ",
-        }))?;
+        verify_me_y_scalars_canonical(
+            me,
+            params.b,
+            step_idx,
+            &format!(
+                "{}RLC input[{i}]",
+                match lane {
+                    RlcLane::Main => "",
+                    RlcLane::Val => "val-lane ",
+                }
+            ),
+        )?;
     }
 
     let rhos_from_tr = ccs::sample_rot_rhos_n(tr, params, ring, rlc_inputs.len())?;
@@ -2260,11 +2271,10 @@ where
                     .bus_cols
                     .checked_mul(cpu_bus.chunk_size)
                     .ok_or_else(|| PiCcsError::ProtocolError("crosscheck bus region overflow".into()))?;
-                let trace_region = s
-                    .m
-                    .checked_sub(m_in)
-                    .and_then(|v| v.checked_sub(bus_region_len))
-                    .ok_or_else(|| PiCcsError::ProtocolError("crosscheck trace region underflow".into()))?;
+                let trace_region =
+                    s.m.checked_sub(m_in)
+                        .and_then(|v| v.checked_sub(bus_region_len))
+                        .ok_or_else(|| PiCcsError::ProtocolError("crosscheck trace region underflow".into()))?;
                 if trace.cols == 0 || trace_region % trace.cols != 0 {
                     return Err(PiCcsError::ProtocolError(format!(
                         "step {}: crosscheck cannot infer trace t_len (trace_region={}, trace_cols={})",
@@ -2694,8 +2704,7 @@ where
 
         let (wb_time_claim_built, wp_time_claim_built) =
             crate::memory_sidecar::memory::build_route_a_wb_wp_time_claims(params, step, &r_cycle)?;
-        let wb_wp_required =
-            crate::memory_sidecar::memory::wb_wp_required_for_rv32_trace_mode_m_in(step.mcs.0.m_in);
+        let wb_wp_required = crate::memory_sidecar::memory::wb_wp_required_for_step_witness(step);
         if wb_wp_required && (wb_time_claim_built.is_none() || wp_time_claim_built.is_none()) {
             return Err(PiCcsError::ProtocolError(
                 "WB/WP claims are required in RV32 trace mode but were not built".into(),
@@ -3206,6 +3215,13 @@ where
                         expected
                     )));
                 }
+                let can_reuse_main_lane_dec =
+                    ccs_out.len() == 1 && outs_Z.len() == 1 && !Z_split.is_empty() && children.len() == Z_split.len();
+                let shared_val_lane_child_cs: Option<Vec<Cmt>> = if can_reuse_main_lane_dec {
+                    Some(children.iter().map(|child| child.c.clone()).collect())
+                } else {
+                    None
+                };
 
                 for (claim_idx, me) in mem_proof.val_me_claims.iter().enumerate() {
                     let (wit, ctx) = match claim_idx {
@@ -3223,6 +3239,66 @@ where
                     };
                     tr.append_message(b"fold/val_lane_claim_idx", &(claim_idx as u64).to_le_bytes());
                     tr.append_message(b"fold/val_lane_claim_ctx", ctx.as_bytes());
+
+                    // Reuse main-lane split/commit artifacts for the current-step shared-bus
+                    // val lane so we don't pay an extra full split+commit.
+                    if claim_idx == 0 {
+                        if let Some(child_cs) = shared_val_lane_child_cs.as_ref() {
+                            bind_rlc_inputs(tr, RlcLane::Val, step_idx, core::slice::from_ref(me))?;
+                            let rlc_rhos = ccs::sample_rot_rhos_n(tr, params, &ring, 1)?;
+                            let mut rlc_parent = ccs::rlc_public(
+                                &s,
+                                params,
+                                &rlc_rhos,
+                                core::slice::from_ref(me),
+                                mixers.mix_rhos_commits,
+                                ell_d,
+                            )?;
+                            let (mut dec_children, ok_y, ok_x, ok_c) = ccs::dec_children_with_commit_cached(
+                                mode.clone(),
+                                &s,
+                                params,
+                                &rlc_parent,
+                                &Z_split,
+                                ell_d,
+                                child_cs,
+                                mixers.combine_b_pows,
+                                ccs_sparse_cache.as_deref(),
+                            );
+                            if !(ok_y && ok_x && ok_c) {
+                                return Err(PiCcsError::ProtocolError(format!(
+                                    "DEC(val) public check failed at step {} (y={}, X={}, c={})",
+                                    step_idx, ok_y, ok_x, ok_c
+                                )));
+                            }
+                            if let Some(bus) = cpu_bus_opt.as_ref() {
+                                if bus.bus_cols > 0 {
+                                    let core_t = s.t();
+                                    crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
+                                        params,
+                                        bus,
+                                        core_t,
+                                        wit,
+                                        &mut rlc_parent,
+                                    )?;
+                                    for (child, zi) in dec_children.iter_mut().zip(Z_split.iter()) {
+                                        crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
+                                            params, bus, core_t, zi, child,
+                                        )?;
+                                    }
+                                }
+                            }
+                            if collect_val_lane_wits {
+                                val_lane_wits.extend(Z_split.iter().cloned());
+                            }
+                            val_fold.push(RlcDecProof {
+                                rlc_rhos,
+                                rlc_parent,
+                                dec_children,
+                            });
+                            continue;
+                        }
+                    }
 
                     let (proof, mut Z_split_val) = prove_rlc_dec_lane(
                         &mode,
@@ -4260,10 +4336,8 @@ where
 
         let shout_pre = crate::memory_sidecar::memory::verify_shout_addr_pre_time(tr, step, &step_proof.mem, step_idx)?;
         let twist_pre = crate::memory_sidecar::memory::verify_twist_addr_pre_time(tr, step, &step_proof.mem)?;
-        let wb_enabled =
-            crate::memory_sidecar::memory::wb_wp_required_for_rv32_trace_mode_m_in(step.mcs_inst.m_in);
-        let wp_enabled =
-            crate::memory_sidecar::memory::wb_wp_required_for_rv32_trace_mode_m_in(step.mcs_inst.m_in);
+        let wb_enabled = crate::memory_sidecar::memory::wb_wp_required_for_step_instance(step);
+        let wp_enabled = crate::memory_sidecar::memory::wb_wp_required_for_step_instance(step);
         let crate::memory_sidecar::route_a_time::RouteABatchedTimeVerifyOutput { r_time, final_values } =
             crate::memory_sidecar::route_a_time::verify_route_a_batched_time(
                 tr,
@@ -4780,9 +4854,11 @@ where
 
                 for (mem_idx, proof) in step_proof.val_fold.iter().enumerate() {
                     tr.append_message(b"fold/val_lane_mem_idx", &(mem_idx as u64).to_le_bytes());
-                    let me_cur = step_proof.mem.val_me_claims.get(mem_idx).ok_or_else(|| {
-                        PiCcsError::ProtocolError("missing current Twist ME(val) claim".into())
-                    })?;
+                    let me_cur = step_proof
+                        .mem
+                        .val_me_claims
+                        .get(mem_idx)
+                        .ok_or_else(|| PiCcsError::ProtocolError("missing current Twist ME(val) claim".into()))?;
                     if has_prev {
                         let me_prev = step_proof
                             .mem
