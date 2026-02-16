@@ -232,6 +232,8 @@ fn riscv_trace_no_shared_cpu_bus_shout_sltu_semantics_redteam() {
         mcs,
         lut_instances: vec![(sltu_lut_inst, sltu_lut_wit)],
         mem_instances: Vec::new(),
+        decode_instances: Vec::new(),
+        width_instances: Vec::new(),
         _phantom: PhantomData,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =

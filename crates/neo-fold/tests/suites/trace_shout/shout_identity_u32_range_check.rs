@@ -123,6 +123,8 @@ fn route_a_shout_identity_u32_range_check_two_lanes_same_value_verifies() {
         mcs: (mcs, mcs_wit),
         lut_instances: vec![(inst, wit)],
         mem_instances: vec![],
+        decode_instances: Vec::new(),
+        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     };
 
@@ -167,6 +169,8 @@ fn route_a_shout_identity_u32_range_check_rejects_wrong_val() {
         mcs: (mcs, mcs_wit),
         lut_instances: vec![(inst, wit)],
         mem_instances: vec![],
+        decode_instances: Vec::new(),
+        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     };
 

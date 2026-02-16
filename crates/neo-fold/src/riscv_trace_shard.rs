@@ -37,8 +37,15 @@ use neo_memory::riscv::lookups::{
     decode_program, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID, REG_ID,
 };
 use neo_memory::riscv::rom_init::prog_rom_layout_and_init_words;
-use neo_memory::riscv::trace::{extract_twist_lanes_over_time, TwistLaneOverTime};
-use neo_memory::witness::{LutInstance, LutWitness, MemInstance, MemWitness, StepWitnessBundle};
+use neo_memory::riscv::trace::{
+    build_rv32_decode_sidecar_z, extract_twist_lanes_over_time, rv32_decode_sidecar_witness_from_exec_table,
+    build_rv32_width_sidecar_z, rv32_width_sidecar_witness_from_exec_table, Rv32DecodeSidecarLayout,
+    Rv32WidthSidecarLayout, RV32_TRACE_W2_DECODE_ID, RV32_TRACE_W3_WIDTH_ID, TwistLaneOverTime,
+};
+use neo_memory::witness::{
+    DecodeInstance, DecodeWitness, LutInstance, LutWitness, MemInstance, MemWitness, StepWitnessBundle, WidthInstance,
+    WidthWitness,
+};
 use neo_memory::{LutTableSpec, MemInit, R1csCpu};
 use neo_params::NeoParams;
 use neo_vm_trace::{StepTrace, Twist as _, TwistOpKind};
@@ -940,6 +947,77 @@ impl Rv32TraceWiring {
                 &initial_mem,
                 &cpu,
             )?;
+
+            let decode_layout = Rv32DecodeSidecarLayout::new();
+            let width_layout = Rv32WidthSidecarLayout::new();
+            if session.steps_witness().len() != exec_chunks.len() {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "decode sidecar build drift: step bundle count {} != exec chunk count {}",
+                    session.steps_witness().len(),
+                    exec_chunks.len()
+                )));
+            }
+            let params_for_decode = session.params().clone();
+            let committer = session.committer().clone();
+            for (step_idx, (step, exec_chunk)) in session
+                .steps_witness_mut()
+                .iter_mut()
+                .zip(exec_chunks.iter())
+                .enumerate()
+            {
+                if !step.decode_instances.is_empty() {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "decode sidecar already populated for step {step_idx}"
+                    )));
+                }
+                if !step.width_instances.is_empty() {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "width sidecar already populated for step {step_idx}"
+                    )));
+                }
+                let decode_wit_cols = rv32_decode_sidecar_witness_from_exec_table(&decode_layout, exec_chunk);
+                let width_wit_cols = rv32_width_sidecar_witness_from_exec_table(&width_layout, exec_chunk);
+                if decode_wit_cols.t != layout.t {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "decode sidecar t mismatch at step {step_idx}: got {}, expected {}",
+                        decode_wit_cols.t, layout.t
+                    )));
+                }
+                if width_wit_cols.t != layout.t {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "width sidecar t mismatch at step {step_idx}: got {}, expected {}",
+                        width_wit_cols.t, layout.t
+                    )));
+                }
+                let decode_z =
+                    build_rv32_decode_sidecar_z(&decode_layout, &decode_wit_cols, ccs.m, layout.m_in, &step.mcs.0.x)
+                        .map_err(PiCcsError::InvalidInput)?;
+                let width_z =
+                    build_rv32_width_sidecar_z(&width_layout, &width_wit_cols, ccs.m, layout.m_in, &step.mcs.0.x)
+                        .map_err(PiCcsError::InvalidInput)?;
+                let decode_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(&params_for_decode, &decode_z);
+                let width_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(&params_for_decode, &width_z);
+                let decode_c = committer.commit(&decode_Z);
+                let width_c = committer.commit(&width_Z);
+                let decode_inst = DecodeInstance {
+                    decode_id: RV32_TRACE_W2_DECODE_ID,
+                    comms: vec![decode_c],
+                    steps: layout.t,
+                    cols: decode_layout.cols,
+                    _phantom: PhantomData,
+                };
+                let width_inst = WidthInstance {
+                    width_id: RV32_TRACE_W3_WIDTH_ID,
+                    comms: vec![width_c],
+                    steps: layout.t,
+                    cols: width_layout.cols,
+                    _phantom: PhantomData,
+                };
+                step.decode_instances
+                    .push((decode_inst, DecodeWitness { mats: vec![decode_Z] }));
+                step.width_instances
+                    .push((width_inst, WidthWitness { mats: vec![width_Z] }));
+            }
             chunk_build_commit_duration += elapsed_duration(chunk_start);
         } else {
             // Route-A legacy fallback: keep the main CPU witness as pure trace columns (no bus tail),
@@ -1068,10 +1146,59 @@ impl Rv32TraceWiring {
                     mem_instances.push(ram_mem);
                 }
 
+                let decode_layout = Rv32DecodeSidecarLayout::new();
+                let width_layout = Rv32WidthSidecarLayout::new();
+                let decode_wit_cols = rv32_decode_sidecar_witness_from_exec_table(&decode_layout, exec_chunk);
+                let width_wit_cols = rv32_width_sidecar_witness_from_exec_table(&width_layout, exec_chunk);
+                if decode_wit_cols.t != layout.t {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "decode sidecar t mismatch: got {}, expected {}",
+                        decode_wit_cols.t, layout.t
+                    )));
+                }
+                if width_wit_cols.t != layout.t {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "width sidecar t mismatch: got {}, expected {}",
+                        width_wit_cols.t, layout.t
+                    )));
+                }
+                let decode_z =
+                    build_rv32_decode_sidecar_z(&decode_layout, &decode_wit_cols, ccs.m, layout.m_in, &x)
+                        .map_err(PiCcsError::InvalidInput)?;
+                let width_z =
+                    build_rv32_width_sidecar_z(&width_layout, &width_wit_cols, ccs.m, layout.m_in, &x)
+                        .map_err(PiCcsError::InvalidInput)?;
+                let decode_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &decode_z);
+                let width_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &width_z);
+                let decode_c = session.committer().commit(&decode_Z);
+                let width_c = session.committer().commit(&width_Z);
+                let decode_instances = vec![(
+                    DecodeInstance {
+                        decode_id: RV32_TRACE_W2_DECODE_ID,
+                        comms: vec![decode_c],
+                        steps: layout.t,
+                        cols: decode_layout.cols,
+                        _phantom: PhantomData,
+                    },
+                    DecodeWitness { mats: vec![decode_Z] },
+                )];
+                let width_instances = vec![(
+                    WidthInstance {
+                        width_id: RV32_TRACE_W3_WIDTH_ID,
+                        comms: vec![width_c],
+                        steps: layout.t,
+                        cols: width_layout.cols,
+                        _phantom: PhantomData,
+                    },
+                    WidthWitness { mats: vec![width_Z] },
+                )];
+
                 session.add_step_bundle(StepWitnessBundle {
                     mcs,
                     lut_instances: Vec::<(LutInstance<_, _>, LutWitness<F>)>::new(),
                     mem_instances,
+                    decode_instances,
+                    width_instances,
                     _phantom: PhantomData::<K>,
                 });
 

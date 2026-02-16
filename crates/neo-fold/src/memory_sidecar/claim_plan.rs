@@ -47,6 +47,13 @@ pub struct RouteATimeClaimPlan {
     pub twist: Vec<TwistTimeClaimIdx>,
     pub wb_bool: Option<usize>,
     pub wp_quiescence: Option<usize>,
+    pub w2_decode_fields: Option<usize>,
+    pub w2_decode_immediates: Option<usize>,
+    pub w3_bitness: Option<usize>,
+    pub w3_quiescence: Option<usize>,
+    pub w3_selector_linkage: Option<usize>,
+    pub w3_load_semantics: Option<usize>,
+    pub w3_store_semantics: Option<usize>,
 }
 
 impl RouteATimeClaimPlan {
@@ -56,6 +63,8 @@ impl RouteATimeClaimPlan {
         ccs_time_degree_bound: usize,
         wb_enabled: bool,
         wp_enabled: bool,
+        w2_enabled: bool,
+        w3_enabled: bool,
         ob_inc_total_degree_bound: Option<usize>,
     ) -> Vec<TimeClaimMeta>
     where
@@ -178,6 +187,47 @@ impl RouteATimeClaimPlan {
             });
         }
 
+        if w2_enabled {
+            out.push(TimeClaimMeta {
+                label: b"w2/decode_fields",
+                degree_bound: 3,
+                is_dynamic: false,
+            });
+            out.push(TimeClaimMeta {
+                label: b"w2/decode_immediates",
+                degree_bound: 3,
+                is_dynamic: false,
+            });
+        }
+
+        if w3_enabled {
+            out.push(TimeClaimMeta {
+                label: b"w3/bitness",
+                degree_bound: 3,
+                is_dynamic: false,
+            });
+            out.push(TimeClaimMeta {
+                label: b"w3/quiescence",
+                degree_bound: 3,
+                is_dynamic: false,
+            });
+            out.push(TimeClaimMeta {
+                label: b"w3/selector_linkage",
+                degree_bound: 3,
+                is_dynamic: false,
+            });
+            out.push(TimeClaimMeta {
+                label: b"w3/load_semantics",
+                degree_bound: 3,
+                is_dynamic: false,
+            });
+            out.push(TimeClaimMeta {
+                label: b"w3/store_semantics",
+                degree_bound: 3,
+                is_dynamic: false,
+            });
+        }
+
         if let Some(degree_bound) = ob_inc_total_degree_bound {
             out.push(TimeClaimMeta {
                 label: crate::output_binding::OB_INC_TOTAL_LABEL,
@@ -199,6 +249,8 @@ impl RouteATimeClaimPlan {
         ccs_time_degree_bound: usize,
         wb_enabled: bool,
         wp_enabled: bool,
+        w2_enabled: bool,
+        w3_enabled: bool,
         ob_inc_total_degree_bound: Option<usize>,
     ) -> Vec<TimeClaimMeta> {
         Self::time_claim_metas_for_instances(
@@ -207,6 +259,8 @@ impl RouteATimeClaimPlan {
             ccs_time_degree_bound,
             wb_enabled,
             wp_enabled,
+            w2_enabled,
+            w3_enabled,
             ob_inc_total_degree_bound,
         )
     }
@@ -216,6 +270,8 @@ impl RouteATimeClaimPlan {
         claim_idx_start: usize,
         wb_enabled: bool,
         wp_enabled: bool,
+        w2_enabled: bool,
+        w3_enabled: bool,
     ) -> Result<RouteATimeClaimPlan, PiCcsError> {
         let mut idx = claim_idx_start;
         let mut shout = Vec::with_capacity(step.lut_insts.len());
@@ -303,6 +359,62 @@ impl RouteATimeClaimPlan {
             None
         };
 
+        let w2_decode_fields = if w2_enabled {
+            let out = idx;
+            idx += 1;
+            Some(out)
+        } else {
+            None
+        };
+
+        let w2_decode_immediates = if w2_enabled {
+            let out = idx;
+            idx += 1;
+            Some(out)
+        } else {
+            None
+        };
+
+        let w3_bitness = if w3_enabled {
+            let out = idx;
+            idx += 1;
+            Some(out)
+        } else {
+            None
+        };
+
+        let w3_quiescence = if w3_enabled {
+            let out = idx;
+            idx += 1;
+            Some(out)
+        } else {
+            None
+        };
+
+        let w3_selector_linkage = if w3_enabled {
+            let out = idx;
+            idx += 1;
+            Some(out)
+        } else {
+            None
+        };
+
+        let w3_load_semantics = if w3_enabled {
+            let out = idx;
+            idx += 1;
+            Some(out)
+        } else {
+            None
+        };
+
+        let w3_store_semantics = if w3_enabled {
+            let out = idx;
+            idx += 1;
+            Some(out)
+        } else {
+            None
+        };
+
         if idx < claim_idx_start {
             return Err(PiCcsError::ProtocolError("RouteATimeClaimPlan index underflow".into()));
         }
@@ -315,6 +427,13 @@ impl RouteATimeClaimPlan {
             twist,
             wb_bool,
             wp_quiescence,
+            w2_decode_fields,
+            w2_decode_immediates,
+            w3_bitness,
+            w3_quiescence,
+            w3_selector_linkage,
+            w3_load_semantics,
+            w3_store_semantics,
         })
     }
 }

@@ -125,6 +125,8 @@ fn absorb_step_memory_binds_table_spec() {
             table: vec![],
         }],
         mem_insts: vec![],
+        decode_insts: Vec::new(),
+        width_insts: Vec::new(),
         _phantom: PhantomData,
     };
 
@@ -178,6 +180,8 @@ fn route_a_shout_implicit_table_spec_verifies() {
         mcs: (mcs, mcs_wit),
         lut_instances: vec![(inst, wit)],
         mem_instances: vec![],
+        decode_instances: Vec::new(),
+        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     };
 
@@ -268,6 +272,8 @@ fn route_a_shout_implicit_identity_u32_table_spec_verifies() {
         mcs: (mcs, mcs_wit),
         lut_instances: vec![(inst, wit)],
         mem_instances: vec![],
+        decode_instances: Vec::new(),
+        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     };
 

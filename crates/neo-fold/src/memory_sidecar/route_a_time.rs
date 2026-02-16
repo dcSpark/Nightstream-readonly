@@ -38,6 +38,13 @@ pub fn prove_route_a_batched_time(
     twist_write_claims: Vec<K>,
     wb_time_claim: Option<ExtraBatchedTimeClaim>,
     wp_time_claim: Option<ExtraBatchedTimeClaim>,
+    w2_decode_fields_claim: Option<ExtraBatchedTimeClaim>,
+    w2_decode_immediates_claim: Option<ExtraBatchedTimeClaim>,
+    w3_bitness_claim: Option<ExtraBatchedTimeClaim>,
+    w3_quiescence_claim: Option<ExtraBatchedTimeClaim>,
+    w3_selector_linkage_claim: Option<ExtraBatchedTimeClaim>,
+    w3_load_semantics_claim: Option<ExtraBatchedTimeClaim>,
+    w3_store_semantics_claim: Option<ExtraBatchedTimeClaim>,
     ob_inc_total: Option<ExtraBatchedTimeClaim>,
 ) -> Result<RouteABatchedTimeProverOutput, PiCcsError> {
     let mut claimed_sums: Vec<K> = Vec::new();
@@ -140,6 +147,157 @@ pub fn prove_route_a_batched_time(
         });
     }
 
+    let w2_decode_fields_degree_bound = w2_decode_fields_claim
+        .as_ref()
+        .map(|extra| extra.oracle.degree_bound());
+    let mut w2_decode_fields_label: Option<&'static [u8]> = None;
+    let mut w2_decode_fields_oracle: Option<Box<dyn RoundOracle>> = w2_decode_fields_claim.map(|extra| {
+        w2_decode_fields_label = Some(extra.label);
+        extra.oracle
+    });
+    if let Some(oracle) = w2_decode_fields_oracle.as_deref_mut() {
+        let claimed_sum = K::ZERO;
+        let label = w2_decode_fields_label.expect("missing w2_decode_fields label");
+        claimed_sums.push(claimed_sum);
+        degree_bounds.push(oracle.degree_bound());
+        labels.push(label);
+        claim_is_dynamic.push(false);
+        claims.push(BatchedClaim {
+            oracle,
+            claimed_sum,
+            label,
+        });
+    }
+
+    let w2_decode_immediates_degree_bound = w2_decode_immediates_claim
+        .as_ref()
+        .map(|extra| extra.oracle.degree_bound());
+    let mut w2_decode_immediates_label: Option<&'static [u8]> = None;
+    let mut w2_decode_immediates_oracle: Option<Box<dyn RoundOracle>> =
+        w2_decode_immediates_claim.map(|extra| {
+            w2_decode_immediates_label = Some(extra.label);
+            extra.oracle
+        });
+    if let Some(oracle) = w2_decode_immediates_oracle.as_deref_mut() {
+        let claimed_sum = K::ZERO;
+        let label = w2_decode_immediates_label.expect("missing w2_decode_immediates label");
+        claimed_sums.push(claimed_sum);
+        degree_bounds.push(oracle.degree_bound());
+        labels.push(label);
+        claim_is_dynamic.push(false);
+        claims.push(BatchedClaim {
+            oracle,
+            claimed_sum,
+            label,
+        });
+    }
+
+    let w3_bitness_degree_bound = w3_bitness_claim.as_ref().map(|extra| extra.oracle.degree_bound());
+    let mut w3_bitness_label: Option<&'static [u8]> = None;
+    let mut w3_bitness_oracle: Option<Box<dyn RoundOracle>> = w3_bitness_claim.map(|extra| {
+        w3_bitness_label = Some(extra.label);
+        extra.oracle
+    });
+    if let Some(oracle) = w3_bitness_oracle.as_deref_mut() {
+        let claimed_sum = K::ZERO;
+        let label = w3_bitness_label.expect("missing w3_bitness label");
+        claimed_sums.push(claimed_sum);
+        degree_bounds.push(oracle.degree_bound());
+        labels.push(label);
+        claim_is_dynamic.push(false);
+        claims.push(BatchedClaim {
+            oracle,
+            claimed_sum,
+            label,
+        });
+    }
+
+    let w3_quiescence_degree_bound = w3_quiescence_claim.as_ref().map(|extra| extra.oracle.degree_bound());
+    let mut w3_quiescence_label: Option<&'static [u8]> = None;
+    let mut w3_quiescence_oracle: Option<Box<dyn RoundOracle>> = w3_quiescence_claim.map(|extra| {
+        w3_quiescence_label = Some(extra.label);
+        extra.oracle
+    });
+    if let Some(oracle) = w3_quiescence_oracle.as_deref_mut() {
+        let claimed_sum = K::ZERO;
+        let label = w3_quiescence_label.expect("missing w3_quiescence label");
+        claimed_sums.push(claimed_sum);
+        degree_bounds.push(oracle.degree_bound());
+        labels.push(label);
+        claim_is_dynamic.push(false);
+        claims.push(BatchedClaim {
+            oracle,
+            claimed_sum,
+            label,
+        });
+    }
+
+    let w3_selector_linkage_degree_bound = w3_selector_linkage_claim
+        .as_ref()
+        .map(|extra| extra.oracle.degree_bound());
+    let mut w3_selector_linkage_label: Option<&'static [u8]> = None;
+    let mut w3_selector_linkage_oracle: Option<Box<dyn RoundOracle>> = w3_selector_linkage_claim.map(|extra| {
+        w3_selector_linkage_label = Some(extra.label);
+        extra.oracle
+    });
+    if let Some(oracle) = w3_selector_linkage_oracle.as_deref_mut() {
+        let claimed_sum = K::ZERO;
+        let label = w3_selector_linkage_label.expect("missing w3_selector_linkage label");
+        claimed_sums.push(claimed_sum);
+        degree_bounds.push(oracle.degree_bound());
+        labels.push(label);
+        claim_is_dynamic.push(false);
+        claims.push(BatchedClaim {
+            oracle,
+            claimed_sum,
+            label,
+        });
+    }
+
+    let w3_load_semantics_degree_bound = w3_load_semantics_claim
+        .as_ref()
+        .map(|extra| extra.oracle.degree_bound());
+    let mut w3_load_semantics_label: Option<&'static [u8]> = None;
+    let mut w3_load_semantics_oracle: Option<Box<dyn RoundOracle>> = w3_load_semantics_claim.map(|extra| {
+        w3_load_semantics_label = Some(extra.label);
+        extra.oracle
+    });
+    if let Some(oracle) = w3_load_semantics_oracle.as_deref_mut() {
+        let claimed_sum = K::ZERO;
+        let label = w3_load_semantics_label.expect("missing w3_load_semantics label");
+        claimed_sums.push(claimed_sum);
+        degree_bounds.push(oracle.degree_bound());
+        labels.push(label);
+        claim_is_dynamic.push(false);
+        claims.push(BatchedClaim {
+            oracle,
+            claimed_sum,
+            label,
+        });
+    }
+
+    let w3_store_semantics_degree_bound = w3_store_semantics_claim
+        .as_ref()
+        .map(|extra| extra.oracle.degree_bound());
+    let mut w3_store_semantics_label: Option<&'static [u8]> = None;
+    let mut w3_store_semantics_oracle: Option<Box<dyn RoundOracle>> = w3_store_semantics_claim.map(|extra| {
+        w3_store_semantics_label = Some(extra.label);
+        extra.oracle
+    });
+    if let Some(oracle) = w3_store_semantics_oracle.as_deref_mut() {
+        let claimed_sum = K::ZERO;
+        let label = w3_store_semantics_label.expect("missing w3_store_semantics label");
+        claimed_sums.push(claimed_sum);
+        degree_bounds.push(oracle.degree_bound());
+        labels.push(label);
+        claim_is_dynamic.push(false);
+        claims.push(BatchedClaim {
+            oracle,
+            claimed_sum,
+            label,
+        });
+    }
+
     let ob_inc_total_degree_bound = ob_inc_total
         .as_ref()
         .map(|extra| extra.oracle.degree_bound());
@@ -170,6 +328,12 @@ pub fn prove_route_a_batched_time(
         ccs_time_degree_bound,
         wb_time_degree_bound.is_some(),
         wp_time_degree_bound.is_some(),
+        w2_decode_fields_degree_bound.is_some() || w2_decode_immediates_degree_bound.is_some(),
+        w3_bitness_degree_bound.is_some()
+            || w3_quiescence_degree_bound.is_some()
+            || w3_selector_linkage_degree_bound.is_some()
+            || w3_load_semantics_degree_bound.is_some()
+            || w3_store_semantics_degree_bound.is_some(),
         ob_inc_total_degree_bound,
     );
     let expected_degree_bounds: Vec<usize> = metas.iter().map(|m| m.degree_bound).collect();
@@ -230,6 +394,8 @@ pub fn verify_route_a_batched_time(
     proof: &BatchedTimeProof,
     wb_enabled: bool,
     wp_enabled: bool,
+    w2_enabled: bool,
+    w3_enabled: bool,
     ob_inc_total_degree_bound: Option<usize>,
 ) -> Result<RouteABatchedTimeVerifyOutput, PiCcsError> {
     let metas = RouteATimeClaimPlan::time_claim_metas_for_step(
@@ -237,6 +403,8 @@ pub fn verify_route_a_batched_time(
         ccs_time_degree_bound,
         wb_enabled,
         wp_enabled,
+        w2_enabled,
+        w3_enabled,
         ob_inc_total_degree_bound,
     );
     let expected_degree_bounds: Vec<usize> = metas.iter().map(|m| m.degree_bound).collect();

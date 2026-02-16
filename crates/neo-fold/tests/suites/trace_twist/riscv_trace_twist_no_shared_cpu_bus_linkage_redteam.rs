@@ -334,6 +334,8 @@ fn riscv_trace_no_shared_cpu_bus_linkage_rejects_tampered_prog_addr_bits() {
             (reg_mem_inst.clone(), reg_mem_wit.clone()),
             (ram_mem_inst.clone(), ram_mem_wit.clone()),
         ],
+        decode_instances: Vec::new(),
+        width_instances: Vec::new(),
         _phantom: PhantomData,
     }];
     let steps_instance_ok: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> = steps_witness_ok
@@ -376,6 +378,8 @@ fn riscv_trace_no_shared_cpu_bus_linkage_rejects_tampered_prog_addr_bits() {
             (reg_mem_inst, reg_mem_wit),
             (ram_mem_inst, ram_mem_wit),
         ],
+        decode_instances: Vec::new(),
+        width_instances: Vec::new(),
         _phantom: PhantomData,
     }];
     let steps_instance_bad: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> = steps_witness_bad

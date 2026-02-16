@@ -16,7 +16,9 @@ use neo_memory::identity::shout_oracle::IdentityAddressLookupOracleSparse;
 use neo_memory::mle::{eq_points, lt_eval};
 use neo_memory::riscv::lookups::{PROG_ID, RAM_ID, REG_ID};
 use neo_memory::riscv::shout_oracle::RiscvAddressLookupOracleSparse;
-use neo_memory::riscv::trace::Rv32TraceLayout;
+use neo_memory::riscv::trace::{
+    Rv32DecodeSidecarLayout, Rv32TraceLayout, Rv32WidthSidecarLayout, RV32_TRACE_W2_DECODE_ID, RV32_TRACE_W3_WIDTH_ID,
+};
 use neo_memory::sparse_time::SparseIdxVec;
 use neo_memory::ts_common as ts;
 use neo_memory::twist_oracle::{
@@ -805,6 +807,36 @@ fn w2_decode_pack_weight_vector(r_cycle: &[K], len: usize) -> Vec<K> {
 }
 
 #[inline]
+fn w2_decode_imm_weight_vector(r_cycle: &[K], len: usize) -> Vec<K> {
+    bitness_weights(r_cycle, len, 0x5732_5F49_4D4D_214Du64)
+}
+
+#[inline]
+fn w3_bitness_weight_vector(r_cycle: &[K], len: usize) -> Vec<K> {
+    bitness_weights(r_cycle, len, 0x5733_5F42_4954_2144u64)
+}
+
+#[inline]
+fn w3_quiescence_weight_vector(r_cycle: &[K], len: usize) -> Vec<K> {
+    bitness_weights(r_cycle, len, 0x5733_5F51_5549_4553u64)
+}
+
+#[inline]
+fn w3_selector_weight_vector(r_cycle: &[K], len: usize) -> Vec<K> {
+    bitness_weights(r_cycle, len, 0x5733_5F53_454C_4543u64)
+}
+
+#[inline]
+fn w3_load_weight_vector(r_cycle: &[K], len: usize) -> Vec<K> {
+    bitness_weights(r_cycle, len, 0x5733_5F4C_4F41_4421u64)
+}
+
+#[inline]
+fn w3_store_weight_vector(r_cycle: &[K], len: usize) -> Vec<K> {
+    bitness_weights(r_cycle, len, 0x5733_5F53_544F_5245u64)
+}
+
+#[inline]
 fn wp_weight_vector(r_cycle: &[K], len: usize) -> Vec<K> {
     bitness_weights(r_cycle, len, 0x5750_5F51_5549_4553u64)
 }
@@ -823,69 +855,58 @@ pub(crate) fn rv32_trace_wb_columns(layout: &Rv32TraceLayout) -> Vec<usize> {
         layout.branch_invert_shout_prod,
         layout.jalr_drop_bit[0],
         layout.jalr_drop_bit[1],
-        layout.op_lui,
-        layout.op_auipc,
-        layout.op_jal,
-        layout.op_jalr,
-        layout.op_branch,
-        layout.op_load,
-        layout.op_store,
-        layout.op_alu_imm,
-        layout.op_alu_reg,
-        layout.op_misc_mem,
-        layout.op_system,
-        layout.op_amo,
-        layout.is_lb,
-        layout.is_lbu,
-        layout.is_lh,
-        layout.is_lhu,
-        layout.is_lw,
-        layout.is_sb,
-        layout.is_sh,
-        layout.is_sw,
-        layout.op_lui_write,
-        layout.op_alu_imm_write,
-        layout.op_alu_reg_write,
-        layout.is_lb_write,
-        layout.is_lbu_write,
-        layout.is_lh_write,
-        layout.is_lhu_write,
-        layout.is_lw_write,
+        layout.rd_is_zero_01,
+        layout.rd_is_zero_012,
+        layout.rd_is_zero_0123,
+        layout.rd_is_zero,
     ];
     out.extend_from_slice(&layout.rd_bit);
     out.extend_from_slice(&layout.funct3_bit);
     out.extend_from_slice(&layout.rs1_bit);
     out.extend_from_slice(&layout.rs2_bit);
     out.extend_from_slice(&layout.funct7_bit);
-    out.extend_from_slice(&layout.funct3_is);
-    out.extend_from_slice(&layout.ram_rv_low_bit);
-    out.extend_from_slice(&layout.rs2_low_bit);
     out
+}
+
+const W2_FIELDS_RESIDUAL_COUNT: usize = 69;
+const W2_IMM_RESIDUAL_COUNT: usize = 4;
+
+#[inline]
+fn w2_bool01(v: K) -> K {
+    v * (v - K::ONE)
 }
 
 #[inline]
 fn w2_decode_selector_residuals(
     active: K,
+    opcode: K,
     opcode_flags: [K; 12],
     funct3_is: [K; 8],
     funct3_bits: [K; 3],
     branch_f3b1_op: K,
-    op_load: K,
-    load_flags: [K; 5],
-    op_store: K,
-    store_flags: [K; 3],
     op_amo: K,
-) -> [K; 9] {
+) -> [K; 8] {
     let opcode_one_hot = opcode_flags.into_iter().fold(K::ZERO, |acc, v| acc + v) - active;
     let funct3_one_hot = funct3_is.into_iter().fold(K::ZERO, |acc, v| acc + v) - active;
     let funct3_bit0_link = (funct3_is[1] + funct3_is[3] + funct3_is[5] + funct3_is[7]) - funct3_bits[0];
     let funct3_bit1_link = (funct3_is[2] + funct3_is[3] + funct3_is[6] + funct3_is[7]) - funct3_bits[1];
     let funct3_bit2_link = (funct3_is[4] + funct3_is[5] + funct3_is[6] + funct3_is[7]) - funct3_bits[2];
     let branch_f3b1_link = (funct3_is[6] + funct3_is[7]) - branch_f3b1_op;
-    let load_selector = load_flags.into_iter().fold(K::ZERO, |acc, v| acc + v) - op_load;
-    let store_selector = store_flags.into_iter().fold(K::ZERO, |acc, v| acc + v) - op_store;
     // Tier-2.1 trace mode lock: op_amo must be zero on every row.
     let amo_forbidden = op_amo;
+    let opcode_value_link = opcode_flags[0] * K::from(F::from_u64(0x37))
+        + opcode_flags[1] * K::from(F::from_u64(0x17))
+        + opcode_flags[2] * K::from(F::from_u64(0x6f))
+        + opcode_flags[3] * K::from(F::from_u64(0x67))
+        + opcode_flags[4] * K::from(F::from_u64(0x63))
+        + opcode_flags[5] * K::from(F::from_u64(0x03))
+        + opcode_flags[6] * K::from(F::from_u64(0x23))
+        + opcode_flags[7] * K::from(F::from_u64(0x13))
+        + opcode_flags[8] * K::from(F::from_u64(0x33))
+        + opcode_flags[9] * K::from(F::from_u64(0x0f))
+        + opcode_flags[10] * K::from(F::from_u64(0x73))
+        + opcode_flags[11] * K::from(F::from_u64(0x2f))
+        - opcode;
 
     [
         opcode_one_hot,
@@ -894,9 +915,348 @@ fn w2_decode_selector_residuals(
         funct3_bit1_link,
         funct3_bit2_link,
         branch_f3b1_link,
-        load_selector,
-        store_selector,
         amo_forbidden,
+        opcode_value_link,
+    ]
+}
+
+#[inline]
+fn w2_decode_bitness_residuals(opcode_flags: [K; 12], funct3_is: [K; 8]) -> [K; 20] {
+    [
+        w2_bool01(opcode_flags[0]),
+        w2_bool01(opcode_flags[1]),
+        w2_bool01(opcode_flags[2]),
+        w2_bool01(opcode_flags[3]),
+        w2_bool01(opcode_flags[4]),
+        w2_bool01(opcode_flags[5]),
+        w2_bool01(opcode_flags[6]),
+        w2_bool01(opcode_flags[7]),
+        w2_bool01(opcode_flags[8]),
+        w2_bool01(opcode_flags[9]),
+        w2_bool01(opcode_flags[10]),
+        w2_bool01(opcode_flags[11]),
+        w2_bool01(funct3_is[0]),
+        w2_bool01(funct3_is[1]),
+        w2_bool01(funct3_is[2]),
+        w2_bool01(funct3_is[3]),
+        w2_bool01(funct3_is[4]),
+        w2_bool01(funct3_is[5]),
+        w2_bool01(funct3_is[6]),
+        w2_bool01(funct3_is[7]),
+    ]
+}
+
+#[inline]
+fn w2_alu_branch_lookup_residuals(
+    active: K,
+    halted: K,
+    shout_has_lookup: K,
+    shout_lhs: K,
+    shout_rhs: K,
+    shout_table_id: K,
+    rs1_val: K,
+    rs2_val: K,
+    rd_has_write: K,
+    rd_is_zero: K,
+    rd_val: K,
+    ram_has_read: K,
+    ram_has_write: K,
+    ram_addr: K,
+    shout_val: K,
+    branch_f3b1_op: K,
+    funct3_bits: [K; 3],
+    funct7_bits: [K; 7],
+    opcode_flags: [K; 12],
+    op_write_flags: [K; 6],
+    funct3_is: [K; 8],
+    alu_reg_table_delta: K,
+    alu_imm_table_delta: K,
+    alu_imm_shift_rhs_delta: K,
+    rs2_decode: K,
+    imm_i: K,
+    imm_s: K,
+) -> [K; 41] {
+    let op_lui = opcode_flags[0];
+    let op_auipc = opcode_flags[1];
+    let op_jal = opcode_flags[2];
+    let op_jalr = opcode_flags[3];
+    let op_branch = opcode_flags[4];
+    let op_alu_imm = opcode_flags[7];
+    let op_alu_reg = opcode_flags[8];
+    let op_misc_mem = opcode_flags[9];
+    let op_system = opcode_flags[10];
+
+    let op_lui_write = op_write_flags[0];
+    let op_auipc_write = op_write_flags[1];
+    let op_jal_write = op_write_flags[2];
+    let op_jalr_write = op_write_flags[3];
+    let op_alu_imm_write = op_write_flags[4];
+    let op_alu_reg_write = op_write_flags[5];
+
+    let non_mem_ops =
+        op_lui + op_auipc + op_jal + op_jalr + op_branch + op_alu_imm + op_alu_reg + op_misc_mem + op_system;
+
+    let alu_table_base = K::from(F::from_u64(3)) * funct3_is[0]
+        + K::from(F::from_u64(7)) * funct3_is[1]
+        + K::from(F::from_u64(5)) * funct3_is[2]
+        + K::from(F::from_u64(6)) * funct3_is[3]
+        + K::from(F::from_u64(1)) * funct3_is[4]
+        + K::from(F::from_u64(8)) * funct3_is[5]
+        + K::from(F::from_u64(2)) * funct3_is[6];
+    let branch_table_expected = K::from(F::from_u64(10)) - K::from(F::from_u64(5)) * funct3_bits[2] + branch_f3b1_op;
+    let shift_selector = funct3_is[1] + funct3_is[5];
+
+    [
+        op_alu_imm * (shout_has_lookup - K::ONE),
+        op_alu_reg * (shout_has_lookup - K::ONE),
+        (K::ONE - shout_has_lookup) * shout_table_id,
+        (op_alu_imm + op_alu_reg + op_branch) * (shout_lhs - rs1_val),
+        alu_imm_shift_rhs_delta - shift_selector * (rs2_decode - imm_i),
+        op_alu_imm * (shout_rhs - imm_i - alu_imm_shift_rhs_delta),
+        op_alu_reg * (shout_rhs - rs2_val),
+        op_branch * (shout_rhs - rs2_val),
+        op_alu_imm_write * (rd_val - shout_val),
+        op_alu_reg_write * (rd_val - shout_val),
+        op_alu_reg * (shout_table_id - alu_table_base - alu_reg_table_delta),
+        op_alu_imm * (shout_table_id - alu_table_base - alu_imm_table_delta),
+        op_branch * (shout_table_id - branch_table_expected),
+        op_alu_reg * funct7_bits[0],
+        alu_reg_table_delta - funct7_bits[5] * (funct3_is[0] + funct3_is[5]),
+        alu_imm_table_delta - funct7_bits[5] * funct3_is[5],
+        op_lui * rd_has_write - op_lui_write,
+        op_auipc * rd_has_write - op_auipc_write,
+        op_jal * rd_has_write - op_jal_write,
+        op_jalr * rd_has_write - op_jalr_write,
+        op_alu_imm * rd_has_write - op_alu_imm_write,
+        op_alu_reg * rd_has_write - op_alu_reg_write,
+        op_lui * (rd_has_write + rd_is_zero - K::ONE),
+        op_auipc * (rd_has_write + rd_is_zero - K::ONE),
+        op_jal * (rd_has_write + rd_is_zero - K::ONE),
+        op_jalr * (rd_has_write + rd_is_zero - K::ONE),
+        opcode_flags[5] * (rd_has_write + rd_is_zero - K::ONE),
+        op_alu_imm * (rd_has_write + rd_is_zero - K::ONE),
+        op_alu_reg * (rd_has_write + rd_is_zero - K::ONE),
+        op_branch * rd_has_write,
+        opcode_flags[6] * rd_has_write,
+        op_misc_mem * rd_has_write,
+        op_system * rd_has_write,
+        active * (halted - op_system),
+        opcode_flags[5] * (ram_has_read - K::ONE),
+        opcode_flags[6] * (ram_has_write - K::ONE),
+        non_mem_ops * ram_has_read,
+        non_mem_ops * ram_has_write,
+        non_mem_ops * ram_addr,
+        opcode_flags[5] * (ram_addr - rs1_val - imm_i),
+        opcode_flags[6] * (ram_addr - rs1_val - imm_s),
+    ]
+}
+
+#[inline]
+fn w2_decode_immediate_residuals(
+    imm_i: K,
+    imm_s: K,
+    imm_b: K,
+    imm_j: K,
+    rd_bits: [K; 5],
+    funct3_bits: [K; 3],
+    rs1_bits: [K; 5],
+    rs2_bits: [K; 5],
+    funct7_bits: [K; 7],
+) -> [K; 4] {
+    let signext_imm12 = K::from(F::from_u64((1u64 << 32) - (1u64 << 11)));
+    let signext_imm13 = K::from(F::from_u64((1u64 << 32) - (1u64 << 12)));
+    let signext_imm21 = K::from(F::from_u64((1u64 << 32) - (1u64 << 20)));
+
+    let imm_i_res = imm_i
+        - rs2_bits[0]
+        - K::from(F::from_u64(2)) * rs2_bits[1]
+        - K::from(F::from_u64(4)) * rs2_bits[2]
+        - K::from(F::from_u64(8)) * rs2_bits[3]
+        - K::from(F::from_u64(16)) * rs2_bits[4]
+        - K::from(F::from_u64(32)) * funct7_bits[0]
+        - K::from(F::from_u64(64)) * funct7_bits[1]
+        - K::from(F::from_u64(128)) * funct7_bits[2]
+        - K::from(F::from_u64(256)) * funct7_bits[3]
+        - K::from(F::from_u64(512)) * funct7_bits[4]
+        - K::from(F::from_u64(1024)) * funct7_bits[5]
+        - signext_imm12 * funct7_bits[6];
+
+    let imm_s_res = imm_s
+        - rd_bits[0]
+        - K::from(F::from_u64(2)) * rd_bits[1]
+        - K::from(F::from_u64(4)) * rd_bits[2]
+        - K::from(F::from_u64(8)) * rd_bits[3]
+        - K::from(F::from_u64(16)) * rd_bits[4]
+        - K::from(F::from_u64(32)) * funct7_bits[0]
+        - K::from(F::from_u64(64)) * funct7_bits[1]
+        - K::from(F::from_u64(128)) * funct7_bits[2]
+        - K::from(F::from_u64(256)) * funct7_bits[3]
+        - K::from(F::from_u64(512)) * funct7_bits[4]
+        - K::from(F::from_u64(1024)) * funct7_bits[5]
+        - signext_imm12 * funct7_bits[6];
+
+    let imm_b_res = imm_b
+        - K::from(F::from_u64(2)) * rd_bits[1]
+        - K::from(F::from_u64(4)) * rd_bits[2]
+        - K::from(F::from_u64(8)) * rd_bits[3]
+        - K::from(F::from_u64(16)) * rd_bits[4]
+        - K::from(F::from_u64(32)) * funct7_bits[0]
+        - K::from(F::from_u64(64)) * funct7_bits[1]
+        - K::from(F::from_u64(128)) * funct7_bits[2]
+        - K::from(F::from_u64(256)) * funct7_bits[3]
+        - K::from(F::from_u64(512)) * funct7_bits[4]
+        - K::from(F::from_u64(1024)) * funct7_bits[5]
+        - K::from(F::from_u64(2048)) * rd_bits[0]
+        - signext_imm13 * funct7_bits[6];
+
+    let imm_j_res = imm_j
+        - K::from(F::from_u64(2)) * rs2_bits[1]
+        - K::from(F::from_u64(4)) * rs2_bits[2]
+        - K::from(F::from_u64(8)) * rs2_bits[3]
+        - K::from(F::from_u64(16)) * rs2_bits[4]
+        - K::from(F::from_u64(32)) * funct7_bits[0]
+        - K::from(F::from_u64(64)) * funct7_bits[1]
+        - K::from(F::from_u64(128)) * funct7_bits[2]
+        - K::from(F::from_u64(256)) * funct7_bits[3]
+        - K::from(F::from_u64(512)) * funct7_bits[4]
+        - K::from(F::from_u64(1024)) * funct7_bits[5]
+        - K::from(F::from_u64(2048)) * rs2_bits[0]
+        - K::from(F::from_u64(4096)) * funct3_bits[0]
+        - K::from(F::from_u64(8192)) * funct3_bits[1]
+        - K::from(F::from_u64(16384)) * funct3_bits[2]
+        - K::from(F::from_u64(32768)) * rs1_bits[0]
+        - K::from(F::from_u64(65536)) * rs1_bits[1]
+        - K::from(F::from_u64(131072)) * rs1_bits[2]
+        - K::from(F::from_u64(262144)) * rs1_bits[3]
+        - K::from(F::from_u64(524288)) * rs1_bits[4]
+        - signext_imm21 * funct7_bits[6];
+
+    [imm_i_res, imm_s_res, imm_b_res, imm_j_res]
+}
+
+#[inline]
+fn w3_selector_linkage_residuals(
+    op_load: K,
+    op_store: K,
+    funct3_is: [K; 8],
+    load_flags: [K; 5],
+    store_flags: [K; 3],
+) -> [K; 10] {
+    [
+        load_flags[0] - op_load * funct3_is[0],
+        load_flags[1] - op_load * funct3_is[4],
+        load_flags[2] - op_load * funct3_is[1],
+        load_flags[3] - op_load * funct3_is[5],
+        load_flags[4] - op_load * funct3_is[2],
+        store_flags[0] - op_store * funct3_is[0],
+        store_flags[1] - op_store * funct3_is[1],
+        store_flags[2] - op_store * funct3_is[2],
+        load_flags.into_iter().fold(K::ZERO, |acc, v| acc + v) - op_load,
+        store_flags.into_iter().fold(K::ZERO, |acc, v| acc + v) - op_store,
+    ]
+}
+
+#[inline]
+fn w3_load_semantics_residuals(
+    rd_val: K,
+    ram_rv: K,
+    rd_has_write: K,
+    ram_has_read: K,
+    load_flags: [K; 5],
+    ram_rv_q16: K,
+    ram_rv_low_bits: [K; 16],
+) -> [K; 16] {
+    let pow2 = |k: usize| K::from(F::from_u64(1u64 << k));
+    let two16 = K::from(F::from_u64(1u64 << 16));
+    let lb_sign_coeff = K::from(F::from_u64((1u64 << 32) - (1u64 << 7)));
+    let lh_sign_coeff = K::from(F::from_u64((1u64 << 32) - (1u64 << 15)));
+
+    let mut ram_rv_low8 = K::ZERO;
+    for (k, b) in ram_rv_low_bits.iter().copied().enumerate().take(8) {
+        ram_rv_low8 += pow2(k) * b;
+    }
+    let mut ram_rv_low16 = K::ZERO;
+    for (k, b) in ram_rv_low_bits.iter().copied().enumerate() {
+        ram_rv_low16 += pow2(k) * b;
+    }
+
+    let lb_val = {
+        let mut acc = K::ZERO;
+        for (k, b) in ram_rv_low_bits.iter().copied().enumerate().take(8) {
+            acc += if k == 7 { lb_sign_coeff } else { pow2(k) } * b;
+        }
+        acc
+    };
+    let lh_val = {
+        let mut acc = K::ZERO;
+        for (k, b) in ram_rv_low_bits.iter().copied().enumerate() {
+            if k >= 16 {
+                break;
+            }
+            acc += if k == 15 { lh_sign_coeff } else { pow2(k) } * b;
+        }
+        acc
+    };
+
+    [
+        load_flags[4] * (rd_val - ram_rv),
+        load_flags[0] * (rd_val - lb_val),
+        load_flags[1] * (rd_val - ram_rv_low8),
+        load_flags[2] * (rd_val - lh_val),
+        load_flags[3] * (rd_val - ram_rv_low16),
+        load_flags[0] * (rd_has_write - K::ONE),
+        load_flags[1] * (rd_has_write - K::ONE),
+        load_flags[2] * (rd_has_write - K::ONE),
+        load_flags[3] * (rd_has_write - K::ONE),
+        load_flags[4] * (rd_has_write - K::ONE),
+        load_flags[0] * (ram_has_read - K::ONE),
+        load_flags[1] * (ram_has_read - K::ONE),
+        load_flags[2] * (ram_has_read - K::ONE),
+        load_flags[3] * (ram_has_read - K::ONE),
+        load_flags[4] * (ram_has_read - K::ONE),
+        ram_has_read * (ram_rv - two16 * ram_rv_q16 - ram_rv_low16),
+    ]
+}
+
+#[inline]
+fn w3_store_semantics_residuals(
+    ram_wv: K,
+    ram_rv: K,
+    rs2_val: K,
+    rd_has_write: K,
+    ram_has_read: K,
+    ram_has_write: K,
+    store_flags: [K; 3],
+    rs2_q16: K,
+    ram_rv_low_bits: [K; 16],
+    rs2_low_bits: [K; 16],
+) -> [K; 12] {
+    let pow2 = |k: usize| K::from(F::from_u64(1u64 << k));
+    let two16 = K::from(F::from_u64(1u64 << 16));
+    let mut rs2_low16 = K::ZERO;
+    let mut sb_patch = K::ZERO;
+    let mut sh_patch = K::ZERO;
+    for k in 0..16 {
+        let coeff = pow2(k);
+        rs2_low16 += coeff * rs2_low_bits[k];
+        if k < 8 {
+            sb_patch += coeff * (ram_rv_low_bits[k] - rs2_low_bits[k]);
+        }
+        sh_patch += coeff * (ram_rv_low_bits[k] - rs2_low_bits[k]);
+    }
+    [
+        store_flags[2] * (ram_wv - rs2_val),
+        store_flags[0] * (ram_wv - ram_rv + sb_patch),
+        store_flags[1] * (ram_wv - ram_rv + sh_patch),
+        store_flags[0] * rd_has_write,
+        store_flags[1] * rd_has_write,
+        store_flags[2] * rd_has_write,
+        store_flags[0] * (ram_has_read - K::ONE),
+        store_flags[1] * (ram_has_read - K::ONE),
+        store_flags[0] * (ram_has_write - K::ONE),
+        store_flags[1] * (ram_has_write - K::ONE),
+        store_flags[2] * (ram_has_write - K::ONE),
+        rs2_val - two16 * rs2_q16 - rs2_low16,
     ]
 }
 
@@ -905,26 +1265,6 @@ fn rv32_trace_wp_columns(layout: &Rv32TraceLayout) -> Vec<usize> {
         layout.instr_word,
         layout.opcode,
         layout.funct3,
-        layout.funct7,
-        layout.rd,
-        layout.rs1,
-        layout.rs2,
-        layout.op_lui,
-        layout.op_auipc,
-        layout.op_jal,
-        layout.op_jalr,
-        layout.op_branch,
-        layout.op_load,
-        layout.op_store,
-        layout.op_alu_imm,
-        layout.op_alu_reg,
-        layout.op_misc_mem,
-        layout.op_system,
-        layout.op_amo,
-        layout.op_lui_write,
-        layout.op_auipc_write,
-        layout.op_jal_write,
-        layout.op_jalr_write,
         layout.prog_addr,
         layout.prog_value,
         layout.rs1_addr,
@@ -944,66 +1284,6 @@ fn rv32_trace_wp_columns(layout: &Rv32TraceLayout) -> Vec<usize> {
         layout.shout_lhs,
         layout.shout_rhs,
         layout.shout_table_id,
-        layout.is_lb,
-        layout.is_lbu,
-        layout.is_lh,
-        layout.is_lhu,
-        layout.is_lw,
-        layout.is_sb,
-        layout.is_sh,
-        layout.is_sw,
-        layout.op_alu_imm_write,
-        layout.op_alu_reg_write,
-        layout.is_lb_write,
-        layout.is_lbu_write,
-        layout.is_lh_write,
-        layout.is_lhu_write,
-        layout.is_lw_write,
-        layout.funct3_is[0],
-        layout.funct3_is[1],
-        layout.funct3_is[2],
-        layout.funct3_is[3],
-        layout.funct3_is[4],
-        layout.funct3_is[5],
-        layout.funct3_is[6],
-        layout.funct3_is[7],
-        layout.alu_reg_table_delta,
-        layout.alu_imm_table_delta,
-        layout.alu_imm_shift_rhs_delta,
-        layout.ram_rv_q16,
-        layout.rs2_q16,
-        layout.ram_rv_low_bit[0],
-        layout.ram_rv_low_bit[1],
-        layout.ram_rv_low_bit[2],
-        layout.ram_rv_low_bit[3],
-        layout.ram_rv_low_bit[4],
-        layout.ram_rv_low_bit[5],
-        layout.ram_rv_low_bit[6],
-        layout.ram_rv_low_bit[7],
-        layout.ram_rv_low_bit[8],
-        layout.ram_rv_low_bit[9],
-        layout.ram_rv_low_bit[10],
-        layout.ram_rv_low_bit[11],
-        layout.ram_rv_low_bit[12],
-        layout.ram_rv_low_bit[13],
-        layout.ram_rv_low_bit[14],
-        layout.ram_rv_low_bit[15],
-        layout.rs2_low_bit[0],
-        layout.rs2_low_bit[1],
-        layout.rs2_low_bit[2],
-        layout.rs2_low_bit[3],
-        layout.rs2_low_bit[4],
-        layout.rs2_low_bit[5],
-        layout.rs2_low_bit[6],
-        layout.rs2_low_bit[7],
-        layout.rs2_low_bit[8],
-        layout.rs2_low_bit[9],
-        layout.rs2_low_bit[10],
-        layout.rs2_low_bit[11],
-        layout.rs2_low_bit[12],
-        layout.rs2_low_bit[13],
-        layout.rs2_low_bit[14],
-        layout.rs2_low_bit[15],
         layout.rd_bit[0],
         layout.rd_bit[1],
         layout.rd_bit[2],
@@ -1029,10 +1309,6 @@ fn rv32_trace_wp_columns(layout: &Rv32TraceLayout) -> Vec<usize> {
         layout.funct7_bit[4],
         layout.funct7_bit[5],
         layout.funct7_bit[6],
-        layout.imm_i,
-        layout.imm_s,
-        layout.imm_b,
-        layout.imm_j,
         layout.branch_taken,
         layout.branch_invert_shout,
         layout.branch_taken_imm,
@@ -1137,6 +1413,67 @@ fn decode_trace_col_values_batch(
         decoded.insert(col_id, out);
     }
 
+    Ok(decoded)
+}
+
+fn decode_sidecar_col_values_batch(
+    params: &NeoParams,
+    m_in: usize,
+    t_len: usize,
+    z: &neo_ccs::matrix::Mat<F>,
+    max_cols: usize,
+    col_ids: &[usize],
+) -> Result<BTreeMap<usize, Vec<K>>, PiCcsError> {
+    let m = z.cols();
+    let d = neo_math::D;
+    if z.rows() != d {
+        return Err(PiCcsError::InvalidInput(format!(
+            "W2: decode sidecar Z.rows()={} != D={d}",
+            z.rows()
+        )));
+    }
+
+    let b_k = K::from(F::from_u64(params.b as u64));
+    let mut pow_b = Vec::with_capacity(d);
+    let mut cur = K::ONE;
+    for _ in 0..d {
+        pow_b.push(cur);
+        cur *= b_k;
+    }
+
+    let unique_col_ids: BTreeSet<usize> = col_ids.iter().copied().collect();
+    let mut decoded = BTreeMap::<usize, Vec<K>>::new();
+    for col_id in unique_col_ids {
+        if col_id >= max_cols {
+            return Err(PiCcsError::InvalidInput(format!(
+                "W2: decode sidecar column out of range (col_id={col_id}, cols={max_cols})"
+            )));
+        }
+        let col_start = m_in
+            .checked_add(
+                col_id
+                    .checked_mul(t_len)
+                    .ok_or_else(|| PiCcsError::InvalidInput("W2: col_id * t_len overflow".into()))?,
+            )
+            .ok_or_else(|| PiCcsError::InvalidInput("W2: trace column start overflow".into()))?;
+        let mut out = Vec::with_capacity(t_len);
+        for j in 0..t_len {
+            let idx = col_start
+                .checked_add(j)
+                .ok_or_else(|| PiCcsError::InvalidInput("W2: trace z idx overflow".into()))?;
+            if idx >= m {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "W2: decode sidecar z idx out of range (idx={idx}, m={m})"
+                )));
+            }
+            let mut acc = K::ZERO;
+            for rho in 0..d {
+                acc += pow_b[rho] * K::from(z[(rho, idx)]);
+            }
+            out.push(acc);
+        }
+        decoded.insert(col_id, out);
+    }
     Ok(decoded)
 }
 
@@ -1257,6 +1594,85 @@ impl RoundOracle for WeightedMaskOracleSparseTime {
         }
         self.prefix_eq *= eq_single_k(r, self.r_cycle[self.bit_idx]);
         self.active.fold_round_in_place(r);
+        for col in self.cols.iter_mut() {
+            col.fold_round_in_place(r);
+        }
+        self.bit_idx += 1;
+    }
+}
+
+struct FormulaOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    cols: Vec<SparseIdxVec<K>>,
+    degree_bound: usize,
+    eval_fn: Box<dyn Fn(&[K]) -> K>,
+}
+
+impl FormulaOracleSparseTime {
+    fn new(cols: Vec<SparseIdxVec<K>>, degree_bound: usize, r_cycle: &[K], eval_fn: Box<dyn Fn(&[K]) -> K>) -> Self {
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            cols,
+            degree_bound,
+            eval_fn,
+        }
+    }
+}
+
+impl RoundOracle for FormulaOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.cols.is_empty() {
+            return vec![K::ZERO; points.len()];
+        }
+
+        let mut pairs = Vec::new();
+        for col in self.cols.iter() {
+            pairs.extend(gather_pairs_from_sparse(col.entries()));
+        }
+        pairs.sort_unstable();
+        pairs.dedup();
+
+        let mut ys = vec![K::ZERO; points.len()];
+        let mut vals = vec![K::ZERO; self.cols.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                for (j, col) in self.cols.iter().enumerate() {
+                    vals[j] = interp(col.get(child0), col.get(child1), x);
+                }
+                let f_x = (self.eval_fn)(&vals);
+                if f_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * f_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single_k(r, self.r_cycle[self.bit_idx]);
         for col in self.cols.iter_mut() {
             col.fold_round_in_place(r);
         }
@@ -4680,6 +5096,26 @@ pub(crate) fn wb_wp_required_for_step_witness(step: &StepWitnessBundle<Cmt, F, K
     step.mcs.0.m_in == 5 && has_rv32_trace_required_mem_ids(step.mem_instances.iter().map(|(m, _)| m.mem_id))
 }
 
+#[inline]
+pub(crate) fn w2_required_for_step_instance(step: &StepInstanceBundle<Cmt, F, K>) -> bool {
+    wb_wp_required_for_step_instance(step) && !step.decode_insts.is_empty()
+}
+
+#[inline]
+pub(crate) fn w2_required_for_step_witness(step: &StepWitnessBundle<Cmt, F, K>) -> bool {
+    wb_wp_required_for_step_witness(step) && !step.decode_instances.is_empty()
+}
+
+#[inline]
+pub(crate) fn w3_required_for_step_instance(step: &StepInstanceBundle<Cmt, F, K>) -> bool {
+    wb_wp_required_for_step_instance(step) && !step.width_insts.is_empty()
+}
+
+#[inline]
+pub(crate) fn w3_required_for_step_witness(step: &StepWitnessBundle<Cmt, F, K>) -> bool {
+    wb_wp_required_for_step_witness(step) && !step.width_instances.is_empty()
+}
+
 pub(crate) fn build_route_a_wb_wp_time_claims(
     params: &NeoParams,
     step: &StepWitnessBundle<Cmt, F, K>,
@@ -4703,106 +5139,15 @@ pub(crate) fn build_route_a_wb_wp_time_claims(
     let decoded = decode_trace_col_values_batch(params, step, t_len, &decode_cols)?;
 
     let wb_weights = wb_weight_vector(r_cycle, wb_bool_cols.len());
-    let mut wb_bool_decoded_cols: Vec<&Vec<K>> = Vec::with_capacity(wb_bool_cols.len());
     let mut wb_bool_sparse_cols: Vec<SparseIdxVec<K>> = Vec::with_capacity(wb_bool_cols.len());
     for &col_id in wb_bool_cols.iter() {
         let vals = decoded
             .get(&col_id)
-            .ok_or_else(|| PiCcsError::ProtocolError(format!("WB/W2: missing decoded bool column {col_id}")))?;
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("WB: missing decoded bool column {col_id}")))?;
         wb_bool_sparse_cols.push(sparse_trace_col_from_values(m_in, ell_n, vals)?);
-        wb_bool_decoded_cols.push(vals);
     }
 
     let wb_oracle = LazyWeightedBitnessOracleSparseTime::new_with_cycle(r_cycle, wb_bool_sparse_cols, wb_weights);
-
-    // W2 bootstrap: add decode/selector residual checks using existing WB-opened columns,
-    // so proof shape stays unchanged while the decode offload path comes online.
-    let wb_col_idx: BTreeMap<usize, usize> = wb_bool_cols
-        .iter()
-        .copied()
-        .enumerate()
-        .map(|(idx, col_id)| (col_id, idx))
-        .collect();
-    let wb_bool_value_at = |col_id: usize, row: usize| -> Result<K, PiCcsError> {
-        let idx = wb_col_idx.get(&col_id).copied().ok_or_else(|| {
-            PiCcsError::ProtocolError(format!(
-                "WB/W2: missing required bool column {} in wb column set",
-                col_id
-            ))
-        })?;
-        Ok(wb_bool_decoded_cols[idx][row])
-    };
-
-    let w2_residual_count = 9usize;
-    let w2_weights = w2_decode_pack_weight_vector(r_cycle, w2_residual_count);
-    let mut residual_vals: Vec<Vec<K>> = (0..w2_residual_count)
-        .map(|_| Vec::with_capacity(t_len))
-        .collect();
-    for j in 0..t_len {
-        let residuals = w2_decode_selector_residuals(
-            wb_bool_value_at(trace.active, j)?,
-            [
-                wb_bool_value_at(trace.op_lui, j)?,
-                wb_bool_value_at(trace.op_auipc, j)?,
-                wb_bool_value_at(trace.op_jal, j)?,
-                wb_bool_value_at(trace.op_jalr, j)?,
-                wb_bool_value_at(trace.op_branch, j)?,
-                wb_bool_value_at(trace.op_load, j)?,
-                wb_bool_value_at(trace.op_store, j)?,
-                wb_bool_value_at(trace.op_alu_imm, j)?,
-                wb_bool_value_at(trace.op_alu_reg, j)?,
-                wb_bool_value_at(trace.op_misc_mem, j)?,
-                wb_bool_value_at(trace.op_system, j)?,
-                wb_bool_value_at(trace.op_amo, j)?,
-            ],
-            [
-                wb_bool_value_at(trace.funct3_is[0], j)?,
-                wb_bool_value_at(trace.funct3_is[1], j)?,
-                wb_bool_value_at(trace.funct3_is[2], j)?,
-                wb_bool_value_at(trace.funct3_is[3], j)?,
-                wb_bool_value_at(trace.funct3_is[4], j)?,
-                wb_bool_value_at(trace.funct3_is[5], j)?,
-                wb_bool_value_at(trace.funct3_is[6], j)?,
-                wb_bool_value_at(trace.funct3_is[7], j)?,
-            ],
-            [
-                wb_bool_value_at(trace.funct3_bit[0], j)?,
-                wb_bool_value_at(trace.funct3_bit[1], j)?,
-                wb_bool_value_at(trace.funct3_bit[2], j)?,
-            ],
-            wb_bool_value_at(trace.branch_f3b1_op, j)?,
-            wb_bool_value_at(trace.op_load, j)?,
-            [
-                wb_bool_value_at(trace.is_lb, j)?,
-                wb_bool_value_at(trace.is_lbu, j)?,
-                wb_bool_value_at(trace.is_lh, j)?,
-                wb_bool_value_at(trace.is_lhu, j)?,
-                wb_bool_value_at(trace.is_lw, j)?,
-            ],
-            wb_bool_value_at(trace.op_store, j)?,
-            [
-                wb_bool_value_at(trace.is_sb, j)?,
-                wb_bool_value_at(trace.is_sh, j)?,
-                wb_bool_value_at(trace.is_sw, j)?,
-            ],
-            wb_bool_value_at(trace.op_amo, j)?,
-        );
-
-        for (k, r) in residuals.iter().enumerate() {
-            residual_vals[k].push(*r);
-        }
-    }
-
-    let mut residual_sparse_cols = Vec::with_capacity(residual_vals.len());
-    for vals in residual_vals.iter() {
-        residual_sparse_cols.push(sparse_trace_col_from_values(m_in, ell_n, vals)?);
-    }
-    let pow2_cycle = 1usize
-        .checked_shl(ell_n as u32)
-        .ok_or_else(|| PiCcsError::InvalidInput("WB/W2: 2^ell_n overflow".into()))?;
-    let active_zero = SparseIdxVec::from_entries(pow2_cycle, Vec::new());
-    let w2_oracle = WeightedMaskOracleSparseTime::new(active_zero, residual_sparse_cols, w2_weights, r_cycle);
-    let wb_round_oracle = SumRoundOracle::new(vec![Box::new(wb_oracle), Box::new(w2_oracle)]);
 
     let wp_cols = rv32_trace_wp_columns(&trace);
     let weights = wp_weight_vector(r_cycle, wp_cols.len());
@@ -4820,9 +5165,753 @@ pub(crate) fn build_route_a_wb_wp_time_claims(
     }
 
     let oracle = WeightedMaskOracleSparseTime::new(active, sparse_cols, weights, r_cycle);
+    Ok((Some((Box::new(wb_oracle), K::ZERO)), Some((Box::new(oracle), K::ZERO))))
+}
+
+pub(crate) fn build_route_a_w2_time_claims(
+    params: &NeoParams,
+    step: &StepWitnessBundle<Cmt, F, K>,
+    r_cycle: &[K],
+) -> Result<(Option<(Box<dyn RoundOracle>, K)>, Option<(Box<dyn RoundOracle>, K)>), PiCcsError> {
+    if !w2_required_for_step_witness(step) {
+        return Ok((None, None));
+    }
+    if step.decode_instances.len() != 1 {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W2 expects exactly one decode sidecar instance, got {}",
+            step.decode_instances.len()
+        )));
+    }
+    let (decode_inst, decode_wit) = &step.decode_instances[0];
+    if decode_inst.decode_id != RV32_TRACE_W2_DECODE_ID {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W2 decode_id mismatch: got {}, expected {}",
+            decode_inst.decode_id, RV32_TRACE_W2_DECODE_ID
+        )));
+    }
+    if decode_wit.mats.len() != 1 || decode_inst.comms.len() != 1 {
+        return Err(PiCcsError::ProtocolError(
+            "W2 expects exactly one decode sidecar mat/commitment".into(),
+        ));
+    }
+
+    let trace = Rv32TraceLayout::new();
+    let decode = Rv32DecodeSidecarLayout::new();
+    if decode_inst.cols != decode.cols {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W2 decode sidecar width mismatch: got {}, expected {}",
+            decode_inst.cols, decode.cols
+        )));
+    }
+    let t_len = decode_inst.steps;
+    let m_in = step.mcs.0.m_in;
+    let ell_n = r_cycle.len();
+
+    let mut cpu_cols = vec![
+        trace.active,
+        trace.halted,
+        trace.opcode,
+        trace.rd_has_write,
+        trace.rd_is_zero,
+        trace.rs1_val,
+        trace.rs2_val,
+        trace.rd_val,
+        trace.ram_has_read,
+        trace.ram_has_write,
+        trace.ram_addr,
+        trace.shout_has_lookup,
+        trace.shout_val,
+        trace.shout_lhs,
+        trace.shout_rhs,
+        trace.shout_table_id,
+        trace.branch_f3b1_op,
+    ];
+    cpu_cols.extend_from_slice(&trace.funct3_bit);
+    cpu_cols.extend_from_slice(&trace.rd_bit);
+    cpu_cols.extend_from_slice(&trace.rs1_bit);
+    cpu_cols.extend_from_slice(&trace.rs2_bit);
+    cpu_cols.extend_from_slice(&trace.funct7_bit);
+    let cpu_decoded = decode_trace_col_values_batch(params, step, t_len, &cpu_cols)?;
+
+    let decode_col_ids: Vec<usize> = (0..decode.cols).collect();
+    let decode_decoded =
+        decode_sidecar_col_values_batch(params, m_in, t_len, &decode_wit.mats[0], decode.cols, &decode_col_ids)?;
+
+    let cpu_value_at = |col_id: usize, row: usize| -> Result<K, PiCcsError> {
+        cpu_decoded
+            .get(&col_id)
+            .and_then(|v| v.get(row))
+            .copied()
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W2 missing CPU decoded column {col_id}")))
+    };
+    let decode_value_at = |col_id: usize, row: usize| -> Result<K, PiCcsError> {
+        decode_decoded
+            .get(&col_id)
+            .and_then(|v| v.get(row))
+            .copied()
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W2 missing decode sidecar column {col_id}")))
+    };
+
+    let mut imm_residual_vals: Vec<Vec<K>> = (0..W2_IMM_RESIDUAL_COUNT)
+        .map(|_| Vec::with_capacity(t_len))
+        .collect();
+    for j in 0..t_len {
+        let funct3_bits = [
+            cpu_value_at(trace.funct3_bit[0], j)?,
+            cpu_value_at(trace.funct3_bit[1], j)?,
+            cpu_value_at(trace.funct3_bit[2], j)?,
+        ];
+        let funct7_bits = [
+            cpu_value_at(trace.funct7_bit[0], j)?,
+            cpu_value_at(trace.funct7_bit[1], j)?,
+            cpu_value_at(trace.funct7_bit[2], j)?,
+            cpu_value_at(trace.funct7_bit[3], j)?,
+            cpu_value_at(trace.funct7_bit[4], j)?,
+            cpu_value_at(trace.funct7_bit[5], j)?,
+            cpu_value_at(trace.funct7_bit[6], j)?,
+        ];
+        let imm = w2_decode_immediate_residuals(
+            decode_value_at(decode.imm_i, j)?,
+            decode_value_at(decode.imm_s, j)?,
+            decode_value_at(decode.imm_b, j)?,
+            decode_value_at(decode.imm_j, j)?,
+            [
+                cpu_value_at(trace.rd_bit[0], j)?,
+                cpu_value_at(trace.rd_bit[1], j)?,
+                cpu_value_at(trace.rd_bit[2], j)?,
+                cpu_value_at(trace.rd_bit[3], j)?,
+                cpu_value_at(trace.rd_bit[4], j)?,
+            ],
+            funct3_bits,
+            [
+                cpu_value_at(trace.rs1_bit[0], j)?,
+                cpu_value_at(trace.rs1_bit[1], j)?,
+                cpu_value_at(trace.rs1_bit[2], j)?,
+                cpu_value_at(trace.rs1_bit[3], j)?,
+                cpu_value_at(trace.rs1_bit[4], j)?,
+            ],
+            [
+                cpu_value_at(trace.rs2_bit[0], j)?,
+                cpu_value_at(trace.rs2_bit[1], j)?,
+                cpu_value_at(trace.rs2_bit[2], j)?,
+                cpu_value_at(trace.rs2_bit[3], j)?,
+                cpu_value_at(trace.rs2_bit[4], j)?,
+            ],
+            funct7_bits,
+        );
+        for (k, r) in imm.iter().enumerate() {
+            imm_residual_vals[k].push(*r);
+        }
+    }
+
+    let main_field_cols = vec![
+        trace.active,
+        trace.halted,
+        trace.opcode,
+        trace.rd_has_write,
+        trace.rd_is_zero,
+        trace.rs1_val,
+        trace.rs2_val,
+        trace.rd_val,
+        trace.ram_has_read,
+        trace.ram_has_write,
+        trace.ram_addr,
+        trace.shout_has_lookup,
+        trace.shout_val,
+        trace.shout_lhs,
+        trace.shout_rhs,
+        trace.shout_table_id,
+        trace.branch_f3b1_op,
+        trace.funct3_bit[0],
+        trace.funct3_bit[1],
+        trace.funct3_bit[2],
+        trace.funct7_bit[0],
+        trace.funct7_bit[1],
+        trace.funct7_bit[2],
+        trace.funct7_bit[3],
+        trace.funct7_bit[4],
+        trace.funct7_bit[5],
+        trace.funct7_bit[6],
+    ];
+    let decode_field_cols = vec![
+        decode.op_lui,
+        decode.op_auipc,
+        decode.op_jal,
+        decode.op_jalr,
+        decode.op_branch,
+        decode.op_load,
+        decode.op_store,
+        decode.op_alu_imm,
+        decode.op_alu_reg,
+        decode.op_misc_mem,
+        decode.op_system,
+        decode.op_amo,
+        decode.op_lui_write,
+        decode.op_auipc_write,
+        decode.op_jal_write,
+        decode.op_jalr_write,
+        decode.op_alu_imm_write,
+        decode.op_alu_reg_write,
+        decode.funct3_is[0],
+        decode.funct3_is[1],
+        decode.funct3_is[2],
+        decode.funct3_is[3],
+        decode.funct3_is[4],
+        decode.funct3_is[5],
+        decode.funct3_is[6],
+        decode.funct3_is[7],
+        decode.alu_reg_table_delta,
+        decode.alu_imm_table_delta,
+        decode.alu_imm_shift_rhs_delta,
+        decode.rs2,
+        decode.imm_i,
+        decode.imm_s,
+    ];
+    let mut main_sparse = BTreeMap::<usize, SparseIdxVec<K>>::new();
+    for &col_id in main_field_cols.iter() {
+        let vals = cpu_decoded
+            .get(&col_id)
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W2 missing CPU decoded column {col_id}")))?;
+        main_sparse.insert(col_id, sparse_trace_col_from_values(m_in, ell_n, vals)?);
+    }
+    let mut decode_sparse = BTreeMap::<usize, SparseIdxVec<K>>::new();
+    for &col_id in decode_field_cols.iter() {
+        let vals = decode_decoded
+            .get(&col_id)
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W2 missing decode sidecar column {col_id}")))?;
+        decode_sparse.insert(col_id, sparse_trace_col_from_values(m_in, ell_n, vals)?);
+    }
+    let main_col = |col_id: usize| -> Result<SparseIdxVec<K>, PiCcsError> {
+        main_sparse
+            .get(&col_id)
+            .cloned()
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W2 missing main sparse column {col_id}")))
+    };
+    let decode_col = |col_id: usize| -> Result<SparseIdxVec<K>, PiCcsError> {
+        decode_sparse
+            .get(&col_id)
+            .cloned()
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W2 missing decode sparse column {col_id}")))
+    };
+
+    let mut fields_sparse_cols = Vec::with_capacity(main_field_cols.len() + decode_field_cols.len());
+    for &col_id in main_field_cols.iter() {
+        fields_sparse_cols.push(main_col(col_id)?);
+    }
+    for &col_id in decode_field_cols.iter() {
+        fields_sparse_cols.push(decode_col(col_id)?);
+    }
+
+    let mut imm_sparse_cols = Vec::with_capacity(imm_residual_vals.len());
+    for vals in imm_residual_vals.iter() {
+        imm_sparse_cols.push(sparse_trace_col_from_values(m_in, ell_n, vals)?);
+    }
+
+    let pow2_cycle = 1usize
+        .checked_shl(ell_n as u32)
+        .ok_or_else(|| PiCcsError::InvalidInput("W2: 2^ell_n overflow".into()))?;
+    let active_zero = SparseIdxVec::from_entries(pow2_cycle, Vec::new());
+    let fields_weights = w2_decode_pack_weight_vector(r_cycle, W2_FIELDS_RESIDUAL_COUNT);
+    let fields_oracle = FormulaOracleSparseTime::new(
+        fields_sparse_cols,
+        3,
+        r_cycle,
+        Box::new(move |vals: &[K]| {
+            let mut idx = 0usize;
+            let active = vals[idx];
+            idx += 1;
+            let halted = vals[idx];
+            idx += 1;
+            let opcode = vals[idx];
+            idx += 1;
+            let rd_has_write = vals[idx];
+            idx += 1;
+            let rd_is_zero = vals[idx];
+            idx += 1;
+            let rs1_val = vals[idx];
+            idx += 1;
+            let rs2_val = vals[idx];
+            idx += 1;
+            let rd_val = vals[idx];
+            idx += 1;
+            let ram_has_read = vals[idx];
+            idx += 1;
+            let ram_has_write = vals[idx];
+            idx += 1;
+            let ram_addr = vals[idx];
+            idx += 1;
+            let shout_has_lookup = vals[idx];
+            idx += 1;
+            let shout_val = vals[idx];
+            idx += 1;
+            let shout_lhs = vals[idx];
+            idx += 1;
+            let shout_rhs = vals[idx];
+            idx += 1;
+            let shout_table_id = vals[idx];
+            idx += 1;
+            let branch_f3b1_op = vals[idx];
+            idx += 1;
+            let funct3_bits = [vals[idx], vals[idx + 1], vals[idx + 2]];
+            idx += 3;
+            let funct7_bits = [
+                vals[idx],
+                vals[idx + 1],
+                vals[idx + 2],
+                vals[idx + 3],
+                vals[idx + 4],
+                vals[idx + 5],
+                vals[idx + 6],
+            ];
+            idx += 7;
+            let opcode_flags = [
+                vals[idx],
+                vals[idx + 1],
+                vals[idx + 2],
+                vals[idx + 3],
+                vals[idx + 4],
+                vals[idx + 5],
+                vals[idx + 6],
+                vals[idx + 7],
+                vals[idx + 8],
+                vals[idx + 9],
+                vals[idx + 10],
+                vals[idx + 11],
+            ];
+            idx += 12;
+            let op_write_flags = [
+                vals[idx],
+                vals[idx + 1],
+                vals[idx + 2],
+                vals[idx + 3],
+                vals[idx + 4],
+                vals[idx + 5],
+            ];
+            idx += 6;
+            let funct3_is = [
+                vals[idx],
+                vals[idx + 1],
+                vals[idx + 2],
+                vals[idx + 3],
+                vals[idx + 4],
+                vals[idx + 5],
+                vals[idx + 6],
+                vals[idx + 7],
+            ];
+            idx += 8;
+            let alu_reg_table_delta = vals[idx];
+            idx += 1;
+            let alu_imm_table_delta = vals[idx];
+            idx += 1;
+            let alu_imm_shift_rhs_delta = vals[idx];
+            idx += 1;
+            let rs2_decode = vals[idx];
+            idx += 1;
+            let imm_i = vals[idx];
+            idx += 1;
+            let imm_s = vals[idx];
+            let selector_residuals = w2_decode_selector_residuals(
+                active,
+                opcode,
+                opcode_flags,
+                funct3_is,
+                funct3_bits,
+                branch_f3b1_op,
+                opcode_flags[11],
+            );
+            let bitness_residuals = w2_decode_bitness_residuals(opcode_flags, funct3_is);
+            let alu_branch_residuals = w2_alu_branch_lookup_residuals(
+                active,
+                halted,
+                shout_has_lookup,
+                shout_lhs,
+                shout_rhs,
+                shout_table_id,
+                rs1_val,
+                rs2_val,
+                rd_has_write,
+                rd_is_zero,
+                rd_val,
+                ram_has_read,
+                ram_has_write,
+                ram_addr,
+                shout_val,
+                branch_f3b1_op,
+                funct3_bits,
+                funct7_bits,
+                opcode_flags,
+                op_write_flags,
+                funct3_is,
+                alu_reg_table_delta,
+                alu_imm_table_delta,
+                alu_imm_shift_rhs_delta,
+                rs2_decode,
+                imm_i,
+                imm_s,
+            );
+            let mut weighted = K::ZERO;
+            let mut w_idx = 0usize;
+            for r in selector_residuals {
+                weighted += fields_weights[w_idx] * r;
+                w_idx += 1;
+            }
+            for r in bitness_residuals {
+                weighted += fields_weights[w_idx] * r;
+                w_idx += 1;
+            }
+            for r in alu_branch_residuals {
+                weighted += fields_weights[w_idx] * r;
+                w_idx += 1;
+            }
+            debug_assert_eq!(w_idx, fields_weights.len());
+            debug_assert_eq!(idx + 1, vals.len());
+            weighted
+        }),
+    );
+    let imm_oracle = WeightedMaskOracleSparseTime::new(
+        active_zero,
+        imm_sparse_cols,
+        w2_decode_imm_weight_vector(r_cycle, 4),
+        r_cycle,
+    );
+
     Ok((
-        Some((Box::new(wb_round_oracle), K::ZERO)),
-        Some((Box::new(oracle), K::ZERO)),
+        Some((Box::new(fields_oracle), K::ZERO)),
+        Some((Box::new(imm_oracle), K::ZERO)),
+    ))
+}
+
+type W3TimeClaims = (
+    Option<(Box<dyn RoundOracle>, K)>,
+    Option<(Box<dyn RoundOracle>, K)>,
+    Option<(Box<dyn RoundOracle>, K)>,
+    Option<(Box<dyn RoundOracle>, K)>,
+    Option<(Box<dyn RoundOracle>, K)>,
+);
+
+pub(crate) fn build_route_a_w3_time_claims(
+    params: &NeoParams,
+    step: &StepWitnessBundle<Cmt, F, K>,
+    r_cycle: &[K],
+) -> Result<W3TimeClaims, PiCcsError> {
+    if !w3_required_for_step_witness(step) {
+        return Ok((None, None, None, None, None));
+    }
+    if step.width_instances.len() != 1 {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 expects exactly one width sidecar instance, got {}",
+            step.width_instances.len()
+        )));
+    }
+    if step.decode_instances.len() != 1 {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 expects exactly one decode sidecar instance, got {}",
+            step.decode_instances.len()
+        )));
+    }
+
+    let trace = Rv32TraceLayout::new();
+    let width = Rv32WidthSidecarLayout::new();
+    let decode = Rv32DecodeSidecarLayout::new();
+    let (width_inst, width_wit) = &step.width_instances[0];
+    let (decode_inst, decode_wit) = &step.decode_instances[0];
+    if width_inst.width_id != RV32_TRACE_W3_WIDTH_ID {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 width_id mismatch: got {}, expected {}",
+            width_inst.width_id, RV32_TRACE_W3_WIDTH_ID
+        )));
+    }
+    if decode_inst.decode_id != RV32_TRACE_W2_DECODE_ID {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 decode_id mismatch: got {}, expected {}",
+            decode_inst.decode_id, RV32_TRACE_W2_DECODE_ID
+        )));
+    }
+    if width_inst.comms.len() != 1 || width_wit.mats.len() != 1 {
+        return Err(PiCcsError::ProtocolError(
+            "W3 expects exactly one width sidecar commitment/mat".into(),
+        ));
+    }
+    if decode_inst.comms.len() != 1 || decode_wit.mats.len() != 1 {
+        return Err(PiCcsError::ProtocolError(
+            "W3 expects exactly one decode sidecar commitment/mat".into(),
+        ));
+    }
+    if width_inst.cols != width.cols {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 width sidecar width mismatch: got {}, expected {}",
+            width_inst.cols, width.cols
+        )));
+    }
+    if decode_inst.cols != decode.cols {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 decode sidecar width mismatch: got {}, expected {}",
+            decode_inst.cols, decode.cols
+        )));
+    }
+
+    let m_in = step.mcs.0.m_in;
+    let ell_n = r_cycle.len();
+    let t_len = width_inst.steps;
+    if t_len == 0 {
+        return Err(PiCcsError::InvalidInput("W3: t_len must be >= 1".into()));
+    }
+
+    let main_col_ids = [
+        trace.active,
+        trace.rd_has_write,
+        trace.rd_val,
+        trace.ram_has_read,
+        trace.ram_has_write,
+        trace.ram_rv,
+        trace.ram_wv,
+        trace.rs2_val,
+    ];
+    let main_decoded = decode_trace_col_values_batch(params, step, t_len, &main_col_ids)?;
+    let width_col_ids: Vec<usize> = (0..width.cols).collect();
+    let width_decoded =
+        decode_sidecar_col_values_batch(params, m_in, t_len, &width_wit.mats[0], width.cols, &width_col_ids)?;
+    let decode_col_ids: Vec<usize> = core::iter::once(decode.op_load)
+        .chain(core::iter::once(decode.op_store))
+        .chain(decode.funct3_is.iter().copied())
+        .collect();
+    let decode_decoded =
+        decode_sidecar_col_values_batch(params, m_in, t_len, &decode_wit.mats[0], decode.cols, &decode_col_ids)?;
+
+    let mut main_sparse = BTreeMap::<usize, SparseIdxVec<K>>::new();
+    for &col_id in main_col_ids.iter() {
+        let vals = main_decoded
+            .get(&col_id)
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W3 missing main decoded column {col_id}")))?;
+        main_sparse.insert(col_id, sparse_trace_col_from_values(m_in, ell_n, vals)?);
+    }
+    let mut width_sparse = BTreeMap::<usize, SparseIdxVec<K>>::new();
+    for col_id in 0..width.cols {
+        let vals = width_decoded
+            .get(&col_id)
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W3 missing width decoded column {col_id}")))?;
+        width_sparse.insert(col_id, sparse_trace_col_from_values(m_in, ell_n, vals)?);
+    }
+    let mut decode_sparse = BTreeMap::<usize, SparseIdxVec<K>>::new();
+    for &col_id in decode_col_ids.iter() {
+        let vals = decode_decoded
+            .get(&col_id)
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W3 missing decode decoded column {col_id}")))?;
+        decode_sparse.insert(col_id, sparse_trace_col_from_values(m_in, ell_n, vals)?);
+    }
+
+    let main_col = |col_id: usize| -> Result<SparseIdxVec<K>, PiCcsError> {
+        main_sparse
+            .get(&col_id)
+            .cloned()
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W3 missing main sparse column {col_id}")))
+    };
+    let width_col = |col_id: usize| -> Result<SparseIdxVec<K>, PiCcsError> {
+        width_sparse
+            .get(&col_id)
+            .cloned()
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W3 missing width sparse column {col_id}")))
+    };
+    let decode_col = |col_id: usize| -> Result<SparseIdxVec<K>, PiCcsError> {
+        decode_sparse
+            .get(&col_id)
+            .cloned()
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W3 missing decode sparse column {col_id}")))
+    };
+
+    let bitness_cols: Vec<usize> = {
+        let mut out = vec![
+            width.is_lb,
+            width.is_lbu,
+            width.is_lh,
+            width.is_lhu,
+            width.is_lw,
+            width.is_sb,
+            width.is_sh,
+            width.is_sw,
+        ];
+        out.extend_from_slice(&width.ram_rv_low_bit);
+        out.extend_from_slice(&width.rs2_low_bit);
+        out
+    };
+    let mut bitness_sparse = Vec::with_capacity(bitness_cols.len());
+    for &col_id in bitness_cols.iter() {
+        bitness_sparse.push(width_col(col_id)?);
+    }
+    let bitness_weights = w3_bitness_weight_vector(r_cycle, bitness_cols.len());
+    let bitness_oracle = FormulaOracleSparseTime::new(
+        bitness_sparse,
+        3,
+        r_cycle,
+        Box::new(move |vals: &[K]| {
+            let mut weighted = K::ZERO;
+            for (b, w) in vals.iter().zip(bitness_weights.iter()) {
+                weighted += *w * *b * (*b - K::ONE);
+            }
+            weighted
+        }),
+    );
+
+    let mut quiescence_sparse = Vec::with_capacity(1 + width.cols);
+    quiescence_sparse.push(main_col(trace.active)?);
+    for col_id in 0..width.cols {
+        quiescence_sparse.push(width_col(col_id)?);
+    }
+    let quiescence_weights = w3_quiescence_weight_vector(r_cycle, width.cols);
+    let quiescence_oracle = FormulaOracleSparseTime::new(
+        quiescence_sparse,
+        3,
+        r_cycle,
+        Box::new(move |vals: &[K]| {
+            let active = vals[0];
+            let mut weighted = K::ZERO;
+            for (i, w) in quiescence_weights.iter().enumerate() {
+                weighted += *w * vals[1 + i];
+            }
+            (K::ONE - active) * weighted
+        }),
+    );
+
+    let mut selector_sparse = Vec::with_capacity(18);
+    selector_sparse.push(decode_col(decode.op_load)?);
+    selector_sparse.push(decode_col(decode.op_store)?);
+    for &col_id in decode.funct3_is.iter() {
+        selector_sparse.push(decode_col(col_id)?);
+    }
+    selector_sparse.push(width_col(width.is_lb)?);
+    selector_sparse.push(width_col(width.is_lbu)?);
+    selector_sparse.push(width_col(width.is_lh)?);
+    selector_sparse.push(width_col(width.is_lhu)?);
+    selector_sparse.push(width_col(width.is_lw)?);
+    selector_sparse.push(width_col(width.is_sb)?);
+    selector_sparse.push(width_col(width.is_sh)?);
+    selector_sparse.push(width_col(width.is_sw)?);
+    let selector_weights = w3_selector_weight_vector(r_cycle, 10);
+    let selector_oracle = FormulaOracleSparseTime::new(
+        selector_sparse,
+        3,
+        r_cycle,
+        Box::new(move |vals: &[K]| {
+            let op_load = vals[0];
+            let op_store = vals[1];
+            let funct3_is = [vals[2], vals[3], vals[4], vals[5], vals[6], vals[7], vals[8], vals[9]];
+            let load_flags = [vals[10], vals[11], vals[12], vals[13], vals[14]];
+            let store_flags = [vals[15], vals[16], vals[17]];
+            let residuals = w3_selector_linkage_residuals(op_load, op_store, funct3_is, load_flags, store_flags);
+            let mut weighted = K::ZERO;
+            for (r, w) in residuals.iter().zip(selector_weights.iter()) {
+                weighted += *w * *r;
+            }
+            weighted
+        }),
+    );
+
+    let mut load_sparse = Vec::with_capacity(26);
+    load_sparse.push(main_col(trace.rd_val)?);
+    load_sparse.push(main_col(trace.ram_rv)?);
+    load_sparse.push(main_col(trace.rd_has_write)?);
+    load_sparse.push(main_col(trace.ram_has_read)?);
+    load_sparse.push(width_col(width.is_lb)?);
+    load_sparse.push(width_col(width.is_lbu)?);
+    load_sparse.push(width_col(width.is_lh)?);
+    load_sparse.push(width_col(width.is_lhu)?);
+    load_sparse.push(width_col(width.is_lw)?);
+    load_sparse.push(width_col(width.ram_rv_q16)?);
+    for &col_id in width.ram_rv_low_bit.iter() {
+        load_sparse.push(width_col(col_id)?);
+    }
+    let load_weights = w3_load_weight_vector(r_cycle, 16);
+    let load_oracle = FormulaOracleSparseTime::new(
+        load_sparse,
+        3,
+        r_cycle,
+        Box::new(move |vals: &[K]| {
+            let rd_val = vals[0];
+            let ram_rv = vals[1];
+            let rd_has_write = vals[2];
+            let ram_has_read = vals[3];
+            let load_flags = [vals[4], vals[5], vals[6], vals[7], vals[8]];
+            let ram_rv_q16 = vals[9];
+            let mut ram_rv_low_bits = [K::ZERO; 16];
+            ram_rv_low_bits.copy_from_slice(&vals[10..26]);
+            let residuals = w3_load_semantics_residuals(
+                rd_val,
+                ram_rv,
+                rd_has_write,
+                ram_has_read,
+                load_flags,
+                ram_rv_q16,
+                ram_rv_low_bits,
+            );
+            let mut weighted = K::ZERO;
+            for (r, w) in residuals.iter().zip(load_weights.iter()) {
+                weighted += *w * *r;
+            }
+            weighted
+        }),
+    );
+
+    let mut store_sparse = Vec::with_capacity(42);
+    store_sparse.push(main_col(trace.ram_wv)?);
+    store_sparse.push(main_col(trace.ram_rv)?);
+    store_sparse.push(main_col(trace.rs2_val)?);
+    store_sparse.push(main_col(trace.rd_has_write)?);
+    store_sparse.push(main_col(trace.ram_has_read)?);
+    store_sparse.push(main_col(trace.ram_has_write)?);
+    store_sparse.push(width_col(width.is_sb)?);
+    store_sparse.push(width_col(width.is_sh)?);
+    store_sparse.push(width_col(width.is_sw)?);
+    store_sparse.push(width_col(width.rs2_q16)?);
+    for &col_id in width.ram_rv_low_bit.iter() {
+        store_sparse.push(width_col(col_id)?);
+    }
+    for &col_id in width.rs2_low_bit.iter() {
+        store_sparse.push(width_col(col_id)?);
+    }
+    let store_weights = w3_store_weight_vector(r_cycle, 12);
+    let store_oracle = FormulaOracleSparseTime::new(
+        store_sparse,
+        3,
+        r_cycle,
+        Box::new(move |vals: &[K]| {
+            let ram_wv = vals[0];
+            let ram_rv = vals[1];
+            let rs2_val = vals[2];
+            let rd_has_write = vals[3];
+            let ram_has_read = vals[4];
+            let ram_has_write = vals[5];
+            let store_flags = [vals[6], vals[7], vals[8]];
+            let rs2_q16 = vals[9];
+            let mut ram_rv_low_bits = [K::ZERO; 16];
+            ram_rv_low_bits.copy_from_slice(&vals[10..26]);
+            let mut rs2_low_bits = [K::ZERO; 16];
+            rs2_low_bits.copy_from_slice(&vals[26..42]);
+            let residuals = w3_store_semantics_residuals(
+                ram_wv,
+                ram_rv,
+                rs2_val,
+                rd_has_write,
+                ram_has_read,
+                ram_has_write,
+                store_flags,
+                rs2_q16,
+                ram_rv_low_bits,
+                rs2_low_bits,
+            );
+            let mut weighted = K::ZERO;
+            for (r, w) in residuals.iter().zip(store_weights.iter()) {
+                weighted += *w * *r;
+            }
+            weighted
+        }),
+    );
+
+    Ok((
+        Some((Box::new(bitness_oracle), K::ZERO)),
+        Some((Box::new(quiescence_oracle), K::ZERO)),
+        Some((Box::new(selector_oracle), K::ZERO)),
+        Some((Box::new(load_oracle), K::ZERO)),
+        Some((Box::new(store_oracle), K::ZERO)),
     ))
 }
 
@@ -4902,6 +5991,146 @@ fn emit_route_a_wb_wp_me_claims(
     Ok((wb_claims, wp_claims))
 }
 
+fn emit_route_a_w2_me_claims(
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s: &CcsStructure<F>,
+    step: &StepWitnessBundle<Cmt, F, K>,
+    r_time: &[K],
+) -> Result<Vec<MeInstance<Cmt, F, K>>, PiCcsError> {
+    if !w2_required_for_step_witness(step) {
+        return Ok(Vec::new());
+    }
+    if step.decode_instances.len() != 1 {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W2 expects exactly one decode sidecar instance, got {}",
+            step.decode_instances.len()
+        )));
+    }
+    let (decode_inst, decode_wit) = &step.decode_instances[0];
+    if decode_inst.decode_id != RV32_TRACE_W2_DECODE_ID {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W2 decode_id mismatch: got {}, expected {}",
+            decode_inst.decode_id, RV32_TRACE_W2_DECODE_ID
+        )));
+    }
+    if decode_inst.comms.len() != 1 || decode_wit.mats.len() != 1 {
+        return Err(PiCcsError::ProtocolError(
+            "W2 expects exactly one decode sidecar commitment/mat".into(),
+        ));
+    }
+
+    let decode_layout = Rv32DecodeSidecarLayout::new();
+    if decode_inst.cols != decode_layout.cols {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W2 decode sidecar width mismatch: got {}, expected {}",
+            decode_inst.cols, decode_layout.cols
+        )));
+    }
+
+    let m_in = step.mcs.0.m_in;
+    let t_len = decode_inst.steps;
+    let core_t = s.t();
+    let open_cols: Vec<usize> = (0..decode_layout.cols).collect();
+    let mut claims = ts::emit_me_claims_for_mats(
+        tr,
+        b"decode/me_digest_w2_time",
+        params,
+        s,
+        core::slice::from_ref(&decode_inst.comms[0]),
+        core::slice::from_ref(&decode_wit.mats[0]),
+        r_time,
+        m_in,
+    )?;
+    if claims.len() != 1 {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W2 expects exactly one decode ME claim at r_time, got {}",
+            claims.len()
+        )));
+    }
+    crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
+        params,
+        m_in,
+        t_len,
+        m_in,
+        &open_cols,
+        core_t,
+        &decode_wit.mats[0],
+        &mut claims[0],
+    )?;
+    Ok(claims)
+}
+
+fn emit_route_a_w3_me_claims(
+    tr: &mut Poseidon2Transcript,
+    params: &NeoParams,
+    s: &CcsStructure<F>,
+    step: &StepWitnessBundle<Cmt, F, K>,
+    r_time: &[K],
+) -> Result<Vec<MeInstance<Cmt, F, K>>, PiCcsError> {
+    if !w3_required_for_step_witness(step) {
+        return Ok(Vec::new());
+    }
+    if step.width_instances.len() != 1 {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 expects exactly one width sidecar instance, got {}",
+            step.width_instances.len()
+        )));
+    }
+    let (width_inst, width_wit) = &step.width_instances[0];
+    if width_inst.width_id != RV32_TRACE_W3_WIDTH_ID {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 width_id mismatch: got {}, expected {}",
+            width_inst.width_id, RV32_TRACE_W3_WIDTH_ID
+        )));
+    }
+    if width_inst.comms.len() != 1 || width_wit.mats.len() != 1 {
+        return Err(PiCcsError::ProtocolError(
+            "W3 expects exactly one width sidecar commitment/mat".into(),
+        ));
+    }
+
+    let width_layout = Rv32WidthSidecarLayout::new();
+    if width_inst.cols != width_layout.cols {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 width sidecar width mismatch: got {}, expected {}",
+            width_inst.cols, width_layout.cols
+        )));
+    }
+
+    let m_in = step.mcs.0.m_in;
+    let t_len = width_inst.steps;
+    let core_t = s.t();
+    let open_cols: Vec<usize> = (0..width_layout.cols).collect();
+    let mut claims = ts::emit_me_claims_for_mats(
+        tr,
+        b"width/me_digest_w3_time",
+        params,
+        s,
+        core::slice::from_ref(&width_inst.comms[0]),
+        core::slice::from_ref(&width_wit.mats[0]),
+        r_time,
+        m_in,
+    )?;
+    if claims.len() != 1 {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 expects exactly one width ME claim at r_time, got {}",
+            claims.len()
+        )));
+    }
+    crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
+        params,
+        m_in,
+        t_len,
+        m_in,
+        &open_cols,
+        core_t,
+        &width_wit.mats[0],
+        &mut claims[0],
+    )?;
+    Ok(claims)
+}
+
 fn verify_route_a_wb_wp_terminals(
     core_t: usize,
     step: &StepInstanceBundle<Cmt, F, K>,
@@ -4956,71 +6185,7 @@ fn verify_route_a_wb_wp_terminals(
             wb_weighted_bitness += w * b * (b - K::ONE);
         }
 
-        let wb_open_col = |col_id: usize| -> Result<K, PiCcsError> {
-            let idx = wb_bool_cols
-                .iter()
-                .position(|&c| c == col_id)
-                .ok_or_else(|| {
-                    PiCcsError::ProtocolError(format!("WB/W2 terminal: missing required opening column {}", col_id))
-                })?;
-            Ok(wb_bool_open[idx])
-        };
-
-        let residuals = w2_decode_selector_residuals(
-            wb_open_col(trace.active)?,
-            [
-                wb_open_col(trace.op_lui)?,
-                wb_open_col(trace.op_auipc)?,
-                wb_open_col(trace.op_jal)?,
-                wb_open_col(trace.op_jalr)?,
-                wb_open_col(trace.op_branch)?,
-                wb_open_col(trace.op_load)?,
-                wb_open_col(trace.op_store)?,
-                wb_open_col(trace.op_alu_imm)?,
-                wb_open_col(trace.op_alu_reg)?,
-                wb_open_col(trace.op_misc_mem)?,
-                wb_open_col(trace.op_system)?,
-                wb_open_col(trace.op_amo)?,
-            ],
-            [
-                wb_open_col(trace.funct3_is[0])?,
-                wb_open_col(trace.funct3_is[1])?,
-                wb_open_col(trace.funct3_is[2])?,
-                wb_open_col(trace.funct3_is[3])?,
-                wb_open_col(trace.funct3_is[4])?,
-                wb_open_col(trace.funct3_is[5])?,
-                wb_open_col(trace.funct3_is[6])?,
-                wb_open_col(trace.funct3_is[7])?,
-            ],
-            [
-                wb_open_col(trace.funct3_bit[0])?,
-                wb_open_col(trace.funct3_bit[1])?,
-                wb_open_col(trace.funct3_bit[2])?,
-            ],
-            wb_open_col(trace.branch_f3b1_op)?,
-            wb_open_col(trace.op_load)?,
-            [
-                wb_open_col(trace.is_lb)?,
-                wb_open_col(trace.is_lbu)?,
-                wb_open_col(trace.is_lh)?,
-                wb_open_col(trace.is_lhu)?,
-                wb_open_col(trace.is_lw)?,
-            ],
-            wb_open_col(trace.op_store)?,
-            [
-                wb_open_col(trace.is_sb)?,
-                wb_open_col(trace.is_sh)?,
-                wb_open_col(trace.is_sw)?,
-            ],
-            wb_open_col(trace.op_amo)?,
-        );
-        let w2_weights = w2_decode_pack_weight_vector(r_cycle, residuals.len());
-        let mut w2_weighted_residual = K::ZERO;
-        for (r, w) in residuals.iter().zip(w2_weights.iter()) {
-            w2_weighted_residual += *w * *r;
-        }
-
-        let expected_terminal = eq_points(r_time, r_cycle) * (wb_weighted_bitness + w2_weighted_residual);
+        let expected_terminal = eq_points(r_time, r_cycle) * wb_weighted_bitness;
         let observed_terminal = batched_final_values[claim_idx];
         if observed_terminal != expected_terminal {
             return Err(PiCcsError::ProtocolError(
@@ -5091,6 +6256,689 @@ fn verify_route_a_wb_wp_terminals(
         return Err(PiCcsError::ProtocolError(
             "unexpected WP ME claims: wp/quiescence stage is not enabled".into(),
         ));
+    }
+
+    Ok(())
+}
+
+fn verify_route_a_w2_terminals(
+    core_t: usize,
+    step: &StepInstanceBundle<Cmt, F, K>,
+    r_time: &[K],
+    r_cycle: &[K],
+    batched_final_values: &[K],
+    claim_plan: &RouteATimeClaimPlan,
+    mem_proof: &MemSidecarProof<Cmt, F, K>,
+) -> Result<(), PiCcsError> {
+    if claim_plan.w2_decode_fields.is_none() && claim_plan.w2_decode_immediates.is_none() {
+        if !mem_proof.w2_decode_me_claims.is_empty() {
+            return Err(PiCcsError::ProtocolError(
+                "unexpected W2 decode ME claims: W2 stage is not enabled".into(),
+            ));
+        }
+        return Ok(());
+    }
+
+    if step.decode_insts.len() != 1 {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W2 requires exactly one decode sidecar instance in public step, got {}",
+            step.decode_insts.len()
+        )));
+    }
+    if mem_proof.w2_decode_me_claims.len() != 1 {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W2 expects exactly one decode ME claim at r_time (got {})",
+            mem_proof.w2_decode_me_claims.len()
+        )));
+    }
+    if mem_proof.wb_me_claims.len() != 1 {
+        return Err(PiCcsError::ProtocolError(
+            "W2 requires WB ME openings for shared active/bit terminals".into(),
+        ));
+    }
+
+    let decode_layout = Rv32DecodeSidecarLayout::new();
+    let decode_me = &mem_proof.w2_decode_me_claims[0];
+    let decode_inst = &step.decode_insts[0];
+    if decode_inst.decode_id != RV32_TRACE_W2_DECODE_ID {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W2 decode_id mismatch: got {}, expected {}",
+            decode_inst.decode_id, RV32_TRACE_W2_DECODE_ID
+        )));
+    }
+    if decode_inst.comms.len() != 1 {
+        return Err(PiCcsError::ProtocolError(
+            "W2 expects exactly one decode sidecar commitment".into(),
+        ));
+    }
+    if decode_me.r.as_slice() != r_time {
+        return Err(PiCcsError::ProtocolError(
+            "W2 decode ME claim r mismatch (expected r_time)".into(),
+        ));
+    }
+    if decode_me.c != decode_inst.comms[0] {
+        return Err(PiCcsError::ProtocolError(
+            "W2 decode ME claim commitment mismatch".into(),
+        ));
+    }
+    if decode_me.m_in != step.mcs_inst.m_in {
+        return Err(PiCcsError::ProtocolError("W2 decode ME claim m_in mismatch".into()));
+    }
+    let need_decode = core_t
+        .checked_add(decode_layout.cols)
+        .ok_or_else(|| PiCcsError::InvalidInput("W2 decode opening count overflow".into()))?;
+    if decode_me.y_scalars.len() != need_decode {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W2 decode ME opening length mismatch (got {}, expected {need_decode})",
+            decode_me.y_scalars.len()
+        )));
+    }
+    let decode_open = &decode_me.y_scalars[core_t..];
+    let decode_open_col = |col_id: usize| -> Result<K, PiCcsError> {
+        decode_open
+            .get(col_id)
+            .copied()
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W2 missing decode opening col_id={col_id}")))
+    };
+
+    let trace = Rv32TraceLayout::new();
+    let wb_me = &mem_proof.wb_me_claims[0];
+    let wb_cols = rv32_trace_wb_columns(&trace);
+    let need_wb = core_t
+        .checked_add(wb_cols.len())
+        .ok_or_else(|| PiCcsError::InvalidInput("W2 WB opening count overflow".into()))?;
+    if wb_me.y_scalars.len() != need_wb {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W2 WB opening length mismatch (got {}, expected {need_wb})",
+            wb_me.y_scalars.len()
+        )));
+    }
+    let wb_open = &wb_me.y_scalars[core_t..];
+    let wb_open_col = |col_id: usize| -> Result<K, PiCcsError> {
+        let idx = wb_cols
+            .iter()
+            .position(|&c| c == col_id)
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W2 missing WB opening column {col_id}")))?;
+        Ok(wb_open[idx])
+    };
+
+    if mem_proof.wp_me_claims.len() != 1 {
+        return Err(PiCcsError::ProtocolError(
+            "W2 requires WP ME openings for main trace semantics terminals".into(),
+        ));
+    }
+    let wp_me = &mem_proof.wp_me_claims[0];
+    if wp_me.r.as_slice() != r_time {
+        return Err(PiCcsError::ProtocolError(
+            "W2 WP ME claim r mismatch (expected r_time)".into(),
+        ));
+    }
+    if wp_me.c != step.mcs_inst.c {
+        return Err(PiCcsError::ProtocolError("W2 WP ME claim commitment mismatch".into()));
+    }
+    if wp_me.m_in != step.mcs_inst.m_in {
+        return Err(PiCcsError::ProtocolError("W2 WP ME claim m_in mismatch".into()));
+    }
+    let wp_cols = rv32_trace_wp_opening_columns(&trace);
+    let need_wp = core_t
+        .checked_add(wp_cols.len())
+        .ok_or_else(|| PiCcsError::InvalidInput("W2 WP opening count overflow".into()))?;
+    if wp_me.y_scalars.len() != need_wp {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W2 WP opening length mismatch (got {}, expected {need_wp})",
+            wp_me.y_scalars.len()
+        )));
+    }
+    let wp_open = &wp_me.y_scalars[core_t..];
+    let wp_open_col = |col_id: usize| -> Result<K, PiCcsError> {
+        let idx = wp_cols
+            .iter()
+            .position(|&c| c == col_id)
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W2 missing WP opening column {col_id}")))?;
+        Ok(wp_open[idx])
+    };
+
+    if let Some(claim_idx) = claim_plan.w2_decode_fields {
+        if claim_idx >= batched_final_values.len() {
+            return Err(PiCcsError::ProtocolError(
+                "w2/decode_fields claim index out of range".into(),
+            ));
+        }
+        let opcode_flags = [
+            decode_open_col(decode_layout.op_lui)?,
+            decode_open_col(decode_layout.op_auipc)?,
+            decode_open_col(decode_layout.op_jal)?,
+            decode_open_col(decode_layout.op_jalr)?,
+            decode_open_col(decode_layout.op_branch)?,
+            decode_open_col(decode_layout.op_load)?,
+            decode_open_col(decode_layout.op_store)?,
+            decode_open_col(decode_layout.op_alu_imm)?,
+            decode_open_col(decode_layout.op_alu_reg)?,
+            decode_open_col(decode_layout.op_misc_mem)?,
+            decode_open_col(decode_layout.op_system)?,
+            decode_open_col(decode_layout.op_amo)?,
+        ];
+        let funct3_is = [
+            decode_open_col(decode_layout.funct3_is[0])?,
+            decode_open_col(decode_layout.funct3_is[1])?,
+            decode_open_col(decode_layout.funct3_is[2])?,
+            decode_open_col(decode_layout.funct3_is[3])?,
+            decode_open_col(decode_layout.funct3_is[4])?,
+            decode_open_col(decode_layout.funct3_is[5])?,
+            decode_open_col(decode_layout.funct3_is[6])?,
+            decode_open_col(decode_layout.funct3_is[7])?,
+        ];
+        let funct3_bits = [
+            wb_open_col(trace.funct3_bit[0])?,
+            wb_open_col(trace.funct3_bit[1])?,
+            wb_open_col(trace.funct3_bit[2])?,
+        ];
+        let funct7_bits = [
+            wb_open_col(trace.funct7_bit[0])?,
+            wb_open_col(trace.funct7_bit[1])?,
+            wb_open_col(trace.funct7_bit[2])?,
+            wb_open_col(trace.funct7_bit[3])?,
+            wb_open_col(trace.funct7_bit[4])?,
+            wb_open_col(trace.funct7_bit[5])?,
+            wb_open_col(trace.funct7_bit[6])?,
+        ];
+        let op_write_flags = [
+            decode_open_col(decode_layout.op_lui_write)?,
+            decode_open_col(decode_layout.op_auipc_write)?,
+            decode_open_col(decode_layout.op_jal_write)?,
+            decode_open_col(decode_layout.op_jalr_write)?,
+            decode_open_col(decode_layout.op_alu_imm_write)?,
+            decode_open_col(decode_layout.op_alu_reg_write)?,
+        ];
+
+        let selector_residuals = w2_decode_selector_residuals(
+            wp_open_col(trace.active)?,
+            wp_open_col(trace.opcode)?,
+            opcode_flags,
+            funct3_is,
+            funct3_bits,
+            wp_open_col(trace.branch_f3b1_op)?,
+            decode_open_col(decode_layout.op_amo)?,
+        );
+        let bitness_residuals = w2_decode_bitness_residuals(opcode_flags, funct3_is);
+        let alu_branch_residuals = w2_alu_branch_lookup_residuals(
+            wp_open_col(trace.active)?,
+            wb_open_col(trace.halted)?,
+            wp_open_col(trace.shout_has_lookup)?,
+            wp_open_col(trace.shout_lhs)?,
+            wp_open_col(trace.shout_rhs)?,
+            wp_open_col(trace.shout_table_id)?,
+            wp_open_col(trace.rs1_val)?,
+            wp_open_col(trace.rs2_val)?,
+            wp_open_col(trace.rd_has_write)?,
+            wb_open_col(trace.rd_is_zero)?,
+            wp_open_col(trace.rd_val)?,
+            wp_open_col(trace.ram_has_read)?,
+            wp_open_col(trace.ram_has_write)?,
+            wp_open_col(trace.ram_addr)?,
+            wp_open_col(trace.shout_val)?,
+            wp_open_col(trace.branch_f3b1_op)?,
+            funct3_bits,
+            funct7_bits,
+            opcode_flags,
+            op_write_flags,
+            funct3_is,
+            decode_open_col(decode_layout.alu_reg_table_delta)?,
+            decode_open_col(decode_layout.alu_imm_table_delta)?,
+            decode_open_col(decode_layout.alu_imm_shift_rhs_delta)?,
+            decode_open_col(decode_layout.rs2)?,
+            decode_open_col(decode_layout.imm_i)?,
+            decode_open_col(decode_layout.imm_s)?,
+        );
+
+        let mut residuals = Vec::with_capacity(W2_FIELDS_RESIDUAL_COUNT);
+        residuals.extend_from_slice(&selector_residuals);
+        residuals.extend_from_slice(&bitness_residuals);
+        residuals.extend_from_slice(&alu_branch_residuals);
+        let mut weighted = K::ZERO;
+        let weights = w2_decode_pack_weight_vector(r_cycle, residuals.len());
+        for (r, w) in residuals.iter().zip(weights.iter()) {
+            weighted += *w * *r;
+        }
+        let expected = eq_points(r_time, r_cycle) * weighted;
+        if batched_final_values[claim_idx] != expected {
+            return Err(PiCcsError::ProtocolError(
+                "w2/decode_fields terminal value mismatch".into(),
+            ));
+        }
+    }
+
+    if let Some(claim_idx) = claim_plan.w2_decode_immediates {
+        if claim_idx >= batched_final_values.len() {
+            return Err(PiCcsError::ProtocolError(
+                "w2/decode_immediates claim index out of range".into(),
+            ));
+        }
+        let residuals = w2_decode_immediate_residuals(
+            decode_open_col(decode_layout.imm_i)?,
+            decode_open_col(decode_layout.imm_s)?,
+            decode_open_col(decode_layout.imm_b)?,
+            decode_open_col(decode_layout.imm_j)?,
+            [
+                wb_open_col(trace.rd_bit[0])?,
+                wb_open_col(trace.rd_bit[1])?,
+                wb_open_col(trace.rd_bit[2])?,
+                wb_open_col(trace.rd_bit[3])?,
+                wb_open_col(trace.rd_bit[4])?,
+            ],
+            [
+                wb_open_col(trace.funct3_bit[0])?,
+                wb_open_col(trace.funct3_bit[1])?,
+                wb_open_col(trace.funct3_bit[2])?,
+            ],
+            [
+                wb_open_col(trace.rs1_bit[0])?,
+                wb_open_col(trace.rs1_bit[1])?,
+                wb_open_col(trace.rs1_bit[2])?,
+                wb_open_col(trace.rs1_bit[3])?,
+                wb_open_col(trace.rs1_bit[4])?,
+            ],
+            [
+                wb_open_col(trace.rs2_bit[0])?,
+                wb_open_col(trace.rs2_bit[1])?,
+                wb_open_col(trace.rs2_bit[2])?,
+                wb_open_col(trace.rs2_bit[3])?,
+                wb_open_col(trace.rs2_bit[4])?,
+            ],
+            [
+                wb_open_col(trace.funct7_bit[0])?,
+                wb_open_col(trace.funct7_bit[1])?,
+                wb_open_col(trace.funct7_bit[2])?,
+                wb_open_col(trace.funct7_bit[3])?,
+                wb_open_col(trace.funct7_bit[4])?,
+                wb_open_col(trace.funct7_bit[5])?,
+                wb_open_col(trace.funct7_bit[6])?,
+            ],
+        );
+        let mut weighted = K::ZERO;
+        let weights = w2_decode_imm_weight_vector(r_cycle, residuals.len());
+        for (r, w) in residuals.iter().zip(weights.iter()) {
+            weighted += *w * *r;
+        }
+        let expected = eq_points(r_time, r_cycle) * weighted;
+        if batched_final_values[claim_idx] != expected {
+            return Err(PiCcsError::ProtocolError(
+                "w2/decode_immediates terminal value mismatch".into(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+fn verify_route_a_w3_terminals(
+    core_t: usize,
+    step: &StepInstanceBundle<Cmt, F, K>,
+    r_time: &[K],
+    r_cycle: &[K],
+    batched_final_values: &[K],
+    claim_plan: &RouteATimeClaimPlan,
+    mem_proof: &MemSidecarProof<Cmt, F, K>,
+) -> Result<(), PiCcsError> {
+    let any_w3_claim = claim_plan.w3_bitness.is_some()
+        || claim_plan.w3_quiescence.is_some()
+        || claim_plan.w3_selector_linkage.is_some()
+        || claim_plan.w3_load_semantics.is_some()
+        || claim_plan.w3_store_semantics.is_some();
+    if !any_w3_claim {
+        if !mem_proof.w3_width_me_claims.is_empty() {
+            return Err(PiCcsError::ProtocolError(
+                "unexpected W3 width ME claims: W3 stage is not enabled".into(),
+            ));
+        }
+        return Ok(());
+    }
+
+    if step.width_insts.len() != 1 {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 requires exactly one width sidecar instance in public step, got {}",
+            step.width_insts.len()
+        )));
+    }
+    if step.decode_insts.len() != 1 {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 requires exactly one decode sidecar instance in public step, got {}",
+            step.decode_insts.len()
+        )));
+    }
+    if mem_proof.w3_width_me_claims.len() != 1 {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 expects exactly one width ME claim at r_time (got {})",
+            mem_proof.w3_width_me_claims.len()
+        )));
+    }
+    if mem_proof.wp_me_claims.len() != 1 {
+        return Err(PiCcsError::ProtocolError(
+            "W3 requires WP ME openings for shared main-trace terminals".into(),
+        ));
+    }
+    if mem_proof.w2_decode_me_claims.len() != 1 {
+        return Err(PiCcsError::ProtocolError(
+            "W3 requires W2 decode ME openings for selector linkage terminals".into(),
+        ));
+    }
+
+    let trace = Rv32TraceLayout::new();
+    let width = Rv32WidthSidecarLayout::new();
+    let decode = Rv32DecodeSidecarLayout::new();
+
+    let width_inst = &step.width_insts[0];
+    if width_inst.width_id != RV32_TRACE_W3_WIDTH_ID {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 width_id mismatch: got {}, expected {}",
+            width_inst.width_id, RV32_TRACE_W3_WIDTH_ID
+        )));
+    }
+    if width_inst.comms.len() != 1 {
+        return Err(PiCcsError::ProtocolError(
+            "W3 expects exactly one width sidecar commitment".into(),
+        ));
+    }
+    if width_inst.cols != width.cols {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 width sidecar width mismatch: got {}, expected {}",
+            width_inst.cols, width.cols
+        )));
+    }
+    let width_me = &mem_proof.w3_width_me_claims[0];
+    if width_me.r.as_slice() != r_time {
+        return Err(PiCcsError::ProtocolError(
+            "W3 width ME claim r mismatch (expected r_time)".into(),
+        ));
+    }
+    if width_me.c != width_inst.comms[0] {
+        return Err(PiCcsError::ProtocolError(
+            "W3 width ME claim commitment mismatch".into(),
+        ));
+    }
+    if width_me.m_in != step.mcs_inst.m_in {
+        return Err(PiCcsError::ProtocolError("W3 width ME claim m_in mismatch".into()));
+    }
+    let need_width = core_t
+        .checked_add(width.cols)
+        .ok_or_else(|| PiCcsError::InvalidInput("W3 width opening count overflow".into()))?;
+    if width_me.y_scalars.len() != need_width {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 width ME opening length mismatch (got {}, expected {need_width})",
+            width_me.y_scalars.len()
+        )));
+    }
+    let width_open = &width_me.y_scalars[core_t..];
+    let width_open_col = |col_id: usize| -> Result<K, PiCcsError> {
+        width_open
+            .get(col_id)
+            .copied()
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W3 missing width opening col_id={col_id}")))
+    };
+
+    let wp_me = &mem_proof.wp_me_claims[0];
+    if wp_me.r.as_slice() != r_time {
+        return Err(PiCcsError::ProtocolError(
+            "W3 WP ME claim r mismatch (expected r_time)".into(),
+        ));
+    }
+    if wp_me.c != step.mcs_inst.c {
+        return Err(PiCcsError::ProtocolError("W3 WP ME claim commitment mismatch".into()));
+    }
+    if wp_me.m_in != step.mcs_inst.m_in {
+        return Err(PiCcsError::ProtocolError("W3 WP ME claim m_in mismatch".into()));
+    }
+    let wp_cols = rv32_trace_wp_opening_columns(&trace);
+    let need_wp = core_t
+        .checked_add(wp_cols.len())
+        .ok_or_else(|| PiCcsError::InvalidInput("W3 WP opening count overflow".into()))?;
+    if wp_me.y_scalars.len() != need_wp {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 WP ME opening length mismatch (got {}, expected {need_wp})",
+            wp_me.y_scalars.len()
+        )));
+    }
+    let wp_open = &wp_me.y_scalars[core_t..];
+    let wp_open_col = |col_id: usize| -> Result<K, PiCcsError> {
+        let idx = wp_cols
+            .iter()
+            .position(|&c| c == col_id)
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W3 missing WP opening column {col_id}")))?;
+        Ok(wp_open[idx])
+    };
+
+    let decode_inst = &step.decode_insts[0];
+    if decode_inst.decode_id != RV32_TRACE_W2_DECODE_ID {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 decode_id mismatch: got {}, expected {}",
+            decode_inst.decode_id, RV32_TRACE_W2_DECODE_ID
+        )));
+    }
+    if decode_inst.comms.len() != 1 {
+        return Err(PiCcsError::ProtocolError(
+            "W3 expects exactly one decode sidecar commitment".into(),
+        ));
+    }
+    if decode_inst.cols != decode.cols {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 decode sidecar width mismatch: got {}, expected {}",
+            decode_inst.cols, decode.cols
+        )));
+    }
+    let decode_me = &mem_proof.w2_decode_me_claims[0];
+    if decode_me.r.as_slice() != r_time {
+        return Err(PiCcsError::ProtocolError(
+            "W3 decode ME claim r mismatch (expected r_time)".into(),
+        ));
+    }
+    if decode_me.c != decode_inst.comms[0] {
+        return Err(PiCcsError::ProtocolError(
+            "W3 decode ME claim commitment mismatch".into(),
+        ));
+    }
+    if decode_me.m_in != step.mcs_inst.m_in {
+        return Err(PiCcsError::ProtocolError("W3 decode ME claim m_in mismatch".into()));
+    }
+    let need_decode = core_t
+        .checked_add(decode.cols)
+        .ok_or_else(|| PiCcsError::InvalidInput("W3 decode opening count overflow".into()))?;
+    if decode_me.y_scalars.len() != need_decode {
+        return Err(PiCcsError::ProtocolError(format!(
+            "W3 decode ME opening length mismatch (got {}, expected {need_decode})",
+            decode_me.y_scalars.len()
+        )));
+    }
+    let decode_open = &decode_me.y_scalars[core_t..];
+    let decode_open_col = |col_id: usize| -> Result<K, PiCcsError> {
+        decode_open
+            .get(col_id)
+            .copied()
+            .ok_or_else(|| PiCcsError::ProtocolError(format!("W3 missing decode opening col_id={col_id}")))
+    };
+
+    let active = wp_open_col(trace.active)?;
+    let rd_has_write = wp_open_col(trace.rd_has_write)?;
+    let rd_val = wp_open_col(trace.rd_val)?;
+    let ram_has_read = wp_open_col(trace.ram_has_read)?;
+    let ram_has_write = wp_open_col(trace.ram_has_write)?;
+    let ram_rv = wp_open_col(trace.ram_rv)?;
+    let ram_wv = wp_open_col(trace.ram_wv)?;
+    let rs2_val = wp_open_col(trace.rs2_val)?;
+
+    let load_flags = [
+        width_open_col(width.is_lb)?,
+        width_open_col(width.is_lbu)?,
+        width_open_col(width.is_lh)?,
+        width_open_col(width.is_lhu)?,
+        width_open_col(width.is_lw)?,
+    ];
+    let store_flags = [
+        width_open_col(width.is_sb)?,
+        width_open_col(width.is_sh)?,
+        width_open_col(width.is_sw)?,
+    ];
+    let mut ram_rv_low_bits = [K::ZERO; 16];
+    let mut rs2_low_bits = [K::ZERO; 16];
+    for k in 0..16 {
+        ram_rv_low_bits[k] = width_open_col(width.ram_rv_low_bit[k])?;
+        rs2_low_bits[k] = width_open_col(width.rs2_low_bit[k])?;
+    }
+    let ram_rv_q16 = width_open_col(width.ram_rv_q16)?;
+    let rs2_q16 = width_open_col(width.rs2_q16)?;
+    let funct3_is = [
+        decode_open_col(decode.funct3_is[0])?,
+        decode_open_col(decode.funct3_is[1])?,
+        decode_open_col(decode.funct3_is[2])?,
+        decode_open_col(decode.funct3_is[3])?,
+        decode_open_col(decode.funct3_is[4])?,
+        decode_open_col(decode.funct3_is[5])?,
+        decode_open_col(decode.funct3_is[6])?,
+        decode_open_col(decode.funct3_is[7])?,
+    ];
+    let op_load = decode_open_col(decode.op_load)?;
+    let op_store = decode_open_col(decode.op_store)?;
+
+    if let Some(claim_idx) = claim_plan.w3_bitness {
+        if claim_idx >= batched_final_values.len() {
+            return Err(PiCcsError::ProtocolError("w3/bitness claim index out of range".into()));
+        }
+        let mut bitness_open = vec![
+            load_flags[0],
+            load_flags[1],
+            load_flags[2],
+            load_flags[3],
+            load_flags[4],
+            store_flags[0],
+            store_flags[1],
+            store_flags[2],
+        ];
+        bitness_open.extend_from_slice(&ram_rv_low_bits);
+        bitness_open.extend_from_slice(&rs2_low_bits);
+        let weights = w3_bitness_weight_vector(r_cycle, bitness_open.len());
+        let mut weighted = K::ZERO;
+        for (b, w) in bitness_open.iter().zip(weights.iter()) {
+            weighted += *w * *b * (*b - K::ONE);
+        }
+        let expected = eq_points(r_time, r_cycle) * weighted;
+        if batched_final_values[claim_idx] != expected {
+            return Err(PiCcsError::ProtocolError("w3/bitness terminal value mismatch".into()));
+        }
+    } else if !mem_proof.w3_width_me_claims.is_empty() {
+        return Err(PiCcsError::ProtocolError(
+            "unexpected W3 width ME claims: w3/bitness stage is not enabled".into(),
+        ));
+    }
+
+    if let Some(claim_idx) = claim_plan.w3_quiescence {
+        if claim_idx >= batched_final_values.len() {
+            return Err(PiCcsError::ProtocolError(
+                "w3/quiescence claim index out of range".into(),
+            ));
+        }
+        let mut quiescence_open = vec![
+            load_flags[0],
+            load_flags[1],
+            load_flags[2],
+            load_flags[3],
+            load_flags[4],
+            store_flags[0],
+            store_flags[1],
+            store_flags[2],
+            ram_rv_q16,
+            rs2_q16,
+        ];
+        quiescence_open.extend_from_slice(&ram_rv_low_bits);
+        quiescence_open.extend_from_slice(&rs2_low_bits);
+        let weights = w3_quiescence_weight_vector(r_cycle, quiescence_open.len());
+        let mut weighted = K::ZERO;
+        for (v, w) in quiescence_open.iter().zip(weights.iter()) {
+            weighted += *w * *v;
+        }
+        let expected = eq_points(r_time, r_cycle) * (K::ONE - active) * weighted;
+        if batched_final_values[claim_idx] != expected {
+            return Err(PiCcsError::ProtocolError(
+                "w3/quiescence terminal value mismatch".into(),
+            ));
+        }
+    }
+
+    if let Some(claim_idx) = claim_plan.w3_selector_linkage {
+        if claim_idx >= batched_final_values.len() {
+            return Err(PiCcsError::ProtocolError(
+                "w3/selector_linkage claim index out of range".into(),
+            ));
+        }
+        let residuals = w3_selector_linkage_residuals(op_load, op_store, funct3_is, load_flags, store_flags);
+        let weights = w3_selector_weight_vector(r_cycle, residuals.len());
+        let mut weighted = K::ZERO;
+        for (r, w) in residuals.iter().zip(weights.iter()) {
+            weighted += *w * *r;
+        }
+        let expected = eq_points(r_time, r_cycle) * weighted;
+        if batched_final_values[claim_idx] != expected {
+            return Err(PiCcsError::ProtocolError(
+                "w3/selector_linkage terminal value mismatch".into(),
+            ));
+        }
+    }
+
+    if let Some(claim_idx) = claim_plan.w3_load_semantics {
+        if claim_idx >= batched_final_values.len() {
+            return Err(PiCcsError::ProtocolError(
+                "w3/load_semantics claim index out of range".into(),
+            ));
+        }
+        let residuals = w3_load_semantics_residuals(
+            rd_val,
+            ram_rv,
+            rd_has_write,
+            ram_has_read,
+            load_flags,
+            ram_rv_q16,
+            ram_rv_low_bits,
+        );
+        let weights = w3_load_weight_vector(r_cycle, residuals.len());
+        let mut weighted = K::ZERO;
+        for (r, w) in residuals.iter().zip(weights.iter()) {
+            weighted += *w * *r;
+        }
+        let expected = eq_points(r_time, r_cycle) * weighted;
+        if batched_final_values[claim_idx] != expected {
+            return Err(PiCcsError::ProtocolError(
+                "w3/load_semantics terminal value mismatch".into(),
+            ));
+        }
+    }
+
+    if let Some(claim_idx) = claim_plan.w3_store_semantics {
+        if claim_idx >= batched_final_values.len() {
+            return Err(PiCcsError::ProtocolError(
+                "w3/store_semantics claim index out of range".into(),
+            ));
+        }
+        let residuals = w3_store_semantics_residuals(
+            ram_wv,
+            ram_rv,
+            rs2_val,
+            rd_has_write,
+            ram_has_read,
+            ram_has_write,
+            store_flags,
+            rs2_q16,
+            ram_rv_low_bits,
+            rs2_low_bits,
+        );
+        let weights = w3_store_weight_vector(r_cycle, residuals.len());
+        let mut weighted = K::ZERO;
+        for (r, w) in residuals.iter().zip(weights.iter()) {
+            weighted += *w * *r;
+        }
+        let expected = eq_points(r_time, r_cycle) * weighted;
+        if batched_final_values[claim_idx] != expected {
+            return Err(PiCcsError::ProtocolError(
+                "w3/store_semantics terminal value mismatch".into(),
+            ));
+        }
     }
 
     Ok(())
@@ -5359,6 +7207,8 @@ pub(crate) fn finalize_route_a_memory_prover(
     let mut val_me_claims: Vec<MeInstance<Cmt, F, K>> = Vec::new();
     let mut wb_me_claims: Vec<MeInstance<Cmt, F, K>> = Vec::new();
     let mut wp_me_claims: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let mut w2_decode_me_claims: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let mut w3_width_me_claims: Vec<MeInstance<Cmt, F, K>> = Vec::new();
     let mut proofs: Vec<MemOrLutProof> = Vec::new();
 
     // --------------------------------------------------------------------
@@ -5936,6 +7786,10 @@ pub(crate) fn finalize_route_a_memory_prover(
     let (wb_claims, wp_claims) = emit_route_a_wb_wp_me_claims(tr, params, s, step, r_time)?;
     wb_me_claims.extend(wb_claims);
     wp_me_claims.extend(wp_claims);
+    let w2_claims = emit_route_a_w2_me_claims(tr, params, s, step, r_time)?;
+    w2_decode_me_claims.extend(w2_claims);
+    let w3_claims = emit_route_a_w3_me_claims(tr, params, s, step, r_time)?;
+    w3_width_me_claims.extend(w3_claims);
 
     Ok(MemSidecarProof {
         shout_me_claims_time,
@@ -5943,6 +7797,8 @@ pub(crate) fn finalize_route_a_memory_prover(
         val_me_claims,
         wb_me_claims,
         wp_me_claims,
+        w2_decode_me_claims,
+        w3_width_me_claims,
         shout_addr_pre: shout_addr_pre.clone(),
         proofs,
     })
@@ -6090,7 +7946,9 @@ pub fn verify_route_a_memory_step(
     };
     let wb_enabled = wb_wp_required_for_step_instance(step);
     let wp_enabled = wb_wp_required_for_step_instance(step);
-    let claim_plan = RouteATimeClaimPlan::build(step, claim_idx_start, wb_enabled, wp_enabled)?;
+    let w2_enabled = w2_required_for_step_instance(step);
+    let w3_enabled = w3_required_for_step_instance(step);
+    let claim_plan = RouteATimeClaimPlan::build(step, claim_idx_start, wb_enabled, wp_enabled, w2_enabled, w3_enabled)?;
     if claim_plan.claim_idx_end > batched_final_values.len() {
         return Err(PiCcsError::InvalidInput(format!(
             "batched_final_values too short (need at least {}, have {})",
@@ -6884,6 +8742,24 @@ pub fn verify_route_a_memory_step(
         &claim_plan,
         mem_proof,
     )?;
+    verify_route_a_w2_terminals(
+        core_t,
+        step,
+        r_time,
+        r_cycle,
+        batched_final_values,
+        &claim_plan,
+        mem_proof,
+    )?;
+    verify_route_a_w3_terminals(
+        core_t,
+        step,
+        r_time,
+        r_cycle,
+        batched_final_values,
+        &claim_plan,
+        mem_proof,
+    )?;
 
     Ok(RouteAMemoryVerifyOutput {
         claim_idx_end: claim_plan.claim_idx_end,
@@ -7000,7 +8876,9 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
 
     let wb_enabled = wb_wp_required_for_step_instance(step);
     let wp_enabled = wb_wp_required_for_step_instance(step);
-    let claim_plan = RouteATimeClaimPlan::build(step, claim_idx_start, wb_enabled, wp_enabled)?;
+    let w2_enabled = w2_required_for_step_instance(step);
+    let w3_enabled = w3_required_for_step_instance(step);
+    let claim_plan = RouteATimeClaimPlan::build(step, claim_idx_start, wb_enabled, wp_enabled, w2_enabled, w3_enabled)?;
     if claim_plan.claim_idx_end > batched_final_values.len() || claim_plan.claim_idx_end > batched_claimed_sums.len() {
         return Err(PiCcsError::InvalidInput(
             "batched final_values / claimed_sums too short for claim plan".into(),
@@ -8806,6 +10684,24 @@ fn verify_route_a_memory_step_no_shared_cpu_bus(
     )?;
 
     verify_route_a_wb_wp_terminals(
+        core_t,
+        step,
+        r_time,
+        r_cycle,
+        batched_final_values,
+        &claim_plan,
+        mem_proof,
+    )?;
+    verify_route_a_w2_terminals(
+        core_t,
+        step,
+        r_time,
+        r_cycle,
+        batched_final_values,
+        &claim_plan,
+        mem_proof,
+    )?;
+    verify_route_a_w3_terminals(
         core_t,
         step,
         r_time,

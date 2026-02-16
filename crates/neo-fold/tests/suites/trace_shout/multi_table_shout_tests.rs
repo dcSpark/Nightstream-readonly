@@ -170,6 +170,8 @@ fn create_step_with_shout_bus(
         mcs: (mcs, mcs_wit),
         lut_instances,
         mem_instances: vec![],
+        decode_instances: Vec::new(),
+        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     }
 }

@@ -384,6 +384,8 @@ where
             mcs,
             lut_instances,
             mem_instances,
+            decode_instances: Vec::new(),
+            width_instances: Vec::new(),
             _phantom: PhantomData,
         });
 

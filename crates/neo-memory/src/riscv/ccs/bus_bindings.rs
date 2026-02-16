@@ -152,8 +152,8 @@ fn trace_cpu_col(layout: &Rv32TraceCcsLayout, trace_col: usize) -> usize {
 
 #[inline]
 fn trace_zero_col(layout: &Rv32TraceCcsLayout) -> usize {
-    // Tier 2.1 scope lock enforces op_amo == 0 on all rows.
-    trace_cpu_col(layout, layout.trace.op_amo)
+    // `jalr_drop_bit[0]` is constrained to 0 on every row in trace CCS.
+    trace_cpu_col(layout, layout.trace.jalr_drop_bit[0])
 }
 
 #[inline]

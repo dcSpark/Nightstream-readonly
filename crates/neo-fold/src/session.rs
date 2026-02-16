@@ -805,6 +805,10 @@ where
         &self.steps
     }
 
+    pub fn steps_witness_mut(&mut self) -> &mut [StepWitnessBundle<Cmt, F, K>] {
+        &mut self.steps
+    }
+
     /// Access auxiliary data captured during the most recent shared-CPU-bus witness build (if any).
     pub fn shared_bus_aux(&self) -> Option<&ShardWitnessAux> {
         self.shared_bus_aux.as_ref()
@@ -1731,8 +1735,12 @@ where
         let has_wb_or_wp = run.steps.iter().any(|step| {
             !step.mem.wb_me_claims.is_empty()
                 || !step.mem.wp_me_claims.is_empty()
+                || !step.mem.w2_decode_me_claims.is_empty()
+                || !step.mem.w3_width_me_claims.is_empty()
                 || !step.wb_fold.is_empty()
                 || !step.wp_fold.is_empty()
+                || !step.w2_fold.is_empty()
+                || !step.w3_fold.is_empty()
         });
         if !(has_twist_or_shout || has_wb_or_wp) && !outputs.obligations.val.is_empty() {
             return Err(PiCcsError::ProtocolError(
@@ -1903,8 +1911,12 @@ where
         let has_wb_or_wp = run.steps.iter().any(|step| {
             !step.mem.wb_me_claims.is_empty()
                 || !step.mem.wp_me_claims.is_empty()
+                || !step.mem.w2_decode_me_claims.is_empty()
+                || !step.mem.w3_width_me_claims.is_empty()
                 || !step.wb_fold.is_empty()
                 || !step.wp_fold.is_empty()
+                || !step.w2_fold.is_empty()
+                || !step.w3_fold.is_empty()
         });
         if !(has_twist_or_shout || has_wb_or_wp) && !outputs.obligations.val.is_empty() {
             return Err(PiCcsError::ProtocolError(

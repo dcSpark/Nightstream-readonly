@@ -234,6 +234,8 @@ fn build_one_step_fixture(seed: u64) -> SharedBusFixture {
         mcs,
         lut_instances: vec![(lut_inst, lut_wit)],
         mem_instances: vec![(mem_inst, mem_wit)],
+        decode_instances: Vec::new(),
+        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     }];
     let steps_instance = steps_witness.iter().map(StepInstanceBundle::from).collect();

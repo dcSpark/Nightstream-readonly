@@ -1,4 +1,5 @@
 use neo_ajtai::AjtaiSModule;
+use neo_ccs::relations::check_ccs_rowwise_zero;
 use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::session::FoldingSession;
 use neo_memory::riscv::ccs::{build_rv32_trace_wiring_ccs, rv32_trace_ccs_witness_from_exec_table, Rv32TraceCcsLayout};
@@ -39,6 +40,7 @@ fn riscv_trace_wiring_ccs_single_step_prove_verify() {
     let layout = Rv32TraceCcsLayout::new(exec.rows.len()).expect("trace CCS layout");
     let (x, w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
     let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
+    check_ccs_rowwise_zero(&ccs, &x, &w).expect("trace CCS rowwise zero");
 
     let mut session = FoldingSession::<AjtaiSModule>::new_ajtai_seeded(FoldingMode::Optimized, &ccs, [9u8; 32])
         .expect("new_ajtai_seeded");

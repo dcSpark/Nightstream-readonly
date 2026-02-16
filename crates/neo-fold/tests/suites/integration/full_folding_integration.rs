@@ -444,6 +444,8 @@ fn build_single_chunk_inputs() -> (
         mcs: (mcs_inst.clone(), mcs_wit.clone()),
         lut_instances: vec![(lut_inst.clone(), lut_wit)],
         mem_instances: vec![(mem_inst.clone(), mem_wit)],
+        decode_instances: Vec::new(),
+        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     };
 
@@ -610,6 +612,8 @@ fn full_folding_integration_multi_step_chunk() {
         mcs: (mcs_inst, mcs_wit),
         lut_instances: vec![(lut_inst, lut_wit)],
         mem_instances: vec![(mem_inst, mem_wit)],
+        decode_instances: Vec::new(),
+        width_instances: Vec::new(),
         _phantom: PhantomData,
     };
 

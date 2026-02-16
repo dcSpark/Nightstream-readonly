@@ -367,6 +367,8 @@ fn vm_simple_add_program() {
             mcs: (mcs, mcs_wit),
             lut_instances: vec![(opcode_inst, opcode_wit), (imm_inst, imm_wit)],
             mem_instances: vec![(mem_inst, mem_wit)],
+            decode_instances: Vec::new(),
+            width_instances: Vec::new(),
             _phantom: PhantomData::<K>,
         });
     }
@@ -450,6 +452,8 @@ fn vm_register_file_operations() {
             mcs: (mcs, mcs_wit),
             lut_instances: vec![],
             mem_instances: vec![(reg_inst, reg_wit)],
+            decode_instances: Vec::new(),
+            width_instances: Vec::new(),
             _phantom: PhantomData::<K>,
         });
     }
@@ -477,6 +481,8 @@ fn vm_register_file_operations() {
             mcs: (mcs, mcs_wit),
             lut_instances: vec![],
             mem_instances: vec![(reg_inst, reg_wit)],
+            decode_instances: Vec::new(),
+            width_instances: Vec::new(),
             _phantom: PhantomData::<K>,
         });
     }
@@ -505,6 +511,8 @@ fn vm_register_file_operations() {
             mcs: (mcs, mcs_wit),
             lut_instances: vec![],
             mem_instances: vec![(reg_inst, reg_wit)],
+            decode_instances: Vec::new(),
+            width_instances: Vec::new(),
             _phantom: PhantomData::<K>,
         });
     }
@@ -606,6 +614,8 @@ fn vm_combined_bytecode_and_data_memory() {
         mcs: (mcs, mcs_wit),
         lut_instances: vec![(bytecode_inst, bytecode_wit)],
         mem_instances: vec![(ram_inst, ram_wit)],
+        decode_instances: Vec::new(),
+        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     };
 
@@ -673,6 +683,8 @@ fn vm_invalid_opcode_claim_fails() {
         mcs: (mcs, mcs_wit),
         lut_instances: vec![(bytecode_inst, bytecode_wit)],
         mem_instances: vec![],
+        decode_instances: Vec::new(),
+        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     };
 
@@ -767,6 +779,8 @@ fn vm_multi_instruction_sequence() {
             mcs: (mcs, mcs_wit),
             lut_instances: vec![(bytecode_inst, bytecode_wit)],
             mem_instances: vec![(mem_inst, mem_wit)],
+            decode_instances: Vec::new(),
+            width_instances: Vec::new(),
             _phantom: PhantomData::<K>,
         });
     }

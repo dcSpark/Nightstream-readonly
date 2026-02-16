@@ -159,6 +159,10 @@ pub struct MemSidecarProof<C, FF, KK> {
     pub wb_me_claims: Vec<MeInstance<C, FF, KK>>,
     /// CPU ME openings at `r_time` used to bind WP quiescence terminals to committed trace columns.
     pub wp_me_claims: Vec<MeInstance<C, FF, KK>>,
+    /// Decode sidecar ME openings at `r_time` used by W2 decode-field/immediate zero-identity stages.
+    pub w2_decode_me_claims: Vec<MeInstance<C, FF, KK>>,
+    /// Width sidecar ME openings at `r_time` used by W3 width/value zero-identity stages.
+    pub w3_width_me_claims: Vec<MeInstance<C, FF, KK>>,
     /// Route A Shout address pre-time proofs batched across all Shout instances in the step.
     pub shout_addr_pre: ShoutAddrPreProof<KK>,
     pub proofs: Vec<MemOrLutProof>,
@@ -212,6 +216,10 @@ pub struct StepProof {
     pub wb_fold: Vec<RlcDecProof>,
     /// Reserved WP folding lane(s) for staged quiescence claims.
     pub wp_fold: Vec<RlcDecProof>,
+    /// Reserved W2 folding lane(s) for decode sidecar claim artifacts.
+    pub w2_fold: Vec<RlcDecProof>,
+    /// Reserved W3 folding lane(s) for width sidecar claim artifacts.
+    pub w3_fold: Vec<RlcDecProof>,
 }
 
 #[derive(Clone, Debug)]
@@ -264,6 +272,12 @@ impl ShardProof {
                 val.extend_from_slice(&p.dec_children);
             }
             for p in &step.wp_fold {
+                val.extend_from_slice(&p.dec_children);
+            }
+            for p in &step.w2_fold {
+                val.extend_from_slice(&p.dec_children);
+            }
+            for p in &step.w3_fold {
                 val.extend_from_slice(&p.dec_children);
             }
         }

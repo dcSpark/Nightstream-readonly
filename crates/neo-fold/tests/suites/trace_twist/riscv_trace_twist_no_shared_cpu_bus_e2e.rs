@@ -303,6 +303,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_twist_prove_verify() {
             (reg_mem_inst, reg_mem_wit),
             (ram_mem_inst, ram_mem_wit),
         ],
+        decode_instances: Vec::new(),
+        width_instances: Vec::new(),
         _phantom: PhantomData,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =

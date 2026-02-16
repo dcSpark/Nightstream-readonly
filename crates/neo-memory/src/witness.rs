@@ -209,6 +209,48 @@ pub struct LutWitness<F> {
     pub mats: Vec<Mat<F>>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DecodeInstance<C, F> {
+    /// Deterministic decode sidecar id.
+    ///
+    /// Track A currently uses one decode sidecar per RV32 trace step.
+    pub decode_id: u32,
+    /// Commitment(s) for the decode sidecar witness matrix/matrices.
+    pub comms: Vec<C>,
+    /// Number of rows (cycles) in the sidecar witness domain.
+    pub steps: usize,
+    /// Number of committed decode columns per row.
+    pub cols: usize,
+    #[serde(skip)]
+    pub _phantom: PhantomData<F>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct DecodeWitness<F> {
+    pub mats: Vec<Mat<F>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WidthInstance<C, F> {
+    /// Deterministic width sidecar id.
+    ///
+    /// Track A W3 uses one width sidecar per RV32 trace step.
+    pub width_id: u32,
+    /// Commitment(s) for the width sidecar witness matrix/matrices.
+    pub comms: Vec<C>,
+    /// Number of rows (cycles) in the sidecar witness domain.
+    pub steps: usize,
+    /// Number of committed width-helper columns per row.
+    pub cols: usize,
+    #[serde(skip)]
+    pub _phantom: PhantomData<F>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WidthWitness<F> {
+    pub mats: Vec<Mat<F>>,
+}
+
 #[derive(Clone, Debug)]
 pub struct ShoutWitnessLayout {
     pub ell_addr: usize,
@@ -241,6 +283,8 @@ pub struct StepWitnessBundle<Cmt, F, K> {
     pub mcs: (McsInstance<Cmt, F>, McsWitness<F>),
     pub lut_instances: Vec<(LutInstance<Cmt, F>, LutWitness<F>)>,
     pub mem_instances: Vec<(MemInstance<Cmt, F>, MemWitness<F>)>,
+    pub decode_instances: Vec<(DecodeInstance<Cmt, F>, DecodeWitness<F>)>,
+    pub width_instances: Vec<(WidthInstance<Cmt, F>, WidthWitness<F>)>,
     #[serde(skip)]
     pub _phantom: PhantomData<K>,
 }
@@ -251,6 +295,8 @@ impl<Cmt, F, K> From<(McsInstance<Cmt, F>, McsWitness<F>)> for StepWitnessBundle
             mcs,
             lut_instances: Vec::new(),
             mem_instances: Vec::new(),
+            decode_instances: Vec::new(),
+            width_instances: Vec::new(),
             _phantom: PhantomData,
         }
     }
@@ -262,6 +308,8 @@ pub struct StepInstanceBundle<Cmt, F, K> {
     pub mcs_inst: McsInstance<Cmt, F>,
     pub lut_insts: Vec<LutInstance<Cmt, F>>,
     pub mem_insts: Vec<MemInstance<Cmt, F>>,
+    pub decode_insts: Vec<DecodeInstance<Cmt, F>>,
+    pub width_insts: Vec<WidthInstance<Cmt, F>>,
     #[serde(skip)]
     pub _phantom: PhantomData<K>,
 }
@@ -272,6 +320,8 @@ impl<Cmt, F, K> From<McsInstance<Cmt, F>> for StepInstanceBundle<Cmt, F, K> {
             mcs_inst,
             lut_insts: Vec::new(),
             mem_insts: Vec::new(),
+            decode_insts: Vec::new(),
+            width_insts: Vec::new(),
             _phantom: PhantomData,
         }
     }
@@ -291,6 +341,16 @@ impl<Cmt: Clone, F: Clone, K> From<&StepWitnessBundle<Cmt, F, K>> for StepInstan
                 .iter()
                 .map(|(inst, _)| inst.clone())
                 .collect(),
+            decode_insts: step
+                .decode_instances
+                .iter()
+                .map(|(inst, _)| inst.clone())
+                .collect(),
+            width_insts: step
+                .width_instances
+                .iter()
+                .map(|(inst, _)| inst.clone())
+                .collect(),
             _phantom: PhantomData,
         }
     }
@@ -302,12 +362,16 @@ impl<Cmt, F, K> From<StepWitnessBundle<Cmt, F, K>> for StepInstanceBundle<Cmt, F
             mcs: (mcs_inst, _mcs_wit),
             lut_instances,
             mem_instances,
+            decode_instances,
+            width_instances,
             _phantom: _,
         } = step;
         Self {
             mcs_inst,
             lut_insts: lut_instances.into_iter().map(|(inst, _)| inst).collect(),
             mem_insts: mem_instances.into_iter().map(|(inst, _)| inst).collect(),
+            decode_insts: decode_instances.into_iter().map(|(inst, _)| inst).collect(),
+            width_insts: width_instances.into_iter().map(|(inst, _)| inst).collect(),
             _phantom: PhantomData,
         }
     }

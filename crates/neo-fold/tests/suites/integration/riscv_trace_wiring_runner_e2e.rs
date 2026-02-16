@@ -398,6 +398,96 @@ fn rv32_trace_wiring_runner_wb_wp_folds_are_emitted_and_required() {
 }
 
 #[test]
+fn rv32_trace_wiring_runner_w2_decode_folds_are_emitted_and_required() {
+    // Program: ADDI x1, x0, 1; HALT
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .prove()
+        .expect("trace wiring prove");
+    run.verify().expect("trace wiring verify");
+
+    let proof = run.proof().clone();
+    assert_eq!(proof.steps.len(), 1, "expected one step proof");
+    assert!(
+        !proof.steps[0].mem.w2_decode_me_claims.is_empty(),
+        "expected W2 decode ME claims for RV32 trace route-A"
+    );
+    assert!(
+        !proof.steps[0].w2_fold.is_empty(),
+        "expected w2_fold proofs for RV32 trace route-A"
+    );
+
+    let mut proof_missing_w2_fold = proof.clone();
+    proof_missing_w2_fold.steps[0].w2_fold.clear();
+    assert!(
+        run.verify_proof(&proof_missing_w2_fold).is_err(),
+        "missing w2_fold must fail verification"
+    );
+
+    let mut proof_missing_w2_me = proof.clone();
+    proof_missing_w2_me.steps[0].mem.w2_decode_me_claims.clear();
+    assert!(
+        run.verify_proof(&proof_missing_w2_me).is_err(),
+        "missing W2 decode ME claims must fail verification"
+    );
+}
+
+#[test]
+fn rv32_trace_wiring_runner_w3_width_folds_are_emitted_and_required() {
+    // Program: ADDI x1, x0, 1; HALT
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .prove()
+        .expect("trace wiring prove");
+    run.verify().expect("trace wiring verify");
+
+    let proof = run.proof().clone();
+    assert_eq!(proof.steps.len(), 1, "expected one step proof");
+    assert!(
+        !proof.steps[0].mem.w3_width_me_claims.is_empty(),
+        "expected W3 width ME claims for RV32 trace route-A"
+    );
+    assert!(
+        !proof.steps[0].w3_fold.is_empty(),
+        "expected w3_fold proofs for RV32 trace route-A"
+    );
+
+    let mut proof_missing_w3_fold = proof.clone();
+    proof_missing_w3_fold.steps[0].w3_fold.clear();
+    assert!(
+        run.verify_proof(&proof_missing_w3_fold).is_err(),
+        "missing w3_fold must fail verification"
+    );
+
+    let mut proof_missing_w3_me = proof.clone();
+    proof_missing_w3_me.steps[0].mem.w3_width_me_claims.clear();
+    assert!(
+        run.verify_proof(&proof_missing_w3_me).is_err(),
+        "missing W3 width ME claims must fail verification"
+    );
+}
+
+#[test]
 fn rv32_trace_wiring_runner_rejects_zero_chunk_rows() {
     let program = vec![RiscvInstruction::Halt];
     let program_bytes = encode_program(&program);

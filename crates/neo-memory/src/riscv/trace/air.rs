@@ -114,29 +114,12 @@ impl Rv32TraceAir {
                     return Err(format!("row {i}: funct7_bit[{bit}] not boolean"));
                 }
             }
-            for (bit, c) in l.ram_rv_low_bit.iter().copied().enumerate() {
-                let e = Self::bool_check(col(c, i));
-                if !Self::is_zero(e) {
-                    return Err(format!("row {i}: ram_rv_low_bit[{bit}] not boolean"));
-                }
-            }
-            for (bit, c) in l.rs2_low_bit.iter().copied().enumerate() {
-                let e = Self::bool_check(col(c, i));
-                if !Self::is_zero(e) {
-                    return Err(format!("row {i}: rs2_low_bit[{bit}] not boolean"));
-                }
-            }
-
             // Padding invariants: inactive rows must not carry "hidden" values.
             let inv_active = F::ONE - active;
             for (name, c) in [
                 ("instr_word", l.instr_word),
                 ("opcode", l.opcode),
                 ("funct3", l.funct3),
-                ("funct7", l.funct7),
-                ("rd", l.rd),
-                ("rs1", l.rs1),
-                ("rs2", l.rs2),
                 ("prog_addr", l.prog_addr),
                 ("prog_value", l.prog_value),
                 ("rs1_addr", l.rs1_addr),
@@ -159,19 +142,6 @@ impl Rv32TraceAir {
                 let e = Self::gated_zero(inv_active, col(c, i));
                 if !Self::is_zero(e) {
                     return Err(format!("row {i}: inactive padding violated ({name} != 0)"));
-                }
-            }
-
-            // rd packing: rd == Σ 2^k * rd_bit[k].
-            {
-                let rd = col(l.rd, i);
-                let expect = col(l.rd_bit[0], i)
-                    + F::from_u64(2) * col(l.rd_bit[1], i)
-                    + F::from_u64(4) * col(l.rd_bit[2], i)
-                    + F::from_u64(8) * col(l.rd_bit[3], i)
-                    + F::from_u64(16) * col(l.rd_bit[4], i);
-                if !Self::is_zero(rd - expect) {
-                    return Err(format!("row {i}: rd packing mismatch"));
                 }
             }
 
@@ -260,14 +230,29 @@ impl Rv32TraceAir {
 
             // Active → REG addr bindings; rd_has_write → rd_addr binding.
             {
-                if !Self::is_zero(Self::gated_eq(active, col(l.rs1_addr, i), col(l.rs1, i))) {
-                    return Err(format!("row {i}: rs1_addr != rs1 field"));
+                let rs1_bits = col(l.rs1_bit[0], i)
+                    + F::from_u64(2) * col(l.rs1_bit[1], i)
+                    + F::from_u64(4) * col(l.rs1_bit[2], i)
+                    + F::from_u64(8) * col(l.rs1_bit[3], i)
+                    + F::from_u64(16) * col(l.rs1_bit[4], i);
+                if !Self::is_zero(Self::gated_eq(active, col(l.rs1_addr, i), rs1_bits)) {
+                    return Err(format!("row {i}: rs1_addr != packed rs1 bits"));
                 }
-                if !Self::is_zero(Self::gated_eq(active, col(l.rs2_addr, i), col(l.rs2, i))) {
-                    return Err(format!("row {i}: rs2_addr != rs2 field"));
+                let rs2_bits = col(l.rs2_bit[0], i)
+                    + F::from_u64(2) * col(l.rs2_bit[1], i)
+                    + F::from_u64(4) * col(l.rs2_bit[2], i)
+                    + F::from_u64(8) * col(l.rs2_bit[3], i)
+                    + F::from_u64(16) * col(l.rs2_bit[4], i);
+                if !Self::is_zero(Self::gated_eq(active, col(l.rs2_addr, i), rs2_bits)) {
+                    return Err(format!("row {i}: rs2_addr != packed rs2 bits"));
                 }
-                if !Self::is_zero(Self::gated_eq(rd_has_write, col(l.rd_addr, i), col(l.rd, i))) {
-                    return Err(format!("row {i}: rd_addr != rd field when rd_has_write=1"));
+                let rd_bits = col(l.rd_bit[0], i)
+                    + F::from_u64(2) * col(l.rd_bit[1], i)
+                    + F::from_u64(4) * col(l.rd_bit[2], i)
+                    + F::from_u64(8) * col(l.rd_bit[3], i)
+                    + F::from_u64(16) * col(l.rd_bit[4], i);
+                if !Self::is_zero(Self::gated_eq(rd_has_write, col(l.rd_addr, i), rd_bits)) {
+                    return Err(format!("row {i}: rd_addr != packed rd bits when rd_has_write=1"));
                 }
             }
         }

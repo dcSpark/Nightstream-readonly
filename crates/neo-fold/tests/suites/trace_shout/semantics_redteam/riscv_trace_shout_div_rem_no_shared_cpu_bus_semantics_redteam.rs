@@ -359,8 +359,8 @@ fn build_paged_shout_only_bus_zs_packed_rem(
 #[test]
 fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
     // Same program as the e2e test; tamper:
-    // - DIV q_is_zero on a row where q_abs != 0, and
-    // - REM r_is_zero on a row where r_abs != 0.
+    // - DIV rhs_is_zero on a non-trivial lookup row, and
+    // - REM rhs_is_zero on a non-trivial lookup row.
     let program = vec![
         RiscvInstruction::Lui { rd: 1, imm: -7 },
         RiscvInstruction::Lui { rd: 2, imm: 3 },
@@ -589,8 +589,21 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
     let j = shout_lanes[0]
         .has_lookup
         .iter()
-        .position(|&b| b)
-        .expect("expected at least one DIV lookup");
+        .enumerate()
+        .find_map(|(idx, &has)| {
+            if !has {
+                return None;
+            }
+            let (lhs_u64, rhs_u64) = uninterleave_bits(shout_lanes[0].key[idx] as u128);
+            let lhs = lhs_u64 as u32;
+            let rhs = rhs_u64 as u32;
+            if lhs != 0 || rhs != 0 {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+        .expect("expected a non-trivial DIV lookup");
     let bus = build_bus_layout_for_instances_with_shout_and_twist_lanes(
         ccs.m,
         layout.m_in,
@@ -600,12 +613,12 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
     )
     .expect("bus layout");
     let cols = &bus.shout_cols[0].lanes[0];
-    let q_is_zero_col_id = cols
+    let div_rhs_is_zero_col_id = cols
         .addr_bits
         .clone()
-        .nth(9)
-        .expect("expected addr_bits[9] for q_is_zero");
-    let cell = bus.bus_cell(q_is_zero_col_id, j);
+        .nth(5)
+        .expect("expected addr_bits[5] for rhs_is_zero");
+    let cell = bus.bus_cell(div_rhs_is_zero_col_id, j);
     div_zs[0][cell] = if div_zs[0][cell] == F::ONE { F::ZERO } else { F::ONE };
 
     let mut div_comms = Vec::with_capacity(div_zs.len());
@@ -629,19 +642,25 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
         .iter()
         .enumerate()
         .find_map(|(idx, &has)| {
-            if has && shout_lanes[1].value[idx] != 0 {
+            if !has {
+                return None;
+            }
+            let (lhs_u64, rhs_u64) = uninterleave_bits(shout_lanes[1].key[idx] as u128);
+            let lhs = lhs_u64 as u32;
+            let rhs = rhs_u64 as u32;
+            if lhs != 0 || rhs != 0 {
                 Some(idx)
             } else {
                 None
             }
         })
-        .expect("expected at least one REM lookup with nonzero remainder");
-    let r_is_zero_col_id = cols
+        .expect("expected a non-trivial REM lookup");
+    let rem_rhs_is_zero_col_id = cols
         .addr_bits
         .clone()
-        .nth(9)
-        .expect("expected addr_bits[9] for r_is_zero");
-    let rem_cell = bus.bus_cell(r_is_zero_col_id, j_rem);
+        .nth(5)
+        .expect("expected addr_bits[5] for rhs_is_zero");
+    let rem_cell = bus.bus_cell(rem_rhs_is_zero_col_id, j_rem);
     rem_zs[0][rem_cell] = if rem_zs[0][rem_cell] == F::ONE { F::ZERO } else { F::ONE };
 
     let mut rem_comms = Vec::with_capacity(rem_zs.len());
@@ -661,6 +680,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
         mcs,
         lut_instances: vec![(div_inst, div_wit), (rem_inst, rem_wit)],
         mem_instances: Vec::new(),
+        decode_instances: Vec::new(),
+        width_instances: Vec::new(),
         _phantom: PhantomData,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =
@@ -689,6 +710,6 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
             &proof,
             mixers,
         )
-        .expect_err("tampered packed DIV/REM zero flags must be caught by Route-A time constraints");
+        .expect_err("tampered packed DIV/REM rhs_is_zero flags must be caught by Route-A time constraints");
     }
 }
