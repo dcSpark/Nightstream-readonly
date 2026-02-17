@@ -188,6 +188,11 @@ pub struct Rv32B1Layout {
     pub ecall_is_cycle: usize,
     pub ecall_print_prefix_start: usize, // 31
     pub ecall_is_print: usize,
+    pub ecall_poseidon2_prefix_start: usize, // 31
+    pub ecall_is_poseidon2: usize,
+    pub ecall_is_poseidon2_read: usize,
+    pub halt_ecall_poseidon2_read: usize,
+    pub ecall_rd_val: usize,
     pub ecall_halts: usize,
     pub halt_effective: usize,
 
@@ -547,6 +552,32 @@ impl Rv32B1Layout {
     #[inline]
     pub fn ecall_is_print(&self, j: usize) -> usize {
         self.cpu_cell(self.ecall_is_print, j)
+    }
+
+    #[inline]
+    pub fn ecall_poseidon2_prefix(&self, k: usize, j: usize) -> usize {
+        debug_assert!(k < 31, "ecall_poseidon2_prefix k out of range");
+        self.ecall_poseidon2_prefix_start + k * self.chunk_size + j
+    }
+
+    #[inline]
+    pub fn ecall_is_poseidon2(&self, j: usize) -> usize {
+        self.cpu_cell(self.ecall_is_poseidon2, j)
+    }
+
+    #[inline]
+    pub fn ecall_is_poseidon2_read(&self, j: usize) -> usize {
+        self.cpu_cell(self.ecall_is_poseidon2_read, j)
+    }
+
+    #[inline]
+    pub fn halt_ecall_poseidon2_read(&self, j: usize) -> usize {
+        self.cpu_cell(self.halt_ecall_poseidon2_read, j)
+    }
+
+    #[inline]
+    pub fn ecall_rd_val(&self, j: usize) -> usize {
+        self.cpu_cell(self.ecall_rd_val, j)
     }
 
     #[inline]
@@ -1134,6 +1165,11 @@ pub(super) fn build_layout_with_m(
     let ecall_is_cycle = alloc_scalar(&mut col);
     let ecall_print_prefix_start = alloc_array(&mut col, 31);
     let ecall_is_print = alloc_scalar(&mut col);
+    let ecall_poseidon2_prefix_start = alloc_array(&mut col, 31);
+    let ecall_is_poseidon2 = alloc_scalar(&mut col);
+    let ecall_is_poseidon2_read = alloc_scalar(&mut col);
+    let halt_ecall_poseidon2_read = alloc_scalar(&mut col);
+    let ecall_rd_val = alloc_scalar(&mut col);
     let ecall_halts = alloc_scalar(&mut col);
     let halt_effective = alloc_scalar(&mut col);
 
@@ -1315,6 +1351,11 @@ pub(super) fn build_layout_with_m(
         ecall_is_cycle,
         ecall_print_prefix_start,
         ecall_is_print,
+        ecall_poseidon2_prefix_start,
+        ecall_is_poseidon2,
+        ecall_is_poseidon2_read,
+        halt_ecall_poseidon2_read,
+        ecall_rd_val,
         ecall_halts,
         halt_effective,
         bus,

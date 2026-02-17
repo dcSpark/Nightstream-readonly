@@ -20,7 +20,7 @@ pub mod verify;
 pub use common::Challenges;
 
 /// Proof format variant for Π_CCS.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum PiCcsProofVariant {
     /// Split-NC proof with two sumchecks: FE-only + NC-only.
     SplitNcV1,
@@ -55,7 +55,7 @@ pub use common::{
 };
 
 /// Proof structure for the Π_CCS protocol
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PiCcsProof {
     /// Proof format variant.
     pub variant: PiCcsProofVariant,

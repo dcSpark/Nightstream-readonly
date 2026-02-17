@@ -12,7 +12,8 @@ use neo_memory::riscv::ccs::{
 };
 use neo_memory::riscv::lookups::{
     decode_instruction, encode_program, BranchCondition, RiscvCpu, RiscvInstruction, RiscvMemOp, RiscvMemory,
-    RiscvOpcode, RiscvShoutTables, JOLT_CYCLE_TRACK_ECALL_NUM, JOLT_PRINT_ECALL_NUM, PROG_ID, RAM_ID,
+    RiscvOpcode, RiscvShoutTables, JOLT_CYCLE_TRACK_ECALL_NUM, JOLT_PRINT_ECALL_NUM, POSEIDON2_ECALL_NUM,
+    POSEIDON2_READ_ECALL_NUM, PROG_ID, RAM_ID,
 };
 use neo_memory::riscv::rom_init::prog_init_words;
 use neo_memory::witness::LutTableSpec;
@@ -374,6 +375,97 @@ fn rv32_b1_ccs_happy_path_rv32i_ecall_markers_program() {
     let regs = &trace.steps.last().expect("steps").regs_after;
     assert_eq!(regs[1], 7, "instruction after ECALL marker executes");
     assert_eq!(regs[2], 8, "instruction after ECALL print executes");
+
+    let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
+    let (k_ram, d_ram) = pow2_ceil_k(0x40);
+    let mem_layouts = HashMap::from([
+        (
+            0u32,
+            PlainMemLayout {
+                k: k_ram,
+                d: d_ram,
+                n_side: 2,
+                lanes: 1,
+            },
+        ),
+        (
+            1u32,
+            PlainMemLayout {
+                k: k_prog,
+                d: d_prog,
+                n_side: 2,
+                lanes: 1,
+            },
+        ),
+    ]);
+
+    let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
+
+    let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
+    let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
+
+    let table_specs = rv32i_table_specs(xlen);
+
+    let cpu = R1csCpu::new(
+        ccs,
+        params,
+        NoopCommit::default(),
+        layout.m_in,
+        &HashMap::new(),
+        &table_specs,
+        rv32_b1_chunk_to_witness(layout.clone()),
+    )
+    .with_shared_cpu_bus(
+        rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
+        1,
+    )
+    .expect("shared bus");
+
+    let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
+    for (mcs_inst, mcs_wit) in steps {
+        check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).expect("CCS satisfied");
+    }
+}
+
+#[test]
+fn rv32_b1_ccs_happy_path_poseidon2_ecall() {
+    let xlen = 32usize;
+    let mut program = Vec::new();
+
+    // a1 = 0 (n_elements = 0 for empty-input Poseidon2 hash).
+    program.push(RiscvInstruction::IAlu {
+        op: RiscvOpcode::Add,
+        rd: 11,
+        rs1: 0,
+        imm: 0,
+    });
+    // a0 = POSEIDON2_ECALL_NUM → compute ECALL.
+    program.extend(load_u32_imm(10, POSEIDON2_ECALL_NUM));
+    program.push(RiscvInstruction::Halt);
+
+    // Read all 8 digest words via read ECALLs.
+    for _ in 0..8 {
+        program.extend(load_u32_imm(10, POSEIDON2_READ_ECALL_NUM));
+        program.push(RiscvInstruction::Halt);
+    }
+
+    // Clear a0 → final halt.
+    program.push(RiscvInstruction::IAlu {
+        op: RiscvOpcode::Add,
+        rd: 10,
+        rs1: 0,
+        imm: 0,
+    });
+    program.push(RiscvInstruction::Halt);
+
+    let program_bytes = encode_program(&program);
+    let mut cpu_vm = RiscvCpu::new(xlen);
+    cpu_vm.load_program(0, program.clone());
+    let memory = RiscvMemory::with_program_in_twist(xlen, PROG_ID, 0, &program_bytes);
+    let shout = RiscvShoutTables::new(xlen);
+    let trace = trace_program(cpu_vm, memory, shout, 256).expect("trace");
+    assert!(trace.did_halt(), "expected Halt");
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x40);

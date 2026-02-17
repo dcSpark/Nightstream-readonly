@@ -42,7 +42,7 @@ use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as F;
 
 use crate::plain::PlainMemLayout;
-use crate::riscv::lookups::{JOLT_CYCLE_TRACK_ECALL_NUM, JOLT_PRINT_ECALL_NUM, PROG_ID, RAM_ID};
+use crate::riscv::lookups::{JOLT_CYCLE_TRACK_ECALL_NUM, JOLT_PRINT_ECALL_NUM, POSEIDON2_ECALL_NUM, PROG_ID, RAM_ID};
 
 mod bus_bindings;
 mod config;
@@ -1036,10 +1036,14 @@ fn semantic_constraints(
             ));
         }
 
-        // ECALL helpers (Jolt marker/print IDs).
+        // ECALL helpers (Jolt marker/print IDs + Poseidon2 precompile).
         let a0 = layout.reg_in(10, j);
         let ecall_is_cycle = layout.ecall_is_cycle(j);
         let ecall_is_print = layout.ecall_is_print(j);
+        let ecall_is_poseidon2 = layout.ecall_is_poseidon2(j);
+        let ecall_is_poseidon2_read = layout.ecall_is_poseidon2_read(j);
+        let halt_ecall_poseidon2_read = layout.halt_ecall_poseidon2_read(j);
+        let ecall_rd_val = layout.ecall_rd_val(j);
         let ecall_halts = layout.ecall_halts(j);
         let halt_effective = layout.halt_effective(j);
 
@@ -1166,6 +1170,86 @@ fn semantic_constraints(
         }
         constraints.push(Constraint::mul(ecall_is_print, ecall_is_print, ecall_is_print));
 
+        // ecall_is_poseidon2 = (a0 == POSEIDON2_ECALL_NUM).
+        let poseidon2_const = POSEIDON2_ECALL_NUM as u32;
+        {
+            let bit0 = layout.ecall_a0_bit(0, j);
+            let prefix0 = layout.ecall_poseidon2_prefix(0, j);
+            if (poseidon2_const & 1) == 1 {
+                constraints.push(Constraint::terms(one, false, vec![(prefix0, F::ONE), (bit0, -F::ONE)]));
+            } else {
+                constraints.push(Constraint::terms(
+                    one,
+                    false,
+                    vec![(prefix0, F::ONE), (bit0, F::ONE), (one, -F::ONE)],
+                ));
+            }
+        }
+        for k in 1..31 {
+            let prev = layout.ecall_poseidon2_prefix(k - 1, j);
+            let next = layout.ecall_poseidon2_prefix(k, j);
+            let bit_col = layout.ecall_a0_bit(k, j);
+            let bit_is_one = ((poseidon2_const >> k) & 1) == 1;
+            let b_terms = if bit_is_one {
+                vec![(bit_col, F::ONE)]
+            } else {
+                vec![(one, F::ONE), (bit_col, -F::ONE)]
+            };
+            constraints.push(Constraint {
+                condition_col: prev,
+                negate_condition: false,
+                additional_condition_cols: Vec::new(),
+                b_terms,
+                c_terms: vec![(next, F::ONE)],
+            });
+        }
+        {
+            let prev = layout.ecall_poseidon2_prefix(30, j);
+            let bit_col = layout.ecall_a0_bit(31, j);
+            let bit_is_one = ((poseidon2_const >> 31) & 1) == 1;
+            let b_terms = if bit_is_one {
+                vec![(bit_col, F::ONE)]
+            } else {
+                vec![(one, F::ONE), (bit_col, -F::ONE)]
+            };
+            constraints.push(Constraint {
+                condition_col: prev,
+                negate_condition: false,
+                additional_condition_cols: Vec::new(),
+                b_terms,
+                c_terms: vec![(ecall_is_poseidon2, F::ONE)],
+            });
+        }
+        constraints.push(Constraint::mul(ecall_is_poseidon2, ecall_is_poseidon2, ecall_is_poseidon2));
+
+        // ecall_is_poseidon2_read = prefix_30 * bit_31.
+        // POSEIDON2_READ_ECALL_NUM (0x80504F53) shares bits 0-30 with POSEIDON2_ECALL_NUM
+        // (0x504F53) and has bit 31 set. The prefix chain already matches bits 0-30,
+        // so we branch on bit 31: compute = prefix_30 * (1-bit_31), read = prefix_30 * bit_31.
+        {
+            let prefix_30 = layout.ecall_poseidon2_prefix(30, j);
+            let bit_31 = layout.ecall_a0_bit(31, j);
+            constraints.push(Constraint::mul(prefix_30, bit_31, ecall_is_poseidon2_read));
+        }
+        constraints.push(Constraint::mul(ecall_is_poseidon2_read, ecall_is_poseidon2_read, ecall_is_poseidon2_read));
+
+        // halt_ecall_poseidon2_read = is_halt * ecall_is_poseidon2_read.
+        // Gates the raw prefix-derived flag by is_halt so that it only activates
+        // on actual ECALL instructions, not on arbitrary instructions where a0
+        // happens to contain POSEIDON2_READ_ECALL_NUM.
+        constraints.push(Constraint::mul(layout.is_halt(j), ecall_is_poseidon2_read, halt_ecall_poseidon2_read));
+        constraints.push(Constraint::mul(halt_ecall_poseidon2_read, halt_ecall_poseidon2_read, halt_ecall_poseidon2_read));
+
+        // halt_ecall_poseidon2_read * (ecall_rd_val - rd_write_val) = 0
+        // Links ecall_rd_val to rd_write_val for poseidon2_read steps, reusing the
+        // existing enforce_u32_bits range check on rd_write_val.
+        constraints.push(Constraint::terms(
+            halt_ecall_poseidon2_read,
+            false,
+            vec![(ecall_rd_val, F::ONE), (layout.rd_write_val(j), -F::ONE)],
+        ));
+
+        // ecall_halts = 1 - ecall_is_cycle - ecall_is_print - ecall_is_poseidon2 - ecall_is_poseidon2_read.
         constraints.push(Constraint::terms(
             one,
             false,
@@ -1173,6 +1257,8 @@ fn semantic_constraints(
                 (ecall_halts, F::ONE),
                 (ecall_is_cycle, F::ONE),
                 (ecall_is_print, F::ONE),
+                (ecall_is_poseidon2, F::ONE),
+                (ecall_is_poseidon2_read, F::ONE),
                 (one, -F::ONE),
             ],
         ));
@@ -1692,17 +1778,37 @@ fn semantic_constraints(
         // Register update pattern for r=1..31:
         //  - if rd_sel[r]=1 then reg_out[r] = rd_write_val
         //  - else reg_out[r] = reg_in[r]
+        // Special case for r=10 (a0): the Poseidon2 read ECALL writes ecall_rd_val
+        // to reg_out[10] without going through rd_sel/rd_write_val.
         for r in 1..32 {
             constraints.push(Constraint::terms(
                 layout.rd_sel(r, j),
                 false,
                 vec![(layout.reg_out(r, j), F::ONE), (layout.rd_write_val(j), -F::ONE)],
             ));
-            constraints.push(Constraint::terms(
-                layout.rd_sel(r, j),
-                true,
-                vec![(layout.reg_out(r, j), F::ONE), (layout.reg_in(r, j), -F::ONE)],
-            ));
+            if r == 10 {
+                // (1 - rd_sel[10] - halt_ecall_poseidon2_read) * (reg_out[10] - reg_in[10]) = 0
+                // Uses halt-gated flag so this only activates on actual ECALL instructions.
+                constraints.push(Constraint {
+                    condition_col: layout.rd_sel(r, j),
+                    negate_condition: true,
+                    additional_condition_cols: vec![halt_ecall_poseidon2_read],
+                    b_terms: vec![(layout.reg_out(r, j), F::ONE), (layout.reg_in(r, j), -F::ONE)],
+                    c_terms: Vec::new(),
+                });
+                // halt_ecall_poseidon2_read * (reg_out[10] - ecall_rd_val) = 0
+                constraints.push(Constraint::terms(
+                    halt_ecall_poseidon2_read,
+                    false,
+                    vec![(layout.reg_out(r, j), F::ONE), (ecall_rd_val, -F::ONE)],
+                ));
+            } else {
+                constraints.push(Constraint::terms(
+                    layout.rd_sel(r, j),
+                    true,
+                    vec![(layout.reg_out(r, j), F::ONE), (layout.reg_in(r, j), -F::ONE)],
+                ));
+            }
         }
 
         // RAM effective address is computed via the ADD Shout lookup (mod 2^32 semantics).
