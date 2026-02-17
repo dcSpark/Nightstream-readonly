@@ -270,9 +270,6 @@ let wasm_bindgen = (function(exports) {
          */
         bytes() {
             const ret = wasm.spartancompressedproof_bytes(this.__wbg_ptr);
-            if (ret[3]) {
-                throw takeFromExternrefTable0(ret[2]);
-            }
             var v1 = getArrayU8FromWasm0(ret[0], ret[1]).slice();
             wasm.__wbindgen_free(ret[0], ret[1] * 1, 1);
             return v1;
@@ -283,29 +280,18 @@ let wasm_bindgen = (function(exports) {
          */
         bytes_len() {
             const ret = wasm.spartancompressedproof_bytes_len(this.__wbg_ptr);
-            if (ret[2]) {
-                throw takeFromExternrefTable0(ret[1]);
-            }
-            return ret[0] >>> 0;
+            return ret >>> 0;
         }
         /**
-         * Total bytes if you bundled `(vk, snark)` together.
+         * Size of the combined artifact (vk + snark).
+         *
+         * This is optional in the UI; when present it can be used to estimate vk size as
+         * `(vk+snark) - snark`.
          * @returns {number}
          */
         vk_and_snark_bytes_len() {
             const ret = wasm.spartancompressedproof_vk_and_snark_bytes_len(this.__wbg_ptr);
             return ret >>> 0;
-        }
-        /**
-         * Verifier key size (useful for understanding total proof package size).
-         * @returns {number}
-         */
-        vk_bytes_len() {
-            const ret = wasm.spartancompressedproof_vk_bytes_len(this.__wbg_ptr);
-            if (ret[2]) {
-                throw takeFromExternrefTable0(ret[1]);
-            }
-            return ret[0] >>> 0;
         }
     }
     if (Symbol.dispose) SpartanCompressedProof.prototype[Symbol.dispose] = SpartanCompressedProof.prototype.free;
@@ -315,6 +301,32 @@ let wasm_bindgen = (function(exports) {
         wasm.init_panic_hook();
     }
     exports.init_panic_hook = init_panic_hook;
+
+    /**
+     * Prove+verify the RV32 Fibonacci program under the B1 shared-bus step circuit.
+     *
+     * Expected guest semantics:
+     * - reads `n` from RAM[0x104] (u32)
+     * - writes `fib(n)` to RAM[0x100] (u32)
+     * - halts via `ecall` (treated as `Halt` in this VM)
+     * @param {string} asm
+     * @param {number} n
+     * @param {number} ram_bytes
+     * @param {number} chunk_size
+     * @param {number} max_steps
+     * @param {boolean} do_spartan
+     * @returns {any}
+     */
+    function prove_verify_rv32_b1_fibonacci_asm(asm, n, ram_bytes, chunk_size, max_steps, do_spartan) {
+        const ptr0 = passStringToWasm0(asm, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
+        const len0 = WASM_VECTOR_LEN;
+        const ret = wasm.prove_verify_rv32_b1_fibonacci_asm(ptr0, len0, n, ram_bytes, chunk_size, max_steps, do_spartan);
+        if (ret[2]) {
+            throw takeFromExternrefTable0(ret[1]);
+        }
+        return takeFromExternrefTable0(ret[0]);
+    }
+    exports.prove_verify_rv32_b1_fibonacci_asm = prove_verify_rv32_b1_fibonacci_asm;
 
     /**
      * Parse a `TestExport` JSON (same schema as `crates/neo-fold/poseidon2-tests/*.json`),
@@ -361,6 +373,9 @@ let wasm_bindgen = (function(exports) {
                     wasm.__wbindgen_free(deferred0_0, deferred0_1, 1);
                 }
             },
+            __wbg_getRandomValues_1c61fac11405ffdc: function() { return handleError(function (arg0, arg1) {
+                globalThis.crypto.getRandomValues(getArrayU8FromWasm0(arg0, arg1));
+            }, arguments); },
             __wbg_new_361308b2356cecd0: function() {
                 const ret = new Object();
                 return ret;
@@ -431,6 +446,12 @@ let wasm_bindgen = (function(exports) {
         ? { register: () => {}, unregister: () => {} }
         : new FinalizationRegistry(ptr => wasm.__wbg_spartancompressedproof_free(ptr >>> 0, 1));
 
+    function addToExternrefTable0(obj) {
+        const idx = wasm.__externref_table_alloc();
+        wasm.__wbindgen_externrefs.set(idx, obj);
+        return idx;
+    }
+
     function _assertClass(instance, klass) {
         if (!(instance instanceof klass)) {
             throw new Error(`expected instance of ${klass.name}`);
@@ -461,6 +482,15 @@ let wasm_bindgen = (function(exports) {
             cachedUint8ArrayMemory0 = new Uint8Array(wasm.memory.buffer);
         }
         return cachedUint8ArrayMemory0;
+    }
+
+    function handleError(f, args) {
+        try {
+            return f.apply(this, args);
+        } catch (e) {
+            const idx = addToExternrefTable0(e);
+            wasm.__wbindgen_exn_store(idx);
+        }
     }
 
     function passStringToWasm0(arg, malloc, realloc) {

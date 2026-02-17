@@ -19,7 +19,7 @@ pub type ShoutProofK = neo_memory::shout::ShoutProof<K>;
 /// Within each group, when a Shout lane is provably inactive for a step (no lookups), we can
 /// skip its address-domain sumcheck entirely. We still bind all `claimed_sums` to the transcript,
 /// but we include sumcheck rounds only for the active subset.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ShoutAddrPreProof<KK> {
     /// Claimed sums per Shout lane.
     ///
@@ -32,7 +32,7 @@ pub struct ShoutAddrPreProof<KK> {
     pub groups: Vec<ShoutAddrPreGroupProof<KK>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ShoutAddrPreGroupProof<KK> {
     /// Address-bit width (sumcheck round count) for this group.
     pub ell_addr: u32,
@@ -58,7 +58,7 @@ impl<KK> Default for ShoutAddrPreProof<KK> {
 }
 
 /// One fold step’s artifacts (Π_CCS → Π_RLC → Π_DEC).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct FoldStep {
     /// Π_CCS outputs (k ME(b,L) instances)
     pub ccs_out: Vec<MeInstance<Cmt, F, K>>,
@@ -125,13 +125,17 @@ pub struct ShardFoldWitnesses<FF> {
     pub val_lane_wits: Vec<Mat<FF>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum MemOrLutProof {
     Twist(TwistProofK),
     Shout(ShoutProofK),
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(bound(
+    serialize = "C: serde::Serialize, FF: serde::Serialize, KK: serde::Serialize",
+    deserialize = "C: serde::de::DeserializeOwned, FF: serde::de::DeserializeOwned, KK: serde::de::DeserializeOwned + Default"
+))]
 pub struct MemSidecarProof<C, FF, KK> {
     /// Shout bus openings evaluated at the shared `r_time`.
     ///
@@ -168,20 +172,20 @@ pub struct MemSidecarProof<C, FF, KK> {
 ///
 /// This batches CCS (row/time rounds) with Twist/Shout time-domain oracles so all
 /// protocols share the same transcript-derived `r` (enabling Π_RLC folding).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct BatchedTimeProof {
     /// Claimed sums per participating oracle (in the same order as `round_polys`).
     pub claimed_sums: Vec<K>,
     /// Degree bounds per participating oracle.
     pub degree_bounds: Vec<usize>,
     /// Domain-separation labels per participating oracle.
-    pub labels: Vec<&'static [u8]>,
+    pub labels: Vec<Vec<u8>>,
     /// Per-claim sum-check messages: `round_polys[claim][round] = coeffs`.
     pub round_polys: Vec<Vec<Vec<K>>>,
 }
 
 /// Proof data for a standalone Π_RLC → Π_DEC lane (no Π_CCS).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct RlcDecProof {
     /// RLC mixing matrices ρ_i ∈ S ⊆ F^{D×D}
     pub rlc_rhos: Vec<Mat<F>>,
@@ -191,7 +195,7 @@ pub struct RlcDecProof {
     pub dec_children: Vec<MeInstance<Cmt, F, K>>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct StepProof {
     pub fold: FoldStep,
     pub mem: MemSidecarProof<Cmt, F, K>,
@@ -214,7 +218,7 @@ pub struct StepProof {
     pub wp_fold: Vec<RlcDecProof>,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct ShardProof {
     pub steps: Vec<StepProof>,
     /// Optional output binding proof (proves final memory matches claimed outputs).

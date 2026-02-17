@@ -439,6 +439,38 @@ where
         });
         Ok(self)
     }
+
+    /// Like [`with_shared_cpu_bus`], but assumes the CCS already contains bus constraints.
+    ///
+    /// Use this when the `ccs` passed to [`R1csCpu::new`] is a pre-wired CCS from a cache
+    /// (e.g. from a previous `with_shared_cpu_bus` call). This sets up the internal
+    /// `SharedCpuBusState` needed for witness generation in [`build_ccs_chunks`] without
+    /// re-injecting constraint matrices into the CCS.
+    pub fn with_shared_cpu_bus_witness_only(
+        mut self,
+        cfg: SharedCpuBusConfig<F>,
+        chunk_size: usize,
+    ) -> Result<Self, String> {
+        if chunk_size == 0 {
+            return Err("shared_cpu_bus: chunk_size must be >= 1".into());
+        }
+        if cfg.const_one_col >= self.m_in {
+            return Err(format!(
+                "shared_cpu_bus: const_one_col={} must be < m_in={}",
+                cfg.const_one_col, self.m_in
+            ));
+        }
+
+        let (table_ids, mem_ids, layout) = self.shared_bus_schema(&cfg, chunk_size)?;
+
+        self.shared_cpu_bus = Some(SharedCpuBusState {
+            cfg,
+            table_ids,
+            mem_ids,
+            layout,
+        });
+        Ok(self)
+    }
 }
 
 // R1csCpu implementation specifically for Goldilocks field because neo_ajtai::decomp_b uses Goldilocks
@@ -471,6 +503,10 @@ where
         }
 
         let mut mcss = Vec::with_capacity(trace.steps.len().div_ceil(chunk_size));
+        let mut t_witness_build = std::time::Duration::ZERO;
+        let mut t_bus_fill = std::time::Duration::ZERO;
+        let mut t_decomp_b = std::time::Duration::ZERO;
+        let mut t_commit = std::time::Duration::ZERO;
 
         // Track sparse memory state across the full trace to compute inc_at_write_addr.
         let mut mem_state: HashMap<u32, HashMap<u64, Goldilocks>> = HashMap::new();
@@ -500,6 +536,7 @@ where
             let chunk = &trace.steps[chunk_start..chunk_end];
 
             // 1) Build witness z for this chunk.
+            let t0 = std::time::Instant::now();
             let mut z_vec = (self.chunk_to_witness)(chunk);
 
             // Allow witness builders to omit trailing dummy variables (including the shared-bus tail).
@@ -532,8 +569,10 @@ where
                 }
                 z_vec[shared.cfg.const_one_col] = Goldilocks::ONE;
             }
+            t_witness_build += t0.elapsed();
 
             // 2) Overwrite the shared bus tail from the trace events.
+            let t0 = std::time::Instant::now();
             if let Some(shared) = shared {
                 let bus_base = shared.layout.bus_base;
                 let bus_region_len = shared.layout.bus_region_len();
@@ -798,7 +837,10 @@ where
                 }
             }
 
+            t_bus_fill += t0.elapsed();
+
             // 3) Decompose z -> Z matrix
+            let t0 = std::time::Instant::now();
             let d = self.params.d as usize;
             let m = z_vec.len(); // == ccs.m after padding
 
@@ -819,9 +861,12 @@ where
                 }
             }
             let z_mat = Mat::from_row_major(d, m, mat_data);
+            t_decomp_b += t0.elapsed();
 
             // 4) Commit to Z
+            let t0 = std::time::Instant::now();
             let c = self.committer.commit(&z_mat);
+            t_commit += t0.elapsed();
 
             // 5) Build Instance/Witness
             let x = z_vec[..m_in].to_vec();
@@ -831,6 +876,15 @@ where
 
             chunk_start = chunk_end;
         }
+
+        eprintln!(
+            "[build_ccs_chunks] witness_build={}ms, bus_fill={}ms, decomp_b={}ms, commit={}ms, total={}ms",
+            t_witness_build.as_millis(),
+            t_bus_fill.as_millis(),
+            t_decomp_b.as_millis(),
+            t_commit.as_millis(),
+            (t_witness_build + t_bus_fill + t_decomp_b + t_commit).as_millis(),
+        );
 
         Ok(mcss)
     }

@@ -1317,6 +1317,12 @@ fn rv32_b1_chunk_to_witness_internal(
             z[layout.br_not_taken(j)] = F::ONE - taken;
         }
 
+        // Poseidon2 read ECALL: set rd_write_val = ecall_rd_val so the existing
+        // enforce_u32_bits range check covers it.
+        if is_poseidon2_read_ecall {
+            z[layout.rd_write_val(j)] = z[layout.ecall_rd_val(j)];
+        }
+
         let mul_carry = if is_mulh {
             let rhs =
                 (mul_hi as i128) - (rs1_sign as i128) * (rs2_u64 as i128) - (rs2_sign as i128) * (rs1_u64 as i128)

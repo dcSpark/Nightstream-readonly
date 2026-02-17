@@ -106,6 +106,22 @@ pub const PROG_ID: TwistId = TwistId(1);
 /// This is used by the RV32 B1 step circuit in "regfile-as-Twist" mode.
 pub const REG_ID: TwistId = TwistId(2);
 
+/// Poseidon2-Goldilocks hash compute ECALL identifier.
+///
+/// ABI: a0 = POSEIDON2_ECALL_NUM, a1 = input element count,
+///      a2 = input RAM address (elements as 2×u32 LE).
+/// The host reads inputs via untraced loads, computes the hash, and stores the
+/// 4-element digest in CPU-internal state. Use POSEIDON2_READ_ECALL_NUM to
+/// retrieve output words one at a time via register a0.
+pub const POSEIDON2_ECALL_NUM: u32 = 0x504F53;
+
+/// Poseidon2-Goldilocks digest read ECALL identifier (bit 31 set).
+///
+/// ABI: a0 = POSEIDON2_READ_ECALL_NUM. Returns the next u32 word of the
+/// pending Poseidon2 digest in register a0. Call 8 times (4 elements × 2 words)
+/// to retrieve the full digest.
+pub const POSEIDON2_READ_ECALL_NUM: u32 = 0x80504F53;
+
 pub use alu::{compute_op, lookup_entry};
 pub use bits::{interleave_bits, uninterleave_bits};
 pub use cpu::RiscvCpu;

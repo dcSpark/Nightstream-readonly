@@ -340,6 +340,16 @@ pub trait Twist<Addr, Word> {
             self.store_lane(twist_id, addr, value, lane);
         }
     }
+
+    /// Load a value from memory without recording a Twist event.
+    ///
+    /// Used by ECALL precompiles that need to read guest RAM without generating
+    /// per-step Twist bus entries (the ECALL computation is trusted host code).
+    /// The default implementation delegates to `load`.
+    #[inline]
+    fn load_untraced(&mut self, twist_id: TwistId, addr: Addr) -> Word {
+        self.load(twist_id, addr)
+    }
 }
 
 /// A tracing wrapper around any `Twist` implementation.
@@ -430,6 +440,10 @@ where
             value,
             lane: Some(lane),
         });
+    }
+
+    fn load_untraced(&mut self, twist_id: TwistId, addr: Addr) -> Word {
+        self.inner.load(twist_id, addr)
     }
 }
 

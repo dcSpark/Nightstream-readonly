@@ -1,4 +1,6 @@
 use neo_vm_trace::{Shout, Twist};
+use p3_field::{PrimeCharacteristicRing, PrimeField64};
+use p3_goldilocks::Goldilocks;
 
 use super::bits::interleave_bits;
 use super::decode::decode_instruction;
@@ -24,6 +26,10 @@ pub struct RiscvCpu {
     program: Vec<RiscvInstruction>,
     /// Base address of the program.
     program_base: u64,
+    /// Pending Poseidon2 digest words (8 × u32, set by the compute ECALL).
+    poseidon2_pending: Option<[u32; 8]>,
+    /// Index into `poseidon2_pending` for the next read ECALL.
+    poseidon2_read_idx: usize,
 }
 
 impl RiscvCpu {
@@ -37,6 +43,8 @@ impl RiscvCpu {
             halted: false,
             program: Vec::new(),
             program_base: 0,
+            poseidon2_pending: None,
+            poseidon2_read_idx: 0,
         }
     }
 
@@ -94,6 +102,56 @@ impl RiscvCpu {
         let masked = self.mask_value(value);
         twist.store_lane(super::REG_ID, reg as u64, masked, /*lane=*/ 0);
         self.regs[reg as usize] = masked;
+    }
+
+    /// Execute the Poseidon2 hash compute precompile.
+    ///
+    /// Reads `n_elements` Goldilocks field elements from RAM at `input_addr`
+    /// using `load_untraced` (no Twist bus events), computes the Poseidon2-
+    /// Goldilocks sponge hash, and stores the 4-element digest as 8 u32 words
+    /// in internal CPU state (`poseidon2_pending`). The guest retrieves output
+    /// words one at a time via `POSEIDON2_READ_ECALL_NUM`.
+    fn handle_poseidon2_ecall<T: Twist<u64, u64>>(&mut self, twist: &mut T) {
+        use neo_ccs::crypto::poseidon2_goldilocks::poseidon2_hash;
+
+        let ram = super::RAM_ID;
+        let n_elements = self.get_reg(11) as u32; // a1
+        let input_addr = self.get_reg(12); // a2
+
+        let mut inputs = Vec::with_capacity(n_elements as usize);
+        for i in 0..n_elements {
+            let addr = input_addr + (i as u64) * 8;
+            let lo = twist.load_untraced(ram, addr) & 0xFFFF_FFFF;
+            let hi = twist.load_untraced(ram, addr + 4) & 0xFFFF_FFFF;
+            let val = lo | (hi << 32);
+            inputs.push(Goldilocks::from_u64(val));
+        }
+
+        let digest = poseidon2_hash(&inputs);
+
+        let mut words = [0u32; 8];
+        for (i, &elem) in digest.iter().enumerate() {
+            let val = elem.as_canonical_u64();
+            words[i * 2] = val as u32;
+            words[i * 2 + 1] = (val >> 32) as u32;
+        }
+        self.poseidon2_pending = Some(words);
+        self.poseidon2_read_idx = 0;
+    }
+
+    /// Read one u32 word of the pending Poseidon2 digest into register a0.
+    ///
+    /// Called 8 times by the guest to retrieve the full 4-element digest.
+    /// Each call returns the next word and advances the internal read index.
+    fn handle_poseidon2_read_ecall(&mut self) {
+        let words = self
+            .poseidon2_pending
+            .expect("poseidon2 read ECALL called without a pending digest");
+        let idx = self.poseidon2_read_idx;
+        assert!(idx < 8, "poseidon2 read ECALL: all 8 words already consumed");
+        let word = words[idx] as u64;
+        self.set_reg(10, word); // a0
+        self.poseidon2_read_idx = idx + 1;
     }
 }
 
@@ -590,7 +648,12 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
 
             // === System Instructions ===
             RiscvInstruction::Ecall => {
-                // ECALL - environment call (syscall).
+                let call_id = self.get_reg(10) as u32;
+                if call_id == POSEIDON2_ECALL_NUM {
+                    self.handle_poseidon2_ecall(twist);
+                } else if call_id == POSEIDON2_READ_ECALL_NUM {
+                    self.handle_poseidon2_read_ecall();
+                }
                 self.handle_ecall();
             }
 

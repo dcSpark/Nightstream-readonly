@@ -7,6 +7,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::output_binding::{simple_output_config, OutputBindingConfig};
@@ -73,6 +74,25 @@ fn elapsed_duration(start: TimePoint) -> Duration {
     {
         start.elapsed()
     }
+}
+
+/// Per-phase timing breakdown for `Rv32B1::prove()`.
+///
+/// Captures wall-clock time for each major phase so callers can identify bottlenecks.
+#[derive(Clone, Debug, Default)]
+pub struct ProveTimings {
+    /// Program decode, memory layout setup, and Shout table inference.
+    pub decode_and_setup: Duration,
+    /// CCS construction (base + shared-bus wiring) and session/committer creation.
+    pub ccs_and_shared_bus: Duration,
+    /// RISC-V VM execution and shard/witness collection.
+    pub vm_execution: Duration,
+    /// Fold-and-prove (sumcheck + Ajtai commitment).
+    pub fold_and_prove: Duration,
+    /// Sub-phase: RISC-V VM trace collection (within vm_execution).
+    pub vm_trace: Duration,
+    /// Sub-phase: CPU witness building including decomp + commit (within vm_execution).
+    pub cpu_witness: Duration,
 }
 
 pub fn rv32_b1_step_linking_config(layout: &Rv32B1Layout) -> StepLinkingConfig {
@@ -279,6 +299,47 @@ fn all_shout_opcodes() -> HashSet<RiscvOpcode> {
 
 /// High-level “few lines” builder for proving/verifying an RV32 program using the B1 shared-bus step circuit.
 ///
+/// Pre-computed SparseCache + matrix digest for RV32 B1 circuit preprocessing.
+///
+/// The `SparseCache::build()` and matrix-digest computation are the most expensive parts
+/// of both proving and verification.  This struct captures those artefacts so they can be
+/// computed once and reused across many `Rv32B1::prove()` / `build_verifier()` calls with
+/// the same ROM, `ram_bytes`, and `chunk_size`.
+///
+/// Build with [`Rv32B1::build_ccs_cache`], then inject into subsequent builders via
+/// [`Rv32B1::with_ccs_cache`].
+///
+/// When `full_ccs` is present, `prove()` and `build_verifier()` skip `build_rv32_b1_step_ccs`
+/// and `with_shared_cpu_bus`, reusing the cached CCS directly. This saves ~1s per call.
+///
+/// When `params` and `committer` are also present, `prove()` and `build_verifier()` additionally
+/// skip `FoldingSession::new_ajtai()` (which generates a fresh random kappa x m Ajtai matrix),
+/// using `FoldingSession::new()` with the cached values instead.
+pub struct Rv32B1CcsCache {
+    pub sparse: Arc<SparseCache<F>>,
+    /// Full post-shared-bus CCS. When present, prove/verify skip CCS construction.
+    pub full_ccs: Option<CcsStructure<F>>,
+    /// Layout corresponding to the cached CCS.
+    pub layout: Option<Rv32B1Layout>,
+    /// Cached NeoParams from the original session creation.
+    pub params: Option<NeoParams>,
+    /// Cached Ajtai committer (wraps `Arc<PP>`). Avoids re-generating the random matrix.
+    pub committer: Option<AjtaiSModule>,
+    /// Precomputed CCS matrix digest. Avoids re-hashing all matrices (~1.5s) on every prove/verify.
+    pub ccs_mat_digest: Option<Vec<F>>,
+}
+
+impl std::fmt::Debug for Rv32B1CcsCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Rv32B1CcsCache")
+            .field("sparse_len", &self.sparse.len())
+            .field("has_full_ccs", &self.full_ccs.is_some())
+            .field("has_params", &self.params.is_some())
+            .field("has_committer", &self.committer.is_some())
+            .finish()
+    }
+}
+
 /// This:
 /// - chooses parameters + Ajtai committer automatically,
 /// - infers the minimal Shout table set from the program (unless overridden),
@@ -551,6 +612,9 @@ impl Rv32B1 {
             }
         }
 
+        // === Phase 1: Decode + setup ===
+        let phase_start = time_now();
+
         let program = decode_program(&self.program_bytes)
             .map_err(|e| PiCcsError::InvalidInput(format!("decode_program failed: {e}")))?;
         let uses_rv32m = program_uses_rv32m(&program);
@@ -689,7 +753,6 @@ impl Rv32B1 {
 
         let mut vm = RiscvCpu::new(self.xlen);
         vm.load_program(/*base=*/ 0, program);
-
         let empty_tables: HashMap<u32, LutTable<F>> = HashMap::new();
         let lut_lanes: HashMap<u32, usize> = HashMap::new();
 
@@ -714,6 +777,11 @@ impl Rv32B1 {
 
         // Always enforce step-to-step chunk chaining for RV32 B1.
         session.set_step_linking(rv32_b1_step_linking_config(&layout));
+
+        let t_ccs_and_shared_bus = elapsed_duration(phase_start);
+
+        // === Phase 3: VM execution + shard collection ===
+        let phase_start = time_now();
 
         // Execute + collect step bundles (and aux for output binding).
         let build_start = time_now();
@@ -742,6 +810,12 @@ impl Rv32B1 {
             }
         }
 
+        // Extract sub-phase timings from the shared-bus aux.
+        let (t_vm_trace, t_cpu_witness) = session
+            .shared_bus_aux()
+            .map(|aux| (aux.vm_trace_duration, aux.cpu_witness_duration))
+            .unwrap_or((Duration::ZERO, Duration::ZERO));
+
         // Enforce that the *statement* initial memory matches chunk 0's public MemInit.
         let steps_public = session.steps_public();
         rv32_b1_enforce_chunk0_mem_init_matches_statement(&mem_layouts, &initial_mem, &steps_public)?;
@@ -750,7 +824,8 @@ impl Rv32B1 {
             .checked_sub(build_commit_duration)
             .unwrap_or(Duration::ZERO);
 
-        let ccs = cpu.ccs.clone();
+        // Move the CCS out of cpu (no longer needed) to avoid an expensive clone.
+        let ccs = cpu.ccs;
 
         // Prove phase (timed)
         //
@@ -1346,6 +1421,15 @@ impl Rv32B1Run {
         self.session.steps_public()
     }
 
+    /// Return the public MCS instances for inclusion in a proof package.
+    ///
+    /// These instances must be transmitted alongside the `ShardProof` so that
+    /// a standalone verifier (via [`Rv32B1Verifier::verify`]) can check the proof
+    /// without re-executing the RISC-V program.
+    pub fn mcss_public(&self) -> Vec<neo_ccs::McsInstance<Cmt, F>> {
+        self.session.mcss_public()
+    }
+
     pub fn final_boundary_state(&self) -> Result<Rv32BoundaryState, PiCcsError> {
         let steps_public = self.steps_public();
         let last = steps_public
@@ -1508,6 +1592,11 @@ impl Rv32B1Run {
 
     pub fn prove_duration(&self) -> Duration {
         self.prove_duration
+    }
+
+    /// Per-phase timing breakdown for the prove call.
+    pub fn prove_timings(&self) -> &ProveTimings {
+        &self.prove_timings
     }
 
     pub fn verify_duration(&self) -> Option<Duration> {
