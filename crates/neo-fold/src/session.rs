@@ -592,7 +592,7 @@ where
     mode: FoldingMode,
     params: NeoParams,
     l: L,
-    commit_m: Option<usize>,
+    pub(crate) commit_m: Option<usize>,
     mixers: CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32) -> Cmt>,
 
     // Cached CCS preprocessing for proving (best-effort reuse).
@@ -1193,6 +1193,30 @@ where
         Ok(())
     }
 
+    /// Preload prover-side CCS preprocessing with a precomputed matrix digest, skipping the
+    /// expensive `digest_ccs_matrices` call (~1.5s for large circuits).
+    pub fn preload_ccs_sparse_cache_with_digest(
+        &mut self,
+        s: &CcsStructure<F>,
+        ccs_sparse_cache: Arc<SparseCache<F>>,
+        ccs_mat_digest: Vec<F>,
+    ) -> Result<(), PiCcsError> {
+        let src_ptr = (s as *const CcsStructure<F>) as usize;
+        if ccs_sparse_cache.len() != s.t() {
+            return Err(PiCcsError::InvalidInput(format!(
+                "SparseCache matrix count mismatch: cache has {}, CCS has {}",
+                ccs_sparse_cache.len(),
+                s.t()
+            )));
+        }
+        let ctx = ShardProverContext {
+            ccs_mat_digest,
+            ccs_sparse_cache: Some(ccs_sparse_cache),
+        };
+        self.prover_ctx = Some(SessionCcsCache { src_ptr, ctx });
+        Ok(())
+    }
+
     /// Preload verifier-side CCS preprocessing (sparse-cache + matrix-digest).
     ///
     /// This does **not** affect proving. It exists so benchmarks can model a verifier that has
@@ -1203,6 +1227,29 @@ where
         ccs_sparse_cache: Arc<SparseCache<F>>,
     ) -> Result<(), PiCcsError> {
         self.verifier_ctx = Some(self.build_ccs_cache(s, Some(ccs_sparse_cache))?);
+        Ok(())
+    }
+
+    /// Preload verifier-side CCS preprocessing with a precomputed matrix digest.
+    pub fn preload_verifier_ccs_sparse_cache_with_digest(
+        &mut self,
+        s: &CcsStructure<F>,
+        ccs_sparse_cache: Arc<SparseCache<F>>,
+        ccs_mat_digest: Vec<F>,
+    ) -> Result<(), PiCcsError> {
+        let src_ptr = (s as *const CcsStructure<F>) as usize;
+        if ccs_sparse_cache.len() != s.t() {
+            return Err(PiCcsError::InvalidInput(format!(
+                "SparseCache matrix count mismatch: cache has {}, CCS has {}",
+                ccs_sparse_cache.len(),
+                s.t()
+            )));
+        }
+        let ctx = ShardProverContext {
+            ccs_mat_digest,
+            ccs_sparse_cache: Some(ccs_sparse_cache),
+        };
+        self.verifier_ctx = Some(SessionCcsCache { src_ptr, ctx });
         Ok(())
     }
 
