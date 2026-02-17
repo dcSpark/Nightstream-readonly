@@ -43,6 +43,20 @@ pub fn rv32_trace_lookup_addr_group_for_table_id(table_id: u32) -> Option<u32> {
     }
 }
 
+/// Shape-aware address-group hint for shared-bus Shout lanes.
+///
+/// This guards against accidental grouping when callers use low numeric `table_id`s for
+/// non-RV32 opcode tables (common in generic tests/fixtures). RV32 opcode tables (id 0..=19)
+/// are grouped only when their key shape matches the canonical interleaved width.
+#[inline]
+pub fn rv32_trace_lookup_addr_group_for_table_shape(table_id: u32, ell_addr: usize) -> Option<u32> {
+    let group = rv32_trace_lookup_addr_group_for_table_id(table_id)?;
+    if table_id <= 19 && ell_addr != 64 {
+        return None;
+    }
+    Some(group)
+}
+
 #[inline]
 pub fn rv32_trace_lookup_selector_group_for_table_id(table_id: u32) -> Option<u32> {
     if rv32_is_decode_lookup_table_id(table_id) {

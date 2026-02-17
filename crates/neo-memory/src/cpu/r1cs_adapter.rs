@@ -17,7 +17,7 @@ use crate::mem_init::MemInit;
 use crate::plain::LutTable;
 use crate::plain::PlainMemLayout;
 use crate::riscv::trace::{
-    rv32_trace_lookup_addr_group_for_table_id, rv32_trace_lookup_selector_group_for_table_id,
+    rv32_trace_lookup_addr_group_for_table_shape, rv32_trace_lookup_selector_group_for_table_id,
 };
 use crate::witness::{LutInstance, LutTableSpec, MemInstance};
 use neo_ajtai::{decomp_b, DecompStyle};
@@ -197,7 +197,7 @@ where
                 ell_addr,
                 lanes,
                 n_vals: 1usize,
-                addr_group: rv32_trace_lookup_addr_group_for_table_id(*table_id).map(|v| v as u64),
+                addr_group: rv32_trace_lookup_addr_group_for_table_shape(*table_id, ell_addr).map(|v| v as u64),
                 selector_group: rv32_trace_lookup_selector_group_for_table_id(*table_id).map(|v| v as u64),
             });
         }

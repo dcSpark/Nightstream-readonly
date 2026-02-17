@@ -13,6 +13,9 @@ fn prove_run(program: Vec<RiscvInstruction>, max_steps: usize) -> Rv32B1Run {
         .chunk_size(1)
         .max_steps(max_steps)
         .ram_bytes(0x200)
+        // Keep this fixture explicit: these tests rely on XOR lookups in tiny programs,
+        // and we don't want them coupled to shout auto-inference details.
+        .shout_ops([RiscvOpcode::Add, RiscvOpcode::Xor])
         .prove()
         .expect("prove");
     run.verify().expect("baseline verify");
@@ -66,14 +69,14 @@ fn rv32_b1_cpu_vs_bus_twist_rv_mismatch_must_fail() {
 
 #[test]
 fn rv32_b1_cpu_vs_bus_shout_val_mismatch_must_fail() {
-    // Program: XORI x1, x0, 1; HALT (forces a Shout XOR lookup).
+    // Program: XOR x1, x0, x0; HALT (forces a Shout XOR lookup).
     let run = prove_run(
         vec![
-            RiscvInstruction::IAlu {
+            RiscvInstruction::RAlu {
                 op: RiscvOpcode::Xor,
                 rd: 1,
                 rs1: 0,
-                imm: 1,
+                rs2: 0,
             },
             RiscvInstruction::Halt,
         ],

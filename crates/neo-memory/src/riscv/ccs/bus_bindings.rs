@@ -9,7 +9,8 @@ use crate::plain::PlainMemLayout;
 use crate::riscv::lookups::{PROG_ID, RAM_ID, REG_ID};
 use crate::riscv::trace::{
     rv32_decode_lookup_table_id_for_col, rv32_is_decode_lookup_table_id, rv32_is_width_lookup_table_id,
-    rv32_trace_lookup_addr_group_for_table_id, rv32_trace_lookup_selector_group_for_table_id, Rv32DecodeSidecarLayout,
+    rv32_trace_lookup_addr_group_for_table_shape, rv32_trace_lookup_selector_group_for_table_id,
+    Rv32DecodeSidecarLayout,
 };
 
 use super::config::{derive_mem_ids_and_ell_addrs, derive_shout_ids_and_ell_addrs};
@@ -198,8 +199,8 @@ fn validate_trace_shout_table_id(table_id: u32) -> Result<(), String> {
 }
 
 #[inline]
-fn trace_lookup_addr_group_for_table_id(table_id: u32) -> Option<u32> {
-    rv32_trace_lookup_addr_group_for_table_id(table_id)
+fn trace_lookup_addr_group_for_table_shape(table_id: u32, ell_addr: usize) -> Option<u32> {
+    rv32_trace_lookup_addr_group_for_table_shape(table_id, ell_addr)
 }
 
 #[inline]
@@ -230,7 +231,7 @@ fn derive_trace_shout_shapes(
                 table_id,
                 ell_addr: 2 * RV32_XLEN,
                 n_vals: 1usize,
-                addr_group: trace_lookup_addr_group_for_table_id(table_id),
+                addr_group: trace_lookup_addr_group_for_table_shape(table_id, 2 * RV32_XLEN),
                 selector_group: trace_lookup_selector_group_for_table_id(table_id),
             },
         );
@@ -262,7 +263,7 @@ fn derive_trace_shout_shapes(
                     spec.table_id, prev.n_vals, spec.n_vals
                 ));
             }
-            let inferred_group = trace_lookup_addr_group_for_table_id(spec.table_id);
+            let inferred_group = trace_lookup_addr_group_for_table_shape(spec.table_id, spec.ell_addr);
             if prev.addr_group != inferred_group {
                 return Err(format!(
                     "RV32 trace shared bus: conflicting addr_group for table_id={} (base/spec mismatch: {:?} vs {:?})",
@@ -283,7 +284,7 @@ fn derive_trace_shout_shapes(
                     table_id: spec.table_id,
                     ell_addr: spec.ell_addr,
                     n_vals: spec.n_vals,
-                    addr_group: trace_lookup_addr_group_for_table_id(spec.table_id),
+                    addr_group: trace_lookup_addr_group_for_table_shape(spec.table_id, spec.ell_addr),
                     selector_group: trace_lookup_selector_group_for_table_id(spec.table_id),
                 },
             );

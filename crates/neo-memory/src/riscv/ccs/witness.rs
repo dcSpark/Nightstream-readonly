@@ -1223,11 +1223,11 @@ fn rv32_b1_chunk_to_witness_internal(
             let add_b0 = z[layout.bus.bus_cell(add_lane.addr_bits.start + 1, j)];
             z[layout.add_a0b0(j)] = add_a0 * add_b0;
         } else if let Some(ev) = shout_ev {
-            if ev.shout_id.0 == ADD_TABLE_ID {
-                let a0 = if (ev.key & 1) == 1 { F::ONE } else { F::ZERO };
-                let b0 = if ((ev.key >> 1) & 1) == 1 { F::ONE } else { F::ZERO };
-                z[layout.add_a0b0(j)] = a0 * b0;
-            }
+            // In shared-bus mode ADD addr bits may be grouped with other Shout tables, so this
+            // helper must follow the active Shout key even when the opcode is not ADD.
+            let a0 = if (ev.key & 1) == 1 { F::ONE } else { F::ZERO };
+            let b0 = if ((ev.key >> 1) & 1) == 1 { F::ONE } else { F::ZERO };
+            z[layout.add_a0b0(j)] = a0 * b0;
         }
 
         let rs1_i32 = rs1_u32 as i32;

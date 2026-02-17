@@ -56,7 +56,7 @@ fn rv32_b1_main_proof_truncated_steps_must_fail() {
     let sess_ok = verifier_only_session_for_steps(&run, steps_ok);
     assert_eq!(
         sess_ok
-            .verify_collected(run.ccs(), &run.proof().main)
+            .verify_collected(run.ccs(), run.proof())
             .expect("main proof verify"),
         true
     );
@@ -64,7 +64,7 @@ fn rv32_b1_main_proof_truncated_steps_must_fail() {
     // Truncate steps (verifier-side) and reuse the original proof.
     let steps_bad: Vec<StepWit> = run.steps_witness().iter().cloned().take(1).collect();
     let sess_bad = verifier_only_session_for_steps(&run, steps_bad);
-    let res = sess_bad.verify_collected(run.ccs(), &run.proof().main);
+    let res = sess_bad.verify_collected(run.ccs(), run.proof());
     assert!(matches!(res, Err(_) | Ok(false)), "truncated steps must not verify");
 }
 
@@ -86,7 +86,7 @@ fn rv32_b1_main_proof_tamper_prog_init_must_fail() {
     steps_bad[0].mem_instances[prog_idx].0.init = MemInit::Zero;
 
     let sess_bad = verifier_only_session_for_steps(&run, steps_bad);
-    let res = sess_bad.verify_collected(run.ccs(), &run.proof().main);
+    let res = sess_bad.verify_collected(run.ccs(), run.proof());
     assert!(
         matches!(res, Err(_) | Ok(false)),
         "tampering PROG Twist init in public input must fail verification"
@@ -113,7 +113,7 @@ fn rv32_b1_main_proof_tamper_reg_init_must_fail() {
     steps_bad[0].mem_instances[reg_idx].0.init = MemInit::Zero;
 
     let sess_bad = verifier_only_session_for_steps(&run, steps_bad);
-    let res = sess_bad.verify_collected(run.ccs(), &run.proof().main);
+    let res = sess_bad.verify_collected(run.ccs(), run.proof());
     assert!(
         matches!(res, Err(_) | Ok(false)),
         "tampering REG Twist init in public input must fail verification"
@@ -136,7 +136,7 @@ fn rv32_b1_main_proof_step_reordering_must_fail() {
     steps_bad.swap(0, 1);
 
     let sess_bad = verifier_only_session_for_steps(&run, steps_bad);
-    let res = sess_bad.verify_collected(run.ccs(), &run.proof().main);
+    let res = sess_bad.verify_collected(run.ccs(), run.proof());
     assert!(
         matches!(res, Err(_) | Ok(false)),
         "reordering shard steps must not verify"
@@ -166,7 +166,7 @@ fn rv32_b1_main_proof_splicing_across_runs_must_fail() {
     // Attempt to verify run A's main proof against run B's public step bundles.
     let steps_bad: Vec<StepWit> = run_b.steps_witness().to_vec();
     let sess_bad = verifier_only_session_for_steps(&run_a, steps_bad);
-    let res = sess_bad.verify_collected(run_a.ccs(), &run_a.proof().main);
+    let res = sess_bad.verify_collected(run_a.ccs(), run_a.proof());
     assert!(
         matches!(res, Err(_) | Ok(false)),
         "splicing main proof across runs must not verify"

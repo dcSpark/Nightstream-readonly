@@ -70,7 +70,7 @@ fn test_riscv_program_full_prove_verify() {
 
     // Ensure the Shout addr-pre proof skips inactive tables.
     // This program uses only the ADD lookup; LUI and HALT use no Shout lookups and should skip entirely.
-    let proof = run.proof();
+    let proof = run.proof_bundle();
     let mut saw_skipped = false;
     let mut saw_add_only = false;
     for step in &proof.main.steps {
@@ -420,7 +420,7 @@ fn test_riscv_program_rv32m_full_prove_verify() {
     assert_eq!(rv32m_chunks, vec![2, 3], "expected RV32M rows on the MUL/DIV chunks");
 
     let rv32m = run
-        .proof()
+        .proof_bundle()
         .rv32m
         .as_ref()
         .expect("expected RV32M sidecar proofs");

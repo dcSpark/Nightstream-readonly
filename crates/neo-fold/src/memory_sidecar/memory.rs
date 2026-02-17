@@ -22,7 +22,7 @@ use neo_memory::riscv::lookups::{PROG_ID, RAM_ID, REG_ID};
 use neo_memory::riscv::shout_oracle::RiscvAddressLookupOracleSparse;
 use neo_memory::riscv::trace::{
     rv32_decode_lookup_backed_cols, rv32_decode_lookup_backed_row_from_instr_word, rv32_decode_lookup_table_id_for_col,
-    rv32_is_decode_lookup_table_id, rv32_is_width_lookup_table_id, rv32_trace_lookup_addr_group_for_table_id,
+    rv32_is_decode_lookup_table_id, rv32_is_width_lookup_table_id, rv32_trace_lookup_addr_group_for_table_shape,
     rv32_trace_lookup_selector_group_for_table_id,
     rv32_width_lookup_backed_cols, rv32_width_lookup_table_id_for_col, Rv32DecodeSidecarLayout, Rv32TraceLayout,
     Rv32WidthSidecarLayout,
@@ -5512,15 +5512,79 @@ fn has_trace_lookup_families_witness(step: &StepWitnessBundle<Cmt, F, K>) -> boo
 }
 
 #[inline]
+fn has_rv32_trace_twist_mem_ids_instance(step: &StepInstanceBundle<Cmt, F, K>) -> bool {
+    if step.mem_insts.is_empty() {
+        return false;
+    }
+    let mut ids = std::collections::BTreeSet::<u32>::new();
+    for inst in step.mem_insts.iter() {
+        ids.insert(inst.mem_id);
+    }
+    let required = std::collections::BTreeSet::from([PROG_ID.0, REG_ID.0]);
+    let allowed = std::collections::BTreeSet::from([PROG_ID.0, REG_ID.0, RAM_ID.0]);
+    required.is_subset(&ids) && ids.is_subset(&allowed)
+}
+
+#[inline]
+fn has_rv32_trace_twist_mem_ids_witness(step: &StepWitnessBundle<Cmt, F, K>) -> bool {
+    if step.mem_instances.is_empty() {
+        return false;
+    }
+    let mut ids = std::collections::BTreeSet::<u32>::new();
+    for (inst, _) in step.mem_instances.iter() {
+        ids.insert(inst.mem_id);
+    }
+    let required = std::collections::BTreeSet::from([PROG_ID.0, REG_ID.0]);
+    let allowed = std::collections::BTreeSet::from([PROG_ID.0, REG_ID.0, RAM_ID.0]);
+    required.is_subset(&ids) && ids.is_subset(&allowed)
+}
+
+#[inline]
+fn has_rv32_trace_shout_specs_instance(step: &StepInstanceBundle<Cmt, F, K>) -> bool {
+    step.lut_insts.iter().any(|inst| {
+        matches!(
+            inst.table_spec,
+            Some(
+                LutTableSpec::RiscvOpcode { xlen: 32, .. }
+                    | LutTableSpec::RiscvOpcodePacked { xlen: 32, .. }
+                    | LutTableSpec::RiscvOpcodeEventTablePacked { xlen: 32, .. }
+            )
+        )
+    })
+}
+
+#[inline]
+fn has_rv32_trace_shout_specs_witness(step: &StepWitnessBundle<Cmt, F, K>) -> bool {
+    step.lut_instances.iter().any(|(inst, _)| {
+        matches!(
+            inst.table_spec,
+            Some(
+                LutTableSpec::RiscvOpcode { xlen: 32, .. }
+                    | LutTableSpec::RiscvOpcodePacked { xlen: 32, .. }
+                    | LutTableSpec::RiscvOpcodeEventTablePacked { xlen: 32, .. }
+            )
+        )
+    })
+}
+
+#[inline]
 pub(crate) fn wb_wp_required_for_step_instance(step: &StepInstanceBundle<Cmt, F, K>) -> bool {
     // Stage gating is keyed by lookup-family presence instead of fixed `m_in`/`mem_id`
     // assumptions so adapter-side routing can evolve without hardcoding RV32 shapes here.
+    //
+    // No-shared RV32 trace mode also needs CPU trace openings for:
+    // - packed/event-table Shout linkage (spec-tagged), and
+    // - Twist(PROG/REG[/RAM]) linkage (mem-id keyed).
     has_trace_lookup_families_instance(step)
+        || (step.mcs_inst.m_in == 5
+            && (has_rv32_trace_shout_specs_instance(step) || has_rv32_trace_twist_mem_ids_instance(step)))
 }
 
 #[inline]
 pub(crate) fn wb_wp_required_for_step_witness(step: &StepWitnessBundle<Cmt, F, K>) -> bool {
     has_trace_lookup_families_witness(step)
+        || (step.mcs.0.m_in == 5
+            && (has_rv32_trace_shout_specs_witness(step) || has_rv32_trace_twist_mem_ids_witness(step)))
 }
 
 pub(crate) fn build_bus_layout_for_step_witness(
@@ -5536,7 +5600,7 @@ pub(crate) fn build_bus_layout_for_step_witness(
             ell_addr: inst.d * inst.ell,
             lanes: inst.lanes.max(1),
             n_vals: 1usize,
-            addr_group: rv32_trace_lookup_addr_group_for_table_id(inst.table_id).map(|v| v as u64),
+            addr_group: rv32_trace_lookup_addr_group_for_table_shape(inst.table_id, inst.d * inst.ell).map(|v| v as u64),
             selector_group: rv32_trace_lookup_selector_group_for_table_id(inst.table_id).map(|v| v as u64),
         })
         .collect();

@@ -43,6 +43,7 @@ fn rv32_b1_twist_instances_reordered_must_fail() {
         .chunk_size(1)
         .max_steps(2)
         .ram_bytes(0x200)
+        .shout_ops([RiscvOpcode::Add])
         .prove()
         .expect("prove");
     run.verify().expect("baseline verify");
@@ -54,7 +55,7 @@ fn rv32_b1_twist_instances_reordered_must_fail() {
     }
 
     let sess_bad = verifier_only_session_for_steps(&run, steps_bad);
-    let res = sess_bad.verify_collected(run.ccs(), &run.proof().main);
+    let res = sess_bad.verify_collected(run.ccs(), run.proof());
     assert!(
         matches!(res, Err(_) | Ok(false)),
         "reordering Twist instances must not verify"
@@ -78,6 +79,7 @@ fn rv32_b1_shout_table_spec_tamper_must_fail() {
         .chunk_size(1)
         .max_steps(2)
         .ram_bytes(0x200)
+        .shout_ops([RiscvOpcode::Add])
         .prove()
         .expect("prove");
     run.verify().expect("baseline verify");
@@ -97,7 +99,7 @@ fn rv32_b1_shout_table_spec_tamper_must_fail() {
     }
 
     let sess_bad = verifier_only_session_for_steps(&run, steps_bad);
-    let res = sess_bad.verify_collected(run.ccs(), &run.proof().main);
+    let res = sess_bad.verify_collected(run.ccs(), run.proof());
     assert!(
         matches!(res, Err(_) | Ok(false)),
         "tampering Shout table_spec must not verify"
@@ -106,13 +108,13 @@ fn rv32_b1_shout_table_spec_tamper_must_fail() {
 
 #[test]
 fn rv32_b1_shout_instances_reordered_must_fail() {
-    // Ensure we have at least two Shout tables by including XORI (plus implicit ADD table).
+    // Ensure we have at least two Shout tables by including XOR (plus implicit ADD table).
     let program = vec![
-        RiscvInstruction::IAlu {
+        RiscvInstruction::RAlu {
             op: RiscvOpcode::Xor,
             rd: 1,
             rs1: 0,
-            imm: 1,
+            rs2: 0,
         },
         RiscvInstruction::Halt,
     ];
@@ -130,13 +132,13 @@ fn rv32_b1_shout_instances_reordered_must_fail() {
     for step in &mut steps_bad {
         assert!(
             step.lut_instances.len() >= 2,
-            "expected at least 2 Shout instances for XORI program"
+            "expected at least 2 Shout instances for XOR program"
         );
         step.lut_instances.swap(0, 1);
     }
 
     let sess_bad = verifier_only_session_for_steps(&run, steps_bad);
-    let res = sess_bad.verify_collected(run.ccs(), &run.proof().main);
+    let res = sess_bad.verify_collected(run.ccs(), run.proof());
     assert!(
         matches!(res, Err(_) | Ok(false)),
         "reordering Shout instances must not verify"
@@ -175,7 +177,7 @@ fn rv32_b1_ram_init_statement_tamper_must_fail() {
     steps_bad[0].mem_instances[ram_idx].0.init = MemInit::Zero;
 
     let sess_bad = verifier_only_session_for_steps(&run, steps_bad);
-    let res = sess_bad.verify_collected(run.ccs(), &run.proof().main);
+    let res = sess_bad.verify_collected(run.ccs(), run.proof());
     assert!(
         matches!(res, Err(_) | Ok(false)),
         "tampering RAM Twist init in public input must fail verification"

@@ -14,7 +14,7 @@ use neo_memory::riscv::ccs::{
 };
 use neo_memory::riscv::lookups::{
     decode_instruction, encode_program, BranchCondition, RiscvCpu, RiscvInstruction, RiscvMemOp, RiscvMemory,
-    RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID, REG_ID,
+    RiscvOpcode, RiscvShoutTables, POSEIDON2_ECALL_NUM, POSEIDON2_READ_ECALL_NUM, PROG_ID, RAM_ID, REG_ID,
 };
 use neo_memory::riscv::rom_init::prog_init_words;
 use neo_memory::witness::LutTableSpec;
@@ -431,7 +431,7 @@ fn rv32_b1_ccs_happy_path_poseidon2_ecall() {
 
     let (k_prog, d_prog) = pow2_ceil_k(program_bytes.len());
     let (k_ram, d_ram) = pow2_ceil_k(0x40);
-    let mem_layouts = HashMap::from([
+    let mem_layouts = with_reg_layout(HashMap::from([
         (
             0u32,
             PlainMemLayout {
@@ -450,7 +450,7 @@ fn rv32_b1_ccs_happy_path_poseidon2_ecall() {
                 lanes: 1,
             },
         ),
-    ]);
+    ]));
 
     let initial_mem = prog_init_words(PROG_ID, 0, &program_bytes);
 
@@ -469,6 +469,7 @@ fn rv32_b1_ccs_happy_path_poseidon2_ecall() {
         &table_specs,
         rv32_b1_chunk_to_witness(layout.clone()),
     )
+    .expect("R1csCpu::new")
     .with_shared_cpu_bus(
         rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem).expect("cfg"),
         1,

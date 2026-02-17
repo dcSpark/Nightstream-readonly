@@ -8,7 +8,7 @@ use neo_memory::cpu::{
 };
 use neo_memory::riscv::lookups::{PROG_ID, REG_ID};
 use neo_memory::riscv::trace::{
-    rv32_is_decode_lookup_table_id, rv32_is_width_lookup_table_id, rv32_trace_lookup_addr_group_for_table_id,
+    rv32_is_decode_lookup_table_id, rv32_is_width_lookup_table_id, rv32_trace_lookup_addr_group_for_table_shape,
     rv32_trace_lookup_selector_group_for_table_id,
 };
 use neo_memory::sparse_time::SparseIdxVec;
@@ -127,7 +127,8 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
         .collect();
     let base_shout_addr_groups: Vec<Option<u64>> = (0..steps[0].lut_insts_len())
         .map(|i| {
-            rv32_trace_lookup_addr_group_for_table_id(steps[0].lut_inst(i).table_id).map(|v| v as u64)
+            let inst = steps[0].lut_inst(i);
+            rv32_trace_lookup_addr_group_for_table_shape(inst.table_id, inst.d * inst.ell).map(|v| v as u64)
         })
         .collect();
     let base_shout_selector_groups: Vec<Option<u64>> = (0..steps[0].lut_insts_len())
@@ -161,7 +162,8 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
             .collect();
         let cur_shout_addr_groups: Vec<Option<u64>> = (0..step.lut_insts_len())
             .map(|j| {
-                rv32_trace_lookup_addr_group_for_table_id(step.lut_inst(j).table_id).map(|v| v as u64)
+                let inst = step.lut_inst(j);
+                rv32_trace_lookup_addr_group_for_table_shape(inst.table_id, inst.d * inst.ell).map(|v| v as u64)
             })
             .collect();
         let cur_shout_selector_groups: Vec<Option<u64>> = (0..step.lut_insts_len())

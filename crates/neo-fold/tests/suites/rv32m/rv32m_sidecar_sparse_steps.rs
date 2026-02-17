@@ -23,7 +23,7 @@ fn rv32m_sidecar_is_skipped_for_non_m_programs() {
     run.verify().expect("verify");
 
     assert!(
-        run.proof().rv32m.is_none(),
+        run.proof_bundle().rv32m.is_none(),
         "expected no RV32M sidecar proof for a non-M program"
     );
 }
@@ -51,7 +51,7 @@ fn rv32m_sidecar_is_sparse_over_time() {
     run.verify().expect("verify");
 
     let rv32m = run
-        .proof()
+        .proof_bundle()
         .rv32m
         .as_ref()
         .expect("rv32m sidecar proof present");
@@ -108,7 +108,7 @@ fn rv32m_sidecar_selects_only_m_lanes_within_chunks() {
     run.verify().expect("verify");
 
     let rv32m = run
-        .proof()
+        .proof_bundle()
         .rv32m
         .as_ref()
         .expect("rv32m sidecar proof present");

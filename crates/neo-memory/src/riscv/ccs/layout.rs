@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
-use crate::cpu::bus_layout::BusLayout;
+use crate::cpu::bus_layout::{build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, BusLayout, ShoutInstanceShape};
 use crate::plain::PlainMemLayout;
 use crate::riscv::lookups::{PROG_ID, RAM_ID, REG_ID};
+use crate::riscv::trace::{rv32_trace_lookup_addr_group_for_table_shape, rv32_trace_lookup_selector_group_for_table_id};
 
 use super::config::{derive_mem_ids_and_ell_addrs, derive_shout_ids_and_ell_addrs};
 
@@ -1127,11 +1128,21 @@ pub(super) fn build_layout_with_m(
             (*ell_addr, lanes)
         })
         .collect();
-    let bus = crate::cpu::bus_layout::build_bus_layout_for_instances_with_twist_lanes(
+    let shout_shapes = table_ids
+        .iter()
+        .zip(shout_ell_addrs.iter())
+        .map(|(table_id, ell_addr)| ShoutInstanceShape {
+            ell_addr: *ell_addr,
+            lanes: 1usize,
+            n_vals: 1usize,
+            addr_group: rv32_trace_lookup_addr_group_for_table_shape(*table_id, *ell_addr).map(|v| v as u64),
+            selector_group: rv32_trace_lookup_selector_group_for_table_id(*table_id).map(|v| v as u64),
+        });
+    let bus = build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes(
         m,
         m_in,
         chunk_size,
-        shout_ell_addrs,
+        shout_shapes,
         twist_ell_addrs_and_lanes,
     )?;
     if cpu_cols_used > bus.bus_base {

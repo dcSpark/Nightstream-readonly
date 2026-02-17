@@ -1,7 +1,7 @@
 use neo_ajtai::Commitment as Cmt;
 use neo_math::{F, K};
 use neo_memory::riscv::lookups::RiscvOpcode;
-use neo_memory::riscv::trace::rv32_trace_lookup_addr_group_for_table_id;
+use neo_memory::riscv::trace::rv32_trace_lookup_addr_group_for_table_shape;
 use neo_memory::witness::{LutInstance, LutTableSpec, MemInstance, StepInstanceBundle};
 
 use crate::PiCcsError;
@@ -104,7 +104,7 @@ impl RouteATimeClaimPlan {
         for (inst_idx, lut_inst) in lut_insts.iter().enumerate() {
             let lanes = lut_inst.lanes.max(1);
             let ell_addr = lut_inst.d * lut_inst.ell;
-            let addr_group = rv32_trace_lookup_addr_group_for_table_id(lut_inst.table_id);
+            let addr_group = rv32_trace_lookup_addr_group_for_table_shape(lut_inst.table_id, ell_addr);
             let is_packed = matches!(
                 lut_inst.table_spec,
                 Some(LutTableSpec::RiscvOpcodePacked { .. } | LutTableSpec::RiscvOpcodeEventTablePacked { .. })

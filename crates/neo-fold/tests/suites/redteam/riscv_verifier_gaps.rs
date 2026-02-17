@@ -154,7 +154,7 @@ fn swap_decode_plumbing_for_trivial_ccs(run: &Rv32B1Run, bundle: &mut Rv32B1Proo
 fn redteam_output_claim_path_should_not_accept_without_sidecar_enforcement() {
     let run = prove_output_run();
 
-    let mut bad_bundle = run.proof().clone();
+    let mut bad_bundle = run.proof_bundle().clone();
     bad_bundle.semantics.me_out.clear();
     assert!(
         run.verify_proof_bundle(&bad_bundle).is_err(),
@@ -172,7 +172,7 @@ fn redteam_output_claim_path_should_not_accept_without_sidecar_enforcement() {
 fn redteam_output_claim_variants_should_not_accept_without_sidecar_enforcement() {
     let run = prove_output_run();
 
-    let mut bad_bundle = run.proof().clone();
+    let mut bad_bundle = run.proof_bundle().clone();
     bad_bundle.semantics.me_out.clear();
     assert!(
         run.verify_proof_bundle(&bad_bundle).is_err(),
@@ -198,7 +198,7 @@ fn redteam_verifier_should_reject_prover_selected_decode_ccs() {
     let mut run = prove_basic_run();
     run.verify().expect("baseline verify");
 
-    let mut bad_bundle = run.proof().clone();
+    let mut bad_bundle = run.proof_bundle().clone();
     swap_decode_plumbing_for_trivial_ccs(&run, &mut bad_bundle);
 
     assert!(
@@ -212,7 +212,7 @@ fn redteam_legacy_main_only_verifier_should_not_accept_without_sidecars() {
     let mut run = prove_basic_run();
     run.verify().expect("baseline verify");
 
-    let mut bad_bundle = run.proof().clone();
+    let mut bad_bundle = run.proof_bundle().clone();
     bad_bundle.semantics.me_out.clear();
     assert!(
         run.verify_proof_bundle(&bad_bundle).is_err(),

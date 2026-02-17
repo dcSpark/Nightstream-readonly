@@ -133,7 +133,7 @@ fn test_riscv_fibonacci_compiled_full_prove_verify() {
 
     // Print proof size estimate
     {
-        let proof = run.proof();
+        let proof = run.proof_bundle();
         let num_steps = proof.main.steps.len();
         // Each MeInstance has exactly one commitment
         let num_commitments: usize = proof

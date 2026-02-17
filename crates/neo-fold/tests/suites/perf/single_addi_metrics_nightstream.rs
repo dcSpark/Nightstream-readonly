@@ -176,17 +176,17 @@ fn opening_surface_from_shard_proof(proof: &ShardProof) -> OpeningSurfaceBuckets
 }
 
 fn opening_surface_from_rv32_b1_run(run: &neo_fold::riscv_shard::Rv32B1Run) -> OpeningSurfaceBuckets {
-    let mut buckets = opening_surface_from_shard_proof(&run.proof().main);
-    buckets.sidecars += sum_y_scalars(&run.proof().decode_plumbing.me_out);
-    buckets.sidecars += sum_y_scalars(&run.proof().semantics.me_out);
-    if let Some(rv32m) = &run.proof().rv32m {
+    let mut buckets = opening_surface_from_shard_proof(run.proof());
+    buckets.sidecars += sum_y_scalars(&run.proof_bundle().decode_plumbing.me_out);
+    buckets.sidecars += sum_y_scalars(&run.proof_bundle().semantics.me_out);
+    if let Some(rv32m) = &run.proof_bundle().rv32m {
         for chunk in rv32m {
             buckets.sidecars += sum_y_scalars(&chunk.me_out);
             buckets.pcs_open += chunk.me_out.len();
         }
     }
-    buckets.pcs_open += run.proof().decode_plumbing.me_out.len();
-    buckets.pcs_open += run.proof().semantics.me_out.len();
+    buckets.pcs_open += run.proof_bundle().decode_plumbing.me_out.len();
+    buckets.pcs_open += run.proof_bundle().semantics.me_out.len();
     buckets
 }
 
@@ -502,7 +502,7 @@ fn report_track_a_w0_w1_snapshot() {
     let mut other_claims = Vec::new();
 
     for i in 0..bt.labels.len() {
-        let label = std::str::from_utf8(bt.labels[i]).unwrap_or("<invalid>");
+        let label = std::str::from_utf8(&bt.labels[i]).unwrap_or("<invalid>");
         let deg = bt.degree_bounds[i];
         let entry = (label.to_string(), deg);
         if label.starts_with("ccs/") {
