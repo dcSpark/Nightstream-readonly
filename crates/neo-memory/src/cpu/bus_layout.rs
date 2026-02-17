@@ -184,13 +184,15 @@ pub fn build_bus_layout_for_instances_with_shout_and_twist_lanes(
         m,
         m_in,
         chunk_size,
-        shout_ell_addrs_and_lanes.into_iter().map(|(ell_addr, lanes)| ShoutInstanceShape {
-            ell_addr,
-            lanes,
-            n_vals: 1,
-            addr_group: None,
-            selector_group: None,
-        }),
+        shout_ell_addrs_and_lanes
+            .into_iter()
+            .map(|(ell_addr, lanes)| ShoutInstanceShape {
+                ell_addr,
+                lanes,
+                n_vals: 1,
+                addr_group: None,
+                selector_group: None,
+            }),
         twist_ell_addrs_and_lanes,
     )
 }

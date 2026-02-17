@@ -108,8 +108,7 @@ pub const fn rv32_width_lookup_table_id_for_col(col: usize) -> u32 {
 
 #[inline]
 pub const fn rv32_is_width_lookup_table_id(table_id: u32) -> bool {
-    table_id >= RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE
-        && table_id < RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE + 34
+    table_id >= RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE && table_id < RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE + 34
 }
 
 #[inline]

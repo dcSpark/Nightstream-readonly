@@ -133,27 +133,9 @@ pub enum MemOrLutProof {
 
 #[derive(Clone, Debug)]
 pub struct MemSidecarProof<C, FF, KK> {
-    /// Shout bus openings evaluated at the shared `r_time`.
-    ///
-    /// - In **shared CPU bus** mode, Shout time-lane openings are read from the CPU ME output
-    ///   (the bus tail lives inside the CPU witness), so this is empty.
-    /// - In **no shared CPU bus** mode, Shout instances carry their own committed witnesses and
-    ///   this stores the ME openings (including appended Shout bus openings) needed to verify the
-    ///   Route-A time-lane terminal identities and trace linkage checks.
-    pub shout_me_claims_time: Vec<MeInstance<C, FF, KK>>,
-    /// Twist bus openings evaluated at the shared `r_time`.
-    ///
-    /// - In **shared CPU bus** mode, Twist/Shout time-lane openings are read from the CPU ME output
-    ///   (the bus tail lives inside the CPU witness), so this is empty.
-    /// - In **no shared CPU bus** mode, Twist instances carry their own committed witnesses and
-    ///   this stores the ME openings (including appended Twist bus openings) needed to verify the
-    ///   Route-A time-lane terminal identities.
-    pub twist_me_claims_time: Vec<MeInstance<C, FF, KK>>,
     /// ME claims evaluated at `r_val` (Twist val-eval terminal point).
     ///
-    /// - In **shared CPU bus** mode, these are CPU ME openings at `r_val` that include appended bus openings.
-    /// - In **no shared CPU bus** mode, these are Twist ME openings at `r_val` for each Twist instance
-    ///   (and optionally the previous step's instances for rollover).
+    /// Shared-bus mode only: these are CPU ME openings at `r_val` that include appended bus openings.
     pub val_me_claims: Vec<MeInstance<C, FF, KK>>,
     /// CPU ME openings at `r_time` used to bind WB booleanity terminals to committed trace columns.
     pub wb_me_claims: Vec<MeInstance<C, FF, KK>>,
@@ -200,14 +182,6 @@ pub struct StepProof {
     ///
     /// Each proof is an independent Π_RLC→Π_DEC lane (k=1 in current usage).
     pub val_fold: Vec<RlcDecProof>,
-    /// Optional folding lane(s) for Twist ME openings at the shared `r_time` when not using a shared CPU bus.
-    ///
-    /// Each proof is an independent Π_RLC→Π_DEC lane (k=1 in current usage).
-    pub twist_time_fold: Vec<RlcDecProof>,
-    /// Optional folding lane(s) for Shout ME openings at the shared `r_time` when not using a shared CPU bus.
-    ///
-    /// Each proof is an independent Π_RLC→Π_DEC lane (k=1 in current usage).
-    pub shout_time_fold: Vec<RlcDecProof>,
     /// Reserved WB folding lane(s) for staged booleanity claims.
     pub wb_fold: Vec<RlcDecProof>,
     /// Reserved WP folding lane(s) for staged quiescence claims.
@@ -252,12 +226,6 @@ impl ShardProof {
         let mut val = Vec::new();
         for step in &self.steps {
             for p in &step.val_fold {
-                val.extend_from_slice(&p.dec_children);
-            }
-            for p in &step.twist_time_fold {
-                val.extend_from_slice(&p.dec_children);
-            }
-            for p in &step.shout_time_fold {
                 val.extend_from_slice(&p.dec_children);
             }
             for p in &step.wb_fold {

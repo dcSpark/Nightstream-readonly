@@ -58,8 +58,8 @@ pub use bus_bindings::{
 };
 pub use layout::Rv32B1Layout;
 pub use trace::{
-    build_rv32_trace_wiring_ccs, build_rv32_trace_wiring_ccs_with_reserved_rows, rv32_trace_ccs_witness_from_exec_table,
-    rv32_trace_ccs_witness_from_trace_witness, Rv32TraceCcsLayout,
+    build_rv32_trace_wiring_ccs, build_rv32_trace_wiring_ccs_with_reserved_rows,
+    rv32_trace_ccs_witness_from_exec_table, rv32_trace_ccs_witness_from_trace_witness, Rv32TraceCcsLayout,
 };
 pub use witness::{
     rv32_b1_chunk_to_full_witness, rv32_b1_chunk_to_full_witness_checked, rv32_b1_chunk_to_witness,

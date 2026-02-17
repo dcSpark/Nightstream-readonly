@@ -1,11 +1,11 @@
 use std::time::{Duration, Instant};
 
+use neo_ccs::MeInstance;
 use neo_fold::riscv_shard::Rv32B1;
 use neo_fold::riscv_trace_shard::Rv32TraceWiring;
 use neo_fold::shard::ShardProof;
-use neo_ccs::MeInstance;
-use neo_memory::riscv::lookups::{encode_program, BranchCondition, RiscvInstruction, RiscvOpcode};
 use neo_memory::riscv::ccs::{build_rv32_trace_wiring_ccs, Rv32TraceCcsLayout};
+use neo_memory::riscv::lookups::{encode_program, BranchCondition, RiscvInstruction, RiscvOpcode};
 
 #[test]
 #[ignore = "perf-style test: run with `cargo test -p neo-fold --release --test perf -- --ignored --nocapture compare_single_mixed_metrics_nightstream_only`"]
@@ -149,8 +149,6 @@ fn opening_surface_from_shard_proof(proof: &ShardProof) -> OpeningSurfaceBuckets
     for step in &proof.steps {
         buckets.core_ccs += sum_y_scalars(&step.fold.ccs_out);
 
-        buckets.sidecars += sum_y_scalars(&step.mem.shout_me_claims_time);
-        buckets.sidecars += sum_y_scalars(&step.mem.twist_me_claims_time);
         buckets.sidecars += sum_y_scalars(&step.mem.val_me_claims);
 
         buckets.claim_reduction_linkage += sum_y_scalars(&step.mem.wb_me_claims);
@@ -158,19 +156,21 @@ fn opening_surface_from_shard_proof(proof: &ShardProof) -> OpeningSurfaceBuckets
         buckets.claim_reduction_linkage += step.batched_time.claimed_sums.len();
 
         buckets.pcs_open += step.fold.dec_children.len();
-        buckets.pcs_open += step.val_fold.iter().map(|p| p.dec_children.len()).sum::<usize>();
         buckets.pcs_open += step
-            .twist_time_fold
+            .val_fold
             .iter()
             .map(|p| p.dec_children.len())
             .sum::<usize>();
         buckets.pcs_open += step
-            .shout_time_fold
+            .wb_fold
             .iter()
             .map(|p| p.dec_children.len())
             .sum::<usize>();
-        buckets.pcs_open += step.wb_fold.iter().map(|p| p.dec_children.len()).sum::<usize>();
-        buckets.pcs_open += step.wp_fold.iter().map(|p| p.dec_children.len()).sum::<usize>();
+        buckets.pcs_open += step
+            .wp_fold
+            .iter()
+            .map(|p| p.dec_children.len())
+            .sum::<usize>();
     }
     buckets
 }
@@ -433,10 +433,27 @@ fn report_track_a_w0_w1_snapshot() {
     println!();
 
     let col_names = [
-        "one", "active", "halted", "cycle", "pc_before", "pc_after", "instr_word",
-        "rs1_addr", "rs1_val", "rs2_addr", "rs2_val", "rd_addr", "rd_val",
-        "ram_addr", "ram_rv", "ram_wv",
-        "shout_has_lookup", "shout_val", "shout_lhs", "shout_rhs", "jalr_drop_bit",
+        "one",
+        "active",
+        "halted",
+        "cycle",
+        "pc_before",
+        "pc_after",
+        "instr_word",
+        "rs1_addr",
+        "rs1_val",
+        "rs2_addr",
+        "rs2_val",
+        "rd_addr",
+        "rd_val",
+        "ram_addr",
+        "ram_rv",
+        "ram_wv",
+        "shout_has_lookup",
+        "shout_val",
+        "shout_lhs",
+        "shout_rhs",
+        "jalr_drop_bit",
     ];
     println!("  Trace columns ({}):", col_names.len());
     for (i, name) in col_names.iter().enumerate() {
@@ -453,13 +470,23 @@ fn report_track_a_w0_w1_snapshot() {
     let bus_tail_cols = total_ccs_m.saturating_sub(trace_base_m);
     println!("  Total CCS m (with bus):  {total_ccs_m}");
     println!("  Total CCS n (with bus):  {total_ccs_n}");
-    println!("  Trace base m:            {trace_base_m} (m_in={} + {}*{})", layout.m_in, layout.trace.cols, steps);
+    println!(
+        "  Trace base m:            {trace_base_m} (m_in={} + {}*{})",
+        layout.m_in, layout.trace.cols, steps
+    );
     println!("  Bus-tail columns:        {bus_tail_cols}");
     let bus_reserved_rows = total_ccs_n.saturating_sub(core_ccs.n);
-    println!("  Bus reserved rows:       {bus_reserved_rows} (total_n={total_ccs_n} - core_n={})", core_ccs.n);
+    println!(
+        "  Bus reserved rows:       {bus_reserved_rows} (total_n={total_ccs_n} - core_n={})",
+        core_ccs.n
+    );
     println!();
 
-    let step0 = run.steps_public().into_iter().next().expect("at least one step");
+    let step0 = run
+        .steps_public()
+        .into_iter()
+        .next()
+        .expect("at least one step");
     let n_lut = step0.lut_insts.len();
     let n_mem = step0.mem_insts.len();
     println!("  Shout instances (LUT):   {n_lut}");
@@ -468,7 +495,12 @@ fn report_track_a_w0_w1_snapshot() {
         let bus_cols_per_lane = ell_addr + 2;
         println!(
             "    - table_id={:<10} d={} n_side={} ell={} lanes={} bus_cols={}",
-            inst.table_id, inst.d, inst.n_side, inst.ell, inst.lanes, bus_cols_per_lane * inst.lanes
+            inst.table_id,
+            inst.d,
+            inst.n_side,
+            inst.ell,
+            inst.lanes,
+            bus_cols_per_lane * inst.lanes
         );
     }
     println!("  Twist instances (MEM):   {n_mem}");
@@ -477,7 +509,12 @@ fn report_track_a_w0_w1_snapshot() {
         let bus_cols_per_lane = 2 * ell_addr + 5;
         println!(
             "    - mem_id={:<10} d={} n_side={} ell={} lanes={} bus_cols={}",
-            inst.mem_id, inst.d, inst.n_side, inst.ell, inst.lanes, bus_cols_per_lane * inst.lanes
+            inst.mem_id,
+            inst.d,
+            inst.n_side,
+            inst.ell,
+            inst.lanes,
+            bus_cols_per_lane * inst.lanes
         );
     }
     println!();
@@ -525,7 +562,9 @@ fn report_track_a_w0_w1_snapshot() {
     }
 
     let print_group = |name: &str, claims: &[(String, usize)], aggregate: bool| {
-        if claims.is_empty() { return; }
+        if claims.is_empty() {
+            return;
+        }
         println!("  {name} ({} claims):", claims.len());
         if aggregate {
             // Aggregate by label, show count and degree range.
@@ -577,21 +616,46 @@ fn report_track_a_w0_w1_snapshot() {
     println!("5. FOLD LANES");
     println!("{thin_sep}");
     println!("  Main fold (ccs_out):     {} ME claims", step_proof.fold.ccs_out.len());
-    println!("  Main fold (dec children):{} DEC children", step_proof.fold.dec_children.len());
-    let val_count: usize = step_proof.val_fold.iter().map(|v| v.dec_children.len()).sum();
-    println!("  Val fold lanes:          {} (dec children={})", step_proof.val_fold.len(), val_count);
-    let wb_count: usize = step_proof.wb_fold.iter().map(|w| w.dec_children.len()).sum();
-    println!("  WB fold lanes:           {} (dec children={})", step_proof.wb_fold.len(), wb_count);
-    let wp_count: usize = step_proof.wp_fold.iter().map(|w| w.dec_children.len()).sum();
-    println!("  WP fold lanes:           {} (dec children={})", step_proof.wp_fold.len(), wp_count);
+    println!(
+        "  Main fold (dec children):{} DEC children",
+        step_proof.fold.dec_children.len()
+    );
+    let val_count: usize = step_proof
+        .val_fold
+        .iter()
+        .map(|v| v.dec_children.len())
+        .sum();
+    println!(
+        "  Val fold lanes:          {} (dec children={})",
+        step_proof.val_fold.len(),
+        val_count
+    );
+    let wb_count: usize = step_proof
+        .wb_fold
+        .iter()
+        .map(|w| w.dec_children.len())
+        .sum();
+    println!(
+        "  WB fold lanes:           {} (dec children={})",
+        step_proof.wb_fold.len(),
+        wb_count
+    );
+    let wp_count: usize = step_proof
+        .wp_fold
+        .iter()
+        .map(|w| w.dec_children.len())
+        .sum();
+    println!(
+        "  WP fold lanes:           {} (dec children={})",
+        step_proof.wp_fold.len(),
+        wp_count
+    );
     println!();
 
     // ── 6. ME Claims (Sidecar Proofs) ──
     println!("6. MEMORY SIDECAR ME CLAIMS");
     println!("{thin_sep}");
     let mem = &step_proof.mem;
-    println!("  Shout ME @ r_time:       {} claims", mem.shout_me_claims_time.len());
-    println!("  Twist ME @ r_time:       {} claims", mem.twist_me_claims_time.len());
     println!("  Val ME @ r_val:          {} claims", mem.val_me_claims.len());
     println!("  WB ME claims:            {} claims", mem.wb_me_claims.len());
     println!("  WP ME claims:            {} claims", mem.wp_me_claims.len());

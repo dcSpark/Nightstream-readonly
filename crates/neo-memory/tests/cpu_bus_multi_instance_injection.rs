@@ -46,6 +46,8 @@ fn lut_inst(table_id: u32) -> LutInstance<(), F> {
         ell: 1,
         table_spec: None,
         table: vec![F::ZERO, F::ONE],
+        addr_group: None,
+        selector_group: None,
     }
 }
 

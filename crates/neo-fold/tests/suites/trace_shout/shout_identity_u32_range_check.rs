@@ -106,6 +106,8 @@ fn route_a_shout_identity_u32_range_check_two_lanes_same_value_verifies() {
         ell: 1,
         table_spec: Some(LutTableSpec::IdentityU32),
         table: vec![],
+    addr_group: None,
+    selector_group: None,
     };
     let wit = LutWitness { mats: Vec::new() };
 
@@ -154,6 +156,8 @@ fn route_a_shout_identity_u32_range_check_rejects_wrong_val() {
         ell: 1,
         table_spec: Some(LutTableSpec::IdentityU32),
         table: vec![],
+    addr_group: None,
+    selector_group: None,
     };
     let wit = LutWitness { mats: Vec::new() };
 

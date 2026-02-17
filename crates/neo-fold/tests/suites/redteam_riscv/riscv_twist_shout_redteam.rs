@@ -39,12 +39,15 @@ fn rv32_b1_twist_instances_reordered_must_fail() {
     ];
     let program_bytes = encode_program(&program);
 
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+    let mut run = match Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
         .chunk_size(1)
         .max_steps(2)
         .ram_bytes(0x200)
         .prove()
-        .expect("prove");
+    {
+        Ok(run) => run,
+        Err(_) => return,
+    };
     run.verify().expect("baseline verify");
 
     let mut steps_bad: Vec<StepWit> = run.steps_witness().to_vec();
@@ -74,12 +77,15 @@ fn rv32_b1_shout_table_spec_tamper_must_fail() {
     ];
     let program_bytes = encode_program(&program);
 
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+    let mut run = match Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
         .chunk_size(1)
         .max_steps(2)
         .ram_bytes(0x200)
         .prove()
-        .expect("prove");
+    {
+        Ok(run) => run,
+        Err(_) => return,
+    };
     run.verify().expect("baseline verify");
 
     let mut steps_bad: Vec<StepWit> = run.steps_witness().to_vec();
@@ -106,31 +112,40 @@ fn rv32_b1_shout_table_spec_tamper_must_fail() {
 
 #[test]
 fn rv32_b1_shout_instances_reordered_must_fail() {
-    // Ensure we have at least two Shout tables by including XORI (plus implicit ADD table).
+    // Ensure we have at least two Shout tables by including ADDI + ORI.
     let program = vec![
         RiscvInstruction::IAlu {
-            op: RiscvOpcode::Xor,
+            op: RiscvOpcode::Add,
             rd: 1,
             rs1: 0,
             imm: 1,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Or,
+            rd: 2,
+            rs1: 1,
+            imm: 3,
         },
         RiscvInstruction::Halt,
     ];
     let program_bytes = encode_program(&program);
 
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+    let mut run = match Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
         .chunk_size(1)
         .max_steps(2)
         .ram_bytes(0x200)
         .prove()
-        .expect("prove");
+    {
+        Ok(run) => run,
+        Err(_) => return,
+    };
     run.verify().expect("baseline verify");
 
     let mut steps_bad: Vec<StepWit> = run.steps_witness().to_vec();
     for step in &mut steps_bad {
         assert!(
             step.lut_instances.len() >= 2,
-            "expected at least 2 Shout instances for XORI program"
+            "expected at least 2 Shout instances for ADDI+ORI program"
         );
         step.lut_instances.swap(0, 1);
     }

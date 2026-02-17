@@ -6,19 +6,14 @@
 use crate::addr::write_addr_bits_dim_major_le_into_bus;
 use crate::builder::CpuArithmetization;
 use crate::cpu::bus_layout::{
-    build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes,
-    BusLayout, ShoutInstanceShape,
+    build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, BusLayout, ShoutInstanceShape,
 };
 use crate::cpu::constraints::{
-    extend_ccs_with_shared_cpu_bus_constraints_optional_shout, ShoutCpuBinding, TwistCpuBinding,
-    CPU_BUS_COL_DISABLED,
+    extend_ccs_with_shared_cpu_bus_constraints_optional_shout, ShoutCpuBinding, TwistCpuBinding, CPU_BUS_COL_DISABLED,
 };
 use crate::mem_init::MemInit;
 use crate::plain::LutTable;
 use crate::plain::PlainMemLayout;
-use crate::riscv::trace::{
-    rv32_trace_lookup_addr_group_for_table_id, rv32_trace_lookup_selector_group_for_table_id,
-};
 use crate::witness::{LutInstance, LutTableSpec, MemInstance};
 use neo_ajtai::{decomp_b, DecompStyle};
 use neo_ccs::matrix::Mat;
@@ -61,6 +56,16 @@ pub struct SharedCpuBusConfig<F> {
     /// Each Twist instance may have multiple access lanes (`PlainMemLayout.lanes`); this map must
     /// provide one `TwistCpuBinding` per lane in lane-index order.
     pub twist_cpu: HashMap<u32, Vec<TwistCpuBinding>>,
+    /// Optional per-table address-sharing group ids (table_id -> group_id).
+    ///
+    /// Tables with the same group_id share `addr_bits` columns in the bus layout.
+    /// Leave empty for B1 mode (no sharing). Populated by trace mode for column efficiency.
+    pub shout_addr_groups: HashMap<u32, u64>,
+    /// Optional per-table selector-sharing group ids (table_id -> group_id).
+    ///
+    /// Tables with the same group_id share `has_lookup` columns in the bus layout.
+    /// Leave empty for B1 mode (no sharing). Populated by trace mode for column efficiency.
+    pub shout_selector_groups: HashMap<u32, u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -197,8 +202,8 @@ where
                 ell_addr,
                 lanes,
                 n_vals: 1usize,
-                addr_group: rv32_trace_lookup_addr_group_for_table_id(*table_id).map(|v| v as u64),
-                selector_group: rv32_trace_lookup_selector_group_for_table_id(*table_id).map(|v| v as u64),
+                addr_group: bus.shout_addr_groups.get(table_id).copied(),
+                selector_group: bus.shout_selector_groups.get(table_id).copied(),
             });
         }
 
@@ -290,7 +295,11 @@ where
             .sum();
         let mut shout_cpu: Vec<Option<ShoutCpuBinding>> = Vec::with_capacity(total_shout_lanes);
         for table_id in &table_ids {
-            let bindings = cfg.shout_cpu.get(table_id).map(Vec::as_slice).unwrap_or(&[]);
+            let bindings = cfg
+                .shout_cpu
+                .get(table_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
             if bindings.is_empty() {
                 shout_cpu.push(None);
                 continue;
@@ -397,6 +406,8 @@ where
                 ell,
                 table_spec: None,
                 table: Vec::new(),
+                addr_group: cfg.shout_addr_groups.get(table_id).copied(),
+                selector_group: cfg.shout_selector_groups.get(table_id).copied(),
             });
         }
 
@@ -428,6 +439,8 @@ where
             &twist_cpu,
             &lut_insts,
             &mem_insts,
+            &cfg.shout_addr_groups,
+            &cfg.shout_selector_groups,
         )
         .map_err(|e| format!("shared_cpu_bus: failed to inject constraints: {e}"))?;
 
@@ -841,5 +854,26 @@ where
     ) -> Result<Vec<(McsInstance<Cmt, Goldilocks>, McsWitness<Goldilocks>)>, Self::Error> {
         self.build_ccs_chunks(trace, 1)
     }
+
+    fn shout_addr_groups(&self) -> &HashMap<u32, u64> {
+        self.shared_cpu_bus
+            .as_ref()
+            .map(|s| &s.cfg.shout_addr_groups)
+            .unwrap_or_else(|| {
+                static EMPTY: std::sync::LazyLock<HashMap<u32, u64>> = std::sync::LazyLock::new(HashMap::new);
+                &EMPTY
+            })
+    }
+
+    fn shout_selector_groups(&self) -> &HashMap<u32, u64> {
+        self.shared_cpu_bus
+            .as_ref()
+            .map(|s| &s.cfg.shout_selector_groups)
+            .unwrap_or_else(|| {
+                static EMPTY: std::sync::LazyLock<HashMap<u32, u64>> = std::sync::LazyLock::new(HashMap::new);
+                &EMPTY
+            })
+    }
+
     type Error = String;
 }

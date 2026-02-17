@@ -295,6 +295,8 @@ fn metadata_only_lut_instance(table: &LutTable<F>, steps: usize) -> (LutInstance
             ell,
             table_spec: None,
             table: table.content.clone(),
+            addr_group: None,
+            selector_group: None,
         },
         LutWitness { mats: Vec::new() },
     )

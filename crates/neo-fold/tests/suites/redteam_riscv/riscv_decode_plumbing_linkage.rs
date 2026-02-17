@@ -110,8 +110,7 @@ fn rv32_b1_decode_plumbing_splicing_across_runs_must_fail() {
     let run_a = prove_run_addi_halt(/*imm=*/ 1);
     let run_b = prove_run_addi_halt(/*imm=*/ 2);
 
-    let decode_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(run_a.layout()).expect("decode plumbing sidecar ccs");
+    let decode_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(run_a.layout()).expect("decode plumbing sidecar ccs");
 
     let (mcs_insts_a, mcs_wits_a) = collect_mcs(&run_a);
     let num_steps = mcs_insts_a.len();

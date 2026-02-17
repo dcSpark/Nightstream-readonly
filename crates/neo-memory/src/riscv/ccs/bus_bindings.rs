@@ -550,12 +550,25 @@ pub fn rv32_trace_shared_cpu_bus_config_with_specs(
         }
     }
 
+    let mut shout_addr_groups = HashMap::new();
+    let mut shout_selector_groups = HashMap::new();
+    for shape in &shout_shapes {
+        if let Some(g) = shape.addr_group {
+            shout_addr_groups.insert(shape.table_id, g as u64);
+        }
+        if let Some(g) = shape.selector_group {
+            shout_selector_groups.insert(shape.table_id, g as u64);
+        }
+    }
+
     Ok(SharedCpuBusConfig {
         mem_layouts,
         initial_mem,
         const_one_col: layout.const_one,
         shout_cpu,
         twist_cpu,
+        shout_addr_groups,
+        shout_selector_groups,
     })
 }
 
@@ -892,5 +905,7 @@ pub fn rv32_b1_shared_cpu_bus_config(
         const_one_col: layout.const_one,
         shout_cpu,
         twist_cpu,
+        shout_addr_groups: HashMap::new(),
+        shout_selector_groups: HashMap::new(),
     })
 }

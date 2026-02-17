@@ -110,7 +110,6 @@ impl Rv32TraceAir {
                     return Err(format!("row {i}: shout_rhs must be 0 when shout_has_lookup=0"));
                 }
             }
-
         }
 
         // Transition constraints.

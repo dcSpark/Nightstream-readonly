@@ -216,6 +216,8 @@ fn build_one_step_fixture(seed: u64) -> SharedBusFixture {
         ell: lut_ell,
         table_spec: None,
         table: lut_table.content.clone(),
+    addr_group: None,
+    selector_group: None,
     };
     let lut_wit = neo_memory::witness::LutWitness { mats: Vec::new() };
 

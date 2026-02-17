@@ -564,6 +564,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
             xlen: 32,
         }),
         table: Vec::new(),
+    addr_group: None,
+    selector_group: None,
     };
     let rem_inst = LutInstance::<Cmt, F> {
         table_id: 0,
@@ -579,6 +581,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
             xlen: 32,
         }),
         table: Vec::new(),
+    addr_group: None,
+    selector_group: None,
     };
 
     let page_ell_addrs =

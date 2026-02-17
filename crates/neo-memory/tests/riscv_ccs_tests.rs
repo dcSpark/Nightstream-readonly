@@ -8,9 +8,9 @@ use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::CcsStructure;
 use neo_memory::plain::PlainMemLayout;
 use neo_memory::riscv::ccs::{
-    build_rv32_b1_decode_plumbing_sidecar_ccs, build_rv32_b1_rv32m_sidecar_ccs,
-    build_rv32_b1_semantics_sidecar_ccs, build_rv32_b1_step_ccs, rv32_b1_chunk_to_full_witness_checked,
-    rv32_b1_chunk_to_witness, rv32_b1_shared_cpu_bus_config,
+    build_rv32_b1_decode_plumbing_sidecar_ccs, build_rv32_b1_rv32m_sidecar_ccs, build_rv32_b1_semantics_sidecar_ccs,
+    build_rv32_b1_step_ccs, rv32_b1_chunk_to_full_witness_checked, rv32_b1_chunk_to_witness,
+    rv32_b1_shared_cpu_bus_config,
 };
 use neo_memory::riscv::lookups::{
     decode_instruction, encode_program, BranchCondition, RiscvCpu, RiscvInstruction, RiscvMemOp, RiscvMemory,
@@ -271,8 +271,7 @@ fn rv32_b1_ccs_happy_path_small_program() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
 
@@ -296,8 +295,15 @@ fn rv32_b1_ccs_happy_path_small_program() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w)
-            .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w,
+        )
+        .expect("CCS satisfied");
     }
 }
 
@@ -360,8 +366,7 @@ fn rv32_b1_ccs_happy_path_rv32i_fence_program() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
 
@@ -385,8 +390,15 @@ fn rv32_b1_ccs_happy_path_rv32i_fence_program() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w)
-            .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w,
+        )
+        .expect("CCS satisfied");
     }
 }
 
@@ -469,8 +481,7 @@ fn rv32_b1_ccs_happy_path_rv32m_program() {
     let sltu_id = shout_tables.opcode_to_id(RiscvOpcode::Sltu).0;
     let shout_table_ids: [u32; 3] = [add_id, sltu_id, mul_id];
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let rv32m_ccs = build_rv32_b1_rv32m_sidecar_ccs(&layout).expect("rv32m sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
@@ -517,8 +528,15 @@ fn rv32_b1_ccs_happy_path_rv32m_program() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, Some(&rv32m_ccs), &mcs_inst.x, &mcs_wit.w)
-            .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            Some(&rv32m_ccs),
+            &mcs_inst.x,
+            &mcs_wit.w,
+        )
+        .expect("CCS satisfied");
     }
 }
 
@@ -668,8 +686,7 @@ fn rv32_b1_ccs_happy_path_rv32m_signed_program() {
     let mulhu_id = shout_tables.opcode_to_id(RiscvOpcode::Mulhu).0;
     let shout_table_ids: [u32; 3] = [add_id, sltu_id, mulhu_id];
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let rv32m_ccs = build_rv32_b1_rv32m_sidecar_ccs(&layout).expect("rv32m sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
@@ -716,8 +733,15 @@ fn rv32_b1_ccs_happy_path_rv32m_signed_program() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, Some(&rv32m_ccs), &mcs_inst.x, &mcs_wit.w)
-            .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            Some(&rv32m_ccs),
+            &mcs_inst.x,
+            &mcs_wit.w,
+        )
+        .expect("CCS satisfied");
     }
 }
 
@@ -1210,8 +1234,7 @@ fn rv32_b1_ccs_happy_path_rv32i_byte_half_load_store_program() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
 
@@ -1235,8 +1258,15 @@ fn rv32_b1_ccs_happy_path_rv32i_byte_half_load_store_program() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w)
-            .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w,
+        )
+        .expect("CCS satisfied");
     }
 }
 
@@ -1322,8 +1352,7 @@ fn rv32_b1_ccs_byte_store_updates_aligned_word() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
 
@@ -1347,8 +1376,15 @@ fn rv32_b1_ccs_byte_store_updates_aligned_word() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w)
-            .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w,
+        )
+        .expect("CCS satisfied");
     }
 }
 
@@ -1399,8 +1435,7 @@ fn rv32_b1_ccs_rejects_misaligned_lh() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -1423,7 +1458,15 @@ fn rv32_b1_ccs_rejects_misaligned_lh() {
     let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     let (mcs_inst, mcs_wit) = steps.remove(0);
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "misaligned LH should not satisfy CCS"
     );
 }
@@ -1475,8 +1518,7 @@ fn rv32_b1_ccs_rejects_misaligned_lw() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -1499,7 +1541,15 @@ fn rv32_b1_ccs_rejects_misaligned_lw() {
     let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     let (mcs_inst, mcs_wit) = steps.remove(0);
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "misaligned LW should not satisfy CCS"
     );
 }
@@ -1551,8 +1601,7 @@ fn rv32_b1_ccs_rejects_misaligned_sh() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -1575,7 +1624,15 @@ fn rv32_b1_ccs_rejects_misaligned_sh() {
     let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     let (mcs_inst, mcs_wit) = steps.remove(0);
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "misaligned SH should not satisfy CCS"
     );
 }
@@ -1627,8 +1684,7 @@ fn rv32_b1_ccs_rejects_misaligned_sw() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -1651,7 +1707,15 @@ fn rv32_b1_ccs_rejects_misaligned_sw() {
     let mut steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     let (mcs_inst, mcs_wit) = steps.remove(0);
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "misaligned SW should not satisfy CCS"
     );
 }
@@ -1733,8 +1797,7 @@ fn rv32_b1_ccs_happy_path_rv32a_amoaddw_program() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -1757,8 +1820,15 @@ fn rv32_b1_ccs_happy_path_rv32a_amoaddw_program() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w)
-            .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w,
+        )
+        .expect("CCS satisfied");
     }
 }
 
@@ -1833,8 +1903,7 @@ fn rv32_b1_ccs_rejects_tampered_ram_write_value_for_amoaddw() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -1866,7 +1935,15 @@ fn rv32_b1_ccs_rejects_tampered_ram_write_value_for_amoaddw() {
     mcs_wit.w[ram_wv_w_idx] += F::ONE;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "tampered RAM write value should not satisfy CCS"
     );
 }
@@ -1966,8 +2043,7 @@ fn rv32_b1_ccs_happy_path_rv32a_word_amos_program() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -1990,8 +2066,15 @@ fn rv32_b1_ccs_happy_path_rv32a_word_amos_program() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w)
-            .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w,
+        )
+        .expect("CCS satisfied");
     }
 }
 
@@ -2049,8 +2132,7 @@ fn rv32_b1_ccs_chunk_size_2_padding_carries_state() {
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let chunk_size = 2usize;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, chunk_size).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
 
@@ -2074,8 +2156,15 @@ fn rv32_b1_ccs_chunk_size_2_padding_carries_state() {
 
     let chunks = CpuArithmetization::build_ccs_chunks(&cpu, &trace, chunk_size).expect("build chunks");
     for (mcs_inst, mcs_wit) in chunks {
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w)
-            .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w,
+        )
+        .expect("CCS satisfied");
     }
 }
 
@@ -2182,8 +2271,7 @@ fn rv32_b1_ccs_branches_and_jal() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
 
@@ -2207,8 +2295,15 @@ fn rv32_b1_ccs_branches_and_jal() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w)
-            .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w,
+        )
+        .expect("CCS satisfied");
     }
 }
 
@@ -2325,8 +2420,7 @@ fn rv32_b1_ccs_rv32i_alu_ops() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -2349,8 +2443,15 @@ fn rv32_b1_ccs_rv32i_alu_ops() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w)
-            .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w,
+        )
+        .expect("CCS satisfied");
     }
 }
 
@@ -2485,8 +2586,7 @@ fn rv32_b1_ccs_branches_blt_bge_bltu_bgeu() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -2509,8 +2609,15 @@ fn rv32_b1_ccs_branches_blt_bge_bltu_bgeu() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w)
-            .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w,
+        )
+        .expect("CCS satisfied");
     }
 }
 
@@ -2574,8 +2681,7 @@ fn rv32_b1_ccs_jalr_masks_lsb() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -2598,8 +2704,15 @@ fn rv32_b1_ccs_jalr_masks_lsb() {
 
     let steps = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build steps");
     for (mcs_inst, mcs_wit) in steps {
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w)
-            .expect("CCS satisfied");
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w,
+        )
+        .expect("CCS satisfied");
     }
 }
 
@@ -2710,8 +2823,7 @@ fn rv32_b1_ccs_rejects_step_after_halt_within_chunk() {
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let chunk_size = 2usize;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, chunk_size).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -2736,7 +2848,15 @@ fn rv32_b1_ccs_rejects_step_after_halt_within_chunk() {
     assert_eq!(chunks.len(), 1, "expected single chunk");
     let (mcs_inst, mcs_wit) = chunks.pop().expect("chunk");
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "step after HALT should not satisfy CCS"
     );
 }
@@ -2788,8 +2908,7 @@ fn rv32_b1_ccs_rejects_tampered_pc_out() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -2820,7 +2939,15 @@ fn rv32_b1_ccs_rejects_tampered_pc_out() {
     mcs_wit.w[pc_out_w_idx] += F::ONE;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "tampered witness should not satisfy CCS"
     );
 }
@@ -2872,8 +2999,7 @@ fn rv32_b1_ccs_rejects_non_boolean_prog_read_addr_bit() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -2918,7 +3044,15 @@ fn rv32_b1_ccs_rejects_non_boolean_prog_read_addr_bit() {
     mcs_wit.w[pc_out_w_idx] += delta * F::from_u64(1 << 2);
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "non-boolean prog addr bit should not satisfy CCS"
     );
 }
@@ -2982,8 +3116,7 @@ fn rv32_b1_ccs_rejects_non_boolean_shout_addr_bit() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -3037,7 +3170,15 @@ fn rv32_b1_ccs_rejects_non_boolean_shout_addr_bit() {
     mcs_wit.w[rs1_val_w_idx] += delta;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "non-boolean shout addr bit should not satisfy CCS"
     );
 }
@@ -3089,8 +3230,7 @@ fn rv32_b1_ccs_rejects_rom_value_mismatch() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -3120,7 +3260,15 @@ fn rv32_b1_ccs_rejects_rom_value_mismatch() {
     mcs_wit.w[rv_w_idx] += F::ONE;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "rom value mismatch should not satisfy CCS"
     );
 }
@@ -3172,8 +3320,7 @@ fn rv32_b1_ccs_rejects_tampered_regfile() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -3206,7 +3353,15 @@ fn rv32_b1_ccs_rejects_tampered_regfile() {
     mcs_wit.w[rv_w_idx] += F::ONE;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "tampered regfile should not satisfy CCS"
     );
 }
@@ -3258,8 +3413,7 @@ fn rv32_b1_ccs_rejects_tampered_x0() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -3291,7 +3445,15 @@ fn rv32_b1_ccs_rejects_tampered_x0() {
     mcs_wit.w[rv_w_idx] = F::ONE;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "tampered x0 should not satisfy CCS"
     );
 }
@@ -3350,8 +3512,7 @@ fn rv32_b1_ccs_binds_public_initial_and_final_state() {
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let chunk_size = 8usize;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, chunk_size).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -3376,7 +3537,15 @@ fn rv32_b1_ccs_binds_public_initial_and_final_state() {
     assert_eq!(chunks.len(), 1, "chunk_size>N should create one chunk");
     let (mcs_inst, mcs_wit) = chunks.remove(0);
 
-    check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).expect("CCS satisfied");
+    check_rv32_b1_all_ccs_rowwise_zero(
+        &cpu.ccs,
+        &decode_plumbing_ccs,
+        &semantics_ccs,
+        None,
+        &mcs_inst.x,
+        &mcs_wit.w,
+    )
+    .expect("CCS satisfied");
 
     let first = trace.steps.first().expect("trace non-empty");
     assert_eq!(mcs_inst.x[layout.pc0], F::from_u64(first.pc_before));
@@ -3387,14 +3556,16 @@ fn rv32_b1_ccs_binds_public_initial_and_final_state() {
     let mut x_bad = mcs_inst.x.clone();
     x_bad[layout.pc0] += F::ONE;
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &x_bad, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &x_bad, &mcs_wit.w)
+            .is_err(),
         "tampered pc0 should not satisfy CCS"
     );
 
     let mut x_bad = mcs_inst.x.clone();
     x_bad[layout.pc_final] += F::ONE;
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &x_bad, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &x_bad, &mcs_wit.w)
+            .is_err(),
         "tampered pc_final should not satisfy CCS"
     );
 }
@@ -3446,8 +3617,7 @@ fn rv32_b1_ccs_rejects_rom_addr_mismatch() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -3479,7 +3649,15 @@ fn rv32_b1_ccs_rejects_rom_addr_mismatch() {
     mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "rom address mismatch should not satisfy CCS"
     );
 }
@@ -3531,8 +3709,7 @@ fn rv32_b1_ccs_rejects_decode_bit_mismatch() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -3562,7 +3739,15 @@ fn rv32_b1_ccs_rejects_decode_bit_mismatch() {
     mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "decode bit mismatch should not satisfy CCS"
     );
 }
@@ -3626,8 +3811,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -3662,7 +3846,15 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch() {
     mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "shout key mismatch should not satisfy CCS"
     );
 }
@@ -3714,8 +3906,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_lw_eff_addr() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -3750,7 +3941,15 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_lw_eff_addr() {
     mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "shout key mismatch (LW effective address) should not satisfy CCS"
     );
 }
@@ -3820,8 +4019,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_amoaddw() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -3856,7 +4054,15 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_amoaddw() {
     mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "shout key mismatch (AMOADD.W operands) should not satisfy CCS"
     );
 }
@@ -3920,8 +4126,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_beq() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -3956,7 +4161,15 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_beq() {
     mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "shout key mismatch (BEQ operands) should not satisfy CCS"
     );
 }
@@ -4026,8 +4239,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_bne() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -4062,7 +4274,15 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_bne() {
     mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "shout key mismatch (BNE operands) should not satisfy CCS"
     );
 }
@@ -4120,8 +4340,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_ori() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -4156,7 +4375,15 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_ori() {
     mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "shout key mismatch (ORI imm) should not satisfy CCS"
     );
 }
@@ -4214,8 +4441,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_slli() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -4250,7 +4476,15 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_slli() {
     mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "shout key mismatch (SLLI imm) should not satisfy CCS"
     );
 }
@@ -4314,8 +4548,7 @@ fn rv32_b1_ccs_rejects_sltu_key_bit_mismatch_divu_remainder_check() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let rv32m_ccs = build_rv32_b1_rv32m_sidecar_ccs(&layout).expect("rv32m sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
@@ -4353,7 +4586,15 @@ fn rv32_b1_ccs_rejects_sltu_key_bit_mismatch_divu_remainder_check() {
     mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, Some(&rv32m_ccs), &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            Some(&rv32m_ccs),
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "sltu(rem, divisor) shout key mismatch should not satisfy CCS"
     );
 }
@@ -4397,8 +4638,7 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_auipc_pc_operand() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -4433,7 +4673,15 @@ fn rv32_b1_ccs_rejects_shout_key_bit_mismatch_auipc_pc_operand() {
     mcs_wit.w[bit_w_idx] = F::ONE - old_bit;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "shout key mismatch (AUIPC pc operand) should not satisfy CCS"
     );
 }
@@ -4758,8 +5006,7 @@ fn rv32_b1_ccs_rejects_wrong_shout_table_activation() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -4794,7 +5041,15 @@ fn rv32_b1_ccs_rejects_wrong_shout_table_activation() {
     mcs_wit.w[has_lookup_w_idx] = F::ONE;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "wrong shout table activation should not satisfy CCS"
     );
 }
@@ -4846,8 +5101,7 @@ fn rv32_b1_ccs_rejects_inactive_shout_addr_bit_nonzero() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -4893,7 +5147,15 @@ fn rv32_b1_ccs_rejects_inactive_shout_addr_bit_nonzero() {
     mcs_wit.w[bit_w_idx] = F::ONE;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "inactive shout addr bit should be forced to 0 by implied padding"
     );
 }
@@ -4957,8 +5219,7 @@ fn rv32_b1_ccs_rejects_ram_read_value_mismatch() {
 
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, 1).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -4989,7 +5250,15 @@ fn rv32_b1_ccs_rejects_ram_read_value_mismatch() {
     mcs_wit.w[rv_w_idx] += F::ONE;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "ram read value mismatch should not satisfy CCS"
     );
 }
@@ -5048,8 +5317,7 @@ fn rv32_b1_ccs_rejects_chunk_size_2_continuity_break() {
     let shout_table_ids = RV32I_SHOUT_TABLE_IDS;
     let chunk_size = 2usize;
     let (ccs, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, chunk_size).expect("ccs");
-    let decode_plumbing_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
+    let decode_plumbing_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
     let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n).expect("params");
     let table_specs = rv32i_table_specs(xlen);
@@ -5080,7 +5348,15 @@ fn rv32_b1_ccs_rejects_chunk_size_2_continuity_break() {
     mcs_wit.w[pc_in_w_idx] += F::ONE;
 
     assert!(
-        check_rv32_b1_all_ccs_rowwise_zero(&cpu.ccs, &decode_plumbing_ccs, &semantics_ccs, None, &mcs_inst.x, &mcs_wit.w).is_err(),
+        check_rv32_b1_all_ccs_rowwise_zero(
+            &cpu.ccs,
+            &decode_plumbing_ccs,
+            &semantics_ccs,
+            None,
+            &mcs_inst.x,
+            &mcs_wit.w
+        )
+        .is_err(),
         "continuity break should not satisfy CCS"
     );
 }

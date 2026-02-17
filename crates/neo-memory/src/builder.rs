@@ -26,6 +26,24 @@ pub trait CpuArithmetization<F, Cmt> {
     ) -> Result<Vec<(McsInstance<Cmt, F>, McsWitness<F>)>, Self::Error> {
         self.build_ccs_chunks(trace, 1)
     }
+
+    /// Per-table address-sharing group ids for bus layout column sharing.
+    ///
+    /// Tables with the same group id share `addr_bits` columns in the bus layout.
+    /// Default: empty (no sharing). Override in trace mode for column efficiency.
+    fn shout_addr_groups(&self) -> &HashMap<u32, u64> {
+        static EMPTY: std::sync::LazyLock<HashMap<u32, u64>> = std::sync::LazyLock::new(HashMap::new);
+        &EMPTY
+    }
+
+    /// Per-table selector-sharing group ids for bus layout column sharing.
+    ///
+    /// Tables with the same group id share `has_lookup` columns in the bus layout.
+    /// Default: empty (no sharing). Override in trace mode for column efficiency.
+    fn shout_selector_groups(&self) -> &HashMap<u32, u64> {
+        static EMPTY: std::sync::LazyLock<HashMap<u32, u64>> = std::sync::LazyLock::new(HashMap::new);
+        &EMPTY
+    }
 }
 
 #[derive(Debug)]
@@ -376,6 +394,8 @@ where
                 ell,
                 table_spec,
                 table,
+                addr_group: cpu_arith.shout_addr_groups().get(&table_id).copied(),
+                selector_group: cpu_arith.shout_selector_groups().get(&table_id).copied(),
             };
             let wit = LutWitness { mats: Vec::new() };
             lut_instances.push((inst, wit));

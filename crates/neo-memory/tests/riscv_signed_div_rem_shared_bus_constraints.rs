@@ -220,6 +220,8 @@ fn rv32_b1_signed_div_rem_shared_bus_constraints_satisfy() {
             ell: 1,
             table_spec: None,
             table: Vec::new(),
+            addr_group: None,
+            selector_group: None,
         })
         .collect();
     let mem_insts: Vec<MemInstance<(), F>> = mem_ids

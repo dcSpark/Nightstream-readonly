@@ -1,17 +1,16 @@
 use std::collections::HashMap;
 
-use neo_memory::riscv::ccs::{
-    rv32_trace_shared_bus_requirements_with_specs, rv32_trace_shared_cpu_bus_config_with_specs, TraceShoutBusSpec,
-    Rv32TraceCcsLayout, RV32_B1_SHOUT_PROFILE_FULL20,
-};
-use neo_memory::plain::PlainMemLayout;
-use neo_memory::riscv::lookups::{PROG_ID, RAM_ID, REG_ID};
 use neo_memory::cpu::CPU_BUS_COL_DISABLED;
+use neo_memory::plain::PlainMemLayout;
+use neo_memory::riscv::ccs::{
+    rv32_trace_shared_bus_requirements_with_specs, rv32_trace_shared_cpu_bus_config_with_specs, Rv32TraceCcsLayout,
+    TraceShoutBusSpec, RV32_B1_SHOUT_PROFILE_FULL20,
+};
+use neo_memory::riscv::lookups::{PROG_ID, RAM_ID, REG_ID};
 use neo_memory::riscv::trace::{
     rv32_decode_lookup_backed_cols, rv32_decode_lookup_table_id_for_col, rv32_trace_lookup_addr_group_for_table_id,
-    rv32_trace_lookup_selector_group_for_table_id, rv32_width_lookup_backed_cols,
-    rv32_width_lookup_table_id_for_col, Rv32DecodeSidecarLayout,
-    Rv32WidthSidecarLayout,
+    rv32_trace_lookup_selector_group_for_table_id, rv32_width_lookup_backed_cols, rv32_width_lookup_table_id_for_col,
+    Rv32DecodeSidecarLayout, Rv32WidthSidecarLayout,
 };
 use p3_goldilocks::Goldilocks as F;
 
@@ -55,7 +54,7 @@ fn decode_selector_specs(prog_d: usize) -> Vec<TraceShoutBusSpec> {
             table_id: rv32_decode_lookup_table_id_for_col(col),
             ell_addr: prog_d,
             n_vals: 1usize,
-})
+        })
         .collect()
 }
 
@@ -67,7 +66,7 @@ fn width_selector_specs(cycle_d: usize) -> Vec<TraceShoutBusSpec> {
             table_id: rv32_width_lookup_table_id_for_col(col),
             ell_addr: cycle_d,
             n_vals: 1usize,
-})
+        })
         .collect()
 }
 
@@ -117,8 +116,14 @@ fn rv32_trace_shared_bus_requirements_accept_rv32m_table_ids() {
         &mem_layouts,
     )
     .expect("trace shared bus requirements");
-    assert!(bus_region_len > 0, "expected non-zero bus region for full table profile");
-    assert!(reserved_rows > 0, "expected injected bus constraints for shout padding rows");
+    assert!(
+        bus_region_len > 0,
+        "expected non-zero bus region for full table profile"
+    );
+    assert!(
+        reserved_rows > 0,
+        "expected injected bus constraints for shout padding rows"
+    );
 }
 
 #[test]
@@ -139,14 +144,13 @@ fn rv32_trace_shared_bus_with_specs_adds_custom_shout_width() {
     let layout = Rv32TraceCcsLayout::new(/*t=*/ 4).expect("trace CCS layout");
     let mem_layouts = sample_mem_layouts();
     let mut specs = decode_selector_specs(mem_layouts[&PROG_ID.0].d);
-    let (bus_region_base, _) =
-        rv32_trace_shared_bus_requirements_with_specs(&layout, &[3u32], &specs, &mem_layouts)
-            .expect("trace shared bus baseline requirements");
+    let (bus_region_base, _) = rv32_trace_shared_bus_requirements_with_specs(&layout, &[3u32], &specs, &mem_layouts)
+        .expect("trace shared bus baseline requirements");
     specs.push(TraceShoutBusSpec {
         table_id: 1000,
         ell_addr: 13,
         n_vals: 1usize,
-});
+    });
     let (bus_region_len, reserved_rows) =
         rv32_trace_shared_bus_requirements_with_specs(&layout, &[3u32], &specs, &mem_layouts)
             .expect("trace shared bus requirements with extra spec");
@@ -169,14 +173,9 @@ fn rv32_trace_shared_cpu_bus_config_with_specs_keeps_padding_only_bindings() {
         table_id: 1001,
         ell_addr: 17,
         n_vals: 1usize,
-});
-    let (bus_region_len, _) = rv32_trace_shared_bus_requirements_with_specs(
-        &layout,
-        &[3u32],
-        &specs,
-        &mem_layouts,
-    )
-    .expect("trace shared bus requirements with extra spec");
+    });
+    let (bus_region_len, _) = rv32_trace_shared_bus_requirements_with_specs(&layout, &[3u32], &specs, &mem_layouts)
+        .expect("trace shared bus requirements with extra spec");
     layout.m += bus_region_len;
     let cfg = rv32_trace_shared_cpu_bus_config_with_specs(
         &layout,
@@ -205,13 +204,10 @@ fn rv32_trace_shared_bus_with_specs_rejects_conflicting_ell_addr() {
         table_id: 3,
         ell_addr: 63,
         n_vals: 1usize,
-});
+    });
     let err = rv32_trace_shared_bus_requirements_with_specs(&layout, &[3u32], &extra, &mem_layouts)
         .expect_err("conflicting table width must fail");
-    assert!(
-        err.contains("conflicting ell_addr"),
-        "unexpected error: {err}"
-    );
+    assert!(err.contains("conflicting ell_addr"), "unexpected error: {err}");
 }
 
 #[test]
@@ -265,13 +261,9 @@ fn rv32_trace_shared_cpu_bus_config_with_specs_binds_width_lookup_key_to_cycle()
     let mem_layouts = sample_mem_layouts();
     let mut specs = decode_selector_specs(mem_layouts[&PROG_ID.0].d);
     specs.extend(width_selector_specs(/*cycle_d=*/ 8));
-    let (bus_region_len, _) = rv32_trace_shared_bus_requirements_with_specs(
-        &layout,
-        RV32_B1_SHOUT_PROFILE_FULL20,
-        &specs,
-        &mem_layouts,
-    )
-    .expect("trace shared bus requirements");
+    let (bus_region_len, _) =
+        rv32_trace_shared_bus_requirements_with_specs(&layout, RV32_B1_SHOUT_PROFILE_FULL20, &specs, &mem_layouts)
+            .expect("trace shared bus requirements");
     layout.m += bus_region_len;
     let cfg = rv32_trace_shared_cpu_bus_config_with_specs(
         &layout,
@@ -355,10 +347,7 @@ fn rv32_trace_lookup_selector_group_coalesces_all_decode_lookup_backed_tables() 
     for col in cols {
         let table_id = rv32_decode_lookup_table_id_for_col(col);
         let group = rv32_trace_lookup_selector_group_for_table_id(table_id);
-        assert!(
-            group.is_some(),
-            "decode table_id={table_id} must have a selector group"
-        );
+        assert!(group.is_some(), "decode table_id={table_id} must have a selector group");
         groups.insert(group);
     }
     assert_eq!(
@@ -378,10 +367,7 @@ fn rv32_trace_lookup_selector_group_coalesces_all_width_lookup_tables() {
     for col in cols {
         let table_id = rv32_width_lookup_table_id_for_col(col);
         let group = rv32_trace_lookup_selector_group_for_table_id(table_id);
-        assert!(
-            group.is_some(),
-            "width table_id={table_id} must have a selector group"
-        );
+        assert!(group.is_some(), "width table_id={table_id} must have a selector group");
         groups.insert(group);
     }
     assert_eq!(

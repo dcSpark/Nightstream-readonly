@@ -96,6 +96,8 @@ fn make_shout_instance(
             ell,
             table_spec: None,
             table: table.content.clone(),
+            addr_group: None,
+            selector_group: None,
         },
         neo_memory::witness::LutWitness { mats: Vec::new() },
     )

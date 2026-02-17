@@ -58,6 +58,8 @@ fn build_single_lane_explicit_lut_witness(
         ell,
         table_spec: None,
         table: table.clone(),
+        addr_group: None,
+        selector_group: None,
     };
 
     // Layout: [addr_bits(ell), has_lookup, val].

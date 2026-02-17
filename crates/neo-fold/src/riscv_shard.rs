@@ -24,7 +24,7 @@ use neo_memory::plain::PlainMemLayout;
 use neo_memory::riscv::ccs::{
     build_rv32_b1_decode_plumbing_sidecar_ccs, build_rv32_b1_rv32m_event_sidecar_ccs,
     build_rv32_b1_semantics_sidecar_ccs, build_rv32_b1_step_ccs, estimate_rv32_b1_all_ccs_counts,
-    rv32_b1_chunk_to_witness, rv32_b1_shared_cpu_bus_config, rv32_b1_step_linking_pairs, Rv32B1Layout,
+    rv32_b1_chunk_to_full_witness, rv32_b1_shared_cpu_bus_config, rv32_b1_step_linking_pairs, Rv32B1Layout,
 };
 use neo_memory::riscv::lookups::{
     decode_program, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID, REG_ID,
@@ -701,7 +701,7 @@ impl Rv32B1 {
             layout.m_in,
             &empty_tables,
             &table_specs,
-            rv32_b1_chunk_to_witness(layout.clone()),
+            rv32_b1_chunk_to_full_witness(layout.clone()),
         )
         .map_err(|e| PiCcsError::InvalidInput(format!("R1csCpu::new failed: {e}")))?;
         cpu = cpu

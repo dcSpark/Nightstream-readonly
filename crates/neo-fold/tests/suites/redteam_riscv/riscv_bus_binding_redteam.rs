@@ -66,11 +66,11 @@ fn rv32_b1_cpu_vs_bus_twist_rv_mismatch_must_fail() {
 
 #[test]
 fn rv32_b1_cpu_vs_bus_shout_val_mismatch_must_fail() {
-    // Program: XORI x1, x0, 1; HALT (forces a Shout XOR lookup).
+    // Program: ADDI x1, x0, 1; HALT (forces a Shout ADD lookup).
     let run = prove_run(
         vec![
             RiscvInstruction::IAlu {
-                op: RiscvOpcode::Xor,
+                op: RiscvOpcode::Add,
                 rd: 1,
                 rs1: 0,
                 imm: 1,
@@ -80,13 +80,13 @@ fn rv32_b1_cpu_vs_bus_shout_val_mismatch_must_fail() {
         /*max_steps=*/ 2,
     );
 
-    // Sanity: XOR table must be present in this run's Shout instances.
+    // Sanity: ADD table must be present in this run's Shout instances.
     let shout = RiscvShoutTables::new(32);
-    let xor_table_id = shout.opcode_to_id(RiscvOpcode::Xor).0;
+    let xor_table_id = shout.opcode_to_id(RiscvOpcode::Add).0;
     let _ = run
         .layout()
         .shout_idx(xor_table_id)
-        .expect("missing XOR Shout table");
+        .expect("missing ADD Shout table");
 
     let idx_alu_out = run.layout().alu_out(0);
 

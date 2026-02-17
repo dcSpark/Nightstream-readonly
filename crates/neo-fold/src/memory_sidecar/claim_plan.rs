@@ -1,7 +1,6 @@
 use neo_ajtai::Commitment as Cmt;
 use neo_math::{F, K};
 use neo_memory::riscv::lookups::RiscvOpcode;
-use neo_memory::riscv::trace::rv32_trace_lookup_addr_group_for_table_id;
 use neo_memory::witness::{LutInstance, LutTableSpec, MemInstance, StepInstanceBundle};
 
 use crate::PiCcsError;
@@ -93,9 +92,11 @@ impl RouteATimeClaimPlan {
     {
         let lut_insts: Vec<&LutInstance<Cmt, F>> = lut_insts.into_iter().collect();
 
-        // Group all non-packed lookup families that already share an address group in trace mode.
-        // This collapses per-column decode/width families into one gamma-batched claim pair while
-        // keeping packed/event-table specs on their existing per-lane schedule.
+        // Group all non-packed lookup families that share an address group.
+        // The addr_group is carried on each LutInstance (set by the bus config for trace mode,
+        // None for B1 mode). This collapses per-column decode/width families into one
+        // gamma-batched claim pair while keeping packed/event-table specs on their existing
+        // per-lane schedule.
         let mut grouped: std::collections::BTreeMap<u64, Vec<ShoutGammaGroupLaneRef>> =
             std::collections::BTreeMap::new();
         let mut grouped_ell: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
@@ -104,21 +105,23 @@ impl RouteATimeClaimPlan {
         for (inst_idx, lut_inst) in lut_insts.iter().enumerate() {
             let lanes = lut_inst.lanes.max(1);
             let ell_addr = lut_inst.d * lut_inst.ell;
-            let addr_group = rv32_trace_lookup_addr_group_for_table_id(lut_inst.table_id);
             let is_packed = matches!(
                 lut_inst.table_spec,
                 Some(LutTableSpec::RiscvOpcodePacked { .. } | LutTableSpec::RiscvOpcodeEventTablePacked { .. })
             );
-            let is_gamma_candidate = !is_packed && addr_group.is_some();
+            let is_gamma_candidate = !is_packed && lut_inst.addr_group.is_some();
             for lane_idx in 0..lanes {
                 if is_gamma_candidate {
-                    if let Some(addr_group) = addr_group {
-                        let key = ((addr_group as u64) << 32) | lane_idx as u64;
-                        grouped.entry(key).or_default().push(ShoutGammaGroupLaneRef {
-                            flat_lane_idx,
-                            inst_idx,
-                            lane_idx,
-                        });
+                    if let Some(addr_group) = lut_inst.addr_group {
+                        let key = (addr_group << 32) | lane_idx as u64;
+                        grouped
+                            .entry(key)
+                            .or_default()
+                            .push(ShoutGammaGroupLaneRef {
+                                flat_lane_idx,
+                                inst_idx,
+                                lane_idx,
+                            });
                         grouped_ell.entry(key).or_insert(ell_addr);
                     }
                 }

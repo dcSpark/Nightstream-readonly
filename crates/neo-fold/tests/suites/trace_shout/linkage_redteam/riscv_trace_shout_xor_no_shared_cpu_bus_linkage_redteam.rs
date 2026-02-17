@@ -234,6 +234,8 @@ fn riscv_trace_no_shared_cpu_bus_shout_xor_paging_linkage_redteam() {
             xlen: 32,
         }),
         table: Vec::new(),
+    addr_group: None,
+    selector_group: None,
     };
     let xor_lut_wit = LutWitness { mats };
 
@@ -373,6 +375,8 @@ fn riscv_trace_no_shared_cpu_bus_shout_table_id_mismatch_redteam() {
             xlen: 32,
         }),
         table: Vec::new(),
+    addr_group: None,
+    selector_group: None,
     };
     let wrong_lut_wit = LutWitness { mats };
 
