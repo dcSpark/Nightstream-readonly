@@ -7,11 +7,13 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 
 use crate::output_binding::{simple_output_config, OutputBindingConfig};
 use crate::pi_ccs::FoldingMode;
 use crate::session::FoldingSession;
+use neo_reductions::engines::optimized_engine::oracle::SparseCache;
 use crate::shard::{
     fold_shard_verify_with_output_binding_and_step_linking, fold_shard_verify_with_step_linking, CommitMixers,
     ShardFoldOutputs, ShardProof, StepLinkingConfig,
@@ -71,6 +73,21 @@ fn elapsed_duration(start: TimePoint) -> Duration {
     {
         start.elapsed()
     }
+}
+
+/// Per-phase timing breakdown for `Rv32B1::prove()`.
+///
+/// Captures wall-clock time for each major phase so callers can identify bottlenecks.
+#[derive(Clone, Debug, Default)]
+pub struct ProveTimings {
+    /// Program decode, memory layout setup, and Shout table inference.
+    pub decode_and_setup: Duration,
+    /// CCS construction (base + shared-bus wiring) and session/committer creation.
+    pub ccs_and_shared_bus: Duration,
+    /// RISC-V VM execution and shard/witness collection.
+    pub vm_execution: Duration,
+    /// Fold-and-prove (sumcheck + Ajtai commitment).
+    pub fold_and_prove: Duration,
 }
 
 pub fn rv32_b1_step_linking_config(layout: &Rv32B1Layout) -> StepLinkingConfig {
@@ -267,6 +284,30 @@ fn all_shout_opcodes() -> HashSet<RiscvOpcode> {
 
 /// High-level “few lines” builder for proving/verifying an RV32 program using the B1 shared-bus step circuit.
 ///
+/// Pre-computed SparseCache + matrix digest for RV32 B1 circuit preprocessing.
+///
+/// The `SparseCache::build()` and matrix-digest computation are the most expensive parts
+/// of both proving and verification.  This struct captures those artefacts so they can be
+/// computed once and reused across many `Rv32B1::prove()` / `build_verifier()` calls with
+/// the same ROM, `ram_bytes`, and `chunk_size`.
+///
+/// Build with [`Rv32B1::build_ccs_cache`], then inject into subsequent builders via
+/// [`Rv32B1::with_ccs_cache`].
+///
+/// **Important**: the CCS structure itself is still built from scratch each time (it is fast).
+/// Only the SparseCache (CSC decomposition + matrix digest) is cached.
+pub struct Rv32B1CcsCache {
+    pub sparse: Arc<SparseCache<F>>,
+}
+
+impl std::fmt::Debug for Rv32B1CcsCache {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Rv32B1CcsCache")
+            .field("sparse_len", &self.sparse.len())
+            .finish()
+    }
+}
+
 /// This:
 /// - chooses parameters + Ajtai committer automatically,
 /// - infers the minimal Shout table set from the program (unless overridden),
@@ -285,6 +326,7 @@ pub struct Rv32B1 {
     shout_ops: Option<HashSet<RiscvOpcode>>,
     output_claims: ProgramIO<F>,
     ram_init: HashMap<u64, u64>,
+    ccs_cache: Option<Arc<Rv32B1CcsCache>>,
 }
 
 /// Default instruction cap for RV32B1 runs when `max_steps` is not specified.
@@ -308,6 +350,7 @@ impl Rv32B1 {
             shout_ops: None,
             output_claims: ProgramIO::new(),
             ram_init: HashMap::new(),
+            ccs_cache: None,
         }
     }
 
@@ -371,6 +414,114 @@ impl Rv32B1 {
     pub fn ram_init_u32(mut self, addr: u64, value: u32) -> Self {
         self.ram_init.insert(addr, value as u64);
         self
+    }
+
+    /// Attach a pre-built CCS cache to skip CCS synthesis in [`prove`] and [`build_verifier`].
+    ///
+    /// The cache **must** have been built from a builder with the same `program_bytes`,
+    /// `ram_bytes`, `chunk_size`, and Shout configuration. No runtime validation is performed;
+    /// mismatched caches produce undefined behaviour.
+    pub fn with_ccs_cache(mut self, cache: Arc<Rv32B1CcsCache>) -> Self {
+        self.ccs_cache = Some(cache);
+        self
+    }
+
+    /// Build the CCS preprocessing cache from the current builder configuration.
+    ///
+    /// This performs program decoding, memory-layout setup, Shout-table inference,
+    /// CCS construction, and `SparseCache` synthesis -- exactly the same work that
+    /// [`prove`] and [`build_verifier`] would do on first call -- and packages the
+    /// result so it can be shared across many runs.
+    ///
+    /// ```ignore
+    /// let cache = Rv32B1::from_rom(0, &rom).ram_bytes(0x40000).chunk_size(1024)
+    ///     .shout_auto_minimal().build_ccs_cache()?;
+    /// let cache = Arc::new(cache);
+    ///
+    /// // Subsequent prove/verify calls skip CCS synthesis:
+    /// let run = Rv32B1::from_rom(0, &rom).ram_bytes(0x40000).chunk_size(1024)
+    ///     .shout_auto_minimal().with_ccs_cache(cache.clone())
+    ///     .ram_init_u32(0x104, 42).prove()?;
+    /// ```
+    pub fn build_ccs_cache(&self) -> Result<Rv32B1CcsCache, PiCcsError> {
+        let program = decode_program(&self.program_bytes)
+            .map_err(|e| PiCcsError::InvalidInput(format!("decode_program failed: {e}")))?;
+
+        let (prog_layout, initial_mem) = neo_memory::riscv::rom_init::prog_rom_layout_and_init_words::<F>(
+            PROG_ID,
+            /*base_addr=*/ 0,
+            &self.program_bytes,
+        )
+        .map_err(|e| PiCcsError::InvalidInput(format!("prog_rom_layout_and_init_words failed: {e}")))?;
+
+        let (k_ram, d_ram) = pow2_ceil_k(self.ram_bytes.max(4));
+        let _ = d_ram;
+        let mem_layouts = HashMap::from([
+            (
+                neo_memory::riscv::lookups::RAM_ID.0,
+                PlainMemLayout {
+                    k: k_ram,
+                    d: pow2_ceil_k(self.ram_bytes.max(4)).1,
+                    n_side: 2,
+                    lanes: 1,
+                },
+            ),
+            (PROG_ID.0, prog_layout),
+        ]);
+
+        let shout = RiscvShoutTables::new(self.xlen);
+        let mut shout_ops = match &self.shout_ops {
+            Some(ops) => ops.clone(),
+            None if self.shout_auto_minimal => infer_required_shout_opcodes(&program),
+            None => all_shout_opcodes(),
+        };
+        shout_ops.insert(RiscvOpcode::Add);
+
+        let mut table_specs: HashMap<u32, LutTableSpec> = HashMap::new();
+        for op in &shout_ops {
+            let table_id = shout.opcode_to_id(*op).0;
+            table_specs.insert(
+                table_id,
+                LutTableSpec::RiscvOpcode {
+                    opcode: *op,
+                    xlen: self.xlen,
+                },
+            );
+        }
+        let mut shout_table_ids: Vec<u32> = table_specs.keys().copied().collect();
+        shout_table_ids.sort_unstable();
+
+        let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, self.chunk_size)
+            .map_err(|e| PiCcsError::InvalidInput(format!("build_rv32_b1_step_ccs failed: {e}")))?;
+
+        // Apply shared-bus wiring (adds Twist/Shout constraint matrices to the CCS).
+        // This uses ROM-only initial_mem since the CCS structure doesn't depend on
+        // witness-specific ram_init values.
+        let session = FoldingSession::<AjtaiSModule>::new_ajtai(self.mode.clone(), &ccs_base)?;
+        let params = session.params().clone();
+        let committer = session.committer().clone();
+        let empty_tables: HashMap<u32, LutTable<F>> = HashMap::new();
+
+        let mut cpu = R1csCpu::new(
+            ccs_base,
+            params,
+            committer,
+            layout.m_in,
+            &empty_tables,
+            &table_specs,
+            rv32_b1_chunk_to_witness(layout.clone()),
+        );
+        cpu = cpu
+            .with_shared_cpu_bus(
+                rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem)
+                    .map_err(|e| PiCcsError::InvalidInput(format!("rv32_b1_shared_cpu_bus_config failed: {e}")))?,
+                self.chunk_size,
+            )
+            .map_err(|e| PiCcsError::InvalidInput(format!("shared bus inject failed: {e}")))?;
+
+        let sparse = Arc::new(SparseCache::build(&cpu.ccs));
+
+        Ok(Rv32B1CcsCache { sparse })
     }
 
     /// Build only the verification context (CCS + session) without executing the program or proving.
@@ -505,6 +656,8 @@ impl Rv32B1 {
         let ccs = cpu.ccs.clone();
 
         // No execution, no fold_and_prove -- just the verification context.
+        // NOTE: verifier SparseCache preloading is deferred to `preload_sparse_cache()`
+        // because the CCS pointer changes when moved into the Rv32B1Verifier struct.
         Ok(Rv32B1Verifier {
             session,
             ccs,
@@ -550,6 +703,9 @@ impl Rv32B1 {
                 )));
             }
         }
+
+        // === Phase 1: Decode + setup ===
+        let phase_start = time_now();
 
         let program = decode_program(&self.program_bytes)
             .map_err(|e| PiCcsError::InvalidInput(format!("decode_program failed: {e}")))?;
@@ -621,6 +777,13 @@ impl Rv32B1 {
         let mut shout_table_ids: Vec<u32> = table_specs.keys().copied().collect();
         shout_table_ids.sort_unstable();
 
+        let t_decode_and_setup = elapsed_duration(phase_start);
+
+        // === Phase 2: CCS construction + shared-bus wiring ===
+        let phase_start = time_now();
+
+        let prebuilt_sparse = self.ccs_cache.as_ref().map(|c| c.sparse.clone());
+
         let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, self.chunk_size)
             .map_err(|e| PiCcsError::InvalidInput(format!("build_rv32_b1_step_ccs failed: {e}")))?;
 
@@ -656,6 +819,11 @@ impl Rv32B1 {
         // Always enforce step-to-step chunk chaining for RV32 B1.
         session.set_step_linking(rv32_b1_step_linking_config(&layout));
 
+        let t_ccs_and_shared_bus = elapsed_duration(phase_start);
+
+        // === Phase 3: VM execution + shard collection ===
+        let phase_start = time_now();
+
         // Execute + collect step bundles (and aux for output binding).
         session.execute_shard_shared_cpu_bus(
             vm,
@@ -687,15 +855,25 @@ impl Rv32B1 {
 
         let ccs = cpu.ccs.clone();
 
-        // Prove phase (timed)
-        let prove_start = time_now();
+        // Preload the SparseCache using the *final* CCS reference that fold_and_prove will use.
+        // (Must happen after cpu.ccs.clone() because the pointer-keyed cache checks identity.)
+        if let Some(ref sparse) = prebuilt_sparse {
+            session.preload_ccs_sparse_cache(&ccs, sparse.clone())?;
+        }
+
+        let t_vm_execution = elapsed_duration(phase_start);
+
+        // === Phase 4: Fold-and-prove ===
+        let phase_start = time_now();
         let proof = if self.output_claims.is_empty() {
             session.fold_and_prove(&ccs)?
         } else {
             let ob_cfg = OutputBindingConfig::new(d_ram, self.output_claims.clone());
             session.fold_and_prove_with_output_binding_auto_simple(&ccs, &ob_cfg)?
         };
-        let prove_duration = elapsed_duration(prove_start);
+        let t_fold_and_prove = elapsed_duration(phase_start);
+
+        let prove_duration = t_decode_and_setup + t_ccs_and_shared_bus + t_vm_execution + t_fold_and_prove;
 
         Ok(Rv32B1Run {
             session,
@@ -707,6 +885,12 @@ impl Rv32B1 {
             ram_num_bits: d_ram,
             output_claims: self.output_claims,
             prove_duration,
+            prove_timings: ProveTimings {
+                decode_and_setup: t_decode_and_setup,
+                ccs_and_shared_bus: t_ccs_and_shared_bus,
+                vm_execution: t_vm_execution,
+                fold_and_prove: t_fold_and_prove,
+            },
             verify_duration: None,
         })
     }
@@ -727,6 +911,15 @@ pub struct Rv32B1Verifier {
 }
 
 impl Rv32B1Verifier {
+    /// Preload the verifier SparseCache using `&self.ccs` (final pointer).
+    ///
+    /// Call this once after `build_verifier()` returns, before the first `verify()`.
+    /// This ensures the pointer-keyed cache hits inside the session's verify path.
+    pub fn preload_sparse_cache(&mut self, sparse: Arc<SparseCache<F>>) -> Result<(), PiCcsError> {
+        self.session
+            .preload_verifier_ccs_sparse_cache(&self.ccs, sparse)
+    }
+
     /// Verify a `ShardProof` using the provided public step instance bundles.
     ///
     /// `steps_public` must be the step instance bundles produced by the prover (via
@@ -765,6 +958,7 @@ pub struct Rv32B1Run {
     ram_num_bits: usize,
     output_claims: ProgramIO<F>,
     prove_duration: Duration,
+    prove_timings: ProveTimings,
     verify_duration: Option<Duration>,
 }
 
@@ -928,6 +1122,11 @@ impl Rv32B1Run {
 
     pub fn prove_duration(&self) -> Duration {
         self.prove_duration
+    }
+
+    /// Per-phase timing breakdown for the prove call.
+    pub fn prove_timings(&self) -> &ProveTimings {
+        &self.prove_timings
     }
 
     pub fn verify_duration(&self) -> Option<Duration> {

@@ -5,7 +5,7 @@ use neo_vm_trace::{StepTrace, TwistOpKind};
 
 use crate::riscv::lookups::{
     decode_instruction, BranchCondition, RiscvInstruction, RiscvMemOp, RiscvOpcode, JOLT_CYCLE_TRACK_ECALL_NUM,
-    JOLT_PRINT_ECALL_NUM, PROG_ID, RAM_ID,
+    JOLT_PRINT_ECALL_NUM, POSEIDON2_ECALL_NUM, POSEIDON2_READ_ECALL_NUM, PROG_ID, RAM_ID,
 };
 
 use super::constants::{
@@ -78,7 +78,30 @@ fn set_ecall_helpers(z: &mut [F], layout: &Rv32B1Layout, j: usize, a0_u64: u64, 
     let is_print = print_prefix == 1 && print_match31;
     z[layout.ecall_is_print(j)] = if is_print { F::ONE } else { F::ZERO };
 
-    let ecall_halts = !(is_cycle || is_print);
+    let poseidon2_const = POSEIDON2_ECALL_NUM;
+    let mut poseidon2_prefix = if ((a0_u32 ^ poseidon2_const) & 1) == 0 { 1u32 } else { 0u32 };
+    z[layout.ecall_poseidon2_prefix(0, j)] = if poseidon2_prefix == 1 { F::ONE } else { F::ZERO };
+    for k in 1..31 {
+        let bit_match = ((a0_u32 >> k) ^ (poseidon2_const >> k)) & 1;
+        poseidon2_prefix &= 1u32 ^ bit_match;
+        z[layout.ecall_poseidon2_prefix(k, j)] = if poseidon2_prefix == 1 { F::ONE } else { F::ZERO };
+    }
+    let poseidon2_match31 = (((a0_u32 >> 31) ^ (poseidon2_const >> 31)) & 1) == 0;
+    let is_poseidon2 = poseidon2_prefix == 1 && poseidon2_match31;
+    z[layout.ecall_is_poseidon2(j)] = if is_poseidon2 { F::ONE } else { F::ZERO };
+
+    // ecall_is_poseidon2_read = prefix_30 * bit_31 (bit 31 set = read ECALL).
+    let bit_31_set = (a0_u32 >> 31) & 1 == 1;
+    let is_poseidon2_read = poseidon2_prefix == 1 && bit_31_set;
+    z[layout.ecall_is_poseidon2_read(j)] = if is_poseidon2_read { F::ONE } else { F::ZERO };
+
+    // halt_ecall_poseidon2_read = is_halt * ecall_is_poseidon2_read.
+    // Gates the raw prefix flag by is_halt so register update constraints only
+    // activate on actual ECALL instructions.
+    let halt_poseidon2_read = is_halt && is_poseidon2_read;
+    z[layout.halt_ecall_poseidon2_read(j)] = if halt_poseidon2_read { F::ONE } else { F::ZERO };
+
+    let ecall_halts = !(is_cycle || is_print || is_poseidon2 || is_poseidon2_read);
     z[layout.ecall_halts(j)] = if ecall_halts { F::ONE } else { F::ZERO };
     z[layout.halt_effective(j)] = if is_halt && ecall_halts { F::ONE } else { F::ZERO };
 
@@ -644,6 +667,13 @@ fn rv32_b1_chunk_to_witness_internal(
         z[layout.is_halt(j)] = if is_halt { F::ONE } else { F::ZERO };
         set_ecall_helpers(&mut z, layout, j, step.regs_before[10], is_halt)?;
 
+        // Detect Poseidon2 read ECALL and set ecall_rd_val.
+        let is_poseidon2_read_ecall = is_halt && step.regs_before[10] as u32 == POSEIDON2_READ_ECALL_NUM;
+        if is_poseidon2_read_ecall {
+            let rd_val = step.regs_after[10];
+            z[layout.ecall_rd_val(j)] = F::from_u64(rd_val);
+        }
+
         // One-hot register selectors.
         let rs1_idx = rs1 as usize;
         let rs2_idx = rs2 as usize;
@@ -1150,6 +1180,12 @@ fn rv32_b1_chunk_to_witness_internal(
         if is_bge || is_bgeu {
             z[layout.br_taken(j)] = F::ONE - z[layout.alu_out(j)];
             z[layout.br_not_taken(j)] = F::ONE - z[layout.br_taken(j)];
+        }
+
+        // Poseidon2 read ECALL: set rd_write_val = ecall_rd_val so the existing
+        // enforce_u32_bits range check covers it.
+        if is_poseidon2_read_ecall {
+            z[layout.rd_write_val(j)] = z[layout.ecall_rd_val(j)];
         }
 
         let mul_carry = if is_mulh {
