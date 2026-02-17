@@ -55,7 +55,7 @@ fn fill_bus_tail_from_step_events(
         // RV32 opcode tables: d=2*xlen=64, n_side=2, ell=1.
         write_addr_bits_dim_major_le_into_bus(z, bus, cols.addr_bits.clone(), /*j=*/ 0, ev.key, 64, 2, 1);
         z[bus.bus_cell(cols.has_lookup, 0)] = F::ONE;
-        z[bus.bus_cell(cols.val, 0)] = F::from_u64(ev.value);
+        z[bus.bus_cell(cols.primary_val(), 0)] = F::from_u64(ev.value);
     }
 
     // Twist reads/writes (lane-pinned for REG_ID, lane0 otherwise).
@@ -209,7 +209,8 @@ fn rv32_b1_signed_div_rem_shared_bus_constraints_satisfy() {
 
     let lut_insts: Vec<LutInstance<(), F>> = table_ids
         .iter()
-        .map(|_| LutInstance {
+        .map(|id| LutInstance {
+            table_id: *id,
             comms: Vec::new(),
             k: 0,
             d: 64,

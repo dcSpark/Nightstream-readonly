@@ -53,7 +53,7 @@ fn rv32_b1_all_ccs_count_estimator_matches_built_ccs() {
 
     let (step_ccs, layout) =
         build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, /*chunk_size=*/ 1).expect("build_rv32_b1_step_ccs");
-    let decode_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode sidecar ccs");
+    let decode_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("decode plumbing sidecar ccs");
     let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("semantics sidecar ccs");
 
     let counts = estimate_rv32_b1_all_ccs_counts(&mem_layouts, &shout_table_ids, /*chunk_size=*/ 1)

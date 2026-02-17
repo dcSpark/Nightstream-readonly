@@ -114,6 +114,7 @@ fn absorb_step_memory_binds_table_spec() {
     let make_step = |opcode: RiscvOpcode| StepInstanceBundle::<Cmt, F, K> {
         mcs_inst: dummy_mcs.clone(),
         lut_insts: vec![LutInstance {
+            table_id: 0,
             comms: Vec::new(),
             k: 0,
             d: 64,
@@ -125,8 +126,6 @@ fn absorb_step_memory_binds_table_spec() {
             table: vec![],
         }],
         mem_insts: vec![],
-        decode_insts: Vec::new(),
-        width_insts: Vec::new(),
         _phantom: PhantomData,
     };
 
@@ -158,6 +157,7 @@ fn route_a_shout_implicit_table_spec_verifies() {
     let out = compute_op(opcode, rs1, rs2, xlen);
 
     let inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 64,
@@ -180,8 +180,6 @@ fn route_a_shout_implicit_table_spec_verifies() {
         mcs: (mcs, mcs_wit),
         lut_instances: vec![(inst, wit)],
         mem_instances: vec![],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     };
 
@@ -250,6 +248,7 @@ fn route_a_shout_implicit_identity_u32_table_spec_verifies() {
     let out = addr;
 
     let inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 32,
@@ -272,8 +271,6 @@ fn route_a_shout_implicit_identity_u32_table_spec_verifies() {
         mcs: (mcs, mcs_wit),
         lut_instances: vec![(inst, wit)],
         mem_instances: vec![],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     };
 

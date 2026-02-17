@@ -5,13 +5,20 @@
 
 use crate::addr::write_addr_bits_dim_major_le_into_bus;
 use crate::builder::CpuArithmetization;
-use crate::cpu::bus_layout::{build_bus_layout_for_instances_with_shout_and_twist_lanes, BusLayout};
+use crate::cpu::bus_layout::{
+    build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes,
+    BusLayout, ShoutInstanceShape,
+};
 use crate::cpu::constraints::{
     extend_ccs_with_shared_cpu_bus_constraints_optional_shout, ShoutCpuBinding, TwistCpuBinding,
+    CPU_BUS_COL_DISABLED,
 };
 use crate::mem_init::MemInit;
 use crate::plain::LutTable;
 use crate::plain::PlainMemLayout;
+use crate::riscv::trace::{
+    rv32_trace_lookup_addr_group_for_table_id, rv32_trace_lookup_selector_group_for_table_id,
+};
 use crate::witness::{LutInstance, LutTableSpec, MemInstance};
 use neo_ajtai::{decomp_b, DecompStyle};
 use neo_ccs::matrix::Mat;
@@ -166,7 +173,7 @@ where
         let mut mem_ids: Vec<u32> = bus.mem_layouts.keys().copied().collect();
         mem_ids.sort_unstable();
 
-        let mut shout_ell_addrs_and_lanes = Vec::with_capacity(table_ids.len());
+        let mut shout_shapes = Vec::with_capacity(table_ids.len());
         for table_id in &table_ids {
             let (d, n_side) = self
                 .shout_meta
@@ -186,7 +193,13 @@ where
                 .map(|v| v.len())
                 .unwrap_or(0)
                 .max(1);
-            shout_ell_addrs_and_lanes.push((ell_addr, lanes));
+            shout_shapes.push(ShoutInstanceShape {
+                ell_addr,
+                lanes,
+                n_vals: 1usize,
+                addr_group: rv32_trace_lookup_addr_group_for_table_id(*table_id).map(|v| v as u64),
+                selector_group: rv32_trace_lookup_selector_group_for_table_id(*table_id).map(|v| v as u64),
+            });
         }
 
         let mut twist_ell_addrs_and_lanes = Vec::with_capacity(mem_ids.len());
@@ -206,11 +219,11 @@ where
             twist_ell_addrs_and_lanes.push((ell_addr, layout.lanes.max(1)));
         }
 
-        let layout = build_bus_layout_for_instances_with_shout_and_twist_lanes(
+        let layout = build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes(
             self.ccs.m,
             self.m_in,
             chunk_size,
-            shout_ell_addrs_and_lanes,
+            shout_shapes,
             twist_ell_addrs_and_lanes,
         )?;
         Ok((table_ids, mem_ids, layout))
@@ -249,16 +262,19 @@ where
             id: u32,
             bus_base: usize,
             chunk_size: usize,
-            cols: &[(&str, usize)],
+            cols: &[(&str, usize, bool)],
         ) -> Result<(), String> {
             let max_step_offset = chunk_size
                 .checked_sub(1)
                 .ok_or_else(|| "shared_cpu_bus: chunk_size must be >= 1".to_string())?;
-            for (label, col) in cols {
+            for (label, col, allow_bus_overlap) in cols {
+                if *col == CPU_BUS_COL_DISABLED {
+                    continue;
+                }
                 let max_col = col
                     .checked_add(max_step_offset)
                     .ok_or_else(|| format!("shared_cpu_bus: {kind} binding for id={id} overflows usize"))?;
-                if max_col >= bus_base {
+                if !allow_bus_overlap && max_col >= bus_base {
                     return Err(format!(
                         "shared_cpu_bus: {kind} binding for id={id} uses {label}={col} (max={max_col}), but bus_base={bus_base} (CPU bindings must be < bus_base to avoid overlapping the bus tail)"
                     ));
@@ -280,9 +296,9 @@ where
                 continue;
             }
             for (lane_idx, b) in bindings.iter().enumerate() {
-                let mut cols = vec![("has_lookup", b.has_lookup), ("val", b.val)];
+                let mut cols = vec![("has_lookup", b.has_lookup, false), ("val", b.val, false)];
                 if let Some(addr) = b.addr {
-                    cols.push(("addr", addr));
+                    cols.push(("addr", addr, false));
                 }
                 validate_cpu_binding_cols(
                     &format!("shout_cpu[lane={lane_idx}]"),
@@ -322,15 +338,16 @@ where
             }
             for (lane_idx, b) in bindings.iter().enumerate() {
                 let mut cols = vec![
-                    ("has_read", b.has_read),
-                    ("has_write", b.has_write),
-                    ("read_addr", b.read_addr),
-                    ("write_addr", b.write_addr),
-                    ("rv", b.rv),
-                    ("wv", b.wv),
+                    // Selector columns may intentionally source from bus-tail decode lookups.
+                    ("has_read", b.has_read, true),
+                    ("has_write", b.has_write, true),
+                    ("read_addr", b.read_addr, false),
+                    ("write_addr", b.write_addr, false),
+                    ("rv", b.rv, false),
+                    ("wv", b.wv, false),
                 ];
                 if let Some(inc) = b.inc {
-                    cols.push(("inc", inc));
+                    cols.push(("inc", inc, false));
                 }
                 let kind = format!("twist_cpu[lane={lane_idx}]");
                 validate_cpu_binding_cols(&kind, *mem_id, bus_base, chunk_size, &cols)?;
@@ -370,6 +387,7 @@ where
                 .unwrap_or(0)
                 .max(1);
             lut_insts.push(LutInstance {
+                table_id: *table_id,
                 comms: Vec::new(),
                 k: 0,
                 d,
@@ -664,7 +682,7 @@ where
                         }
                     }
 
-                    // Shout lanes: addr_bits, has_lookup, val.
+                    // Shout lanes: addr_bits, has_lookup, vals[0].
                     for (i, table_id) in shared.table_ids.iter().enumerate() {
                         let inst_cols = &shared.layout.shout_cols[i];
                         let (d, n_side) = self
@@ -687,7 +705,7 @@ where
                                     ell,
                                 );
                                 z_vec[shared.layout.bus_cell(shout_cols.has_lookup, j)] = Goldilocks::ONE;
-                                z_vec[shared.layout.bus_cell(shout_cols.val, j)] = val;
+                                z_vec[shared.layout.bus_cell(shout_cols.primary_val(), j)] = val;
                             }
                         }
                     }

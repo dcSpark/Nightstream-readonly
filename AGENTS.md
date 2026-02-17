@@ -4,6 +4,7 @@
 - We don't care about backwards compatibility because we are still in development. Keep the code simple and lean.
 - Avoid adding new Rust features or ENVs unless it is explicitly approved.
 - Never modify this file without explicit approval.
+- No single file should ever exceed 1,500 lines of code unless explicitly confirmed by the user.
 
 ## Testing
 - Never add tests in the same implementation file, always prefer to add them to a file inside tests/ (current or new)
@@ -13,6 +14,23 @@
 ## Build & Test Commands
 - When running tests use --release eg cargo test --workspace --release
 - For extra debugs use debug-logs eg --features paper-exact,debug-logs
+
+## Perf & Constraint Debugging
+
+Perf tests live in `crates/neo-fold/tests/suites/perf/single_addi_metrics_nightstream.rs`. All use `--ignored`.
+
+Full constraint architecture report (main CCS, bus, Route-A claims, openings, timing):
+```bash
+NS_DEBUG_N=10 cargo test -p neo-fold --release --test perf -- --ignored --nocapture report_track_a_w0_w1_snapshot
+```
+N: number of riscv instructions + 1 (halt).
+
+Other useful tests (all accept `NS_DEBUG_N`):
+- `debug_trace_single_n_mixed_ops` — trace-wiring prove/verify + openings
+- `debug_chunked_single_n_mixed_ops` — same in chunked (B1) mode
+- `debug_trace_vs_chunked_single_n_mixed_ops` — side-by-side comparison
+- `report_trace_vs_chunked_medians` — 5-run median timing
+- `debug_trace_core_rows_per_cycle_equiv` — CCS rows/cycle (no prove, fast; uses `NS_DEBUG_T`)
 
 ## Profiling
 

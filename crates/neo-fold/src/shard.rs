@@ -33,7 +33,7 @@ use neo_ajtai::{
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::{CcsStructure, Mat, MeInstance};
 use neo_math::{KExtensions, D, F, K};
-use neo_memory::riscv::trace::{Rv32DecodeSidecarLayout, Rv32TraceLayout, Rv32WidthSidecarLayout};
+use neo_memory::riscv::trace::{Rv32DecodeSidecarLayout, Rv32TraceLayout};
 use neo_memory::ts_common as ts;
 use neo_memory::witness::{LutTableSpec, StepInstanceBundle, StepWitnessBundle};
 use neo_params::NeoParams;
@@ -1723,17 +1723,15 @@ where
         let trace = Rv32TraceLayout::new();
         let trace_cols_to_open: Vec<usize> = vec![
             trace.active,
-            trace.prog_addr,
-            trace.prog_value,
+            trace.cycle,
+            trace.pc_before,
+            trace.instr_word,
             trace.rs1_addr,
             trace.rs1_val,
             trace.rs2_addr,
             trace.rs2_val,
-            trace.rd_has_write,
             trace.rd_addr,
             trace.rd_val,
-            trace.ram_has_read,
-            trace.ram_has_write,
             trace.ram_addr,
             trace.ram_rv,
             trace.ram_wv,
@@ -1741,7 +1739,6 @@ where
             trace.shout_val,
             trace.shout_lhs,
             trace.shout_rhs,
-            trace.shout_table_id,
         ];
 
         let want_len = trace_open_base + trace_cols_to_open.len();
@@ -2237,35 +2234,32 @@ where
                 crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(params, cpu_bus, core_t, Z, out)?;
             }
 
-            let want_with_trace = core_t + cpu_bus.bus_cols + 20;
+            let trace = Rv32TraceLayout::new();
+            let trace_cols_to_open: Vec<usize> = vec![
+                trace.active,
+                trace.cycle,
+                trace.pc_before,
+                trace.instr_word,
+                trace.rs1_addr,
+                trace.rs1_val,
+                trace.rs2_addr,
+                trace.rs2_val,
+                trace.rd_addr,
+                trace.rd_val,
+                trace.ram_addr,
+                trace.ram_rv,
+                trace.ram_wv,
+                trace.shout_has_lookup,
+                trace.shout_val,
+                trace.shout_lhs,
+                trace.shout_rhs,
+            ];
+            let want_with_trace = core_t + cpu_bus.bus_cols + trace_cols_to_open.len();
             if ccs_out
                 .first()
                 .map(|me| me.y_scalars.len() == want_with_trace)
                 .unwrap_or(false)
             {
-                let trace = Rv32TraceLayout::new();
-                let trace_cols_to_open: Vec<usize> = vec![
-                    trace.active,
-                    trace.prog_addr,
-                    trace.prog_value,
-                    trace.rs1_addr,
-                    trace.rs1_val,
-                    trace.rs2_addr,
-                    trace.rs2_val,
-                    trace.rd_has_write,
-                    trace.rd_addr,
-                    trace.rd_val,
-                    trace.ram_has_read,
-                    trace.ram_has_write,
-                    trace.ram_addr,
-                    trace.ram_rv,
-                    trace.ram_wv,
-                    trace.shout_has_lookup,
-                    trace.shout_val,
-                    trace.shout_lhs,
-                    trace.shout_rhs,
-                    trace.shout_table_id,
-                ];
                 let m_in = mcs_inst.m_in;
                 let bus_region_len = cpu_bus
                     .bus_cols
@@ -2531,13 +2525,20 @@ where
         let include_ob = ob.is_some() && (idx + 1 == steps.len());
         let mut wb_time_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
         let mut wp_time_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
-        let mut w2_decode_fields_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
-        let mut w2_decode_immediates_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
-        let mut w3_bitness_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
-        let mut w3_quiescence_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
-        let mut w3_selector_linkage_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
-        let mut w3_load_semantics_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
-        let mut w3_store_semantics_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
+        let mut decode_decode_fields_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
+        let mut decode_decode_immediates_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> =
+            None;
+        let mut width_bitness_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
+        let mut width_quiescence_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
+        let mut width_load_semantics_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
+        let mut width_store_semantics_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
+        let mut control_next_pc_linear_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
+        let mut control_next_pc_control_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> =
+            None;
+        let mut control_branch_semantics_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> =
+            None;
+        let mut control_control_writeback_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> =
+            None;
         let mut ob_time_claim: Option<crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim> = None;
         let mut ob_r_prime: Option<Vec<K>> = None;
 
@@ -2731,80 +2732,117 @@ where
                 label: b"wp/quiescence",
             });
         }
-        let (w2_decode_fields_built, w2_decode_immediates_built) =
-            crate::memory_sidecar::memory::build_route_a_w2_time_claims(params, step, &r_cycle)?;
-        let w2_required = crate::memory_sidecar::memory::w2_required_for_step_witness(step);
-        if w2_required && (w2_decode_fields_built.is_none() || w2_decode_immediates_built.is_none()) {
+        let (decode_decode_fields_built, decode_decode_immediates_built) =
+            crate::memory_sidecar::memory::build_route_a_decode_time_claims(params, step, &r_cycle)?;
+        let decode_required = crate::memory_sidecar::memory::decode_stage_required_for_step_witness(step);
+        if decode_required && (decode_decode_fields_built.is_none() || decode_decode_immediates_built.is_none()) {
             return Err(PiCcsError::ProtocolError(
-                "W2 claims are required in RV32 trace mode but were not built".into(),
+                "decode stage claims are required in RV32 trace mode but were not built".into(),
             ));
         }
-        if let Some((oracle, _claimed_sum)) = w2_decode_fields_built {
-            w2_decode_fields_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
+        if let Some((oracle, _claimed_sum)) = decode_decode_fields_built {
+            decode_decode_fields_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
                 oracle,
                 claimed_sum: K::ZERO,
-                label: b"w2/decode_fields",
+                label: b"decode/fields",
             });
         }
-        if let Some((oracle, _claimed_sum)) = w2_decode_immediates_built {
-            w2_decode_immediates_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
+        if let Some((oracle, _claimed_sum)) = decode_decode_immediates_built {
+            decode_decode_immediates_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
                 oracle,
                 claimed_sum: K::ZERO,
-                label: b"w2/decode_immediates",
+                label: b"decode/immediates",
             });
         }
         let (
-            w3_bitness_built,
-            w3_quiescence_built,
-            w3_selector_linkage_built,
-            w3_load_semantics_built,
-            w3_store_semantics_built,
-        ) = crate::memory_sidecar::memory::build_route_a_w3_time_claims(params, step, &r_cycle)?;
-        let w3_required = crate::memory_sidecar::memory::w3_required_for_step_witness(step);
-        if w3_required
-            && (w3_bitness_built.is_none()
-                || w3_quiescence_built.is_none()
-                || w3_selector_linkage_built.is_none()
-                || w3_load_semantics_built.is_none()
-                || w3_store_semantics_built.is_none())
+            width_bitness_built,
+            width_quiescence_built,
+            _width_selector_linkage_built,
+            width_load_semantics_built,
+            width_store_semantics_built,
+        ) = crate::memory_sidecar::memory::build_route_a_width_time_claims(params, step, &r_cycle)?;
+        let width_required = crate::memory_sidecar::memory::width_stage_required_for_step_witness(step);
+        if width_required
+            && (width_bitness_built.is_none()
+                || width_quiescence_built.is_none()
+                || width_load_semantics_built.is_none()
+                || width_store_semantics_built.is_none())
         {
             return Err(PiCcsError::ProtocolError(
-                "W3 claims are required in RV32 trace mode but were not built".into(),
+                "width stage claims are required in RV32 trace mode but were not built".into(),
             ));
         }
-        if let Some((oracle, _claimed_sum)) = w3_bitness_built {
-            w3_bitness_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
+        if let Some((oracle, _claimed_sum)) = width_bitness_built {
+            width_bitness_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
                 oracle,
                 claimed_sum: K::ZERO,
-                label: b"w3/bitness",
+                label: b"width/bitness",
             });
         }
-        if let Some((oracle, _claimed_sum)) = w3_quiescence_built {
-            w3_quiescence_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
+        if let Some((oracle, _claimed_sum)) = width_quiescence_built {
+            width_quiescence_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
                 oracle,
                 claimed_sum: K::ZERO,
-                label: b"w3/quiescence",
+                label: b"width/quiescence",
             });
         }
-        if let Some((oracle, _claimed_sum)) = w3_selector_linkage_built {
-            w3_selector_linkage_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
+        if let Some((oracle, _claimed_sum)) = width_load_semantics_built {
+            width_load_semantics_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
                 oracle,
                 claimed_sum: K::ZERO,
-                label: b"w3/selector_linkage",
+                label: b"width/load_semantics",
             });
         }
-        if let Some((oracle, _claimed_sum)) = w3_load_semantics_built {
-            w3_load_semantics_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
+        if let Some((oracle, _claimed_sum)) = width_store_semantics_built {
+            width_store_semantics_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
                 oracle,
                 claimed_sum: K::ZERO,
-                label: b"w3/load_semantics",
+                label: b"width/store_semantics",
             });
         }
-        if let Some((oracle, _claimed_sum)) = w3_store_semantics_built {
-            w3_store_semantics_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
+        let (
+            control_next_pc_linear_built,
+            control_next_pc_control_built,
+            control_branch_semantics_built,
+            control_control_writeback_built,
+        ) = crate::memory_sidecar::memory::build_route_a_control_time_claims(params, step, &r_cycle)?;
+        let control_required = crate::memory_sidecar::memory::control_stage_required_for_step_witness(step);
+        if control_required
+            && (control_next_pc_linear_built.is_none()
+                || control_next_pc_control_built.is_none()
+                || control_branch_semantics_built.is_none()
+                || control_control_writeback_built.is_none())
+        {
+            return Err(PiCcsError::ProtocolError(
+                "control stage claims are required in RV32 trace mode but were not built".into(),
+            ));
+        }
+        if let Some((oracle, _claimed_sum)) = control_next_pc_linear_built {
+            control_next_pc_linear_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
                 oracle,
                 claimed_sum: K::ZERO,
-                label: b"w3/store_semantics",
+                label: b"control/next_pc_linear",
+            });
+        }
+        if let Some((oracle, _claimed_sum)) = control_next_pc_control_built {
+            control_next_pc_control_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
+                oracle,
+                claimed_sum: K::ZERO,
+                label: b"control/next_pc_control",
+            });
+        }
+        if let Some((oracle, _claimed_sum)) = control_branch_semantics_built {
+            control_branch_semantics_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
+                oracle,
+                claimed_sum: K::ZERO,
+                label: b"control/branch_semantics",
+            });
+        }
+        if let Some((oracle, _claimed_sum)) = control_control_writeback_built {
+            control_control_writeback_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
+                oracle,
+                claimed_sum: K::ZERO,
+                label: b"control/writeback",
             });
         }
 
@@ -2862,13 +2900,17 @@ where
             twist_write_claims,
             wb_time_claim,
             wp_time_claim,
-            w2_decode_fields_claim,
-            w2_decode_immediates_claim,
-            w3_bitness_claim,
-            w3_quiescence_claim,
-            w3_selector_linkage_claim,
-            w3_load_semantics_claim,
-            w3_store_semantics_claim,
+            decode_decode_fields_claim,
+            decode_decode_immediates_claim,
+            width_bitness_claim,
+            width_quiescence_claim,
+            None,
+            width_load_semantics_claim,
+            width_store_semantics_claim,
+            control_next_pc_linear_claim,
+            control_next_pc_control_claim,
+            control_branch_semantics_claim,
+            control_control_writeback_claim,
             ob_time_claim,
         )?;
 
@@ -3036,28 +3078,21 @@ where
 
             let trace_cols_to_open_dense: Vec<usize> = vec![
                 trace.active,
-                trace.prog_addr,
-                trace.prog_value,
+                trace.cycle,
+                trace.pc_before,
+                trace.instr_word,
                 trace.rs1_addr,
                 trace.rs1_val,
                 trace.rs2_addr,
                 trace.rs2_val,
-                trace.rd_has_write,
                 trace.rd_addr,
                 trace.rd_val,
-                trace.ram_has_read,
-                trace.ram_has_write,
                 trace.ram_addr,
                 trace.ram_rv,
                 trace.ram_wv,
             ];
-            let trace_cols_to_open_shout: Vec<usize> = vec![
-                trace.shout_has_lookup,
-                trace.shout_val,
-                trace.shout_lhs,
-                trace.shout_rhs,
-                trace.shout_table_id,
-            ];
+            let trace_cols_to_open_shout: Vec<usize> =
+                vec![trace.shout_has_lookup, trace.shout_val, trace.shout_lhs, trace.shout_rhs];
             let trace_cols_to_open_all: Vec<usize> = trace_cols_to_open_dense
                 .iter()
                 .chain(trace_cols_to_open_shout.iter())
@@ -3226,14 +3261,6 @@ where
             normalize_me_claims(core::slice::from_mut(me), ell_n, ell_d, t)?;
         }
         for me in mem_proof.wp_me_claims.iter_mut() {
-            let t = me.y.len();
-            normalize_me_claims(core::slice::from_mut(me), ell_n, ell_d, t)?;
-        }
-        for me in mem_proof.w2_decode_me_claims.iter_mut() {
-            let t = me.y.len();
-            normalize_me_claims(core::slice::from_mut(me), ell_n, ell_d, t)?;
-        }
-        for me in mem_proof.w3_width_me_claims.iter_mut() {
             let t = me.y.len();
             normalize_me_claims(core::slice::from_mut(me), ell_n, ell_d, t)?;
         }
@@ -3813,7 +3840,52 @@ where
         if !mem_proof.wp_me_claims.is_empty() {
             let trace = Rv32TraceLayout::new();
             let t_len = crate::memory_sidecar::memory::infer_rv32_trace_t_len_for_wb_wp(step, &trace)?;
-            let wp_open_cols = crate::memory_sidecar::memory::rv32_trace_wp_opening_columns(&trace);
+            let mut wp_open_cols = crate::memory_sidecar::memory::rv32_trace_wp_opening_columns(&trace);
+            if control_required {
+                wp_open_cols.extend(crate::memory_sidecar::memory::rv32_trace_control_extra_opening_columns(
+                    &trace,
+                ));
+            }
+            if decode_required {
+                let decode_layout = Rv32DecodeSidecarLayout::new();
+                let (_decode_open_cols, decode_lut_indices) =
+                    crate::memory_sidecar::memory::resolve_shared_decode_lookup_lut_indices(step, &decode_layout)?;
+                let bus = crate::memory_sidecar::memory::build_bus_layout_for_step_witness(step, t_len)?;
+                if bus.shout_cols.len() != step.lut_instances.len() {
+                    return Err(PiCcsError::ProtocolError(
+                        "W2(shared): bus layout shout lane count drift in WP fold".into(),
+                    ));
+                }
+                let bus_base_delta = bus
+                    .bus_base
+                    .checked_sub(mcs_inst.m_in)
+                    .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): bus_base underflow in WP fold".into()))?;
+                if bus_base_delta % t_len != 0 {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "W2(shared): bus_base alignment mismatch in WP fold (bus_base_delta={}, t_len={t_len})",
+                        bus_base_delta
+                    )));
+                }
+                let bus_col_offset = bus_base_delta / t_len;
+                for &lut_idx in decode_lut_indices.iter() {
+                    let inst_cols = bus.shout_cols.get(lut_idx).ok_or_else(|| {
+                        PiCcsError::ProtocolError(
+                            "W2(shared): missing shout cols for decode lookup table in WP fold".into(),
+                        )
+                    })?;
+                    let lane0 = inst_cols.lanes.get(0).ok_or_else(|| {
+                        PiCcsError::ProtocolError(
+                            "W2(shared): expected one shout lane for decode lookup table in WP fold".into(),
+                        )
+                    })?;
+                    wp_open_cols.push(bus_col_offset + lane0.primary_val());
+                }
+            }
+            if width_required {
+                wp_open_cols.extend(crate::memory_sidecar::memory::width_lookup_bus_val_cols_witness(
+                    step, t_len,
+                )?);
+            }
             let core_t = s.t();
             let m_in = mcs_inst.m_in;
             let dec_wits = wb_wp_dec_wits
@@ -3883,114 +3955,6 @@ where
             }
         }
 
-        let mut w2_fold: Vec<RlcDecProof> = Vec::new();
-        if !mem_proof.w2_decode_me_claims.is_empty() {
-            if step.decode_instances.len() != 1 {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "W2 fold expects exactly one decode sidecar witness (got {})",
-                    step.decode_instances.len()
-                )));
-            }
-            let decode_layout = Rv32DecodeSidecarLayout::new();
-            let open_cols: Vec<usize> = (0..decode_layout.cols).collect();
-            let (decode_inst, decode_wit) = &step.decode_instances[0];
-            if decode_wit.mats.len() != 1 {
-                return Err(PiCcsError::ProtocolError(
-                    "W2 fold expects exactly one decode sidecar mat".into(),
-                ));
-            }
-            let decode_mat = &decode_wit.mats[0];
-            let t_len = decode_inst.steps;
-            let core_t = s.t();
-            let m_in = mcs_inst.m_in;
-            tr.append_message(b"fold/w2_lane_start", &(step_idx as u64).to_le_bytes());
-            for (claim_idx, me) in mem_proof.w2_decode_me_claims.iter().enumerate() {
-                tr.append_message(b"fold/w2_lane_claim_idx", &(claim_idx as u64).to_le_bytes());
-                let (mut proof, mut Z_split_val) = prove_rlc_dec_lane(
-                    &mode,
-                    RlcLane::Val,
-                    tr,
-                    params,
-                    &s,
-                    ccs_sparse_cache.as_deref(),
-                    None,
-                    &ring,
-                    ell_d,
-                    k_dec,
-                    step_idx,
-                    None,
-                    core::slice::from_ref(me),
-                    core::slice::from_ref(&decode_mat),
-                    true,
-                    l,
-                    mixers,
-                )?;
-                for (child, zi) in proof.dec_children.iter_mut().zip(Z_split_val.iter()) {
-                    crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
-                        params, m_in, t_len, m_in, &open_cols, core_t, zi, child,
-                    )?;
-                }
-                if collect_val_lane_wits {
-                    val_lane_wits.extend(Z_split_val.drain(..));
-                }
-                w2_fold.push(proof);
-            }
-        }
-
-        let mut w3_fold: Vec<RlcDecProof> = Vec::new();
-        if !mem_proof.w3_width_me_claims.is_empty() {
-            if step.width_instances.len() != 1 {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "W3 fold expects exactly one width sidecar witness (got {})",
-                    step.width_instances.len()
-                )));
-            }
-            let width_layout = Rv32WidthSidecarLayout::new();
-            let open_cols: Vec<usize> = (0..width_layout.cols).collect();
-            let (width_inst, width_wit) = &step.width_instances[0];
-            if width_wit.mats.len() != 1 {
-                return Err(PiCcsError::ProtocolError(
-                    "W3 fold expects exactly one width sidecar mat".into(),
-                ));
-            }
-            let width_mat = &width_wit.mats[0];
-            let t_len = width_inst.steps;
-            let core_t = s.t();
-            let m_in = mcs_inst.m_in;
-            tr.append_message(b"fold/w3_lane_start", &(step_idx as u64).to_le_bytes());
-            for (claim_idx, me) in mem_proof.w3_width_me_claims.iter().enumerate() {
-                tr.append_message(b"fold/w3_lane_claim_idx", &(claim_idx as u64).to_le_bytes());
-                let (mut proof, mut Z_split_val) = prove_rlc_dec_lane(
-                    &mode,
-                    RlcLane::Val,
-                    tr,
-                    params,
-                    &s,
-                    ccs_sparse_cache.as_deref(),
-                    None,
-                    &ring,
-                    ell_d,
-                    k_dec,
-                    step_idx,
-                    None,
-                    core::slice::from_ref(me),
-                    core::slice::from_ref(&width_mat),
-                    true,
-                    l,
-                    mixers,
-                )?;
-                for (child, zi) in proof.dec_children.iter_mut().zip(Z_split_val.iter()) {
-                    crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
-                        params, m_in, t_len, m_in, &open_cols, core_t, zi, child,
-                    )?;
-                }
-                if collect_val_lane_wits {
-                    val_lane_wits.extend(Z_split_val.drain(..));
-                }
-                w3_fold.push(proof);
-            }
-        }
-
         accumulator = children.clone();
         accumulator_wit = if want_main_wits { Z_split } else { Vec::new() };
 
@@ -4009,8 +3973,6 @@ where
             shout_time_fold,
             wb_fold,
             wp_fold,
-            w2_fold,
-            w3_fold,
         });
 
         tr.append_message(b"fold/step_done", &(step_idx as u64).to_le_bytes());
@@ -4546,8 +4508,9 @@ where
         let twist_pre = crate::memory_sidecar::memory::verify_twist_addr_pre_time(tr, step, &step_proof.mem)?;
         let wb_enabled = crate::memory_sidecar::memory::wb_wp_required_for_step_instance(step);
         let wp_enabled = crate::memory_sidecar::memory::wb_wp_required_for_step_instance(step);
-        let w2_enabled = crate::memory_sidecar::memory::w2_required_for_step_instance(step);
-        let w3_enabled = crate::memory_sidecar::memory::w3_required_for_step_instance(step);
+        let decode_stage_enabled = crate::memory_sidecar::memory::decode_stage_required_for_step_instance(step);
+        let width_stage_enabled = crate::memory_sidecar::memory::width_stage_required_for_step_instance(step);
+        let control_stage_enabled = crate::memory_sidecar::memory::control_stage_required_for_step_instance(step);
         let crate::memory_sidecar::route_a_time::RouteABatchedTimeVerifyOutput { r_time, final_values } =
             crate::memory_sidecar::route_a_time::verify_route_a_batched_time(
                 tr,
@@ -4559,8 +4522,9 @@ where
                 &step_proof.batched_time,
                 wb_enabled,
                 wp_enabled,
-                w2_enabled,
-                w3_enabled,
+                decode_stage_enabled,
+                width_stage_enabled,
+                control_stage_enabled,
                 ob_inc_total_degree_bound,
             )?;
 
@@ -5041,7 +5005,13 @@ where
                         &proof.rlc_rhos,
                         &proof.rlc_parent,
                         &proof.dec_children,
-                    )?;
+                    )
+                    .map_err(|e| {
+                        PiCcsError::ProtocolError(format!(
+                            "step {} val_fold(shared) claim {} ({ctx}) verify failed: {e:?}",
+                            idx, claim_idx
+                        ))
+                    })?;
                     val_lane_obligations.extend_from_slice(&proof.dec_children);
                 }
             } else {
@@ -5091,7 +5061,13 @@ where
                             &proof.rlc_rhos,
                             &proof.rlc_parent,
                             &proof.dec_children,
-                        )?;
+                        )
+                        .map_err(|e| {
+                            PiCcsError::ProtocolError(format!(
+                                "step {} val_fold(no-shared, mem_idx={}, with_prev) verify failed: {e:?}",
+                                idx, mem_idx
+                            ))
+                        })?;
                     } else {
                         verify_rlc_dec_lane(
                             RlcLane::Val,
@@ -5106,7 +5082,13 @@ where
                             &proof.rlc_rhos,
                             &proof.rlc_parent,
                             &proof.dec_children,
-                        )?;
+                        )
+                        .map_err(|e| {
+                            PiCcsError::ProtocolError(format!(
+                                "step {} val_fold(no-shared, mem_idx={}, cur_only) verify failed: {e:?}",
+                                idx, mem_idx
+                            ))
+                        })?;
                     }
                     val_lane_obligations.extend_from_slice(&proof.dec_children);
                 }
@@ -5159,7 +5141,13 @@ where
                     &proof.rlc_rhos,
                     &proof.rlc_parent,
                     &proof.dec_children,
-                )?;
+                )
+                .map_err(|e| {
+                    PiCcsError::ProtocolError(format!(
+                        "step {} twist_time_fold mem_idx {} verify failed: {e:?}",
+                        idx, mem_idx
+                    ))
+                })?;
                 val_lane_obligations.extend_from_slice(&proof.dec_children);
             }
         }
@@ -5292,7 +5280,10 @@ where
                     &proof.rlc_rhos,
                     &proof.rlc_parent,
                     &proof.dec_children,
-                )?;
+                )
+                .map_err(|e| {
+                    PiCcsError::ProtocolError(format!("step {} wb_fold claim {} verify failed: {e:?}", idx, claim_idx))
+                })?;
                 val_lane_obligations.extend_from_slice(&proof.dec_children);
             }
         }
@@ -5335,93 +5326,10 @@ where
                     &proof.rlc_rhos,
                     &proof.rlc_parent,
                     &proof.dec_children,
-                )?;
-                val_lane_obligations.extend_from_slice(&proof.dec_children);
-            }
-        }
-
-        if step_proof.mem.w2_decode_me_claims.is_empty() {
-            if !step_proof.w2_fold.is_empty() {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "step {}: unexpected w2_fold proof(s) (no W2 decode ME claims)",
-                    idx
-                )));
-            }
-        } else {
-            if step_proof.w2_fold.len() != step_proof.mem.w2_decode_me_claims.len() {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "step {}: w2_fold count mismatch (have {}, expected {})",
-                    idx,
-                    step_proof.w2_fold.len(),
-                    step_proof.mem.w2_decode_me_claims.len()
-                )));
-            }
-            tr.append_message(b"fold/w2_lane_start", &(step_idx as u64).to_le_bytes());
-            for (claim_idx, (me, proof)) in step_proof
-                .mem
-                .w2_decode_me_claims
-                .iter()
-                .zip(step_proof.w2_fold.iter())
-                .enumerate()
-            {
-                tr.append_message(b"fold/w2_lane_claim_idx", &(claim_idx as u64).to_le_bytes());
-                verify_rlc_dec_lane(
-                    RlcLane::Val,
-                    tr,
-                    params,
-                    &s,
-                    &ring,
-                    ell_d,
-                    mixers,
-                    step_idx,
-                    core::slice::from_ref(me),
-                    &proof.rlc_rhos,
-                    &proof.rlc_parent,
-                    &proof.dec_children,
-                )?;
-                val_lane_obligations.extend_from_slice(&proof.dec_children);
-            }
-        }
-
-        if step_proof.mem.w3_width_me_claims.is_empty() {
-            if !step_proof.w3_fold.is_empty() {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "step {}: unexpected w3_fold proof(s) (no W3 width ME claims)",
-                    idx
-                )));
-            }
-        } else {
-            if step_proof.w3_fold.len() != step_proof.mem.w3_width_me_claims.len() {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "step {}: w3_fold count mismatch (have {}, expected {})",
-                    idx,
-                    step_proof.w3_fold.len(),
-                    step_proof.mem.w3_width_me_claims.len()
-                )));
-            }
-            tr.append_message(b"fold/w3_lane_start", &(step_idx as u64).to_le_bytes());
-            for (claim_idx, (me, proof)) in step_proof
-                .mem
-                .w3_width_me_claims
-                .iter()
-                .zip(step_proof.w3_fold.iter())
-                .enumerate()
-            {
-                tr.append_message(b"fold/w3_lane_claim_idx", &(claim_idx as u64).to_le_bytes());
-                verify_rlc_dec_lane(
-                    RlcLane::Val,
-                    tr,
-                    params,
-                    &s,
-                    &ring,
-                    ell_d,
-                    mixers,
-                    step_idx,
-                    core::slice::from_ref(me),
-                    &proof.rlc_rhos,
-                    &proof.rlc_parent,
-                    &proof.dec_children,
-                )?;
+                )
+                .map_err(|e| {
+                    PiCcsError::ProtocolError(format!("step {} wp_fold claim {} verify failed: {e:?}", idx, claim_idx))
+                })?;
                 val_lane_obligations.extend_from_slice(&proof.dec_children);
             }
         }

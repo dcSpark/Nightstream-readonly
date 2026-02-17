@@ -144,7 +144,7 @@ fn build_paged_shout_only_bus_zs_packed_div(
         for j in 0..t {
             let has = lane_data.has_lookup[j];
             z[bus.bus_cell(cols.has_lookup, j)] = if has { F::ONE } else { F::ZERO };
-            z[bus.bus_cell(cols.val, j)] = if has { F::from_u64(lane_data.value[j]) } else { F::ZERO };
+            z[bus.bus_cell(cols.primary_val(), j)] = if has { F::from_u64(lane_data.value[j]) } else { F::ZERO };
 
             let mut packed = [F::ZERO; 43];
             if has {
@@ -277,7 +277,7 @@ fn build_paged_shout_only_bus_zs_packed_rem(
         for j in 0..t {
             let has = lane_data.has_lookup[j];
             z[bus.bus_cell(cols.has_lookup, j)] = if has { F::ONE } else { F::ZERO };
-            z[bus.bus_cell(cols.val, j)] = if has { F::from_u64(lane_data.value[j]) } else { F::ZERO };
+            z[bus.bus_cell(cols.primary_val(), j)] = if has { F::from_u64(lane_data.value[j]) } else { F::ZERO };
 
             let mut packed = [F::ZERO; 43];
             if has {
@@ -551,6 +551,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
     assert_eq!(shout_lanes.len(), 2);
 
     let div_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 43,
@@ -565,6 +566,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
         table: Vec::new(),
     };
     let rem_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 43,
@@ -629,6 +631,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
         div_mats.push(Z);
     }
     let div_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: div_comms,
         ..div_inst
     };
@@ -671,6 +674,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
         rem_mats.push(Z);
     }
     let rem_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: rem_comms,
         ..rem_inst
     };
@@ -680,8 +684,6 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
         mcs,
         lut_instances: vec![(div_inst, div_wit), (rem_inst, rem_wit)],
         mem_instances: Vec::new(),
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =

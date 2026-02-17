@@ -400,7 +400,7 @@ fn shout_constraints_catch_lookup_attacks() {
         z[COL_LOOKUP_OUT] = F::from_u64(123);
 
         let bus_has_lookup = bus.bus_cell(shout.has_lookup, 0);
-        let bus_val = bus.bus_cell(shout.val, 0);
+        let bus_val = bus.bus_cell(shout.primary_val(), 0);
         z[bus_has_lookup] = F::ONE;
         z[bus_val] = F::from_u64(456); // Mismatch!
 
@@ -418,7 +418,7 @@ fn shout_constraints_catch_lookup_attacks() {
         z[COL_CONST_ONE] = F::ONE;
 
         let bus_has_lookup = bus.bus_cell(shout.has_lookup, 0);
-        let bus_val = bus.bus_cell(shout.val, 0);
+        let bus_val = bus.bus_cell(shout.primary_val(), 0);
         z[bus_has_lookup] = F::ZERO;
         z[bus_val] = F::from_u64(999); // Should be 0!
 
@@ -438,7 +438,7 @@ fn shout_constraints_catch_lookup_attacks() {
         z[COL_LOOKUP_OUT] = F::from_u64(42);
 
         let bus_has_lookup = bus.bus_cell(shout.has_lookup, 0);
-        let bus_val = bus.bus_cell(shout.val, 0);
+        let bus_val = bus.bus_cell(shout.primary_val(), 0);
         z[bus_has_lookup] = F::ONE;
         z[bus_val] = F::from_u64(42); // Matches!
 
@@ -543,7 +543,7 @@ fn lookup_key_binding_catches_mismatch() {
 
     // Bus: has_lookup=1, val matches, but addr_bits encode 4 (mismatch)
     z[bus.bus_cell(shout.has_lookup, 0)] = F::ONE;
-    z[bus.bus_cell(shout.val, 0)] = F::from_u64(42);
+    z[bus.bus_cell(shout.primary_val(), 0)] = F::from_u64(42);
 
     let addr_base = bus.bus_cell(shout.addr_bits.start, 0);
     // 4 = 0b0100 (little-endian bits: [0,0,1,0])

@@ -366,6 +366,7 @@ where
 
             let lanes = lut_lanes.get(&table_id).copied().unwrap_or(1).max(1);
             let inst = LutInstance::<Cmt, Goldilocks> {
+                table_id,
                 comms: Vec::new(),
                 k,
                 d,
@@ -384,8 +385,6 @@ where
             mcs,
             lut_instances,
             mem_instances,
-            decode_instances: Vec::new(),
-            width_instances: Vec::new(),
             _phantom: PhantomData,
         });
 

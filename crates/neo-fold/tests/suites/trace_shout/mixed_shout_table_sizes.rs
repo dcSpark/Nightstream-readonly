@@ -81,6 +81,7 @@ fn make_shout_instance(
     let ell = table.n_side.trailing_zeros() as usize;
     (
         neo_memory::witness::LutInstance {
+            table_id: table.table_id,
             comms: Vec::new(),
             k: table.k,
             d: table.d,
@@ -165,8 +166,6 @@ fn create_step_with_shout_bus(
         mcs: (mcs, mcs_wit),
         lut_instances,
         mem_instances: vec![],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     }
 }

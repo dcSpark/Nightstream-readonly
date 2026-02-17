@@ -386,7 +386,7 @@ fn debug_trace_core_rows_per_cycle_equiv() {
 }
 
 #[test]
-#[ignore = "W0 snapshot: NS_DEBUG_N=256 cargo test -p neo-fold --release --test perf -- --ignored --nocapture report_track_a_w0_w1_snapshot"]
+#[ignore = "W0 snapshot: NS_DEBUG_N=10 cargo test -p neo-fold --release --test perf -- --ignored --nocapture report_track_a_w0_w1_snapshot"]
 fn report_track_a_w0_w1_snapshot() {
     let n = env_usize("NS_DEBUG_N", 256);
     assert!(n > 0);
@@ -415,38 +415,227 @@ fn report_track_a_w0_w1_snapshot() {
     let core_ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace core ccs");
     let rows_per_cycle = core_ccs.n as f64 / steps as f64;
 
-    // W0 lock values from spec section 7.
-    let baseline_trace_width = 160usize;
-    let baseline_rows = 425usize;
-    let post_w1_trace_width = 148usize;
-    let post_w1_rows = 399usize;
+    let sep = "=".repeat(80);
+    let thin_sep = "-".repeat(80);
 
-    println!(
-        "W0_W1_LOCK baseline(trace_width={},rows_per_cycle={}) post_w1(trace_width={},rows_per_cycle={})",
-        baseline_trace_width, baseline_rows, post_w1_trace_width, post_w1_rows
-    );
-    println!(
-        "TRACK_A_MEASURED n={} trace_width={} core_ccs_n={} rows_per_cycle={:.3} ccs_n={} ccs_m={} prove={} verify={} total={} openings(core_ccs={},sidecars={},claim_reduction_linkage={},pcs_open={},total={})",
-        n,
-        layout.trace.cols,
-        core_ccs.n,
-        rows_per_cycle,
-        run.ccs_num_constraints(),
-        run.ccs_num_variables(),
-        fmt_duration(prove_time),
-        fmt_duration(verify_time),
-        fmt_duration(total_time),
-        openings.core_ccs,
-        openings.sidecars,
-        openings.claim_reduction_linkage,
-        openings.pcs_open,
-        openings.total()
-    );
-    println!(
-        "TRACK_A_USED_SETS memory_ids={:?} shout_table_ids={:?}",
-        run.used_memory_ids(),
-        run.used_shout_table_ids()
-    );
+    println!("\n{sep}");
+    println!("  TRACK A CONSTRAINT ARCHITECTURE REPORT (n={steps} steps)");
+    println!("{sep}\n");
+
+    // ── 1. Main CCS Layer ──
+    println!("1. MAIN CCS LAYER (core glue constraints)");
+    println!("{thin_sep}");
+    println!("  Trace columns:           {}", layout.trace.cols);
+    println!("  Core CCS rows (n):       {}", core_ccs.n);
+    println!("  Core CCS cols (m):       {}", core_ccs.m);
+    println!("  Rows per cycle:          {:.3}", rows_per_cycle);
+    println!("  Public inputs (m_in):    {}", layout.m_in);
+    println!();
+
+    let col_names = [
+        "one", "active", "halted", "cycle", "pc_before", "pc_after", "instr_word",
+        "rs1_addr", "rs1_val", "rs2_addr", "rs2_val", "rd_addr", "rd_val",
+        "ram_addr", "ram_rv", "ram_wv",
+        "shout_has_lookup", "shout_val", "shout_lhs", "shout_rhs", "jalr_drop_bit",
+    ];
+    println!("  Trace columns ({}):", col_names.len());
+    for (i, name) in col_names.iter().enumerate() {
+        println!("    [{i:>2}] {name}");
+    }
+    println!();
+
+    // ── 2. Shared CPU Bus (Sidecar) Layer ──
+    println!("2. SHARED CPU BUS LAYER (Shout + Twist bus-tail columns)");
+    println!("{thin_sep}");
+    let total_ccs_m = run.ccs_num_variables();
+    let total_ccs_n = run.ccs_num_constraints();
+    let trace_base_m = layout.m_in + layout.trace.cols * steps;
+    let bus_tail_cols = total_ccs_m.saturating_sub(trace_base_m);
+    println!("  Total CCS m (with bus):  {total_ccs_m}");
+    println!("  Total CCS n (with bus):  {total_ccs_n}");
+    println!("  Trace base m:            {trace_base_m} (m_in={} + {}*{})", layout.m_in, layout.trace.cols, steps);
+    println!("  Bus-tail columns:        {bus_tail_cols}");
+    let bus_reserved_rows = total_ccs_n.saturating_sub(core_ccs.n);
+    println!("  Bus reserved rows:       {bus_reserved_rows} (total_n={total_ccs_n} - core_n={})", core_ccs.n);
+    println!();
+
+    let step0 = run.steps_public().into_iter().next().expect("at least one step");
+    let n_lut = step0.lut_insts.len();
+    let n_mem = step0.mem_insts.len();
+    println!("  Shout instances (LUT):   {n_lut}");
+    for inst in &step0.lut_insts {
+        let ell_addr = inst.d * inst.ell;
+        let bus_cols_per_lane = ell_addr + 2;
+        println!(
+            "    - table_id={:<10} d={} n_side={} ell={} lanes={} bus_cols={}",
+            inst.table_id, inst.d, inst.n_side, inst.ell, inst.lanes, bus_cols_per_lane * inst.lanes
+        );
+    }
+    println!("  Twist instances (MEM):   {n_mem}");
+    for inst in &step0.mem_insts {
+        let ell_addr = inst.d * inst.ell;
+        let bus_cols_per_lane = 2 * ell_addr + 5;
+        println!(
+            "    - mem_id={:<10} d={} n_side={} ell={} lanes={} bus_cols={}",
+            inst.mem_id, inst.d, inst.n_side, inst.ell, inst.lanes, bus_cols_per_lane * inst.lanes
+        );
+    }
+    println!();
+
+    // ── 3. Route-A Claims ──
+    println!("3. ROUTE-A BATCHED TIME CLAIMS");
+    println!("{thin_sep}");
+    let proof = run.proof();
+    let step_proof = &proof.steps[0];
+    let bt = &step_proof.batched_time;
+    println!("  Total batched claims:    {}", bt.claimed_sums.len());
+    println!();
+
+    // Group claims by category.
+    let mut ccs_claims = Vec::new();
+    let mut shout_claims = Vec::new();
+    let mut twist_claims = Vec::new();
+    let mut wb_wp_claims = Vec::new();
+    let mut decode_claims = Vec::new();
+    let mut width_claims = Vec::new();
+    let mut control_claims = Vec::new();
+    let mut other_claims = Vec::new();
+
+    for i in 0..bt.labels.len() {
+        let label = std::str::from_utf8(bt.labels[i]).unwrap_or("<invalid>");
+        let deg = bt.degree_bounds[i];
+        let entry = (label.to_string(), deg);
+        if label.starts_with("ccs/") {
+            ccs_claims.push(entry);
+        } else if label.starts_with("shout/") {
+            shout_claims.push(entry);
+        } else if label.starts_with("twist/") {
+            twist_claims.push(entry);
+        } else if label.starts_with("wb/") || label.starts_with("wp/") {
+            wb_wp_claims.push(entry);
+        } else if label.starts_with("decode/") {
+            decode_claims.push(entry);
+        } else if label.starts_with("width/") {
+            width_claims.push(entry);
+        } else if label.starts_with("control/") {
+            control_claims.push(entry);
+        } else {
+            other_claims.push(entry);
+        }
+    }
+
+    let print_group = |name: &str, claims: &[(String, usize)], aggregate: bool| {
+        if claims.is_empty() { return; }
+        println!("  {name} ({} claims):", claims.len());
+        if aggregate {
+            // Aggregate by label, show count and degree range.
+            let mut label_counts: Vec<(String, usize, usize, usize)> = Vec::new();
+            for (label, deg) in claims {
+                if let Some(entry) = label_counts.iter_mut().find(|(l, _, _, _)| l == label) {
+                    entry.1 += 1;
+                    entry.2 = entry.2.min(*deg);
+                    entry.3 = entry.3.max(*deg);
+                } else {
+                    label_counts.push((label.clone(), 1, *deg, *deg));
+                }
+            }
+            for (label, count, deg_min, deg_max) in &label_counts {
+                if deg_min == deg_max {
+                    println!("    - {label:<40} x{count:<4} degree_bound={deg_min}");
+                } else {
+                    println!("    - {label:<40} x{count:<4} degree_bound={deg_min}..{deg_max}");
+                }
+            }
+        } else {
+            for (label, deg) in claims {
+                println!("    - {label:<40} degree_bound={deg}");
+            }
+        }
+    };
+
+    print_group("CCS (main constraint satisfaction)", &ccs_claims, false);
+    print_group("Shout (lookup argument)", &shout_claims, true);
+    print_group("Twist (memory argument)", &twist_claims, true);
+    print_group("WB/WP (booleanity + quiescence)", &wb_wp_claims, false);
+    print_group("Decode stage (lookup-backed decode)", &decode_claims, false);
+    print_group("Width stage (lookup-backed width)", &width_claims, false);
+    print_group("Control stage (branch/jump/writeback)", &control_claims, false);
+    print_group("Other", &other_claims, false);
+    println!();
+
+    // ── 4. Opening Surface ──
+    println!("4. OPENING SURFACE");
+    println!("{thin_sep}");
+    println!("  Core CCS:                {}", openings.core_ccs);
+    println!("  Sidecars:                {}", openings.sidecars);
+    println!("  Claim reduction/linkage: {}", openings.claim_reduction_linkage);
+    println!("  PCS open:                {}", openings.pcs_open);
+    println!("  Total:                   {}", openings.total());
+    println!();
+
+    // ── 5. Fold Lanes ──
+    println!("5. FOLD LANES");
+    println!("{thin_sep}");
+    println!("  Main fold (ccs_out):     {} ME claims", step_proof.fold.ccs_out.len());
+    println!("  Main fold (dec children):{} DEC children", step_proof.fold.dec_children.len());
+    let val_count: usize = step_proof.val_fold.iter().map(|v| v.dec_children.len()).sum();
+    println!("  Val fold lanes:          {} (dec children={})", step_proof.val_fold.len(), val_count);
+    let wb_count: usize = step_proof.wb_fold.iter().map(|w| w.dec_children.len()).sum();
+    println!("  WB fold lanes:           {} (dec children={})", step_proof.wb_fold.len(), wb_count);
+    let wp_count: usize = step_proof.wp_fold.iter().map(|w| w.dec_children.len()).sum();
+    println!("  WP fold lanes:           {} (dec children={})", step_proof.wp_fold.len(), wp_count);
+    println!();
+
+    // ── 6. ME Claims (Sidecar Proofs) ──
+    println!("6. MEMORY SIDECAR ME CLAIMS");
+    println!("{thin_sep}");
+    let mem = &step_proof.mem;
+    println!("  Shout ME @ r_time:       {} claims", mem.shout_me_claims_time.len());
+    println!("  Twist ME @ r_time:       {} claims", mem.twist_me_claims_time.len());
+    println!("  Val ME @ r_val:          {} claims", mem.val_me_claims.len());
+    println!("  WB ME claims:            {} claims", mem.wb_me_claims.len());
+    println!("  WP ME claims:            {} claims", mem.wp_me_claims.len());
+    println!();
+
+    // ── 7. Used Sets ──
+    println!("7. USED SETS (dynamic instantiation)");
+    println!("{thin_sep}");
+    println!("  Memory IDs (S_memory):   {:?}", run.used_memory_ids());
+    println!("  Shout table IDs (S_lookup): {:?}", run.used_shout_table_ids());
+    println!();
+
+    // ── 8. Timing ──
+    println!("8. TIMING");
+    println!("{thin_sep}");
+    println!("  Prove:                   {}", fmt_duration(prove_time));
+    println!("  Verify:                  {}", fmt_duration(verify_time));
+    println!("  Total end-to-end:        {}", fmt_duration(total_time));
+    let phases = run.prove_phase_durations();
+    println!("  Phase: setup             {}", fmt_duration(phases.setup));
+    println!("  Phase: chunk commit      {}", fmt_duration(phases.chunk_build_commit));
+    println!("  Phase: fold+prove        {}", fmt_duration(phases.fold_and_prove));
+    println!();
+
+    // ── 9. Summary ──
+    println!("9. SUMMARY");
+    println!("{sep}");
+    println!("  {:<36} {:>10}", "Main trace columns", layout.trace.cols);
+    println!("  {:<36} {:>10}", "Bus-tail columns", bus_tail_cols);
+    println!("  {:<36} {:>10}", "Core CCS rows", core_ccs.n);
+    println!("  {:<36} {:>10}", "Bus reserved rows", bus_reserved_rows);
+    println!("  {:<36} {:>10}", "Total CCS rows (n)", total_ccs_n);
+    println!("  {:<36} {:>10}", "Total CCS cols (m)", total_ccs_m);
+    println!("  {:<36} {:>10}", "Route-A batched claims", bt.claimed_sums.len());
+    println!("  {:<36} {:>10}", "  of which: CCS", ccs_claims.len());
+    println!("  {:<36} {:>10}", "  of which: Shout", shout_claims.len());
+    println!("  {:<36} {:>10}", "  of which: Twist", twist_claims.len());
+    println!("  {:<36} {:>10}", "  of which: WB/WP", wb_wp_claims.len());
+    println!("  {:<36} {:>10}", "  of which: Decode", decode_claims.len());
+    println!("  {:<36} {:>10}", "  of which: Width", width_claims.len());
+    println!("  {:<36} {:>10}", "  of which: Control", control_claims.len());
+    println!("  {:<36} {:>10}", "Commit lanes", 1);
+    println!("  {:<36} {:>10}", "Committed sidecars", 0);
+    println!("{sep}");
 }
 
 #[test]

@@ -1209,7 +1209,7 @@ fn rv32_b1_chunk_to_witness_internal(
                         j,
                         ev.key,
                     );
-                    set_bus_cell(&mut z, layout, lane.val, j, F::from_u64(ev.value));
+                    set_bus_cell(&mut z, layout, lane.primary_val(), j, F::from_u64(ev.value));
                 }
                 z[layout.alu_out(j)] = F::from_u64(ev.value);
             }

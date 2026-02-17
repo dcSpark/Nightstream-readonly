@@ -170,11 +170,7 @@ pub fn build_rv32_trace_wiring_ccs_with_reserved_rows(
     ));
 
     for i in 0..t {
-        let active = tr(l.active, i);
         let _halted = tr(l.halted, i);
-        let rd_has_write = tr(l.rd_has_write, i);
-        let ram_has_read = tr(l.ram_has_read, i);
-        let ram_has_write = tr(l.ram_has_write, i);
         let shout_has_lookup = tr(l.shout_has_lookup, i);
 
         // Canonical AIR-style one-column.
@@ -185,154 +181,6 @@ pub fn build_rv32_trace_wiring_ccs_with_reserved_rows(
         ));
 
         // Booleanity and inactive-row quiescence are enforced by WB/WP sidecar stages.
-
-        // Field bit-packings.
-        cons.push(Constraint::terms(
-            one,
-            false,
-            vec![
-                (tr(l.funct3, i), F::ONE),
-                (tr(l.funct3_bit[0], i), -F::ONE),
-                (tr(l.funct3_bit[1], i), -F::from_u64(2)),
-                (tr(l.funct3_bit[2], i), -F::from_u64(4)),
-            ],
-        ));
-        cons.push(Constraint::terms(
-            active,
-            false,
-            vec![
-                (tr(l.rs1_addr, i), F::ONE),
-                (tr(l.rs1_bit[0], i), -F::ONE),
-                (tr(l.rs1_bit[1], i), -F::from_u64(2)),
-                (tr(l.rs1_bit[2], i), -F::from_u64(4)),
-                (tr(l.rs1_bit[3], i), -F::from_u64(8)),
-                (tr(l.rs1_bit[4], i), -F::from_u64(16)),
-            ],
-        ));
-        cons.push(Constraint::terms(
-            active,
-            false,
-            vec![
-                (tr(l.rs2_addr, i), F::ONE),
-                (tr(l.rs2_bit[0], i), -F::ONE),
-                (tr(l.rs2_bit[1], i), -F::from_u64(2)),
-                (tr(l.rs2_bit[2], i), -F::from_u64(4)),
-                (tr(l.rs2_bit[3], i), -F::from_u64(8)),
-                (tr(l.rs2_bit[4], i), -F::from_u64(16)),
-            ],
-        ));
-        cons.push(Constraint::terms(
-            rd_has_write,
-            false,
-            vec![
-                (tr(l.rd_addr, i), F::ONE),
-                (tr(l.rd_bit[0], i), -F::ONE),
-                (tr(l.rd_bit[1], i), -F::from_u64(2)),
-                (tr(l.rd_bit[2], i), -F::from_u64(4)),
-                (tr(l.rd_bit[3], i), -F::from_u64(8)),
-                (tr(l.rd_bit[4], i), -F::from_u64(16)),
-            ],
-        ));
-
-        // Compact bit-level field packing back into instr_word.
-        cons.push(Constraint::terms(
-            one,
-            false,
-            vec![
-                (tr(l.instr_word, i), F::ONE),
-                (tr(l.opcode, i), -F::ONE),
-                (tr(l.rd_bit[0], i), -F::from_u64(1u64 << 7)),
-                (tr(l.rd_bit[1], i), -F::from_u64(1u64 << 8)),
-                (tr(l.rd_bit[2], i), -F::from_u64(1u64 << 9)),
-                (tr(l.rd_bit[3], i), -F::from_u64(1u64 << 10)),
-                (tr(l.rd_bit[4], i), -F::from_u64(1u64 << 11)),
-                (tr(l.funct3, i), -F::from_u64(1u64 << 12)),
-                (tr(l.rs1_bit[0], i), -F::from_u64(1u64 << 15)),
-                (tr(l.rs1_bit[1], i), -F::from_u64(1u64 << 16)),
-                (tr(l.rs1_bit[2], i), -F::from_u64(1u64 << 17)),
-                (tr(l.rs1_bit[3], i), -F::from_u64(1u64 << 18)),
-                (tr(l.rs1_bit[4], i), -F::from_u64(1u64 << 19)),
-                (tr(l.rs2_bit[0], i), -F::from_u64(1u64 << 20)),
-                (tr(l.rs2_bit[1], i), -F::from_u64(1u64 << 21)),
-                (tr(l.rs2_bit[2], i), -F::from_u64(1u64 << 22)),
-                (tr(l.rs2_bit[3], i), -F::from_u64(1u64 << 23)),
-                (tr(l.rs2_bit[4], i), -F::from_u64(1u64 << 24)),
-                (tr(l.funct7_bit[0], i), -F::from_u64(1u64 << 25)),
-                (tr(l.funct7_bit[1], i), -F::from_u64(1u64 << 26)),
-                (tr(l.funct7_bit[2], i), -F::from_u64(1u64 << 27)),
-                (tr(l.funct7_bit[3], i), -F::from_u64(1u64 << 28)),
-                (tr(l.funct7_bit[4], i), -F::from_u64(1u64 << 29)),
-                (tr(l.funct7_bit[5], i), -F::from_u64(1u64 << 30)),
-                (tr(l.funct7_bit[6], i), -F::from_u64(1u64 << 31)),
-            ],
-        ));
-
-        cons.push(Constraint::mul(
-            tr(l.branch_invert_shout, i),
-            tr(l.shout_val, i),
-            tr(l.branch_invert_shout_prod, i),
-        ));
-        // Keep helper columns canonical in W2 mode.
-        cons.push(Constraint::terms(
-            one,
-            false,
-            vec![(tr(l.jalr_drop_bit[0], i), F::ONE)],
-        ));
-        cons.push(Constraint::terms(
-            one,
-            false,
-            vec![(tr(l.jalr_drop_bit[1], i), F::ONE)],
-        ));
-
-        // rd_is_zero prefix products.
-        //
-        // z01 = (1-b0)*(1-b1)
-        cons.push(Constraint {
-            condition_col: tr(l.rd_bit[0], i),
-            negate_condition: true,
-            additional_condition_cols: Vec::new(),
-            b_terms: vec![(one, F::ONE), (tr(l.rd_bit[1], i), -F::ONE)],
-            c_terms: vec![(tr(l.rd_is_zero_01, i), F::ONE)],
-        });
-        // z012 = z01*(1-b2)
-        cons.push(Constraint {
-            condition_col: tr(l.rd_is_zero_01, i),
-            negate_condition: false,
-            additional_condition_cols: Vec::new(),
-            b_terms: vec![(one, F::ONE), (tr(l.rd_bit[2], i), -F::ONE)],
-            c_terms: vec![(tr(l.rd_is_zero_012, i), F::ONE)],
-        });
-        // z0123 = z012*(1-b3)
-        cons.push(Constraint {
-            condition_col: tr(l.rd_is_zero_012, i),
-            negate_condition: false,
-            additional_condition_cols: Vec::new(),
-            b_terms: vec![(one, F::ONE), (tr(l.rd_bit[3], i), -F::ONE)],
-            c_terms: vec![(tr(l.rd_is_zero_0123, i), F::ONE)],
-        });
-        // z = z0123*(1-b4)
-        cons.push(Constraint {
-            condition_col: tr(l.rd_is_zero_0123, i),
-            negate_condition: false,
-            additional_condition_cols: Vec::new(),
-            b_terms: vec![(one, F::ONE), (tr(l.rd_bit[4], i), -F::ONE)],
-            c_terms: vec![(tr(l.rd_is_zero, i), F::ONE)],
-        });
-
-        // Sound x0 invariant: rd_has_write * rd_is_zero = 0.
-        cons.push(Constraint::terms(
-            rd_has_write,
-            false,
-            vec![(tr(l.rd_is_zero, i), F::ONE)],
-        ));
-
-        // If rd_has_write==0, rd_addr and rd_val must be 0.
-        cons.push(Constraint::terms(rd_has_write, true, vec![(tr(l.rd_addr, i), F::ONE)]));
-        cons.push(Constraint::terms(rd_has_write, true, vec![(tr(l.rd_val, i), F::ONE)]));
-
-        // RAM bus padding: (1 - flag) * value == 0.
-        cons.push(Constraint::terms(ram_has_read, true, vec![(tr(l.ram_rv, i), F::ONE)]));
-        cons.push(Constraint::terms(ram_has_write, true, vec![(tr(l.ram_wv, i), F::ONE)]));
 
         // Shout padding: (1 - has_lookup) * val == 0.
         cons.push(Constraint::terms(
@@ -349,18 +197,6 @@ pub fn build_rv32_trace_wiring_ccs_with_reserved_rows(
             shout_has_lookup,
             true,
             vec![(tr(l.shout_rhs, i), F::ONE)],
-        ));
-
-        // Active → PROG binding.
-        cons.push(Constraint::terms(
-            active,
-            false,
-            vec![(tr(l.prog_addr, i), F::ONE), (tr(l.pc_before, i), -F::ONE)],
-        ));
-        cons.push(Constraint::terms(
-            active,
-            false,
-            vec![(tr(l.prog_value, i), F::ONE), (tr(l.instr_word, i), -F::ONE)],
         ));
     }
 

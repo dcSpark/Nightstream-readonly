@@ -48,6 +48,7 @@ fn build_single_lane_explicit_lut_witness(
     }
 
     let inst = LutInstance::<(), F> {
+        table_id: 0,
         comms: Vec::new(),
         k: n_side,
         d: 1,

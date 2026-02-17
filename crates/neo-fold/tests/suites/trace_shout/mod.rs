@@ -1,4 +1,4 @@
-pub(crate) use crate::common_setup::{default_mixers, setup_ajtai_committer};
+pub(crate) use crate::common_setup::{default_mixers, setup_ajtai_committer, widen_ccs_cols_for_test};
 
 mod e2e_ops;
 mod implicit_shout_table_spec_tests;

@@ -2,7 +2,7 @@ mod helpers;
 
 mod riscv_bus_binding_redteam;
 mod riscv_decode_malicious_witness_redteam;
-mod riscv_decode_sidecar_linkage;
+mod riscv_decode_plumbing_linkage;
 mod riscv_main_proof_redteam;
 mod riscv_semantics_malicious_witness_redteam;
 mod riscv_semantics_sidecar_linkage;

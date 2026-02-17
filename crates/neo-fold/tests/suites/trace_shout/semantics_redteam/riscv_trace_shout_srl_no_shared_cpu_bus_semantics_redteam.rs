@@ -23,7 +23,7 @@ use neo_transcript::Transcript;
 use neo_vm_trace::trace_program;
 use p3_field::PrimeCharacteristicRing;
 
-use crate::suite::{default_mixers, setup_ajtai_committer};
+use crate::suite::{default_mixers, setup_ajtai_committer, widen_ccs_cols_for_test};
 
 fn build_shout_only_bus_z(
     m: usize,
@@ -78,7 +78,7 @@ fn build_shout_only_bus_z(
             z[bus.bus_cell(cols.has_lookup, j)] = if has_lookup { F::ONE } else { F::ZERO };
 
             if has_lookup {
-                z[bus.bus_cell(cols.val, j)] = F::from_u64(lane.value[j]);
+                z[bus.bus_cell(cols.primary_val(), j)] = F::from_u64(lane.value[j]);
             }
 
             if has_lookup {
@@ -147,7 +147,13 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_srl_semantics_redteam() {
 
     let layout = Rv32TraceCcsLayout::new(exec.rows.len()).expect("trace CCS layout");
     let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
-    let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
+    let mut ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
+    let min_m = layout
+        .m_in
+        .checked_add((/*bus_cols=*/ 38usize + 2usize).checked_mul(exec.rows.len()).expect("bus cols * steps"))
+        .expect("m_in + bus region");
+    widen_ccs_cols_for_test(&mut ccs, min_m);
+    w.resize(ccs.m - layout.m_in, F::ZERO);
 
     // Shout lane data for SRL (used to coordinate a linkage-preserving tamper).
     let t = exec.rows.len();
@@ -196,6 +202,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_srl_semantics_redteam() {
 
     // Shout instance: SRL table, 1 lane (tamper remainder-bound while preserving value equation + linkage).
     let srl_lut_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 38,
@@ -240,12 +247,13 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_srl_semantics_redteam() {
     srl_z[cell] = F::ONE;
 
     // Adjust Shout val to preserve the value equation and trace↔Shout linkage.
-    let val_cell = bus.bus_cell(cols.val, j);
+    let val_cell = bus.bus_cell(cols.primary_val(), j);
     srl_z[val_cell] = F::from_u64(new_val);
 
     let srl_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(&params, &srl_z);
     let srl_c = l.commit(&srl_Z);
     let srl_lut_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: vec![srl_c],
         ..srl_lut_inst
     };
@@ -255,8 +263,6 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_srl_semantics_redteam() {
         mcs,
         lut_instances: vec![(srl_lut_inst, srl_lut_wit)],
         mem_instances: Vec::new(),
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =

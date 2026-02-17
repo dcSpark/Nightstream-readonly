@@ -1735,12 +1735,8 @@ where
         let has_wb_or_wp = run.steps.iter().any(|step| {
             !step.mem.wb_me_claims.is_empty()
                 || !step.mem.wp_me_claims.is_empty()
-                || !step.mem.w2_decode_me_claims.is_empty()
-                || !step.mem.w3_width_me_claims.is_empty()
                 || !step.wb_fold.is_empty()
                 || !step.wp_fold.is_empty()
-                || !step.w2_fold.is_empty()
-                || !step.w3_fold.is_empty()
         });
         if !(has_twist_or_shout || has_wb_or_wp) && !outputs.obligations.val.is_empty() {
             return Err(PiCcsError::ProtocolError(
@@ -1911,12 +1907,8 @@ where
         let has_wb_or_wp = run.steps.iter().any(|step| {
             !step.mem.wb_me_claims.is_empty()
                 || !step.mem.wp_me_claims.is_empty()
-                || !step.mem.w2_decode_me_claims.is_empty()
-                || !step.mem.w3_width_me_claims.is_empty()
                 || !step.wb_fold.is_empty()
                 || !step.wp_fold.is_empty()
-                || !step.w2_fold.is_empty()
-                || !step.w3_fold.is_empty()
         });
         if !(has_twist_or_shout || has_wb_or_wp) && !outputs.obligations.val.is_empty() {
             return Err(PiCcsError::ProtocolError(

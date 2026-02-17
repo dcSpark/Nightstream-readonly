@@ -2,7 +2,7 @@ use neo_ajtai::Commitment as Cmt;
 use neo_fold::riscv_shard::{Rv32B1, Rv32B1Run};
 use neo_fold::{pi_ccs_prove_simple, pi_ccs_verify};
 use neo_memory::ajtai::encode_vector_balanced_to_mat;
-use neo_memory::riscv::ccs::build_rv32_b1_decode_sidecar_ccs;
+use neo_memory::riscv::ccs::build_rv32_b1_decode_plumbing_sidecar_ccs;
 use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvOpcode};
 use neo_transcript::Poseidon2Transcript;
 use neo_transcript::Transcript;
@@ -70,17 +70,17 @@ fn tamper_step0_witness(
 }
 
 #[test]
-fn rv32_b1_decode_sidecar_tampered_instr_word_must_not_verify() {
+fn rv32_b1_decode_plumbing_tampered_instr_word_must_not_verify() {
     let run = prove_run_addi_halt(/*imm=*/ 1);
-    let decode_ccs = build_rv32_b1_decode_sidecar_ccs(run.layout(), run.mem_layouts()).expect("decode sidecar ccs");
+    let decode_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(run.layout()).expect("decode plumbing sidecar ccs");
 
     let (mcs_insts, mut mcs_wits) = collect_mcs(&run);
     let idx = run.layout().instr_word(0);
     tamper_step0_witness(&run, decode_ccs.m, &mcs_insts, &mut mcs_wits, idx);
 
     let num_steps = mcs_insts.len();
-    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_sidecar_batch");
-    tr.append_message(b"decode_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
+    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_plumbing_sidecar_batch");
+    tr.append_message(b"decode_plumbing_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
 
     // Prover may reject (commitment mismatch) or produce a proof that fails verification.
     let Ok((me_out, proof)) = pi_ccs_prove_simple(
@@ -94,28 +94,29 @@ fn rv32_b1_decode_sidecar_tampered_instr_word_must_not_verify() {
         return;
     };
 
-    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_sidecar_batch");
-    tr.append_message(b"decode_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
+    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_plumbing_sidecar_batch");
+    tr.append_message(b"decode_plumbing_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
     let Ok(ok) = pi_ccs_verify(&mut tr, run.params(), &decode_ccs, &mcs_insts, &[], &me_out, &proof) else {
         return;
     };
     assert!(
         !ok,
-        "decode sidecar verification unexpectedly succeeded with a tampered witness"
+        "decode plumbing sidecar verification unexpectedly succeeded with a tampered witness"
     );
 }
 
 #[test]
-fn rv32_b1_decode_sidecar_splicing_across_runs_must_fail() {
+fn rv32_b1_decode_plumbing_splicing_across_runs_must_fail() {
     let run_a = prove_run_addi_halt(/*imm=*/ 1);
     let run_b = prove_run_addi_halt(/*imm=*/ 2);
 
-    let decode_ccs = build_rv32_b1_decode_sidecar_ccs(run_a.layout(), run_a.mem_layouts()).expect("decode sidecar ccs");
+    let decode_ccs =
+        build_rv32_b1_decode_plumbing_sidecar_ccs(run_a.layout()).expect("decode plumbing sidecar ccs");
 
     let (mcs_insts_a, mcs_wits_a) = collect_mcs(&run_a);
     let num_steps = mcs_insts_a.len();
-    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_sidecar_batch");
-    tr.append_message(b"decode_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
+    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_plumbing_sidecar_batch");
+    tr.append_message(b"decode_plumbing_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
     let (me_out_a, proof_a) = pi_ccs_prove_simple(
         &mut tr,
         run_a.params(),
@@ -124,11 +125,11 @@ fn rv32_b1_decode_sidecar_splicing_across_runs_must_fail() {
         &mcs_wits_a,
         run_a.committer(),
     )
-    .expect("prove decode sidecar");
+    .expect("prove decode plumbing sidecar");
 
-    // Sanity: decode sidecar should verify for the matching run.
-    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_sidecar_batch");
-    tr.append_message(b"decode_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
+    // Sanity: decode plumbing sidecar should verify for the matching run.
+    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_plumbing_sidecar_batch");
+    tr.append_message(b"decode_plumbing_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
     let ok = pi_ccs_verify(
         &mut tr,
         run_a.params(),
@@ -138,22 +139,22 @@ fn rv32_b1_decode_sidecar_splicing_across_runs_must_fail() {
         &me_out_a,
         &proof_a,
     )
-    .expect("decode sidecar verify (baseline)");
-    assert!(ok, "baseline decode sidecar proof should verify");
+    .expect("decode plumbing sidecar verify (baseline)");
+    assert!(ok, "baseline decode plumbing sidecar proof should verify");
 
     let assert_verify_fails =
         |domain_sep: &'static [u8], num_steps_msg: u64, insts: &[neo_ccs::McsInstance<Cmt, F>], label: &str| {
             let mut tr = Poseidon2Transcript::new(domain_sep);
-            tr.append_message(b"decode_sidecar/num_steps", &num_steps_msg.to_le_bytes());
+            tr.append_message(b"decode_plumbing_sidecar/num_steps", &num_steps_msg.to_le_bytes());
             match pi_ccs_verify(&mut tr, run_a.params(), &decode_ccs, insts, &[], &me_out_a, &proof_a) {
-                Ok(true) => panic!("{label}: decode sidecar verification unexpectedly succeeded"),
+                Ok(true) => panic!("{label}: decode plumbing sidecar verification unexpectedly succeeded"),
                 Ok(false) | Err(_) => {}
             }
         };
 
     // Wrong transcript domain separator must fail (or error).
     assert_verify_fails(
-        b"neo.fold/rv32_b1/decode_sidecar_batch/wrong_domain",
+        b"neo.fold/rv32_b1/decode_plumbing_sidecar_batch/wrong_domain",
         num_steps as u64,
         &mcs_insts_a,
         "wrong transcript domain",
@@ -161,7 +162,7 @@ fn rv32_b1_decode_sidecar_splicing_across_runs_must_fail() {
 
     // Wrong num_steps binding must fail (or error).
     assert_verify_fails(
-        b"neo.fold/rv32_b1/decode_sidecar_batch",
+        b"neo.fold/rv32_b1/decode_plumbing_sidecar_batch",
         num_steps.saturating_add(1) as u64,
         &mcs_insts_a,
         "wrong num_steps message",
@@ -172,7 +173,7 @@ fn rv32_b1_decode_sidecar_splicing_across_runs_must_fail() {
     let mut mcs_insts_swapped = mcs_insts_a.clone();
     mcs_insts_swapped.swap(0, 1);
     assert_verify_fails(
-        b"neo.fold/rv32_b1/decode_sidecar_batch",
+        b"neo.fold/rv32_b1/decode_plumbing_sidecar_batch",
         num_steps as u64,
         &mcs_insts_swapped,
         "swapped step order",
@@ -182,7 +183,7 @@ fn rv32_b1_decode_sidecar_splicing_across_runs_must_fail() {
     let (mcs_insts_b, _mcs_wits_b) = collect_mcs(&run_b);
     assert_eq!(mcs_insts_b.len(), num_steps, "expected same step count");
     assert_verify_fails(
-        b"neo.fold/rv32_b1/decode_sidecar_batch",
+        b"neo.fold/rv32_b1/decode_plumbing_sidecar_batch",
         num_steps as u64,
         &mcs_insts_b,
         "spliced commitments",

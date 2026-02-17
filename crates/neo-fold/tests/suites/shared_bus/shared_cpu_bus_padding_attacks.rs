@@ -72,6 +72,7 @@ fn metadata_only_lut_instance(table: &LutTable<F>, steps: usize) -> (LutInstance
     let ell = table.n_side.trailing_zeros() as usize;
     (
         LutInstance {
+            table_id: table.table_id,
             comms: Vec::new(),
             k: table.k,
             d: table.d,
@@ -225,8 +226,6 @@ fn has_write_flag_mismatch_wv_nonzero_should_be_rejected() {
         mcs,
         lut_instances: vec![],
         mem_instances: vec![(mem_inst, mem_wit)],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, K>> =
@@ -348,8 +347,6 @@ fn has_write_flag_mismatch_inc_nonzero_should_be_rejected() {
         mcs,
         lut_instances: vec![],
         mem_instances: vec![(mem_inst, mem_wit)],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, K>> =
@@ -471,8 +468,6 @@ fn has_read_flag_mismatch_ra_bits_nonzero_should_be_rejected() {
         mcs,
         lut_instances: vec![],
         mem_instances: vec![(mem_inst, mem_wit)],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, K>> =
@@ -594,8 +589,6 @@ fn has_write_flag_mismatch_wa_bits_nonzero_should_be_rejected() {
         mcs,
         lut_instances: vec![],
         mem_instances: vec![(mem_inst, mem_wit)],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, K>> =
@@ -741,8 +734,6 @@ fn has_lookup_flag_mismatch_val_nonzero_should_be_rejected() {
         mcs,
         lut_instances: vec![(lut_inst, lut_wit)],
         mem_instances: vec![(mem_inst, mem_wit)],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, K>> =
@@ -884,8 +875,6 @@ fn has_lookup_flag_mismatch_addr_bits_nonzero_should_be_rejected() {
         mcs,
         lut_instances: vec![(lut_inst, lut_wit)],
         mem_instances: vec![(mem_inst, mem_wit)],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, K>> =

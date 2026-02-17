@@ -23,7 +23,7 @@ use neo_transcript::Transcript;
 use neo_vm_trace::trace_program;
 use p3_field::PrimeCharacteristicRing;
 
-use crate::suite::{default_mixers, setup_ajtai_committer};
+use crate::suite::{default_mixers, setup_ajtai_committer, widen_ccs_cols_for_test};
 
 fn build_shout_only_bus_z(
     m: usize,
@@ -78,7 +78,7 @@ fn build_shout_only_bus_z(
             z[bus.bus_cell(cols.has_lookup, j)] = if has_lookup { F::ONE } else { F::ZERO };
 
             if has_lookup {
-                z[bus.bus_cell(cols.val, j)] = F::from_u64(lane.value[j]);
+                z[bus.bus_cell(cols.primary_val(), j)] = F::from_u64(lane.value[j]);
             }
 
             if has_lookup {
@@ -148,8 +148,14 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_sltu_prove_verify() {
         .expect("inactive rows");
 
     let layout = Rv32TraceCcsLayout::new(exec.rows.len()).expect("trace CCS layout");
-    let (x, w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
-    let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
+    let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
+    let mut ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
+    let min_m = layout
+        .m_in
+        .checked_add((/*bus_cols=*/ 35usize + 2usize).checked_mul(exec.rows.len()).expect("bus cols * steps"))
+        .expect("m_in + bus region");
+    widen_ccs_cols_for_test(&mut ccs, min_m);
+    w.resize(ccs.m - layout.m_in, F::ZERO);
 
     // Params + committer.
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n.max(ccs.m)).expect("params");
@@ -176,6 +182,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_sltu_prove_verify() {
     let shout_lanes = extract_shout_lanes_over_time(&exec, &shout_table_ids).expect("extract shout lanes");
 
     let sltu_lut_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 35,
@@ -202,6 +209,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_sltu_prove_verify() {
     let sltu_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(&params, &sltu_z);
     let sltu_c = l.commit(&sltu_Z);
     let sltu_lut_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: vec![sltu_c],
         ..sltu_lut_inst
     };
@@ -211,8 +219,6 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_sltu_prove_verify() {
         mcs,
         lut_instances: vec![(sltu_lut_inst, sltu_lut_wit)],
         mem_instances: Vec::new(),
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =

@@ -112,7 +112,7 @@ fn build_paged_shout_only_bus_zs(
             for j in 0..t {
                 let has = lane.has_lookup[j];
                 z[bus.bus_cell(cols.has_lookup, j)] = if has { F::ONE } else { F::ZERO };
-                z[bus.bus_cell(cols.val, j)] = if has { F::from_u64(lane.value[j]) } else { F::ZERO };
+                z[bus.bus_cell(cols.primary_val(), j)] = if has { F::from_u64(lane.value[j]) } else { F::ZERO };
 
                 for (local_idx, col_id) in cols.addr_bits.clone().enumerate() {
                     let bit_idx = bit_base
@@ -227,6 +227,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_xor_paged_prove_verify() {
     }
 
     let xor_lut_inst = LutInstance::<Cmt, F> {
+        table_id: shout_table_ids[0],
         comms,
         k: 0,
         d: ell_addr,
@@ -246,8 +247,6 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_xor_paged_prove_verify() {
         mcs,
         lut_instances: vec![(xor_lut_inst, xor_lut_wit)],
         mem_instances: Vec::new(),
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =

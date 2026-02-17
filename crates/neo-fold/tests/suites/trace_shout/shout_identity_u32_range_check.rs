@@ -96,6 +96,7 @@ fn route_a_shout_identity_u32_range_check_two_lanes_same_value_verifies() {
     let x: u64 = 0x1234_5678;
 
     let inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 32,
@@ -123,8 +124,6 @@ fn route_a_shout_identity_u32_range_check_two_lanes_same_value_verifies() {
         mcs: (mcs, mcs_wit),
         lut_instances: vec![(inst, wit)],
         mem_instances: vec![],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     };
 
@@ -145,6 +144,7 @@ fn route_a_shout_identity_u32_range_check_rejects_wrong_val() {
     let bad: u64 = x.wrapping_add(5);
 
     let inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 32,
@@ -169,8 +169,6 @@ fn route_a_shout_identity_u32_range_check_rejects_wrong_val() {
         mcs: (mcs, mcs_wit),
         lut_instances: vec![(inst, wit)],
         mem_instances: vec![],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     };
 

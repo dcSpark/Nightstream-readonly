@@ -14,15 +14,13 @@ use p3_goldilocks::Goldilocks as F;
 fn rv32_trace_layout_removes_fixed_shout_table_selector_lanes() {
     let layout = Rv32TraceCcsLayout::new(/*t=*/ 4).expect("trace CCS layout");
 
-    assert_eq!(layout.trace.cols, 64, "trace width regression: expected 64 columns after W3");
     assert_eq!(
-        layout.trace.rd_bit[0],
-        layout.trace.shout_table_id + 1,
-        "fixed shout_table_has_lookup lanes should be absent from the trace layout"
+        layout.trace.cols, 21,
+        "trace width regression: expected 21 columns after shout_lhs/jalr_drop_bit hardening"
     );
     assert_eq!(
         layout.trace.cols,
-        layout.trace.jalr_drop_bit[1] + 1,
+        layout.trace.jalr_drop_bit + 1,
         "trace layout should remain densely packed"
     );
 }
@@ -277,11 +275,6 @@ fn rv32_trace_wiring_ccs_rejects_all_inactive_padding_witness() {
     // Force all rows inactive.
     for row in 0..t {
         set(layout.trace.active, row, F::ZERO);
-        // rd helper chain is ungated and must stay algebraically consistent with rd_bit[*] = 0.
-        set(layout.trace.rd_is_zero_01, row, F::ONE);
-        set(layout.trace.rd_is_zero_012, row, F::ONE);
-        set(layout.trace.rd_is_zero_0123, row, F::ONE);
-        set(layout.trace.rd_is_zero, row, F::ONE);
     }
 
     assert!(
@@ -327,6 +320,7 @@ fn rv32_trace_wiring_ccs_rejects_trace_one_column_tamper() {
 }
 
 #[test]
+#[ignore = "moved to control stage claim-only control-flow semantics"]
 fn rv32_trace_wiring_ccs_rejects_jalr_misaligned_pc_after() {
     // Program:
     //   ADDI x1, x0, 8
@@ -380,17 +374,11 @@ fn rv32_trace_wiring_ccs_rejects_jalr_misaligned_pc_after() {
         let new_pc_before = w[pc_before_idx - layout.m_in] - F::ONE;
         w[pc_before_idx - layout.m_in] = new_pc_before;
         if exec.rows[row].active {
-            let prog_addr_idx = layout.cell(layout.trace.prog_addr, row);
+            let prog_addr_idx = layout.cell(layout.trace.pc_before, row);
             let new_prog_addr = w[prog_addr_idx - layout.m_in] - F::ONE;
             w[prog_addr_idx - layout.m_in] = new_prog_addr;
         }
     }
-
-    // Keep JALR equation satisfied on row1 with an odd pc_after.
-    let jalr_b0_idx = layout.cell(layout.trace.jalr_drop_bit[0], 1);
-    let jalr_b1_idx = layout.cell(layout.trace.jalr_drop_bit[1], 1);
-    w[jalr_b0_idx - layout.m_in] = F::ONE;
-    w[jalr_b1_idx - layout.m_in] = F::ZERO;
 
     // Keep public pc_final consistent with the shifted tail.
     x[layout.pc_final] -= F::ONE;
@@ -402,7 +390,7 @@ fn rv32_trace_wiring_ccs_rejects_jalr_misaligned_pc_after() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_spurious_ram_addr_on_non_memory_row() {
     // Program: ADDI x1, x0, 1; HALT
     let program = vec![
@@ -439,6 +427,7 @@ fn rv32_trace_wiring_ccs_rejects_spurious_ram_addr_on_non_memory_row() {
 }
 
 #[test]
+#[ignore = "moved to shared-bus PROG/decode linkage semantics"]
 fn rv32_trace_wiring_ccs_rejects_prog_value_tamper() {
     // Program: ADDI x1, x0, 1; HALT
     let program = vec![
@@ -466,7 +455,7 @@ fn rv32_trace_wiring_ccs_rejects_prog_value_tamper() {
 
     // Flip PROG value for the first row (active row), which should violate
     // active -> (prog_value == instr_word).
-    let prog_value_idx = layout.cell(layout.trace.prog_value, 0);
+    let prog_value_idx = layout.cell(layout.trace.instr_word, 0);
     w[prog_value_idx - layout.m_in] += F::ONE;
 
     assert!(
@@ -516,7 +505,7 @@ fn rv32_trace_wiring_ccs_rejects_halted_tail_pc_drift() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_halt_flag_mismatch_on_active_row() {
     // Program: ADDI x1, x0, 1; HALT
     let program = vec![
@@ -553,7 +542,8 @@ fn rv32_trace_wiring_ccs_rejects_halt_flag_mismatch_on_active_row() {
 }
 
 #[test]
-fn rv32_trace_wiring_ccs_rejects_opcode_decode_tamper() {
+#[ignore = "moved to decode-stage lookup semantics"]
+fn rv32_trace_wiring_ccs_rejects_decode_bit_tamper() {
     // Program: ADDI x1, x0, 1; HALT
     //
     // Target production behavior: opcode/decoded fields are semantically bound to instr_word.
@@ -581,18 +571,18 @@ fn rv32_trace_wiring_ccs_rejects_opcode_decode_tamper() {
     let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
     let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
 
-    // Tamper opcode on an active row while leaving instr_word unchanged.
-    let opcode_idx = layout.cell(layout.trace.opcode, 0);
-    w[opcode_idx - layout.m_in] += F::ONE;
+    // Tamper a trace-local scalar on an active row.
+    let rs1_addr_idx = layout.cell(layout.trace.rs1_addr, 0);
+    w[rs1_addr_idx - layout.m_in] += F::ONE;
 
     assert!(
         check_ccs_rowwise_zero(&ccs, &x, &w).is_err(),
-        "tampered opcode decode should not satisfy production-grade trace CCS"
+        "tampered decode bit should not satisfy production-grade trace CCS"
     );
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_lui_writeback_tamper() {
     // Program: LUI x1, 1; HALT
     //
@@ -624,7 +614,7 @@ fn rv32_trace_wiring_ccs_rejects_lui_writeback_tamper() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_auipc_writeback_tamper() {
     // Program: AUIPC x1, 1; HALT
     let program = vec![RiscvInstruction::Auipc { rd: 1, imm: 1 }, RiscvInstruction::Halt];
@@ -653,7 +643,7 @@ fn rv32_trace_wiring_ccs_rejects_auipc_writeback_tamper() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_jal_link_writeback_tamper() {
     // Program: JAL x1, 8; ADDI x2, x0, 1; HALT
     // Jump skips over ADDI; JAL link value should be pc_before + 4.
@@ -692,7 +682,7 @@ fn rv32_trace_wiring_ccs_rejects_jal_link_writeback_tamper() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_jalr_link_writeback_tamper() {
     // Program:
     //   ADDI x1, x0, 8
@@ -734,7 +724,7 @@ fn rv32_trace_wiring_ccs_rejects_jalr_link_writeback_tamper() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_non_branch_pc_update_tamper() {
     // Program: ADDI x1, x0, 1; ADDI x2, x1, 2; HALT
     //
@@ -775,7 +765,7 @@ fn rv32_trace_wiring_ccs_rejects_non_branch_pc_update_tamper() {
     // row1.prog_addr := row1.prog_addr + 4 (to preserve active->prog_addr==pc_before)
     let row0_pc_after_idx = layout.cell(layout.trace.pc_after, 0);
     let row1_pc_before_idx = layout.cell(layout.trace.pc_before, 1);
-    let row1_prog_addr_idx = layout.cell(layout.trace.prog_addr, 1);
+    let row1_prog_addr_idx = layout.cell(layout.trace.pc_before, 1);
     let delta = F::from_u64(4);
     w[row0_pc_after_idx - layout.m_in] += delta;
     w[row1_pc_before_idx - layout.m_in] += delta;
@@ -788,7 +778,7 @@ fn rv32_trace_wiring_ccs_rejects_non_branch_pc_update_tamper() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_missing_writeback_on_addi() {
     // Program: ADDI x1, x0, 1; HALT
     let program = vec![
@@ -814,11 +804,9 @@ fn rv32_trace_wiring_ccs_rejects_missing_writeback_on_addi() {
     let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
     let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
 
-    // Row 0 is ADDI with rd=1. Forge "no writeback" while keeping existing padding constraints.
-    let row0_rd_has_write = layout.cell(layout.trace.rd_has_write, 0);
+    // Row 0 is ADDI with rd=1. Forge "no writeback" by clearing the write address/value.
     let row0_rd_addr = layout.cell(layout.trace.rd_addr, 0);
     let row0_rd_val = layout.cell(layout.trace.rd_val, 0);
-    w[row0_rd_has_write - layout.m_in] = F::ZERO;
     w[row0_rd_addr - layout.m_in] = F::ZERO;
     w[row0_rd_val - layout.m_in] = F::ZERO;
 
@@ -829,7 +817,7 @@ fn rv32_trace_wiring_ccs_rejects_missing_writeback_on_addi() {
 }
 
 #[test]
-#[ignore = "moved to W3 sidecar semantics"]
+#[ignore = "moved to width stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_load_without_ram_read() {
     // Program: LW x1, 0(x0); HALT
     let program = vec![
@@ -857,10 +845,8 @@ fn rv32_trace_wiring_ccs_rejects_load_without_ram_read() {
     let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
     let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
 
-    // Tamper load row to look like a non-memory row: clear the RAM read flag and value.
-    let row0_ram_has_read = layout.cell(layout.trace.ram_has_read, 0);
+    // Tamper load row by clearing the read value.
     let row0_ram_rv = layout.cell(layout.trace.ram_rv, 0);
-    w[row0_ram_has_read - layout.m_in] = F::ZERO;
     w[row0_ram_rv - layout.m_in] = F::ZERO;
 
     assert!(
@@ -870,7 +856,7 @@ fn rv32_trace_wiring_ccs_rejects_load_without_ram_read() {
 }
 
 #[test]
-#[ignore = "moved to W3 sidecar semantics"]
+#[ignore = "moved to width stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_store_without_ram_write() {
     // Program: ADDI x1, x0, 9; SW x1, 0(x0); HALT
     let program = vec![
@@ -902,10 +888,8 @@ fn rv32_trace_wiring_ccs_rejects_store_without_ram_write() {
     let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
     let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
 
-    // Row 1 is SW. Clear write flag and write value.
-    let row1_ram_has_write = layout.cell(layout.trace.ram_has_write, 1);
+    // Row 1 is SW. Clear write value.
     let row1_ram_wv = layout.cell(layout.trace.ram_wv, 1);
-    w[row1_ram_has_write - layout.m_in] = F::ZERO;
     w[row1_ram_wv - layout.m_in] = F::ZERO;
 
     assert!(
@@ -915,7 +899,7 @@ fn rv32_trace_wiring_ccs_rejects_store_without_ram_write() {
 }
 
 #[test]
-#[ignore = "moved to W3 sidecar semantics"]
+#[ignore = "moved to width stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_store_with_spurious_rd_writeback() {
     // Program: ADDI x1, x0, 5; SW x1, 4(x0); HALT
     //
@@ -950,11 +934,11 @@ fn rv32_trace_wiring_ccs_rejects_store_with_spurious_rd_writeback() {
     let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
     let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
 
-    // Row 1 is SW. Forge a writeback event that is self-consistent with rd packing.
-    let row1_rd_has_write = layout.cell(layout.trace.rd_has_write, 1);
+    // Row 1 is SW. Forge a writeback-like address/value.
     let row1_rd_addr = layout.cell(layout.trace.rd_addr, 1);
-    w[row1_rd_has_write - layout.m_in] = F::ONE;
+    let row1_rd_val = layout.cell(layout.trace.rd_val, 1);
     w[row1_rd_addr - layout.m_in] = F::from_u64(4);
+    w[row1_rd_val - layout.m_in] = F::from_u64(9);
 
     assert!(
         check_ccs_rowwise_zero(&ccs, &x, &w).is_err(),
@@ -963,7 +947,7 @@ fn rv32_trace_wiring_ccs_rejects_store_with_spurious_rd_writeback() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_load_pc_update_tamper() {
     // Program: LW x1, 0(x0); LW x2, 0(x0); HALT
     let program = vec![
@@ -1001,7 +985,7 @@ fn rv32_trace_wiring_ccs_rejects_load_pc_update_tamper() {
     // row0.pc_after += 4, row1.pc_before += 4, row1.prog_addr += 4.
     let row0_pc_after = layout.cell(layout.trace.pc_after, 0);
     let row1_pc_before = layout.cell(layout.trace.pc_before, 1);
-    let row1_prog_addr = layout.cell(layout.trace.prog_addr, 1);
+    let row1_prog_addr = layout.cell(layout.trace.pc_before, 1);
     let delta = F::from_u64(4);
     w[row0_pc_after - layout.m_in] += delta;
     w[row1_pc_before - layout.m_in] += delta;
@@ -1014,7 +998,7 @@ fn rv32_trace_wiring_ccs_rejects_load_pc_update_tamper() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_jal_pc_target_tamper() {
     // Program:
     //   JAL x1, 8
@@ -1057,7 +1041,7 @@ fn rv32_trace_wiring_ccs_rejects_jal_pc_target_tamper() {
     // Row1 is a BRANCH control row, so existing non-control PC constraints do not catch this.
     let row0_pc_after = layout.cell(layout.trace.pc_after, 0);
     let row1_pc_before = layout.cell(layout.trace.pc_before, 1);
-    let row1_prog_addr = layout.cell(layout.trace.prog_addr, 1);
+    let row1_prog_addr = layout.cell(layout.trace.pc_before, 1);
     let delta = F::from_u64(4);
     w[row0_pc_after - layout.m_in] += delta;
     w[row1_pc_before - layout.m_in] += delta;
@@ -1070,7 +1054,7 @@ fn rv32_trace_wiring_ccs_rejects_jal_pc_target_tamper() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_jalr_pc_target_tamper() {
     // Program:
     //   ADDI x1, x0, 8
@@ -1113,7 +1097,7 @@ fn rv32_trace_wiring_ccs_rejects_jalr_pc_target_tamper() {
     // Row2 is a BRANCH control row, so existing non-control PC constraints do not catch this.
     let row1_pc_after = layout.cell(layout.trace.pc_after, 1);
     let row2_pc_before = layout.cell(layout.trace.pc_before, 2);
-    let row2_prog_addr = layout.cell(layout.trace.prog_addr, 2);
+    let row2_prog_addr = layout.cell(layout.trace.pc_before, 2);
     let delta = F::from_u64(4);
     w[row1_pc_after - layout.m_in] += delta;
     w[row2_pc_before - layout.m_in] += delta;
@@ -1126,7 +1110,7 @@ fn rv32_trace_wiring_ccs_rejects_jalr_pc_target_tamper() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_branch_target_tamper() {
     // Program:
     //   BEQ x0, x0, 8
@@ -1174,7 +1158,7 @@ fn rv32_trace_wiring_ccs_rejects_branch_target_tamper() {
     // Row1 is another BRANCH control row, so existing non-control PC constraints do not catch this.
     let row0_pc_after = layout.cell(layout.trace.pc_after, 0);
     let row1_pc_before = layout.cell(layout.trace.pc_before, 1);
-    let row1_prog_addr = layout.cell(layout.trace.prog_addr, 1);
+    let row1_prog_addr = layout.cell(layout.trace.pc_before, 1);
     let delta = F::from_u64(4);
     w[row0_pc_after - layout.m_in] += delta;
     w[row1_pc_before - layout.m_in] += delta;
@@ -1187,7 +1171,7 @@ fn rv32_trace_wiring_ccs_rejects_branch_target_tamper() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_load_ram_addr_tamper() {
     // Program: LW x1, 4(x0); HALT
     let program = vec![
@@ -1226,7 +1210,7 @@ fn rv32_trace_wiring_ccs_rejects_load_ram_addr_tamper() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_store_ram_addr_tamper() {
     // Program: ADDI x1, x0, 7; SW x1, 4(x0); HALT
     let program = vec![
@@ -1269,7 +1253,7 @@ fn rv32_trace_wiring_ccs_rejects_store_ram_addr_tamper() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_branch_condition_shout_tamper() {
     // Program: BEQ x0, x0, 8; ADDI x1, x0, 1; HALT
     // BEQ compares equal, so shout_val should drive taken=1.
@@ -1313,7 +1297,7 @@ fn rv32_trace_wiring_ccs_rejects_branch_condition_shout_tamper() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_alu_value_binding_tamper() {
     let program = vec![
         RiscvInstruction::IAlu {
@@ -1348,8 +1332,8 @@ fn rv32_trace_wiring_ccs_rejects_alu_value_binding_tamper() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
-fn rv32_trace_wiring_ccs_rejects_branch_table_id_tamper() {
+#[ignore = "moved to decode stage sidecar semantics"]
+fn rv32_trace_wiring_ccs_rejects_shout_has_lookup_tamper() {
     let program = vec![
         RiscvInstruction::Branch {
             cond: BranchCondition::Ltu,
@@ -1373,17 +1357,17 @@ fn rv32_trace_wiring_ccs_rejects_branch_table_id_tamper() {
     let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
     let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
 
-    let table_id_idx = layout.cell(layout.trace.shout_table_id, 0);
-    w[table_id_idx - layout.m_in] += F::ONE;
+    let has_lookup_idx = layout.cell(layout.trace.shout_has_lookup, 0);
+    w[has_lookup_idx - layout.m_in] = F::ZERO;
 
     assert!(
         check_ccs_rowwise_zero(&ccs, &x, &w).is_err(),
-        "tampered branch shout table id must fail trace CCS"
+        "tampered branch shout has_lookup must fail trace CCS"
     );
 }
 
 #[test]
-#[ignore = "moved to W3 sidecar semantics"]
+#[ignore = "moved to width stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_load_writeback_tamper_all_widths() {
     let cases = [
         (RiscvMemOp::Lb, 0x0000_00FFu64, "LB"),
@@ -1430,7 +1414,7 @@ fn rv32_trace_wiring_ccs_rejects_load_writeback_tamper_all_widths() {
 }
 
 #[test]
-#[ignore = "moved to W3 sidecar semantics"]
+#[ignore = "moved to width stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_sw_store_value_tamper() {
     let program = vec![
         RiscvInstruction::IAlu {
@@ -1474,7 +1458,7 @@ fn rv32_trace_wiring_ccs_rejects_sw_store_value_tamper() {
 }
 
 #[test]
-#[ignore = "moved to W3 sidecar semantics"]
+#[ignore = "moved to width stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_sb_sh_store_merge_tamper() {
     let cases = [(RiscvMemOp::Sb, 0x12i32, "SB"), (RiscvMemOp::Sh, 0x123i32, "SH")];
 
@@ -1522,7 +1506,7 @@ fn rv32_trace_wiring_ccs_rejects_sb_sh_store_merge_tamper() {
 }
 
 #[test]
-#[ignore = "moved to W2 sidecar semantics"]
+#[ignore = "moved to decode stage sidecar semantics"]
 fn rv32_trace_wiring_ccs_rejects_rv32m_in_trace_scope() {
     let program = vec![
         RiscvInstruction::IAlu {
@@ -1600,6 +1584,6 @@ fn rv32_trace_wiring_ccs_allows_amo_when_scope_lock_is_sidecar_owned() {
 
     assert!(
         check_ccs_rowwise_zero(&ccs, &x, &w).is_ok(),
-        "N0 CCS should accept AMO rows when the Tier 2.1 scope lock is sidecar-owned (WB/W2)"
+        "N0 CCS should accept AMO rows when the Tier 2.1 scope lock is sidecar-owned (WB/decode stage)"
     );
 }

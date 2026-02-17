@@ -23,7 +23,7 @@ use neo_transcript::Transcript;
 use neo_vm_trace::trace_program;
 use p3_field::{Field, PrimeCharacteristicRing};
 
-use crate::suite::{default_mixers, setup_ajtai_committer};
+use crate::suite::{default_mixers, setup_ajtai_committer, widen_ccs_cols_for_test};
 
 fn divu(lhs: u32, rhs: u32) -> u32 {
     if rhs == 0 {
@@ -83,7 +83,7 @@ fn build_shout_only_bus_z_packed_divu(
     for j in 0..t {
         let has = lane_data.has_lookup[j];
         z[bus.bus_cell(cols.has_lookup, j)] = if has { F::ONE } else { F::ZERO };
-        z[bus.bus_cell(cols.val, j)] = if has { F::from_u64(lane_data.value[j]) } else { F::ZERO };
+        z[bus.bus_cell(cols.primary_val(), j)] = if has { F::from_u64(lane_data.value[j]) } else { F::ZERO };
 
         let mut packed = [F::ZERO; 38];
         if has {
@@ -170,7 +170,7 @@ fn build_shout_only_bus_z_packed_remu(
     for j in 0..t {
         let has = lane_data.has_lookup[j];
         z[bus.bus_cell(cols.has_lookup, j)] = if has { F::ONE } else { F::ZERO };
-        z[bus.bus_cell(cols.val, j)] = if has { F::from_u64(lane_data.value[j]) } else { F::ZERO };
+        z[bus.bus_cell(cols.primary_val(), j)] = if has { F::from_u64(lane_data.value[j]) } else { F::ZERO };
 
         let mut packed = [F::ZERO; 38];
         if has {
@@ -357,8 +357,14 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_divu_remu_semantics_redteam() 
         .expect("inactive rows");
 
     let layout = Rv32TraceCcsLayout::new(exec.rows.len()).expect("trace CCS layout");
-    let (x, w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
-    let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
+    let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
+    let mut ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
+    let min_m = layout
+        .m_in
+        .checked_add((/*bus_cols=*/ 38usize + 2usize).checked_mul(exec.rows.len()).expect("bus cols * steps"))
+        .expect("m_in + bus region");
+    widen_ccs_cols_for_test(&mut ccs, min_m);
+    w.resize(ccs.m - layout.m_in, F::ZERO);
 
     // Params + committer.
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n.max(ccs.m)).expect("params");
@@ -386,6 +392,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_divu_remu_semantics_redteam() 
     assert_eq!(shout_lanes.len(), 2);
 
     let divu_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 38,
@@ -400,6 +407,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_divu_remu_semantics_redteam() 
         table: Vec::new(),
     };
     let remu_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 38,
@@ -442,6 +450,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_divu_remu_semantics_redteam() 
     let divu_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(&params, &divu_z);
     let divu_c = l.commit(&divu_Z);
     let divu_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: vec![divu_c],
         ..divu_inst
     };
@@ -453,6 +462,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_divu_remu_semantics_redteam() 
     let remu_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(&params, &remu_z);
     let remu_c = l.commit(&remu_Z);
     let remu_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: vec![remu_c],
         ..remu_inst
     };
@@ -462,8 +472,6 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_divu_remu_semantics_redteam() 
         mcs,
         lut_instances: vec![(divu_inst, divu_wit), (remu_inst, remu_wit)],
         mem_instances: Vec::new(),
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =

@@ -185,8 +185,6 @@ fn output_binding_e2e_wrong_claim_fails() -> Result<(), PiCcsError> {
         mcs: (mcs_inst, mcs_wit),
         lut_instances: vec![],
         mem_instances: vec![(mem_inst, mem_wit)],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData,
     }];
     let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps_witness.iter().map(StepInstanceBundle::from).collect();

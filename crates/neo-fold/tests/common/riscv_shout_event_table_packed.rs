@@ -681,7 +681,7 @@ pub fn build_shout_event_table_bus_z(
     let cols = &bus.shout_cols[0].lanes[0];
     for (j, row) in rows.iter().enumerate() {
         z[bus.bus_cell(cols.has_lookup, j)] = F::ONE;
-        z[bus.bus_cell(cols.val, j)] = F::from_u64(row.value as u64);
+        z[bus.bus_cell(cols.primary_val(), j)] = F::from_u64(row.value as u64);
 
         let t_idx = m_in
             .checked_add(row.row_idx)

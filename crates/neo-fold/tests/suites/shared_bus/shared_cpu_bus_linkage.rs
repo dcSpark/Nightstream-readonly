@@ -206,6 +206,7 @@ fn build_one_step_fixture(seed: u64) -> SharedBusFixture {
     let mem_wit = neo_memory::witness::MemWitness { mats: Vec::new() };
 
     let lut_inst = neo_memory::witness::LutInstance::<Cmt, F> {
+        table_id: lut_table.table_id,
         comms: Vec::new(),
         k: lut_table.k,
         d: lut_table.d,
@@ -234,8 +235,6 @@ fn build_one_step_fixture(seed: u64) -> SharedBusFixture {
         mcs,
         lut_instances: vec![(lut_inst, lut_wit)],
         mem_instances: vec![(mem_inst, mem_wit)],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     }];
     let steps_instance = steps_witness.iter().map(StepInstanceBundle::from).collect();

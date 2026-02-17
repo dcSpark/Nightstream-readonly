@@ -29,8 +29,8 @@ use neo_memory::output_check::ProgramIO;
 use neo_memory::plain::{LutTable, PlainMemLayout};
 use neo_memory::riscv::ccs::{
     build_rv32_trace_wiring_ccs, build_rv32_trace_wiring_ccs_with_reserved_rows,
-    rv32_trace_ccs_witness_from_exec_table, rv32_trace_shared_bus_requirements, rv32_trace_shared_cpu_bus_config,
-    Rv32TraceCcsLayout,
+    rv32_trace_ccs_witness_from_exec_table, rv32_trace_shared_bus_requirements_with_specs,
+    rv32_trace_shared_cpu_bus_config_with_specs, Rv32TraceCcsLayout, TraceShoutBusSpec,
 };
 use neo_memory::riscv::exec_table::{Rv32ExecRow, Rv32ExecTable};
 use neo_memory::riscv::lookups::{
@@ -38,18 +38,16 @@ use neo_memory::riscv::lookups::{
 };
 use neo_memory::riscv::rom_init::prog_rom_layout_and_init_words;
 use neo_memory::riscv::trace::{
-    build_rv32_decode_sidecar_z, extract_twist_lanes_over_time, rv32_decode_sidecar_witness_from_exec_table,
-    build_rv32_width_sidecar_z, rv32_width_sidecar_witness_from_exec_table, Rv32DecodeSidecarLayout,
-    Rv32WidthSidecarLayout, RV32_TRACE_W2_DECODE_ID, RV32_TRACE_W3_WIDTH_ID, TwistLaneOverTime,
+    extract_twist_lanes_over_time, rv32_decode_lookup_backed_cols, rv32_decode_lookup_backed_row_from_instr_word,
+    rv32_decode_lookup_table_id_for_col, rv32_width_lookup_backed_cols, rv32_width_lookup_table_id_for_col,
+    rv32_width_sidecar_witness_from_exec_table, Rv32DecodeSidecarLayout, Rv32WidthSidecarLayout, TwistLaneOverTime,
 };
-use neo_memory::witness::{
-    DecodeInstance, DecodeWitness, LutInstance, LutWitness, MemInstance, MemWitness, StepWitnessBundle, WidthInstance,
-    WidthWitness,
-};
+use neo_memory::witness::{LutInstance, LutWitness, MemInstance, MemWitness, StepWitnessBundle};
 use neo_memory::{LutTableSpec, MemInit, R1csCpu};
 use neo_params::NeoParams;
-use neo_vm_trace::{StepTrace, Twist as _, TwistOpKind};
+use neo_vm_trace::{ShoutEvent, ShoutId, StepTrace, Twist as _, TwistOpKind, VmTrace};
 use p3_field::PrimeCharacteristicRing;
+use p3_field::PrimeField64;
 
 #[cfg(target_arch = "wasm32")]
 use js_sys::Date;
@@ -504,6 +502,162 @@ fn rv32_trace_table_specs(shout_ops: &HashSet<RiscvOpcode>) -> HashMap<u32, LutT
     table_specs
 }
 
+fn build_rv32_decode_lookup_tables(
+    prog_layout: &PlainMemLayout,
+    prog_init_words: &HashMap<(u32, u64), F>,
+) -> HashMap<u32, LutTable<F>> {
+    let decode_layout = Rv32DecodeSidecarLayout::new();
+    let decode_cols = rv32_decode_lookup_backed_cols(&decode_layout);
+    let mut out = HashMap::new();
+    for &col_id in decode_cols.iter() {
+        let table_id = rv32_decode_lookup_table_id_for_col(col_id);
+        let mut content = vec![F::ZERO; prog_layout.k];
+        for addr in 0..prog_layout.k {
+            let instr_word = prog_init_words
+                .get(&(PROG_ID.0, addr as u64))
+                .copied()
+                .unwrap_or(F::ZERO)
+                .as_canonical_u64() as u32;
+            let row = rv32_decode_lookup_backed_row_from_instr_word(&decode_layout, instr_word, /*active=*/ true);
+            content[addr] = row[col_id];
+        }
+        out.insert(
+            table_id,
+            LutTable {
+                table_id,
+                k: prog_layout.k,
+                d: prog_layout.d,
+                n_side: prog_layout.n_side,
+                content,
+            },
+        );
+    }
+    out
+}
+
+fn inject_rv32_decode_lookup_events_into_trace(
+    trace: &mut VmTrace<u64, u64>,
+    prog_layout: &PlainMemLayout,
+    prog_init_words: &HashMap<(u32, u64), F>,
+) -> Result<(), PiCcsError> {
+    let decode_layout = Rv32DecodeSidecarLayout::new();
+    let decode_cols = rv32_decode_lookup_backed_cols(&decode_layout);
+    for (step_idx, step) in trace.steps.iter_mut().enumerate() {
+        let prog_read = step
+            .twist_events
+            .iter()
+            .find(|e| e.twist_id == PROG_ID && e.kind == TwistOpKind::Read)
+            .ok_or_else(|| {
+                PiCcsError::ProtocolError(format!(
+                    "missing PROG read event while injecting decode lookup events at step {step_idx}"
+                ))
+            })?;
+        let addr = prog_read.addr;
+        if (addr as usize) >= prog_layout.k {
+            return Err(PiCcsError::ProtocolError(format!(
+                "decode lookup event addr out of range at step {step_idx}: addr={addr}, k={}",
+                prog_layout.k
+            )));
+        }
+        let instr_word = prog_init_words
+            .get(&(PROG_ID.0, addr))
+            .copied()
+            .unwrap_or_else(|| F::from_u64(prog_read.value))
+            .as_canonical_u64() as u32;
+        let row = rv32_decode_lookup_backed_row_from_instr_word(&decode_layout, instr_word, /*active=*/ true);
+        for &col_id in decode_cols.iter() {
+            step.shout_events.push(ShoutEvent {
+                shout_id: ShoutId(rv32_decode_lookup_table_id_for_col(col_id)),
+                key: addr,
+                value: row[col_id].as_canonical_u64(),
+            });
+        }
+    }
+    Ok(())
+}
+
+fn build_rv32_width_lookup_tables(
+    width_layout: &Rv32WidthSidecarLayout,
+    exec: &Rv32ExecTable,
+    trace_steps: usize,
+) -> Result<(HashMap<u32, LutTable<F>>, usize), PiCcsError> {
+    // Width lookup tables here are execution-indexed helper transport tables.
+    // They are not a standalone trust root: Route-A width residual claims bind
+    // every opened helper value back to committed trace columns (`ram_rv`,
+    // `rs2_val`), and WB/WP enforce the associated bitness/quiescence properties.
+    let max_cycle = exec
+        .rows
+        .iter()
+        .take(trace_steps)
+        .map(|r| r.cycle)
+        .max()
+        .unwrap_or(0);
+    let cycle_d = required_bits_for_max_addr(max_cycle).max(2);
+    let cycle_k = 1usize
+        .checked_shl(cycle_d as u32)
+        .ok_or_else(|| PiCcsError::InvalidInput(format!("width lookup cycle width too large: d={cycle_d}")))?;
+
+    let wit = rv32_width_sidecar_witness_from_exec_table(width_layout, exec);
+    let width_cols = rv32_width_lookup_backed_cols(width_layout);
+    let mut out = HashMap::new();
+    for &col_id in width_cols.iter() {
+        let table_id = rv32_width_lookup_table_id_for_col(col_id);
+        let mut content = vec![F::ZERO; cycle_k];
+        for (i, row) in exec.rows.iter().enumerate().take(trace_steps) {
+            let cycle = row.cycle as usize;
+            if cycle >= cycle_k {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "width lookup cycle out of range at row {i}: cycle={}, k={cycle_k}",
+                    row.cycle
+                )));
+            }
+            content[cycle] = wit.cols[col_id][i];
+        }
+        out.insert(
+            table_id,
+            LutTable {
+                table_id,
+                k: cycle_k,
+                d: cycle_d,
+                n_side: 2,
+                content,
+            },
+        );
+    }
+    Ok((out, cycle_d))
+}
+
+fn inject_rv32_width_lookup_events_into_trace(
+    trace: &mut VmTrace<u64, u64>,
+    exec: &Rv32ExecTable,
+    width_layout: &Rv32WidthSidecarLayout,
+) -> Result<(), PiCcsError> {
+    if trace.steps.len() > exec.rows.len() {
+        return Err(PiCcsError::ProtocolError(format!(
+            "width lookup injection drift: trace steps {} > exec rows {}",
+            trace.steps.len(),
+            exec.rows.len()
+        )));
+    }
+    let wit = rv32_width_sidecar_witness_from_exec_table(width_layout, exec);
+    let width_cols = rv32_width_lookup_backed_cols(width_layout);
+    for (i, step) in trace.steps.iter_mut().enumerate() {
+        let cycle = exec
+            .rows
+            .get(i)
+            .ok_or_else(|| PiCcsError::ProtocolError("missing exec row while injecting width lookups".into()))?
+            .cycle;
+        for &col_id in width_cols.iter() {
+            step.shout_events.push(ShoutEvent {
+                shout_id: ShoutId(rv32_width_lookup_table_id_for_col(col_id)),
+                key: cycle,
+                value: wit.cols[col_id][i].as_canonical_u64(),
+            });
+        }
+    }
+    Ok(())
+}
+
 /// High-level builder for proving/verifying the RV32 trace wiring CCS.
 ///
 /// This path is intentionally narrow:
@@ -539,6 +693,8 @@ pub struct Rv32TraceWiring {
     output_claims: ProgramIO<F>,
     output_target: OutputTarget,
     shout_ops: Option<HashSet<RiscvOpcode>>,
+    extra_lut_table_specs: HashMap<u32, LutTableSpec>,
+    extra_shout_bus_specs: Vec<TraceShoutBusSpec>,
 }
 
 impl Rv32TraceWiring {
@@ -558,6 +714,8 @@ impl Rv32TraceWiring {
             output_claims: ProgramIO::new(),
             output_target: OutputTarget::Ram,
             shout_ops: None,
+            extra_lut_table_specs: HashMap::new(),
+            extra_shout_bus_specs: Vec::new(),
         }
     }
 
@@ -658,6 +816,22 @@ impl Rv32TraceWiring {
         self
     }
 
+    /// Add an extra implicit lookup-table spec by `table_id`.
+    ///
+    /// The id must not collide with inferred opcode-table ids.
+    pub fn extra_lut_table_spec(mut self, table_id: u32, spec: LutTableSpec) -> Self {
+        self.extra_lut_table_specs.insert(table_id, spec);
+        self
+    }
+
+    /// Optional extra Shout family geometry for trace shared-bus mode.
+    ///
+    /// Each spec adds/overrides a `table_id -> ell_addr` mapping used to size shout lanes.
+    pub fn extra_shout_bus_specs(mut self, specs: impl IntoIterator<Item = TraceShoutBusSpec>) -> Self {
+        self.extra_shout_bus_specs = specs.into_iter().collect();
+        self
+    }
+
     pub fn prove(self) -> Result<Rv32TraceWiringRun, PiCcsError> {
         if self.xlen != 32 {
             return Err(PiCcsError::InvalidInput(format!(
@@ -711,10 +885,19 @@ impl Rv32TraceWiring {
             }
             None => DEFAULT_RV32_TRACE_MAX_STEPS,
         };
+        if !self.shared_cpu_bus {
+            return Err(PiCcsError::InvalidInput(
+                "RV32 trace wiring no-shared fallback is removed; Phase 2 decode lookup requires shared_cpu_bus=true"
+                    .into(),
+            ));
+        }
         let ram_init_map = self.ram_init.clone();
         let reg_init_map = self.reg_init.clone();
         let output_claims = self.output_claims.clone();
         let output_target = self.output_target;
+        let (prog_layout, prog_init_words) =
+            prog_rom_layout_and_init_words::<F>(PROG_ID, /*base_addr=*/ 0, &self.program_bytes)
+                .map_err(|e| PiCcsError::InvalidInput(format!("prog_rom_layout_and_init_words failed: {e}")))?;
 
         let mut vm = RiscvCpu::new(self.xlen);
         vm.load_program(/*base=*/ 0, program.clone());
@@ -739,7 +922,7 @@ impl Rv32TraceWiring {
         }
         let shout = RiscvShoutTables::new(self.xlen);
 
-        let trace = neo_vm_trace::trace_program(vm, twist, shout, max_steps)
+        let mut trace = neo_vm_trace::trace_program(vm, twist, shout, max_steps)
             .map_err(|e| PiCcsError::InvalidInput(format!("trace_program failed: {e}")))?;
 
         if using_default_max_steps && !trace.did_halt() {
@@ -755,6 +938,9 @@ impl Rv32TraceWiring {
                 target_len, DEFAULT_RV32_TRACE_MAX_STEPS
             )));
         }
+        if self.shared_cpu_bus {
+            inject_rv32_decode_lookup_events_into_trace(&mut trace, &prog_layout, &prog_init_words)?;
+        }
         let exec = Rv32ExecTable::from_trace_padded(&trace, target_len)
             .map_err(|e| PiCcsError::InvalidInput(format!("Rv32ExecTable::from_trace_padded failed: {e}")))?;
         exec.validate_cycle_chain()
@@ -765,6 +951,14 @@ impl Rv32TraceWiring {
             .map_err(|e| PiCcsError::InvalidInput(format!("validate_halted_tail failed: {e}")))?;
         exec.validate_inactive_rows_are_empty()
             .map_err(|e| PiCcsError::InvalidInput(format!("validate_inactive_rows_are_empty failed: {e}")))?;
+        let width_layout = Rv32WidthSidecarLayout::new();
+        let (width_lookup_tables, width_lookup_addr_d) = if self.shared_cpu_bus {
+            let (tables, addr_d) = build_rv32_width_lookup_tables(&width_layout, &exec, trace.steps.len())?;
+            inject_rv32_width_lookup_events_into_trace(&mut trace, &exec, &width_layout)?;
+            (tables, addr_d)
+        } else {
+            (HashMap::new(), 0usize)
+        };
 
         let requested_chunk_rows = self.chunk_rows.unwrap_or(DEFAULT_RV32_TRACE_CHUNK_ROWS);
         if requested_chunk_rows == 0 {
@@ -778,9 +972,6 @@ impl Rv32TraceWiring {
 
         let prove_start = time_now();
         let setup_start = prove_start;
-        let (prog_layout, prog_init_words) =
-            prog_rom_layout_and_init_words::<F>(PROG_ID, /*base_addr=*/ 0, &self.program_bytes)
-                .map_err(|e| PiCcsError::InvalidInput(format!("prog_rom_layout_and_init_words failed: {e}")))?;
 
         let mut max_ram_addr = max_ram_addr_from_exec(&exec).unwrap_or(0);
         if let Some(max_init_addr) = ram_init_map.keys().copied().max() {
@@ -844,15 +1035,77 @@ impl Rv32TraceWiring {
             }
             None => inferred_shout_ops,
         };
-        let table_specs = rv32_trace_table_specs(&shout_ops);
-        let mut shout_table_ids: Vec<u32> = table_specs.keys().copied().collect();
-        shout_table_ids.sort_unstable();
+        let decode_layout = Rv32DecodeSidecarLayout::new();
+        let decode_lookup_tables = if self.shared_cpu_bus {
+            build_rv32_decode_lookup_tables(&prog_layout, &prog_init_words)
+        } else {
+            HashMap::new()
+        };
+        let decode_lookup_bus_specs: Vec<TraceShoutBusSpec> = if self.shared_cpu_bus {
+            let decode_lookup_cols = rv32_decode_lookup_backed_cols(&decode_layout);
+            decode_lookup_cols
+                .iter()
+                .copied()
+                .map(|col_id| TraceShoutBusSpec {
+                    table_id: rv32_decode_lookup_table_id_for_col(col_id),
+                    ell_addr: prog_layout.d,
+                    n_vals: 1usize,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let width_lookup_bus_specs: Vec<TraceShoutBusSpec> = if self.shared_cpu_bus {
+            let width_lookup_cols = rv32_width_lookup_backed_cols(&width_layout);
+            width_lookup_cols
+                .iter()
+                .copied()
+                .map(|col_id| TraceShoutBusSpec {
+                    table_id: rv32_width_lookup_table_id_for_col(col_id),
+                    ell_addr: width_lookup_addr_d,
+                    n_vals: 1usize,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let mut table_specs = rv32_trace_table_specs(&shout_ops);
+        let mut base_shout_table_ids: Vec<u32> = table_specs.keys().copied().collect();
+        base_shout_table_ids.sort_unstable();
+        for (&table_id, spec) in &self.extra_lut_table_specs {
+            if table_specs.contains_key(&table_id) {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "extra_lut_table_spec collides with existing table_id={table_id}"
+                )));
+            }
+            table_specs.insert(table_id, spec.clone());
+        }
+        let mut all_extra_shout_specs = self.extra_shout_bus_specs.clone();
+        all_extra_shout_specs.extend(decode_lookup_bus_specs.clone());
+        all_extra_shout_specs.extend(width_lookup_bus_specs.clone());
+        for spec in &all_extra_shout_specs {
+            if !table_specs.contains_key(&spec.table_id)
+                && !decode_lookup_tables.contains_key(&spec.table_id)
+                && !width_lookup_tables.contains_key(&spec.table_id)
+            {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "extra_shout_bus_specs includes table_id={} without a table spec/table content",
+                    spec.table_id
+                )));
+            }
+        }
 
         let mut ccs_reserved_rows = 0usize;
         if self.shared_cpu_bus {
-            let (bus_region_len, reserved_rows) =
-                rv32_trace_shared_bus_requirements(&layout, &shout_table_ids, &mem_layouts)
-                    .map_err(|e| PiCcsError::InvalidInput(format!("rv32_trace_shared_bus_requirements failed: {e}")))?;
+            let (bus_region_len, reserved_rows) = rv32_trace_shared_bus_requirements_with_specs(
+                &layout,
+                &base_shout_table_ids,
+                &all_extra_shout_specs,
+                &mem_layouts,
+            )
+            .map_err(|e| {
+                PiCcsError::InvalidInput(format!("rv32_trace_shared_bus_requirements_with_specs failed: {e}"))
+            })?;
             layout.m = layout
                 .m
                 .checked_add(bus_region_len)
@@ -908,7 +1161,8 @@ impl Rv32TraceWiring {
         if self.shared_cpu_bus {
             let chunk_start = time_now();
 
-            let empty_tables: HashMap<u32, LutTable<F>> = HashMap::new();
+            let mut lut_tables = decode_lookup_tables.clone();
+            lut_tables.extend(width_lookup_tables.clone());
             let lut_lanes: HashMap<u32, usize> = HashMap::new();
 
             let mut cpu = R1csCpu::new(
@@ -916,20 +1170,23 @@ impl Rv32TraceWiring {
                 session.params().clone(),
                 session.committer().clone(),
                 layout.m_in,
-                &empty_tables,
+                &lut_tables,
                 &table_specs,
                 rv32_trace_chunk_to_witness(layout.clone()),
             )
             .map_err(|e| PiCcsError::InvalidInput(format!("R1csCpu::new failed: {e}")))?;
             cpu = cpu
                 .with_shared_cpu_bus(
-                    rv32_trace_shared_cpu_bus_config(
+                    rv32_trace_shared_cpu_bus_config_with_specs(
                         &layout,
-                        &shout_table_ids,
+                        &base_shout_table_ids,
+                        &all_extra_shout_specs,
                         mem_layouts.clone(),
                         initial_mem.clone(),
                     )
-                    .map_err(|e| PiCcsError::InvalidInput(format!("rv32_trace_shared_cpu_bus_config failed: {e}")))?,
+                    .map_err(|e| {
+                        PiCcsError::InvalidInput(format!("rv32_trace_shared_cpu_bus_config_with_specs failed: {e}"))
+                    })?,
                     layout.t,
                 )
                 .map_err(|e| PiCcsError::InvalidInput(format!("shared bus inject failed: {e}")))?;
@@ -941,82 +1198,19 @@ impl Rv32TraceWiring {
                 max_steps,
                 layout.t,
                 &mem_layouts,
-                &empty_tables,
+                &lut_tables,
                 &table_specs,
                 &lut_lanes,
                 &initial_mem,
                 &cpu,
             )?;
 
-            let decode_layout = Rv32DecodeSidecarLayout::new();
-            let width_layout = Rv32WidthSidecarLayout::new();
             if session.steps_witness().len() != exec_chunks.len() {
                 return Err(PiCcsError::ProtocolError(format!(
-                    "decode sidecar build drift: step bundle count {} != exec chunk count {}",
+                    "shared trace build drift: step bundle count {} != exec chunk count {}",
                     session.steps_witness().len(),
                     exec_chunks.len()
                 )));
-            }
-            let params_for_decode = session.params().clone();
-            let committer = session.committer().clone();
-            for (step_idx, (step, exec_chunk)) in session
-                .steps_witness_mut()
-                .iter_mut()
-                .zip(exec_chunks.iter())
-                .enumerate()
-            {
-                if !step.decode_instances.is_empty() {
-                    return Err(PiCcsError::ProtocolError(format!(
-                        "decode sidecar already populated for step {step_idx}"
-                    )));
-                }
-                if !step.width_instances.is_empty() {
-                    return Err(PiCcsError::ProtocolError(format!(
-                        "width sidecar already populated for step {step_idx}"
-                    )));
-                }
-                let decode_wit_cols = rv32_decode_sidecar_witness_from_exec_table(&decode_layout, exec_chunk);
-                let width_wit_cols = rv32_width_sidecar_witness_from_exec_table(&width_layout, exec_chunk);
-                if decode_wit_cols.t != layout.t {
-                    return Err(PiCcsError::ProtocolError(format!(
-                        "decode sidecar t mismatch at step {step_idx}: got {}, expected {}",
-                        decode_wit_cols.t, layout.t
-                    )));
-                }
-                if width_wit_cols.t != layout.t {
-                    return Err(PiCcsError::ProtocolError(format!(
-                        "width sidecar t mismatch at step {step_idx}: got {}, expected {}",
-                        width_wit_cols.t, layout.t
-                    )));
-                }
-                let decode_z =
-                    build_rv32_decode_sidecar_z(&decode_layout, &decode_wit_cols, ccs.m, layout.m_in, &step.mcs.0.x)
-                        .map_err(PiCcsError::InvalidInput)?;
-                let width_z =
-                    build_rv32_width_sidecar_z(&width_layout, &width_wit_cols, ccs.m, layout.m_in, &step.mcs.0.x)
-                        .map_err(PiCcsError::InvalidInput)?;
-                let decode_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(&params_for_decode, &decode_z);
-                let width_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(&params_for_decode, &width_z);
-                let decode_c = committer.commit(&decode_Z);
-                let width_c = committer.commit(&width_Z);
-                let decode_inst = DecodeInstance {
-                    decode_id: RV32_TRACE_W2_DECODE_ID,
-                    comms: vec![decode_c],
-                    steps: layout.t,
-                    cols: decode_layout.cols,
-                    _phantom: PhantomData,
-                };
-                let width_inst = WidthInstance {
-                    width_id: RV32_TRACE_W3_WIDTH_ID,
-                    comms: vec![width_c],
-                    steps: layout.t,
-                    cols: width_layout.cols,
-                    _phantom: PhantomData,
-                };
-                step.decode_instances
-                    .push((decode_inst, DecodeWitness { mats: vec![decode_Z] }));
-                step.width_instances
-                    .push((width_inst, WidthWitness { mats: vec![width_Z] }));
             }
             chunk_build_commit_duration += elapsed_duration(chunk_start);
         } else {
@@ -1146,59 +1340,10 @@ impl Rv32TraceWiring {
                     mem_instances.push(ram_mem);
                 }
 
-                let decode_layout = Rv32DecodeSidecarLayout::new();
-                let width_layout = Rv32WidthSidecarLayout::new();
-                let decode_wit_cols = rv32_decode_sidecar_witness_from_exec_table(&decode_layout, exec_chunk);
-                let width_wit_cols = rv32_width_sidecar_witness_from_exec_table(&width_layout, exec_chunk);
-                if decode_wit_cols.t != layout.t {
-                    return Err(PiCcsError::ProtocolError(format!(
-                        "decode sidecar t mismatch: got {}, expected {}",
-                        decode_wit_cols.t, layout.t
-                    )));
-                }
-                if width_wit_cols.t != layout.t {
-                    return Err(PiCcsError::ProtocolError(format!(
-                        "width sidecar t mismatch: got {}, expected {}",
-                        width_wit_cols.t, layout.t
-                    )));
-                }
-                let decode_z =
-                    build_rv32_decode_sidecar_z(&decode_layout, &decode_wit_cols, ccs.m, layout.m_in, &x)
-                        .map_err(PiCcsError::InvalidInput)?;
-                let width_z =
-                    build_rv32_width_sidecar_z(&width_layout, &width_wit_cols, ccs.m, layout.m_in, &x)
-                        .map_err(PiCcsError::InvalidInput)?;
-                let decode_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &decode_z);
-                let width_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(session.params(), &width_z);
-                let decode_c = session.committer().commit(&decode_Z);
-                let width_c = session.committer().commit(&width_Z);
-                let decode_instances = vec![(
-                    DecodeInstance {
-                        decode_id: RV32_TRACE_W2_DECODE_ID,
-                        comms: vec![decode_c],
-                        steps: layout.t,
-                        cols: decode_layout.cols,
-                        _phantom: PhantomData,
-                    },
-                    DecodeWitness { mats: vec![decode_Z] },
-                )];
-                let width_instances = vec![(
-                    WidthInstance {
-                        width_id: RV32_TRACE_W3_WIDTH_ID,
-                        comms: vec![width_c],
-                        steps: layout.t,
-                        cols: width_layout.cols,
-                        _phantom: PhantomData,
-                    },
-                    WidthWitness { mats: vec![width_Z] },
-                )];
-
                 session.add_step_bundle(StepWitnessBundle {
                     mcs,
                     lut_instances: Vec::<(LutInstance<_, _>, LutWitness<F>)>::new(),
                     mem_instances,
-                    decode_instances,
-                    width_instances,
                     _phantom: PhantomData::<K>,
                 });
 
@@ -1260,6 +1405,13 @@ impl Rv32TraceWiring {
 
         let mut used_mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
         used_mem_ids.sort_unstable();
+        let mut used_shout_table_ids = base_shout_table_ids.clone();
+        for spec in &all_extra_shout_specs {
+            if !used_shout_table_ids.contains(&spec.table_id) {
+                used_shout_table_ids.push(spec.table_id);
+            }
+        }
+        used_shout_table_ids.sort_unstable();
 
         Ok(Rv32TraceWiringRun {
             session,
@@ -1268,7 +1420,7 @@ impl Rv32TraceWiring {
             exec,
             proof,
             used_mem_ids,
-            used_shout_table_ids: shout_table_ids,
+            used_shout_table_ids,
             output_binding_cfg,
             prove_duration,
             prove_phase_durations,

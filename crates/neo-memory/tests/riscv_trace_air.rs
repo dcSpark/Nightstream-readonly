@@ -90,7 +90,7 @@ fn rv32_trace_air_rejects_halted_tail_reactivation() {
 }
 
 #[test]
-fn rv32_trace_air_rejects_non_boolean_funct3_bit() {
+fn rv32_trace_air_rejects_non_boolean_active() {
     // Program: ADDI x1, x0, 1; HALT
     let program = vec![
         RiscvInstruction::IAlu {
@@ -114,10 +114,10 @@ fn rv32_trace_air_rejects_non_boolean_funct3_bit() {
 
     let air = Rv32TraceAir::new();
     let mut wit = Rv32TraceWitness::from_exec_table(&air.layout, &exec).expect("trace witness");
-    wit.cols[air.layout.funct3_bit[0]][0] = F::from_u64(2);
+    wit.cols[air.layout.active][0] = F::from_u64(2);
 
     let err = air
         .assert_satisfied(&wit)
         .expect_err("mutated witness should violate bit booleanity");
-    assert!(err.contains("funct3_bit[0] not boolean"), "unexpected error: {err}");
+    assert!(err.contains("active not boolean"), "unexpected error: {err}");
 }

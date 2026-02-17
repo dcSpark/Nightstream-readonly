@@ -404,20 +404,20 @@ fn shared_bus_shout_lane_assignment_is_in_order_and_resets_per_step() {
     // Step j=0: lane0=(key=0,val=5), lane1=(key=1,val=7).
     assert_eq!(z[layout.bus_cell(lane0.has_lookup, 0)], F::ONE);
     assert_eq!(z[layout.bus_cell(lane0.addr_bits.start, 0)], F::ZERO);
-    assert_eq!(z[layout.bus_cell(lane0.val, 0)], F::from_u64(5));
+    assert_eq!(z[layout.bus_cell(lane0.primary_val(), 0)], F::from_u64(5));
 
     assert_eq!(z[layout.bus_cell(lane1.has_lookup, 0)], F::ONE);
     assert_eq!(z[layout.bus_cell(lane1.addr_bits.start, 0)], F::ONE);
-    assert_eq!(z[layout.bus_cell(lane1.val, 0)], F::from_u64(7));
+    assert_eq!(z[layout.bus_cell(lane1.primary_val(), 0)], F::from_u64(7));
 
     // Step j=1: lane0=(key=1,val=9), lane1=(key=0,val=11).
     assert_eq!(z[layout.bus_cell(lane0.has_lookup, 1)], F::ONE);
     assert_eq!(z[layout.bus_cell(lane0.addr_bits.start, 1)], F::ONE);
-    assert_eq!(z[layout.bus_cell(lane0.val, 1)], F::from_u64(9));
+    assert_eq!(z[layout.bus_cell(lane0.primary_val(), 1)], F::from_u64(9));
 
     assert_eq!(z[layout.bus_cell(lane1.has_lookup, 1)], F::ONE);
     assert_eq!(z[layout.bus_cell(lane1.addr_bits.start, 1)], F::ZERO);
-    assert_eq!(z[layout.bus_cell(lane1.val, 1)], F::from_u64(11));
+    assert_eq!(z[layout.bus_cell(lane1.primary_val(), 1)], F::from_u64(11));
 
     // The injected constraints should be satisfiable for the constructed witness.
     check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).expect("satisfiable");

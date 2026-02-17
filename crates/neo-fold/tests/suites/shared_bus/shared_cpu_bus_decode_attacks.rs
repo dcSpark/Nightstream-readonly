@@ -2,10 +2,10 @@ use neo_fold::riscv_trace_shard::{Rv32TraceWiring, Rv32TraceWiringRun};
 use neo_fold::shard::ShardProof;
 use neo_math::K;
 use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvOpcode};
-use neo_memory::riscv::trace::Rv32DecodeSidecarLayout;
+use neo_memory::riscv::trace::{rv32_decode_lookup_backed_cols, Rv32DecodeSidecarLayout};
 use p3_field::PrimeCharacteristicRing;
 
-fn prove_w2_trace_program() -> (Rv32TraceWiringRun, ShardProof) {
+fn prove_decode_trace_program() -> (Rv32TraceWiringRun, ShardProof) {
     // Program exercises both ALU-imm and ALU-reg decode/linkage paths.
     let program = vec![
         RiscvInstruction::IAlu {
@@ -39,40 +39,45 @@ fn prove_w2_trace_program() -> (Rv32TraceWiringRun, ShardProof) {
     (run, proof)
 }
 
-fn tamper_w2_opening_scalar(proof: &mut ShardProof, decode_col: usize) {
+fn tamper_decode_opening_scalar(proof: &mut ShardProof, decode_col: usize) {
     let layout = Rv32DecodeSidecarLayout::new();
+    let decode_open_cols = rv32_decode_lookup_backed_cols(&layout);
     assert_eq!(
-        proof.steps[0].mem.w2_decode_me_claims.len(),
+        proof.steps[0].mem.wp_me_claims.len(),
         1,
-        "expected one W2 decode ME claim"
+        "expected one WP ME claim carrying decode openings"
     );
-    let me = &mut proof.steps[0].mem.w2_decode_me_claims[0];
-    let core_t = me
+    let me = &mut proof.steps[0].mem.wp_me_claims[0];
+    let decode_start = me
         .y_scalars
         .len()
-        .checked_sub(layout.cols)
-        .expect("W2 ME opening shape");
-    me.y_scalars[core_t + decode_col] += K::ONE;
+        .checked_sub(decode_open_cols.len())
+        .expect("decode openings must be appended to WP ME tail");
+    let open_idx = decode_open_cols
+        .iter()
+        .position(|&c| c == decode_col)
+        .expect("decode col must be present in WP decode opening tail");
+    me.y_scalars[decode_start + open_idx] += K::ONE;
 }
 
 #[test]
-fn w2_write_gate_tamper_is_rejected() {
-    let (run, mut proof) = prove_w2_trace_program();
+fn decode_write_gate_tamper_is_rejected() {
+    let (run, mut proof) = prove_decode_trace_program();
     let layout = Rv32DecodeSidecarLayout::new();
-    tamper_w2_opening_scalar(&mut proof, layout.op_alu_imm_write);
+    tamper_decode_opening_scalar(&mut proof, layout.op_alu_imm);
     assert!(
         run.verify_proof(&proof).is_err(),
-        "tampered W2 write-gate opening must fail verification"
+        "tampered decode stage opcode-class opening must fail verification"
     );
 }
 
 #[test]
-fn w2_alu_table_delta_tamper_is_rejected() {
-    let (run, mut proof) = prove_w2_trace_program();
+fn decode_alu_table_delta_tamper_is_rejected() {
+    let (run, mut proof) = prove_decode_trace_program();
     let layout = Rv32DecodeSidecarLayout::new();
-    tamper_w2_opening_scalar(&mut proof, layout.alu_reg_table_delta);
+    tamper_decode_opening_scalar(&mut proof, layout.rs2);
     assert!(
         run.verify_proof(&proof).is_err(),
-        "tampered W2 ALU table-delta opening must fail verification"
+        "tampered decode stage rs2-decode opening must fail verification"
     );
 }

@@ -77,7 +77,7 @@ fn build_shout_only_bus_z(
         for j in 0..t {
             let has = lane.has_lookup[j];
             z[bus.bus_cell(cols.has_lookup, j)] = if has { F::ONE } else { F::ZERO };
-            z[bus.bus_cell(cols.val, j)] = if has { F::from_u64(lane.value[j]) } else { F::ZERO };
+            z[bus.bus_cell(cols.primary_val(), j)] = if has { F::from_u64(lane.value[j]) } else { F::ZERO };
 
             // Packed-key layout: [lhs_u32, rhs_u32, carry_bit]
             let mut packed = [F::ZERO; 3];
@@ -99,8 +99,10 @@ fn build_shout_only_bus_z(
     Ok(z)
 }
 
-#[test]
-fn riscv_trace_no_shared_cpu_bus_shout_linkage_redteam() {
+fn run_no_shared_cpu_bus_shout_linkage_redteam<FSelect>(select_tamper_col: FSelect)
+where
+    FSelect: Fn(&Rv32TraceCcsLayout) -> usize,
+{
     // Program:
     // - ADDI x1, x0, 1
     // - ADDI x2, x1, 2
@@ -150,8 +152,9 @@ fn riscv_trace_no_shared_cpu_bus_shout_linkage_redteam() {
         }
     }
     let row = tamper_row.expect("expected at least one Shout lookup in the trace");
-    let val_idx = layout.cell(layout.trace.shout_val, row);
-    w[val_idx - layout.m_in] += F::ONE;
+    let tamper_col = select_tamper_col(&layout);
+    let tamper_idx = layout.cell(tamper_col, row);
+    w[tamper_idx - layout.m_in] += F::ONE;
 
     // Params + committer.
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n.max(ccs.m)).expect("params");
@@ -178,6 +181,7 @@ fn riscv_trace_no_shared_cpu_bus_shout_linkage_redteam() {
     let shout_lanes = extract_shout_lanes_over_time(&exec, &shout_table_ids).expect("extract shout lanes");
 
     let add_lut_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 3,
@@ -204,6 +208,7 @@ fn riscv_trace_no_shared_cpu_bus_shout_linkage_redteam() {
     let add_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(&params, &add_z);
     let add_c = l.commit(&add_Z);
     let add_lut_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: vec![add_c],
         ..add_lut_inst
     };
@@ -213,8 +218,6 @@ fn riscv_trace_no_shared_cpu_bus_shout_linkage_redteam() {
         mcs,
         lut_instances: vec![(add_lut_inst, add_lut_wit)],
         mem_instances: Vec::new(),
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =
@@ -246,5 +249,15 @@ fn riscv_trace_no_shared_cpu_bus_shout_linkage_redteam() {
         &proof,
         mixers,
     )
-    .expect_err("tampered trace shout_val must fail during no-shared shout linkage verification");
+    .expect_err("tampered trace shout linkage must fail during no-shared verification");
+}
+
+#[test]
+fn riscv_trace_no_shared_cpu_bus_shout_val_linkage_redteam() {
+    run_no_shared_cpu_bus_shout_linkage_redteam(|layout| layout.trace.shout_val);
+}
+
+#[test]
+fn riscv_trace_no_shared_cpu_bus_shout_lhs_linkage_redteam() {
+    run_no_shared_cpu_bus_shout_linkage_redteam(|layout| layout.trace.shout_lhs);
 }

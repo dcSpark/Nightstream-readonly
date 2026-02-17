@@ -1,7 +1,7 @@
 use neo_ajtai::Commitment as Cmt;
 use neo_fold::riscv_shard::{Rv32B1, Rv32B1Run};
 use neo_fold::{pi_ccs_prove_simple, pi_ccs_verify};
-use neo_memory::riscv::ccs::build_rv32_b1_decode_sidecar_ccs;
+use neo_memory::riscv::ccs::build_rv32_b1_semantics_sidecar_ccs;
 use neo_memory::riscv::lookups::{encode_program, BranchCondition, RiscvInstruction, RiscvMemOp, RiscvOpcode};
 use neo_transcript::Poseidon2Transcript;
 use neo_transcript::Transcript;
@@ -27,12 +27,12 @@ fn prove_semantics_sidecar_or_verify_fails(
     mcs_insts: &[neo_ccs::McsInstance<Cmt, F>],
     mcs_wits: &[neo_ccs::McsWitness<F>],
 ) {
-    // In the current RV32 B1 implementation, the “decode sidecar” CCS contains the full step semantics.
-    let semantics_ccs = build_rv32_b1_decode_sidecar_ccs(run.layout(), run.mem_layouts()).expect("sidecar ccs");
+    // In the current RV32 B1 implementation, the “semantics sidecar” CCS contains the full step semantics.
+    let semantics_ccs = build_rv32_b1_semantics_sidecar_ccs(run.layout(), run.mem_layouts()).expect("sidecar ccs");
 
     let num_steps = mcs_insts.len();
-    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_sidecar_batch");
-    tr.append_message(b"decode_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
+    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/semantics_sidecar_batch");
+    tr.append_message(b"semantics_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
     let Ok((me_out, proof)) = pi_ccs_prove_simple(
         &mut tr,
         run.params(),
@@ -44,8 +44,8 @@ fn prove_semantics_sidecar_or_verify_fails(
         return;
     };
 
-    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_sidecar_batch");
-    tr.append_message(b"decode_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
+    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/semantics_sidecar_batch");
+    tr.append_message(b"semantics_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
     let res = pi_ccs_verify(&mut tr, run.params(), &semantics_ccs, mcs_insts, &[], &me_out, &proof);
     assert_prove_or_verify_fails(res, "semantics sidecar (malicious witness)");
 }

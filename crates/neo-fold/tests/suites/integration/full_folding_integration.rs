@@ -402,6 +402,7 @@ fn build_single_chunk_inputs() -> (
     };
     let mem_wit = neo_memory::witness::MemWitness { mats: Vec::new() };
     let lut_inst = neo_memory::witness::LutInstance::<Cmt, F> {
+        table_id: lut_table.table_id,
         comms: Vec::new(),
         k: lut_table.k,
         d: lut_table.d,
@@ -444,8 +445,6 @@ fn build_single_chunk_inputs() -> (
         mcs: (mcs_inst.clone(), mcs_wit.clone()),
         lut_instances: vec![(lut_inst.clone(), lut_wit)],
         mem_instances: vec![(mem_inst.clone(), mem_wit)],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     };
 
@@ -572,6 +571,7 @@ fn full_folding_integration_multi_step_chunk() {
     };
     let mem_wit = neo_memory::witness::MemWitness { mats: Vec::new() };
     let lut_inst = neo_memory::witness::LutInstance::<Cmt, F> {
+        table_id: lut_table.table_id,
         comms: Vec::new(),
         k: lut_table.k,
         d: lut_table.d,
@@ -612,8 +612,6 @@ fn full_folding_integration_multi_step_chunk() {
         mcs: (mcs_inst, mcs_wit),
         lut_instances: vec![(lut_inst, lut_wit)],
         mem_instances: vec![(mem_inst, mem_wit)],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData,
     };
 

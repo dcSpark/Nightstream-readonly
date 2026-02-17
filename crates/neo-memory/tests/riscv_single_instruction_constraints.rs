@@ -77,7 +77,7 @@ fn nightstream_single_addi_constraint_counts() {
     assert_eq!(nightstream_constraints, 142, "step CCS constraint count regression");
     assert_eq!(
         decode_constraints, 101,
-        "decode sidecar CCS constraint count regression"
+        "decode plumbing sidecar CCS constraint count regression"
     );
     assert_eq!(
         semantics_constraints, 139,

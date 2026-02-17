@@ -2,7 +2,15 @@ use crate::PiCcsError;
 use neo_ccs::{CcsMatrix, CcsStructure, Mat, MeInstance};
 use neo_math::{F, K};
 use neo_memory::ajtai::decode_vector as ajtai_decode_vector;
-use neo_memory::cpu::{build_bus_layout_for_instances_with_shout_and_twist_lanes, BusLayout};
+use neo_memory::cpu::{
+    build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes,
+    BusLayout, ShoutInstanceShape,
+};
+use neo_memory::riscv::lookups::{PROG_ID, REG_ID};
+use neo_memory::riscv::trace::{
+    rv32_is_decode_lookup_table_id, rv32_is_width_lookup_table_id, rv32_trace_lookup_addr_group_for_table_id,
+    rv32_trace_lookup_selector_group_for_table_id,
+};
 use neo_memory::sparse_time::SparseIdxVec;
 use neo_memory::witness::{LutInstance, MemInstance, StepInstanceBundle, StepWitnessBundle};
 use neo_params::NeoParams;
@@ -105,7 +113,6 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
     }
 
     let chunk_size = infer_chunk_size_from_steps(steps)?;
-
     let base_shout_ell_addrs: Vec<usize> = (0..steps[0].lut_insts_len())
         .map(|i| {
             let inst = steps[0].lut_inst(i);
@@ -117,6 +124,14 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
             let inst = steps[0].lut_inst(i);
             inst.lanes
         })
+        .collect();
+    let base_shout_addr_groups: Vec<Option<u64>> = (0..steps[0].lut_insts_len())
+        .map(|i| {
+            rv32_trace_lookup_addr_group_for_table_id(steps[0].lut_inst(i).table_id).map(|v| v as u64)
+        })
+        .collect();
+    let base_shout_selector_groups: Vec<Option<u64>> = (0..steps[0].lut_insts_len())
+        .map(|i| rv32_trace_lookup_selector_group_for_table_id(steps[0].lut_inst(i).table_id).map(|v| v as u64))
         .collect();
     let base_twist_ell_addrs: Vec<usize> = (0..steps[0].mem_insts_len())
         .map(|i| {
@@ -144,6 +159,14 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
                 inst.lanes
             })
             .collect();
+        let cur_shout_addr_groups: Vec<Option<u64>> = (0..step.lut_insts_len())
+            .map(|j| {
+                rv32_trace_lookup_addr_group_for_table_id(step.lut_inst(j).table_id).map(|v| v as u64)
+            })
+            .collect();
+        let cur_shout_selector_groups: Vec<Option<u64>> = (0..step.lut_insts_len())
+            .map(|j| rv32_trace_lookup_selector_group_for_table_id(step.lut_inst(j).table_id).map(|v| v as u64))
+            .collect();
         let cur_twist: Vec<usize> = (0..step.mem_insts_len())
             .map(|j| {
                 let inst = step.mem_inst(j);
@@ -158,6 +181,8 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
             .collect();
         if cur_shout != base_shout_ell_addrs
             || cur_shout_lanes != base_shout_lanes
+            || cur_shout_addr_groups != base_shout_addr_groups
+            || cur_shout_selector_groups != base_shout_selector_groups
             || cur_twist != base_twist_ell_addrs
             || cur_twist_lanes != base_twist_lanes
         {
@@ -167,21 +192,29 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
         }
     }
 
-    let shout_ell_addrs_and_lanes = base_shout_ell_addrs
+    let shout_shapes = base_shout_ell_addrs
         .iter()
         .copied()
         .zip(base_shout_lanes.iter().copied())
-        .map(|(ell_addr, lanes)| (ell_addr, lanes));
+        .zip(base_shout_addr_groups.iter().copied())
+        .zip(base_shout_selector_groups.iter().copied())
+        .map(|(((ell_addr, lanes), addr_group), selector_group)| ShoutInstanceShape {
+            ell_addr,
+            lanes,
+            n_vals: 1usize,
+            addr_group,
+            selector_group,
+        });
     let twist_ell_addrs_and_lanes = base_twist_ell_addrs
         .iter()
         .copied()
         .zip(base_twist_lanes.iter().copied())
         .map(|(ell_addr, lanes)| (ell_addr, lanes));
-    let layout = build_bus_layout_for_instances_with_shout_and_twist_lanes(
+    let layout = build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes(
         s.m,
         m_in,
         chunk_size,
-        shout_ell_addrs_and_lanes,
+        shout_shapes,
         twist_ell_addrs_and_lanes,
     )
     .map_err(PiCcsError::InvalidInput)?;
@@ -212,7 +245,7 @@ pub(crate) fn prepare_ccs_for_shared_cpu_bus_steps<'a, Cmt, S: BusStepView<Cmt>>
 ) -> Result<(&'a CcsStructure<F>, BusLayout), PiCcsError> {
     let bus = infer_bus_layout_for_steps(s0, steps)?;
     let padding_rows = ensure_ccs_has_shared_bus_padding_for_steps(s0, &bus, steps)?;
-    ensure_ccs_binds_shared_bus_for_steps(s0, &bus, &padding_rows)?;
+    ensure_ccs_binds_shared_bus_for_steps(s0, &bus, &padding_rows, steps)?;
     // Performance: do NOT materialize bus copyout matrices into the CCS. Instead, we append the
     // corresponding ME openings directly from the witness (see `append_bus_openings_to_me_*`).
     Ok((s0, bus))
@@ -936,7 +969,7 @@ fn required_bus_cols_for_layout(layout: &BusLayout) -> Vec<BusColLabel> {
                 label: format!("shout[{lut_idx}].lane[{lane_idx}].has_lookup"),
             });
             out.push(BusColLabel {
-                col_id: shout.val,
+                col_id: shout.primary_val(),
                 label: format!("shout[{lut_idx}].lane[{lane_idx}].val"),
             });
         }
@@ -982,7 +1015,7 @@ fn required_bus_cols_for_layout(layout: &BusLayout) -> Vec<BusColLabel> {
     out
 }
 
-fn required_bus_binding_cols_for_layout(layout: &BusLayout) -> Vec<BusColLabel> {
+fn required_bus_binding_cols_for_layout<Cmt, S: BusStepView<Cmt>>(layout: &BusLayout, steps: &[S]) -> Vec<BusColLabel> {
     // Note: `inc_at_write_addr` is a Twist-internal witness field derived from the sparse
     // memory state. Many CPU CCSes do not (and should not) constrain it outside padding rows;
     // it is constrained by the Twist Route-A checks instead. We still require the canonical
@@ -1014,13 +1047,56 @@ fn required_bus_binding_cols_for_layout(layout: &BusLayout) -> Vec<BusColLabel> 
     let shout_selector_and_val_cols: HashSet<usize> = layout
         .shout_cols
         .iter()
-        .flat_map(|inst| inst.lanes.iter().flat_map(|s| [s.has_lookup, s.val]))
+        .flat_map(|inst| inst.lanes.iter().flat_map(|s| [s.has_lookup, s.primary_val()]))
         .collect();
+
+    let mut twist_unbound_cols: HashSet<usize> = HashSet::new();
+    if let Some(step0) = steps.first() {
+        let has_trace_lookup_families = (0..step0.lut_insts_len()).any(|idx| {
+            let table_id = step0.lut_inst(idx).table_id;
+            rv32_is_decode_lookup_table_id(table_id) || rv32_is_width_lookup_table_id(table_id)
+        });
+        if has_trace_lookup_families {
+            for (mem_idx, inst) in layout.twist_cols.iter().enumerate() {
+                let mem_id = step0.mem_inst(mem_idx).mem_id;
+                for (lane_idx, twist) in inst.lanes.iter().enumerate() {
+                    let read_bound = if mem_id == PROG_ID.0 {
+                        lane_idx == 0
+                    } else if mem_id == REG_ID.0 {
+                        lane_idx <= 1
+                    } else {
+                        lane_idx == 0
+                    };
+                    let write_bound = if mem_id == REG_ID.0 {
+                        lane_idx == 0
+                    } else if mem_id == PROG_ID.0 {
+                        false
+                    } else {
+                        lane_idx == 0
+                    };
+
+                    if !read_bound {
+                        twist_unbound_cols.insert(twist.has_read);
+                        twist_unbound_cols.insert(twist.rv);
+                        twist_unbound_cols.extend(twist.ra_bits.clone());
+                    }
+                    if !write_bound {
+                        twist_unbound_cols.insert(twist.has_write);
+                        twist_unbound_cols.insert(twist.wv);
+                        twist_unbound_cols.insert(twist.inc);
+                        twist_unbound_cols.extend(twist.wa_bits.clone());
+                    }
+                }
+            }
+        }
+    }
+
     required_bus_cols_for_layout(layout)
         .into_iter()
         .filter(|c| !inc_cols.contains(&c.col_id))
         .filter(|c| !shout_addr_cols.contains(&c.col_id))
         .filter(|c| !shout_selector_and_val_cols.contains(&c.col_id))
+        .filter(|c| !twist_unbound_cols.contains(&c.col_id))
         .collect()
 }
 
@@ -1191,12 +1267,21 @@ struct BusPaddingLabel {
 
 fn required_bus_padding_for_layout(bus: &BusLayout) -> Vec<BusPaddingLabel> {
     let mut out = Vec::<BusPaddingLabel>::new();
+    let mut shout_addr_range_counts = std::collections::HashMap::<(usize, usize), usize>::new();
+    for inst in bus.shout_cols.iter() {
+        for shout in inst.lanes.iter() {
+            let key = (shout.addr_bits.start, shout.addr_bits.end);
+            *shout_addr_range_counts.entry(key).or_insert(0) += 1;
+        }
+    }
 
     for (lut_idx, inst) in bus.shout_cols.iter().enumerate() {
         for (lane_idx, shout) in inst.lanes.iter().enumerate() {
+            let key = (shout.addr_bits.start, shout.addr_bits.end);
+            let shared_addr_group = shout_addr_range_counts.get(&key).copied().unwrap_or(0) > 1;
             for j in 0..bus.chunk_size {
                 let has_lookup_z = bus.bus_cell(shout.has_lookup, j);
-                let val_z = bus.bus_cell(shout.val, j);
+                let val_z = bus.bus_cell(shout.primary_val(), j);
 
                 // (1 - has_lookup) * val = 0
                 out.push(BusPaddingLabel {
@@ -1205,14 +1290,16 @@ fn required_bus_padding_for_layout(bus: &BusLayout) -> Vec<BusPaddingLabel> {
                     label: format!("shout[{lut_idx}].lane[{lane_idx}][j={j}]: (1-has_lookup)*val"),
                 });
 
-                // (1 - has_lookup) * addr_bits[b] = 0
-                for (b, col_id) in shout.addr_bits.clone().enumerate() {
-                    let bit_z = bus.bus_cell(col_id, j);
-                    out.push(BusPaddingLabel {
-                        flag_z_idx: has_lookup_z,
-                        field_z_idx: bit_z,
-                        label: format!("shout[{lut_idx}].lane[{lane_idx}][j={j}]: (1-has_lookup)*addr_bits[{b}]"),
-                    });
+                if !shared_addr_group {
+                    // (1 - has_lookup) * addr_bits[b] = 0
+                    for (b, col_id) in shout.addr_bits.clone().enumerate() {
+                        let bit_z = bus.bus_cell(col_id, j);
+                        out.push(BusPaddingLabel {
+                            flag_z_idx: has_lookup_z,
+                            field_z_idx: bit_z,
+                            label: format!("shout[{lut_idx}].lane[{lane_idx}][j={j}]: (1-has_lookup)*addr_bits[{b}]"),
+                        });
+                    }
                 }
             }
         }
@@ -1641,10 +1728,11 @@ fn ensure_ccs_has_bus_padding_constraints(
     )))
 }
 
-fn ensure_ccs_binds_shared_bus_for_steps(
+fn ensure_ccs_binds_shared_bus_for_steps<Cmt, S: BusStepView<Cmt>>(
     s: &CcsStructure<F>,
     bus: &BusLayout,
     padding_rows: &HashSet<usize>,
+    steps: &[S],
 ) -> Result<(), PiCcsError> {
     if bus.bus_cols == 0 {
         return Ok(());
@@ -1652,7 +1740,7 @@ fn ensure_ccs_binds_shared_bus_for_steps(
     let required = required_bus_cols_for_layout(bus);
     ensure_ccs_references_bus_cols(s, bus, &required)?;
 
-    let binding_required = required_bus_binding_cols_for_layout(bus);
+    let binding_required = required_bus_binding_cols_for_layout(bus, steps);
     ensure_ccs_references_bus_cols_outside_padding_rows(s, bus, padding_rows, &binding_required)
 }
 

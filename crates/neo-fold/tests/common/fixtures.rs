@@ -307,6 +307,7 @@ fn build_twist_shout_2step_fixture_inner(seed: u64, bad_lookup_step1: bool) -> S
     };
     let mem_wit0 = neo_memory::witness::MemWitness { mats: Vec::new() };
     let lut_inst0 = neo_memory::witness::LutInstance::<Cmt, F> {
+        table_id: lut_table.table_id,
         comms: Vec::new(),
         k: lut_table.k,
         d: lut_table.d,
@@ -332,6 +333,7 @@ fn build_twist_shout_2step_fixture_inner(seed: u64, bad_lookup_step1: bool) -> S
     };
     let mem_wit1 = neo_memory::witness::MemWitness { mats: Vec::new() };
     let lut_inst1 = neo_memory::witness::LutInstance::<Cmt, F> {
+        table_id: lut_table.table_id,
         comms: Vec::new(),
         k: lut_table.k,
         d: lut_table.d,
@@ -364,16 +366,12 @@ fn build_twist_shout_2step_fixture_inner(seed: u64, bad_lookup_step1: bool) -> S
         mcs: (mcs0, mcs_wit0),
         lut_instances: vec![(lut_inst0, lut_wit0)],
         mem_instances: vec![(mem_inst0, mem_wit0)],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     };
     let step1 = StepWitnessBundle {
         mcs: (mcs1, mcs_wit1),
         lut_instances: vec![(lut_inst1, lut_wit1)],
         mem_instances: vec![(mem_inst1, mem_wit1)],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData::<K>,
     };
 

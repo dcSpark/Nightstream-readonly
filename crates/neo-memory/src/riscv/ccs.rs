@@ -53,7 +53,8 @@ mod trace;
 mod witness;
 
 pub use bus_bindings::{
-    rv32_b1_shared_cpu_bus_config, rv32_trace_shared_bus_requirements, rv32_trace_shared_cpu_bus_config,
+    rv32_b1_shared_cpu_bus_config, rv32_trace_shared_bus_requirements, rv32_trace_shared_bus_requirements_with_specs,
+    rv32_trace_shared_cpu_bus_config, rv32_trace_shared_cpu_bus_config_with_specs, TraceShoutBusSpec,
 };
 pub use layout::Rv32B1Layout;
 pub use trace::{
@@ -1954,17 +1955,9 @@ fn rv32_b1_semantic_constraints_impl(
     Ok(constraints)
 }
 
-/// Build the **full** RV32 B1 semantics constraint set (including instruction decode plumbing).
-fn full_semantic_constraints(
-    layout: &Rv32B1Layout,
-    mem_layouts: &HashMap<u32, PlainMemLayout>,
-) -> Result<Vec<Constraint<F>>, String> {
-    rv32_b1_semantic_constraints_impl(layout, mem_layouts, true)
-}
-
 /// Build the RV32 B1 semantics constraint set **excluding** instruction decode plumbing.
 ///
-/// This assumes a separate decode sidecar CCS proves instruction bits/fields/immediates and one-hot flags.
+/// This assumes a separate decode-plumbing sidecar CCS proves instruction bits/fields/immediates and one-hot flags.
 fn semantic_constraints_without_decode(
     layout: &Rv32B1Layout,
     mem_layouts: &HashMap<u32, PlainMemLayout>,
@@ -2646,74 +2639,6 @@ pub fn build_rv32_b1_semantics_sidecar_ccs(
     mem_layouts: &HashMap<u32, PlainMemLayout>,
 ) -> Result<CcsStructure<F>, String> {
     let constraints = semantic_constraints_without_decode(layout, mem_layouts)?;
-    let n = constraints.len();
-    build_r1cs_ccs(&constraints, n, layout.m, layout.const_one)
-}
-
-/// Build an RV32 B1 “decode/semantics” sidecar CCS.
-///
-/// This CCS contains the full RV32 B1 step semantics (including instruction decode plumbing),
-/// and is meant to be proven/verified as an **additional** argument alongside the main folded proof.
-pub fn build_rv32_b1_decode_sidecar_ccs(
-    layout: &Rv32B1Layout,
-    mem_layouts: &HashMap<u32, PlainMemLayout>,
-) -> Result<CcsStructure<F>, String> {
-    let mut constraints = full_semantic_constraints(layout, mem_layouts)?;
-
-    // Derived group/control signals (used by downstream code).
-    for j in 0..layout.chunk_size {
-        // writes_rd = OR over op-classes that write rd (one-hot => sum).
-        constraints.push(Constraint::terms(
-            layout.const_one,
-            false,
-            vec![
-                (layout.writes_rd(j), F::ONE),
-                (layout.is_alu_reg(j), -F::ONE),
-                (layout.is_alu_imm(j), -F::ONE),
-                (layout.is_load(j), -F::ONE),
-                (layout.is_amo(j), -F::ONE),
-                (layout.is_lui(j), -F::ONE),
-                (layout.is_auipc(j), -F::ONE),
-                (layout.is_jal(j), -F::ONE),
-                (layout.is_jalr(j), -F::ONE),
-            ],
-        ));
-
-        // pc_plus4 + is_branch + is_jal + is_jalr = is_active
-        constraints.push(Constraint::terms(
-            layout.const_one,
-            false,
-            vec![
-                (layout.pc_plus4(j), F::ONE),
-                (layout.is_branch(j), F::ONE),
-                (layout.is_jal(j), F::ONE),
-                (layout.is_jalr(j), F::ONE),
-                (layout.is_active(j), -F::ONE),
-            ],
-        ));
-
-        // wb_from_alu selects the Shout-backed writeback path:
-        // wb_from_alu = is_alu_imm + is_alu_reg - is_rv32m + is_auipc
-        constraints.push(Constraint::terms(
-            layout.const_one,
-            false,
-            vec![
-                (layout.wb_from_alu(j), F::ONE),
-                (layout.is_alu_imm(j), -F::ONE),
-                (layout.is_alu_reg(j), -F::ONE),
-                (layout.is_mul(j), F::ONE),
-                (layout.is_mulh(j), F::ONE),
-                (layout.is_mulhu(j), F::ONE),
-                (layout.is_mulhsu(j), F::ONE),
-                (layout.is_div(j), F::ONE),
-                (layout.is_divu(j), F::ONE),
-                (layout.is_rem(j), F::ONE),
-                (layout.is_remu(j), F::ONE),
-                (layout.is_auipc(j), -F::ONE),
-            ],
-        ));
-    }
-
     let n = constraints.len();
     build_r1cs_ccs(&constraints, n, layout.m, layout.const_one)
 }

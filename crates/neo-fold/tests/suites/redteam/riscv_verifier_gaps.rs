@@ -127,7 +127,7 @@ fn make_trivial_ccs(m: usize) -> CcsStructure<F> {
     CcsStructure::new(vec![a], f).expect("build trivial CCS")
 }
 
-fn swap_decode_sidecar_for_trivial_ccs(run: &Rv32B1Run, bundle: &mut Rv32B1ProofBundle) {
+fn swap_decode_plumbing_for_trivial_ccs(run: &Rv32B1Run, bundle: &mut Rv32B1ProofBundle) {
     let (mcs_insts, mcs_wits) = collect_mcs(run);
     let num_steps = mcs_insts.len();
     let trivial_ccs = make_trivial_ccs(run.ccs().m);
@@ -143,7 +143,7 @@ fn swap_decode_sidecar_for_trivial_ccs(run: &Rv32B1Run, bundle: &mut Rv32B1Proof
         &mcs_wits,
         run.committer(),
     )
-    .expect("prove trivial decode sidecar");
+    .expect("prove trivial decode plumbing sidecar");
 
     bundle.decode_plumbing.num_steps = num_steps;
     bundle.decode_plumbing.me_out = me_out;
@@ -199,7 +199,7 @@ fn redteam_verifier_should_reject_prover_selected_decode_ccs() {
     run.verify().expect("baseline verify");
 
     let mut bad_bundle = run.proof().clone();
-    swap_decode_sidecar_for_trivial_ccs(&run, &mut bad_bundle);
+    swap_decode_plumbing_for_trivial_ccs(&run, &mut bad_bundle);
 
     assert!(
         run.verify_proof_bundle(&bad_bundle).is_err(),

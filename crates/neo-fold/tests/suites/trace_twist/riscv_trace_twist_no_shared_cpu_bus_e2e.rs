@@ -26,7 +26,7 @@ use neo_transcript::Transcript;
 use neo_vm_trace::trace_program;
 use p3_field::PrimeCharacteristicRing;
 
-use crate::suite::{default_mixers, setup_ajtai_committer};
+use crate::suite::{default_mixers, setup_ajtai_committer, widen_ccs_cols_for_test};
 
 fn write_u64_bits_lsb(dst_bits: &mut [F], x: u64) {
     for (i, b) in dst_bits.iter_mut().enumerate() {
@@ -155,9 +155,18 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_twist_prove_verify() {
     let (prog_layout, prog_init) = prog_rom_layout_and_init_words::<F>(PROG_ID, /*base=*/ 0, &program_bytes)
         .expect("prog_rom_layout_and_init_words");
 
-    let layout = Rv32TraceCcsLayout::new(exec.rows.len()).expect("trace CCS layout");
-    let (x, w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
-    let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
+    let t = exec.rows.len();
+    let layout = Rv32TraceCcsLayout::new(t).expect("trace CCS layout");
+    let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
+    let mut ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
+    // Legacy no-shared Twist tests need enough witness width to host the widest Twist lane bundle.
+    // Here REG dominates: lanes=2, ell_addr=5 => bus_cols = 2*(2*5 + 5) = 30.
+    let min_m = layout
+        .m_in
+        .checked_add((/*bus_cols=*/ 30usize).checked_mul(t).expect("bus cols * steps"))
+        .expect("m_in + bus region");
+    widen_ccs_cols_for_test(&mut ccs, min_m);
+    w.resize(ccs.m - layout.m_in, F::ZERO);
 
     // Params + committer.
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n.max(ccs.m)).expect("params");
@@ -195,7 +204,6 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_twist_prove_verify() {
         MemInit::Sparse(prog_init_pairs)
     };
 
-    let t = exec.rows.len();
     let ram_d = 2usize; // k=4, address bits=2 (keeps the test tiny)
 
     let init_regs: HashMap<u64, u64> = HashMap::new();
@@ -303,8 +311,6 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_twist_prove_verify() {
             (reg_mem_inst, reg_mem_wit),
             (ram_mem_inst, ram_mem_wit),
         ],
-        decode_instances: Vec::new(),
-        width_instances: Vec::new(),
         _phantom: PhantomData,
     }];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =
