@@ -371,6 +371,7 @@ pub struct Rv32B1 {
     output_target: OutputTarget,
     ram_init: HashMap<u64, u64>,
     reg_init: HashMap<u64, u64>,
+    ccs_cache: Option<Arc<Rv32B1CcsCache>>,
 }
 
 /// Default instruction cap for RV32B1 runs when `max_steps` is not specified.
@@ -416,6 +417,7 @@ impl Rv32B1 {
             output_target: OutputTarget::Ram,
             ram_init: HashMap::new(),
             reg_init: HashMap::new(),
+            ccs_cache: None,
         }
     }
 
@@ -530,6 +532,406 @@ impl Rv32B1 {
     pub fn ram_init_u32(mut self, addr: u64, value: u32) -> Self {
         self.ram_init.insert(addr, value as u64);
         self
+    }
+
+    /// Attach a pre-built CCS cache to skip CCS synthesis in [`prove`] and [`build_verifier`].
+    pub fn with_ccs_cache(mut self, cache: Arc<Rv32B1CcsCache>) -> Self {
+        self.ccs_cache = Some(cache);
+        self
+    }
+
+    /// Build the CCS preprocessing cache from the current builder configuration.
+    pub fn build_ccs_cache(&self) -> Result<Rv32B1CcsCache, PiCcsError> {
+        if self.xlen != 32 {
+            return Err(PiCcsError::InvalidInput(format!(
+                "RV32 B1 MVP requires xlen == 32 (got {})",
+                self.xlen
+            )));
+        }
+        if self.program_bytes.is_empty() {
+            return Err(PiCcsError::InvalidInput("program_bytes must be non-empty".into()));
+        }
+        if !self.chunk_size_auto && self.chunk_size == 0 {
+            return Err(PiCcsError::InvalidInput("chunk_size must be non-zero".into()));
+        }
+        if self.ram_bytes == 0 {
+            return Err(PiCcsError::InvalidInput("ram_bytes must be non-zero".into()));
+        }
+        if self.program_base != 0 {
+            return Err(PiCcsError::InvalidInput(
+                "RV32 B1 MVP requires program_base == 0 (addresses are indices into PROG/RAM layouts)".into(),
+            ));
+        }
+
+        let program = decode_program(&self.program_bytes)
+            .map_err(|e| PiCcsError::InvalidInput(format!("decode_program failed: {e}")))?;
+
+        let estimated_steps = match self.max_steps {
+            Some(n) => {
+                if n == 0 {
+                    return Err(PiCcsError::InvalidInput("max_steps must be non-zero".into()));
+                }
+                n
+            }
+            None => program.len().max(1),
+        };
+
+        let (prog_layout, initial_mem) = neo_memory::riscv::rom_init::prog_rom_layout_and_init_words::<F>(
+            PROG_ID,
+            /*base_addr=*/ 0,
+            &self.program_bytes,
+        )
+        .map_err(|e| PiCcsError::InvalidInput(format!("prog_rom_layout_and_init_words failed: {e}")))?;
+        let mut initial_mem = initial_mem;
+        for (&addr, &value) in &self.ram_init {
+            let value = value as u32 as u64;
+            initial_mem.insert((neo_memory::riscv::lookups::RAM_ID.0, addr), F::from_u64(value));
+        }
+        for (&reg, &value) in &self.reg_init {
+            let value = value as u32 as u64;
+            initial_mem.insert((neo_memory::riscv::lookups::REG_ID.0, reg), F::from_u64(value));
+        }
+
+        let (k_ram, d_ram) = pow2_ceil_k(self.ram_bytes.max(4));
+        let mem_layouts = HashMap::from([
+            (
+                neo_memory::riscv::lookups::RAM_ID.0,
+                PlainMemLayout {
+                    k: k_ram,
+                    d: d_ram,
+                    n_side: 2,
+                    lanes: 1,
+                },
+            ),
+            (
+                neo_memory::riscv::lookups::REG_ID.0,
+                PlainMemLayout {
+                    k: 32,
+                    d: 5,
+                    n_side: 2,
+                    lanes: 2,
+                },
+            ),
+            (PROG_ID.0, prog_layout),
+        ]);
+
+        let shout = RiscvShoutTables::new(self.xlen);
+        let inferred_shout_ops = infer_required_shout_opcodes(&program);
+        let mut shout_ops = match &self.shout_ops {
+            Some(ops) => {
+                let missing: HashSet<RiscvOpcode> = inferred_shout_ops.difference(ops).copied().collect();
+                if !missing.is_empty() {
+                    let mut missing_names: Vec<String> = missing.into_iter().map(|op| format!("{op:?}")).collect();
+                    missing_names.sort_unstable();
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "shout_ops override must be a superset of required opcodes; missing [{}]",
+                        missing_names.join(", ")
+                    )));
+                }
+                ops.clone()
+            }
+            None if self.shout_auto_minimal => inferred_shout_ops,
+            None => all_shout_opcodes(),
+        };
+        shout_ops.insert(RiscvOpcode::Add);
+
+        let mut table_specs: HashMap<u32, LutTableSpec> = HashMap::new();
+        for op in shout_ops {
+            let table_id = shout.opcode_to_id(op).0;
+            table_specs.insert(
+                table_id,
+                LutTableSpec::RiscvOpcode {
+                    opcode: op,
+                    xlen: self.xlen,
+                },
+            );
+        }
+        let mut shout_table_ids: Vec<u32> = table_specs.keys().copied().collect();
+        shout_table_ids.sort_unstable();
+
+        let chunk_size = if self.chunk_size_auto {
+            choose_rv32_b1_chunk_size(&mem_layouts, &shout_table_ids, estimated_steps)
+                .map_err(|e| PiCcsError::InvalidInput(format!("auto chunk_size failed: {e}")))?
+        } else {
+            self.chunk_size
+        };
+        if chunk_size == 0 {
+            return Err(PiCcsError::InvalidInput("chunk_size must be non-zero".into()));
+        }
+
+        let (ccs_base, layout) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, chunk_size)
+            .map_err(|e| PiCcsError::InvalidInput(format!("build_rv32_b1_step_ccs failed: {e}")))?;
+
+        let session = FoldingSession::<AjtaiSModule>::new_ajtai(self.mode.clone(), &ccs_base)?;
+        let params = session.params().clone();
+        let committer = session.committer().clone();
+        let empty_tables: HashMap<u32, LutTable<F>> = HashMap::new();
+
+        let mut cpu = R1csCpu::new(
+            ccs_base,
+            params,
+            committer,
+            layout.m_in,
+            &empty_tables,
+            &table_specs,
+            rv32_b1_chunk_to_witness(layout.clone()),
+        )
+        .map_err(|e| PiCcsError::InvalidInput(format!("R1csCpu::new failed: {e}")))?;
+        cpu = cpu
+            .with_shared_cpu_bus(
+                rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts, initial_mem)
+                    .map_err(|e| PiCcsError::InvalidInput(format!("rv32_b1_shared_cpu_bus_config failed: {e}")))?,
+                chunk_size,
+            )
+            .map_err(|e| PiCcsError::InvalidInput(format!("shared bus inject failed: {e}")))?;
+
+        let full_ccs = cpu.ccs.clone();
+        let sparse = Arc::new(SparseCache::build(&full_ccs));
+        let ccs_mat_digest = neo_reductions::engines::utils::digest_ccs_matrices(&full_ccs);
+
+        Ok(Rv32B1CcsCache {
+            sparse,
+            full_ccs: Some(full_ccs),
+            layout: Some(layout),
+            params: Some(session.params().clone()),
+            committer: Some(session.committer().clone()),
+            ccs_mat_digest: Some(ccs_mat_digest),
+        })
+    }
+
+    /// Build only the verification context (CCS + session) without executing the program or proving.
+    pub fn build_verifier(self) -> Result<Rv32B1Verifier, PiCcsError> {
+        if self.xlen != 32 {
+            return Err(PiCcsError::InvalidInput(format!(
+                "RV32 B1 MVP requires xlen == 32 (got {})",
+                self.xlen
+            )));
+        }
+        if self.program_bytes.is_empty() {
+            return Err(PiCcsError::InvalidInput("program_bytes must be non-empty".into()));
+        }
+        if !self.chunk_size_auto && self.chunk_size == 0 {
+            return Err(PiCcsError::InvalidInput("chunk_size must be non-zero".into()));
+        }
+        if self.ram_bytes == 0 {
+            return Err(PiCcsError::InvalidInput("ram_bytes must be non-zero".into()));
+        }
+        if self.program_base != 0 {
+            return Err(PiCcsError::InvalidInput(
+                "RV32 B1 MVP requires program_base == 0 (addresses are indices into PROG/RAM layouts)".into(),
+            ));
+        }
+        if self.program_bytes.len() % 4 != 0 {
+            return Err(PiCcsError::InvalidInput(
+                "program_bytes must be 4-byte aligned (RV32 B1 runner does not support RVC)".into(),
+            ));
+        }
+        for (i, chunk) in self.program_bytes.chunks_exact(4).enumerate() {
+            let first_half = u16::from_le_bytes([chunk[0], chunk[1]]);
+            if (first_half & 0b11) != 0b11 {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "RV32 B1 runner does not support compressed instructions (RVC): found compressed encoding at word index {i}"
+                )));
+            }
+        }
+
+        let program = decode_program(&self.program_bytes)
+            .map_err(|e| PiCcsError::InvalidInput(format!("decode_program failed: {e}")))?;
+
+        let estimated_steps = match self.max_steps {
+            Some(n) => {
+                if n == 0 {
+                    return Err(PiCcsError::InvalidInput("max_steps must be non-zero".into()));
+                }
+                n
+            }
+            None => program.len().max(1),
+        };
+
+        let (prog_layout, initial_mem) = neo_memory::riscv::rom_init::prog_rom_layout_and_init_words(
+            PROG_ID,
+            /*base_addr=*/ 0,
+            &self.program_bytes,
+        )
+        .map_err(|e| PiCcsError::InvalidInput(format!("prog_rom_layout_and_init_words failed: {e}")))?;
+        let mut initial_mem = initial_mem;
+        for (&addr, &value) in &self.ram_init {
+            let value = value as u32 as u64;
+            initial_mem.insert((neo_memory::riscv::lookups::RAM_ID.0, addr), F::from_u64(value));
+        }
+        for (&reg, &value) in &self.reg_init {
+            let value = value as u32 as u64;
+            initial_mem.insert((neo_memory::riscv::lookups::REG_ID.0, reg), F::from_u64(value));
+        }
+
+        let (k_ram, d_ram) = pow2_ceil_k(self.ram_bytes.max(4));
+        let mem_layouts = HashMap::from([
+            (
+                neo_memory::riscv::lookups::RAM_ID.0,
+                PlainMemLayout {
+                    k: k_ram,
+                    d: d_ram,
+                    n_side: 2,
+                    lanes: 1,
+                },
+            ),
+            (
+                neo_memory::riscv::lookups::REG_ID.0,
+                PlainMemLayout {
+                    k: 32,
+                    d: 5,
+                    n_side: 2,
+                    lanes: 2,
+                },
+            ),
+            (PROG_ID.0, prog_layout),
+        ]);
+
+        let shout = RiscvShoutTables::new(self.xlen);
+        let inferred_shout_ops = infer_required_shout_opcodes(&program);
+        let mut shout_ops = match &self.shout_ops {
+            Some(ops) => {
+                let missing: HashSet<RiscvOpcode> = inferred_shout_ops.difference(ops).copied().collect();
+                if !missing.is_empty() {
+                    let mut missing_names: Vec<String> = missing.into_iter().map(|op| format!("{op:?}")).collect();
+                    missing_names.sort_unstable();
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "shout_ops override must be a superset of required opcodes; missing [{}]",
+                        missing_names.join(", ")
+                    )));
+                }
+                ops.clone()
+            }
+            None if self.shout_auto_minimal => inferred_shout_ops,
+            None => all_shout_opcodes(),
+        };
+        shout_ops.insert(RiscvOpcode::Add);
+
+        let mut table_specs: HashMap<u32, LutTableSpec> = HashMap::new();
+        for op in shout_ops {
+            let table_id = shout.opcode_to_id(op).0;
+            table_specs.insert(
+                table_id,
+                LutTableSpec::RiscvOpcode {
+                    opcode: op,
+                    xlen: self.xlen,
+                },
+            );
+        }
+        let mut shout_table_ids: Vec<u32> = table_specs.keys().copied().collect();
+        shout_table_ids.sort_unstable();
+
+        let chunk_size = if self.chunk_size_auto {
+            choose_rv32_b1_chunk_size(&mem_layouts, &shout_table_ids, estimated_steps)
+                .map_err(|e| PiCcsError::InvalidInput(format!("auto chunk_size failed: {e}")))?
+        } else {
+            self.chunk_size
+        };
+        if chunk_size == 0 {
+            return Err(PiCcsError::InvalidInput("chunk_size must be non-zero".into()));
+        }
+
+        let empty_tables: HashMap<u32, LutTable<F>> = HashMap::new();
+        let has_full_ccs = self
+            .ccs_cache
+            .as_ref()
+            .map(|c| c.full_ccs.is_some() && c.layout.is_some())
+            .unwrap_or(false);
+
+        let mut session: FoldingSession<AjtaiSModule>;
+        let ccs: CcsStructure<F>;
+        let layout: Rv32B1Layout;
+
+        if has_full_ccs {
+            let cache = self.ccs_cache.as_ref().expect("ccs_cache checked above");
+            let cached_ccs = cache.full_ccs.as_ref().expect("cache has full_ccs").clone();
+            layout = cache.layout.as_ref().expect("cache has layout").clone();
+            if let (Some(cached_params), Some(cached_committer)) = (&cache.params, &cache.committer) {
+                session = FoldingSession::new(self.mode.clone(), cached_params.clone(), cached_committer.clone());
+                session.commit_m = Some(cached_ccs.m);
+            } else {
+                session = FoldingSession::<AjtaiSModule>::new_ajtai(self.mode.clone(), &cached_ccs)?;
+            }
+            ccs = cached_ccs;
+        } else {
+            let (ccs_base, layout_built) = build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, chunk_size)
+                .map_err(|e| PiCcsError::InvalidInput(format!("build_rv32_b1_step_ccs failed: {e}")))?;
+            layout = layout_built;
+
+            session = FoldingSession::<AjtaiSModule>::new_ajtai(self.mode.clone(), &ccs_base)?;
+            let params = session.params().clone();
+            let committer = session.committer().clone();
+
+            let mut cpu = R1csCpu::new(
+                ccs_base,
+                params,
+                committer,
+                layout.m_in,
+                &empty_tables,
+                &table_specs,
+                rv32_b1_chunk_to_witness(layout.clone()),
+            )
+            .map_err(|e| PiCcsError::InvalidInput(format!("R1csCpu::new failed: {e}")))?;
+            cpu = cpu
+                .with_shared_cpu_bus(
+                    rv32_b1_shared_cpu_bus_config(&layout, &shout_table_ids, mem_layouts.clone(), initial_mem.clone())
+                        .map_err(|e| PiCcsError::InvalidInput(format!("rv32_b1_shared_cpu_bus_config failed: {e}")))?,
+                    chunk_size,
+                )
+                .map_err(|e| PiCcsError::InvalidInput(format!("shared bus inject failed: {e}")))?;
+            ccs = cpu.ccs.clone();
+        }
+
+        session.set_step_linking(rv32_b1_step_linking_config(&layout));
+
+        let output_binding_cfg = if self.output_claims.is_empty() {
+            None
+        } else {
+            let out_mem_id = match self.output_target {
+                OutputTarget::Ram => neo_memory::riscv::lookups::RAM_ID.0,
+                OutputTarget::Reg => neo_memory::riscv::lookups::REG_ID.0,
+            };
+            let out_layout = mem_layouts.get(&out_mem_id).ok_or_else(|| {
+                PiCcsError::InvalidInput(format!(
+                    "output binding: missing PlainMemLayout for mem_id={out_mem_id}"
+                ))
+            })?;
+            let expected_k = 1usize
+                .checked_shl(out_layout.d as u32)
+                .ok_or_else(|| PiCcsError::InvalidInput("output binding: 2^d overflow".into()))?;
+            if out_layout.k != expected_k {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "output binding: mem_id={out_mem_id} has k={}, but expected 2^d={} (d={})",
+                    out_layout.k, expected_k, out_layout.d
+                )));
+            }
+            let mut mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
+            mem_ids.sort_unstable();
+            let mem_idx = mem_ids
+                .iter()
+                .position(|&id| id == out_mem_id)
+                .ok_or_else(|| PiCcsError::InvalidInput("output binding: mem_id not in mem_layouts".into()))?;
+            Some(OutputBindingConfig::new(out_layout.d, self.output_claims.clone()).with_mem_idx(mem_idx))
+        };
+
+        let mut verifier = Rv32B1Verifier {
+            session,
+            ccs,
+            _layout: layout,
+            mem_layouts,
+            statement_initial_mem: initial_mem,
+            output_binding_cfg,
+        };
+
+        if let Some(cache) = self.ccs_cache {
+            if let Some(digest) = cache.ccs_mat_digest.clone() {
+                verifier.preload_sparse_cache_with_digest(cache.sparse.clone(), digest)?;
+            } else {
+                verifier.preload_sparse_cache(cache.sparse.clone())?;
+            }
+        }
+
+        Ok(verifier)
     }
 
     /// Prove/verify only the Tier 2.1 trace-wiring CCS (time-in-rows).
@@ -1054,6 +1456,58 @@ impl Rv32B1 {
     }
 }
 
+/// Verification context for RV32 B1 proofs.
+///
+/// Created by [`Rv32B1::build_verifier`]. Contains CCS/session state required to
+/// verify proofs without re-running the guest.
+pub struct Rv32B1Verifier {
+    session: FoldingSession<AjtaiSModule>,
+    ccs: CcsStructure<F>,
+    _layout: Rv32B1Layout,
+    mem_layouts: HashMap<u32, PlainMemLayout>,
+    statement_initial_mem: HashMap<(u32, u64), F>,
+    output_binding_cfg: Option<OutputBindingConfig>,
+}
+
+impl Rv32B1Verifier {
+    /// Preload the verifier SparseCache using `&self.ccs` (final pointer).
+    pub fn preload_sparse_cache(&mut self, sparse: Arc<SparseCache<F>>) -> Result<(), PiCcsError> {
+        self.session
+            .preload_verifier_ccs_sparse_cache(&self.ccs, sparse)
+    }
+
+    /// Preload verifier SparseCache with a precomputed matrix digest.
+    pub fn preload_sparse_cache_with_digest(
+        &mut self,
+        sparse: Arc<SparseCache<F>>,
+        ccs_mat_digest: Vec<F>,
+    ) -> Result<(), PiCcsError> {
+        self.session
+            .preload_verifier_ccs_sparse_cache_with_digest(&self.ccs, sparse, ccs_mat_digest)
+    }
+
+    /// Verify a main `ShardProof` against externally supplied public steps.
+    pub fn verify(
+        &self,
+        proof: &ShardProof,
+        steps_public: &[StepInstanceBundle<Cmt, F, K>],
+    ) -> Result<bool, PiCcsError> {
+        rv32_b1_enforce_chunk0_mem_init_matches_statement(
+            &self.mem_layouts,
+            &self.statement_initial_mem,
+            steps_public,
+        )?;
+
+        if let Some(ob_cfg) = &self.output_binding_cfg {
+            self.session
+                .verify_with_external_steps_and_output_binding(&self.ccs, steps_public, proof, ob_cfg)
+        } else {
+            self.session
+                .verify_with_external_steps(&self.ccs, steps_public, proof)
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct PiCcsProofBundle {
     pub num_steps: usize,
@@ -1407,7 +1861,13 @@ impl Rv32B1Run {
         Ok(())
     }
 
-    pub fn proof(&self) -> &Rv32B1ProofBundle {
+    /// Main folding proof (without sidecar proofs).
+    pub fn proof(&self) -> &ShardProof {
+        &self.proof_bundle.main
+    }
+
+    /// Full RV32 B1 proof bundle (main + sidecars).
+    pub fn proof_bundle(&self) -> &Rv32B1ProofBundle {
         &self.proof_bundle
     }
 
@@ -1593,6 +2053,23 @@ impl Rv32B1Run {
 
     pub fn prove_duration(&self) -> Duration {
         self.prove_duration
+    }
+
+    /// Compatibility timing breakdown used by downstream adapters.
+    pub fn prove_timings(&self) -> ProveTimings {
+        let (vm_trace, cpu_witness) = self
+            .session
+            .shared_bus_aux()
+            .map(|aux| (aux.vm_trace_duration, aux.cpu_witness_duration))
+            .unwrap_or((Duration::ZERO, Duration::ZERO));
+        ProveTimings {
+            decode_and_setup: self.prove_phase_durations.setup,
+            ccs_and_shared_bus: Duration::ZERO,
+            vm_execution: self.prove_phase_durations.build_commit,
+            fold_and_prove: self.prove_phase_durations.fold_and_prove,
+            vm_trace,
+            cpu_witness,
+        }
     }
 
     pub fn verify_duration(&self) -> Option<Duration> {
