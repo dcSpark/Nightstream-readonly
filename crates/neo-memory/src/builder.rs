@@ -404,7 +404,7 @@ where
         chunk_size,
         mem_ids,
         final_mem_states: mem_states,
-        vm_trace_duration,
+        vm_trace_duration: std::time::Duration::ZERO,
         cpu_witness_duration,
     };
     Ok((step_bundles, aux))

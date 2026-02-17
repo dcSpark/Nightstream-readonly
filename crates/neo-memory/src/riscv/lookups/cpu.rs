@@ -7,6 +7,7 @@ use super::decode::decode_instruction;
 use super::encode::encode_instruction;
 use super::isa::{BranchCondition, RiscvInstruction, RiscvMemOp, RiscvOpcode};
 use super::tables::RiscvShoutTables;
+use super::{POSEIDON2_ECALL_NUM, POSEIDON2_READ_ECALL_NUM};
 
 /// A RISC-V CPU that can be traced using Neo's VmCpu trait.
 ///

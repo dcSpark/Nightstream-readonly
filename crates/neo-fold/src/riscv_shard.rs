@@ -18,6 +18,7 @@ use crate::PiCcsError;
 use neo_ajtai::{AjtaiSModule, Commitment as Cmt};
 use neo_ccs::{CcsStructure, Mat, MeInstance};
 use neo_math::{F, K};
+use neo_reductions::engines::optimized_engine::oracle::SparseCache;
 use neo_memory::mem_init_from_initial_mem;
 use neo_memory::output_check::ProgramIO;
 use neo_memory::plain::LutTable;
@@ -778,10 +779,10 @@ impl Rv32B1 {
         // Always enforce step-to-step chunk chaining for RV32 B1.
         session.set_step_linking(rv32_b1_step_linking_config(&layout));
 
-        let t_ccs_and_shared_bus = elapsed_duration(phase_start);
+        let _t_ccs_and_shared_bus = elapsed_duration(phase_start);
 
         // === Phase 3: VM execution + shard collection ===
-        let phase_start = time_now();
+        let _phase_start = time_now();
 
         // Execute + collect step bundles (and aux for output binding).
         let build_start = time_now();
@@ -811,7 +812,7 @@ impl Rv32B1 {
         }
 
         // Extract sub-phase timings from the shared-bus aux.
-        let (t_vm_trace, t_cpu_witness) = session
+        let (_t_vm_trace, _t_cpu_witness) = session
             .shared_bus_aux()
             .map(|aux| (aux.vm_trace_duration, aux.cpu_witness_duration))
             .unwrap_or((Duration::ZERO, Duration::ZERO));
@@ -1592,11 +1593,6 @@ impl Rv32B1Run {
 
     pub fn prove_duration(&self) -> Duration {
         self.prove_duration
-    }
-
-    /// Per-phase timing breakdown for the prove call.
-    pub fn prove_timings(&self) -> &ProveTimings {
-        &self.prove_timings
     }
 
     pub fn verify_duration(&self) -> Option<Duration> {
