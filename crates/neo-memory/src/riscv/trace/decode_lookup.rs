@@ -218,9 +218,8 @@ impl Rv32DecodeSidecarLayout {
 
 #[inline]
 pub fn rv32_decode_lookup_backed_cols(layout: &Rv32DecodeSidecarLayout) -> Vec<usize> {
-    let mut out = Vec::with_capacity(60);
+    let mut out = Vec::with_capacity(56);
     out.push(layout.opcode);
-    out.push(layout.funct3);
     out.push(layout.rs2);
     out.push(layout.rd_has_write);
     out.push(layout.ram_has_read);
@@ -247,9 +246,6 @@ pub fn rv32_decode_lookup_backed_cols(layout: &Rv32DecodeSidecarLayout) -> Vec<u
     out.extend_from_slice(&layout.rs1_bit);
     out.extend_from_slice(&layout.rs2_bit);
     out.extend_from_slice(&layout.funct7_bit);
-    out.push(layout.rd_is_zero_01);
-    out.push(layout.rd_is_zero_012);
-    out.push(layout.rd_is_zero_0123);
     out.push(layout.rd_is_zero);
     out
 }

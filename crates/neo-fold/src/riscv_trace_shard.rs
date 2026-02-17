@@ -492,6 +492,12 @@ fn program_requires_ram_sidecar(program: &[RiscvInstruction]) -> bool {
     })
 }
 
+fn program_requires_width_lookup(program: &[RiscvInstruction]) -> bool {
+    program
+        .iter()
+        .any(|instr| matches!(instr, RiscvInstruction::Load { .. } | RiscvInstruction::Store { .. }))
+}
+
 fn rv32_trace_table_specs(shout_ops: &HashSet<RiscvOpcode>) -> HashMap<u32, LutTableSpec> {
     let shout = RiscvShoutTables::new(32);
     let mut table_specs = HashMap::new();
@@ -952,7 +958,8 @@ impl Rv32TraceWiring {
         exec.validate_inactive_rows_are_empty()
             .map_err(|e| PiCcsError::InvalidInput(format!("validate_inactive_rows_are_empty failed: {e}")))?;
         let width_layout = Rv32WidthSidecarLayout::new();
-        let (width_lookup_tables, width_lookup_addr_d) = if self.shared_cpu_bus {
+        let include_width_lookup = self.shared_cpu_bus && program_requires_width_lookup(&program);
+        let (width_lookup_tables, width_lookup_addr_d) = if include_width_lookup {
             let (tables, addr_d) = build_rv32_width_lookup_tables(&width_layout, &exec, trace.steps.len())?;
             inject_rv32_width_lookup_events_into_trace(&mut trace, &exec, &width_layout)?;
             (tables, addr_d)
@@ -1055,7 +1062,7 @@ impl Rv32TraceWiring {
         } else {
             Vec::new()
         };
-        let width_lookup_bus_specs: Vec<TraceShoutBusSpec> = if self.shared_cpu_bus {
+        let width_lookup_bus_specs: Vec<TraceShoutBusSpec> = if include_width_lookup {
             let width_lookup_cols = rv32_width_lookup_backed_cols(&width_layout);
             width_lookup_cols
                 .iter()

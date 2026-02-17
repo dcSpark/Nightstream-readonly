@@ -93,8 +93,9 @@ impl RouteATimeClaimPlan {
     {
         let lut_insts: Vec<&LutInstance<Cmt, F>> = lut_insts.into_iter().collect();
 
-        // Group only canonical RV32 opcode families in non-packed mode. This keeps event-table and
-        // packed specs on their existing per-lane schedule and avoids mixing selector regimes.
+        // Group all non-packed lookup families that already share an address group in trace mode.
+        // This collapses per-column decode/width families into one gamma-batched claim pair while
+        // keeping packed/event-table specs on their existing per-lane schedule.
         let mut grouped: std::collections::BTreeMap<u64, Vec<ShoutGammaGroupLaneRef>> =
             std::collections::BTreeMap::new();
         let mut grouped_ell: std::collections::BTreeMap<u64, usize> = std::collections::BTreeMap::new();
@@ -103,11 +104,15 @@ impl RouteATimeClaimPlan {
         for (inst_idx, lut_inst) in lut_insts.iter().enumerate() {
             let lanes = lut_inst.lanes.max(1);
             let ell_addr = lut_inst.d * lut_inst.ell;
-            let is_gamma_candidate = matches!(lut_inst.table_spec, Some(LutTableSpec::RiscvOpcode { .. }))
-                && rv32_trace_lookup_addr_group_for_table_id(lut_inst.table_id).is_some();
+            let addr_group = rv32_trace_lookup_addr_group_for_table_id(lut_inst.table_id);
+            let is_packed = matches!(
+                lut_inst.table_spec,
+                Some(LutTableSpec::RiscvOpcodePacked { .. } | LutTableSpec::RiscvOpcodeEventTablePacked { .. })
+            );
+            let is_gamma_candidate = !is_packed && addr_group.is_some();
             for lane_idx in 0..lanes {
                 if is_gamma_candidate {
-                    if let Some(addr_group) = rv32_trace_lookup_addr_group_for_table_id(lut_inst.table_id) {
+                    if let Some(addr_group) = addr_group {
                         let key = ((addr_group as u64) << 32) | lane_idx as u64;
                         grouped.entry(key).or_default().push(ShoutGammaGroupLaneRef {
                             flat_lane_idx,
