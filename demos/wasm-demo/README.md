@@ -9,7 +9,7 @@ This demo supports two input modes:
 - **TestExport JSON** (same schema as `crates/neo-fold/poseidon2-tests/*.json`):
   R1CS A/B/C sparse matrices + per-step witnesses.
 - **RV32 Fibonacci** (pasteable “mini-asm” / words): assembles a small RV32 program, generates a trace,
-  and proves it under the RV32 B1 shared-bus step circuit.
+  and proves it under the RV32 trace-wiring shared-bus circuit.
 
 ## API surface / extending from JS
 

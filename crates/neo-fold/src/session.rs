@@ -794,7 +794,7 @@ where
 
     /// Access the collected *public* per-step bundles (MCS + optional Twist/Shout instances).
     ///
-    /// This is useful for specialized verifiers (e.g. RV32 B1 statement checks) that need access
+    /// This is useful for specialized verifiers that need access
     /// to memory/lookup instances, not just the MCS list.
     pub fn steps_public(&self) -> Vec<StepInstanceBundle<Cmt, F, K>> {
         self.steps.iter().map(StepInstanceBundle::from).collect()

@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use neo_fold::riscv_shard::Rv32B1;
+use neo_fold::riscv_trace_shard::Rv32TraceWiring;
 use neo_math::F;
 use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvOpcode};
 use p3_field::PrimeCharacteristicRing;
@@ -32,12 +32,12 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_mulhu_prove_verify() {
     ];
     let program_bytes = encode_program(&program);
 
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
-        .chunk_size(1)
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .chunk_rows(1)
         .max_steps(program.len())
         .reg_output_claim(/*reg=*/ 3, F::from_u64(1))
         .reg_output_claim(/*reg=*/ 4, F::from_u64(1))
         .prove()
-        .expect("rv32_b1 prove (WB/WP route, MULHU)");
-    run.verify().expect("rv32_b1 verify (WB/WP route, MULHU)");
+        .expect("rv32 trace prove (WB/WP route, MULHU)");
+    run.verify().expect("rv32 trace verify (WB/WP route, MULHU)");
 }

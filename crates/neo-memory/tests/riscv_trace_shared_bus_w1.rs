@@ -4,9 +4,9 @@ use neo_memory::cpu::CPU_BUS_COL_DISABLED;
 use neo_memory::plain::PlainMemLayout;
 use neo_memory::riscv::ccs::{
     rv32_trace_shared_bus_requirements_with_specs, rv32_trace_shared_cpu_bus_config_with_specs, Rv32TraceCcsLayout,
-    TraceShoutBusSpec, RV32_B1_SHOUT_PROFILE_FULL20,
+    TraceShoutBusSpec,
 };
-use neo_memory::riscv::lookups::{PROG_ID, RAM_ID, REG_ID};
+use neo_memory::riscv::lookups::{RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID, REG_ID};
 use neo_memory::riscv::trace::{
     rv32_decode_lookup_backed_cols, rv32_decode_lookup_table_id_for_col, rv32_trace_lookup_addr_group_for_table_id,
     rv32_trace_lookup_selector_group_for_table_id, rv32_width_lookup_backed_cols, rv32_width_lookup_table_id_for_col,
@@ -70,14 +70,44 @@ fn width_selector_specs(cycle_d: usize) -> Vec<TraceShoutBusSpec> {
         .collect()
 }
 
+fn full_table_ids() -> Vec<u32> {
+    let shout = RiscvShoutTables::new(/*xlen=*/ 32);
+    [
+        RiscvOpcode::And,
+        RiscvOpcode::Xor,
+        RiscvOpcode::Or,
+        RiscvOpcode::Add,
+        RiscvOpcode::Sub,
+        RiscvOpcode::Slt,
+        RiscvOpcode::Sltu,
+        RiscvOpcode::Sll,
+        RiscvOpcode::Srl,
+        RiscvOpcode::Sra,
+        RiscvOpcode::Eq,
+        RiscvOpcode::Neq,
+        RiscvOpcode::Mul,
+        RiscvOpcode::Mulh,
+        RiscvOpcode::Mulhu,
+        RiscvOpcode::Mulhsu,
+        RiscvOpcode::Div,
+        RiscvOpcode::Divu,
+        RiscvOpcode::Rem,
+        RiscvOpcode::Remu,
+    ]
+    .into_iter()
+    .map(|op| shout.opcode_to_id(op).0)
+    .collect()
+}
+
 #[test]
 fn rv32_trace_shared_bus_config_uses_padding_only_shout_bindings_for_all_tables() {
     let mut layout = Rv32TraceCcsLayout::new(/*t=*/ 4).expect("trace CCS layout");
     let mem_layouts = sample_mem_layouts();
     let decode_specs = decode_selector_specs(mem_layouts[&PROG_ID.0].d);
+    let table_ids = full_table_ids();
     let (bus_region_len, _) = rv32_trace_shared_bus_requirements_with_specs(
         &layout,
-        RV32_B1_SHOUT_PROFILE_FULL20,
+        &table_ids,
         &decode_specs,
         &mem_layouts,
     )
@@ -85,14 +115,14 @@ fn rv32_trace_shared_bus_config_uses_padding_only_shout_bindings_for_all_tables(
     layout.m += bus_region_len;
     let cfg = rv32_trace_shared_cpu_bus_config_with_specs(
         &layout,
-        RV32_B1_SHOUT_PROFILE_FULL20,
+        &table_ids,
         &decode_specs,
         mem_layouts,
         HashMap::<(u32, u64), F>::new(),
     )
     .expect("trace shared bus config");
 
-    for &table_id in RV32_B1_SHOUT_PROFILE_FULL20 {
+    for &table_id in &table_ids {
         let lanes = cfg
             .shout_cpu
             .get(&table_id)
@@ -109,9 +139,10 @@ fn rv32_trace_shared_bus_requirements_accept_rv32m_table_ids() {
     let layout = Rv32TraceCcsLayout::new(/*t=*/ 4).expect("trace CCS layout");
     let mem_layouts = sample_mem_layouts();
     let decode_specs = decode_selector_specs(mem_layouts[&PROG_ID.0].d);
+    let table_ids = full_table_ids();
     let (bus_region_len, reserved_rows) = rv32_trace_shared_bus_requirements_with_specs(
         &layout,
-        RV32_B1_SHOUT_PROFILE_FULL20,
+        &table_ids,
         &decode_specs,
         &mem_layouts,
     )
@@ -215,9 +246,10 @@ fn rv32_trace_shared_cpu_bus_config_with_specs_binds_decode_lookup_key_to_pc_bef
     let mut layout = Rv32TraceCcsLayout::new(/*t=*/ 4).expect("trace CCS layout");
     let mem_layouts = sample_mem_layouts();
     let decode_specs = decode_selector_specs(mem_layouts[&PROG_ID.0].d);
+    let table_ids = full_table_ids();
     let (bus_region_len, _) = rv32_trace_shared_bus_requirements_with_specs(
         &layout,
-        RV32_B1_SHOUT_PROFILE_FULL20,
+        &table_ids,
         &decode_specs,
         &mem_layouts,
     )
@@ -225,7 +257,7 @@ fn rv32_trace_shared_cpu_bus_config_with_specs_binds_decode_lookup_key_to_pc_bef
     layout.m += bus_region_len;
     let cfg = rv32_trace_shared_cpu_bus_config_with_specs(
         &layout,
-        RV32_B1_SHOUT_PROFILE_FULL20,
+        &table_ids,
         &decode_specs,
         mem_layouts,
         HashMap::<(u32, u64), F>::new(),
@@ -261,13 +293,14 @@ fn rv32_trace_shared_cpu_bus_config_with_specs_binds_width_lookup_key_to_cycle()
     let mem_layouts = sample_mem_layouts();
     let mut specs = decode_selector_specs(mem_layouts[&PROG_ID.0].d);
     specs.extend(width_selector_specs(/*cycle_d=*/ 8));
+    let table_ids = full_table_ids();
     let (bus_region_len, _) =
-        rv32_trace_shared_bus_requirements_with_specs(&layout, RV32_B1_SHOUT_PROFILE_FULL20, &specs, &mem_layouts)
+        rv32_trace_shared_bus_requirements_with_specs(&layout, &table_ids, &specs, &mem_layouts)
             .expect("trace shared bus requirements");
     layout.m += bus_region_len;
     let cfg = rv32_trace_shared_cpu_bus_config_with_specs(
         &layout,
-        RV32_B1_SHOUT_PROFILE_FULL20,
+        &table_ids,
         &specs,
         mem_layouts,
         HashMap::<(u32, u64), F>::new(),

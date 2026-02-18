@@ -855,7 +855,7 @@ impl Rv32TraceWiring {
         }
         if self.min_trace_len > DEFAULT_RV32_TRACE_MAX_STEPS {
             return Err(PiCcsError::InvalidInput(format!(
-                "min_trace_len={} exceeds trace-mode hard cap {}. Use the chunked RV32B1 runner for longer executions.",
+                "min_trace_len={} exceeds trace-mode hard cap {}. Increase chunk_rows and prove in chunks for longer executions.",
                 self.min_trace_len, DEFAULT_RV32_TRACE_MAX_STEPS
             )));
         }
@@ -883,7 +883,7 @@ impl Rv32TraceWiring {
                 }
                 if n > DEFAULT_RV32_TRACE_MAX_STEPS {
                     return Err(PiCcsError::InvalidInput(format!(
-                        "max_steps={} exceeds trace-mode hard cap {}. Use the chunked RV32B1 runner for longer executions.",
+                        "max_steps={} exceeds trace-mode hard cap {}. Increase chunk_rows and prove in chunks for longer executions.",
                         n, DEFAULT_RV32_TRACE_MAX_STEPS
                     )));
                 }
@@ -940,7 +940,7 @@ impl Rv32TraceWiring {
         let target_len = trace.steps.len().max(self.min_trace_len);
         if target_len > DEFAULT_RV32_TRACE_MAX_STEPS {
             return Err(PiCcsError::InvalidInput(format!(
-                "trace length {} exceeds trace-mode hard cap {}. Use the chunked RV32B1 runner for longer executions.",
+                "trace length {} exceeds trace-mode hard cap {}. Increase chunk_rows and prove in chunks for longer executions.",
                 target_len, DEFAULT_RV32_TRACE_MAX_STEPS
             )));
         }

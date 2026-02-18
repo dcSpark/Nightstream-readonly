@@ -94,7 +94,7 @@ impl RouteATimeClaimPlan {
 
         // Group all non-packed lookup families that share an address group.
         // The addr_group is carried on each LutInstance (set by the bus config for trace mode,
-        // None for B1 mode). This collapses per-column decode/width families into one
+        // None when no lookup-family sharing is configured). This collapses per-column decode/width families into one
         // gamma-batched claim pair while keeping packed/event-table specs on their existing
         // per-lane schedule.
         let mut grouped: std::collections::BTreeMap<u64, Vec<ShoutGammaGroupLaneRef>> =

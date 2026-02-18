@@ -59,12 +59,12 @@ pub struct SharedCpuBusConfig<F> {
     /// Optional per-table address-sharing group ids (table_id -> group_id).
     ///
     /// Tables with the same group_id share `addr_bits` columns in the bus layout.
-    /// Leave empty for B1 mode (no sharing). Populated by trace mode for column efficiency.
+    /// Leave empty when no families share address bits. Populated by trace mode for column efficiency.
     pub shout_addr_groups: HashMap<u32, u64>,
     /// Optional per-table selector-sharing group ids (table_id -> group_id).
     ///
     /// Tables with the same group_id share `has_lookup` columns in the bus layout.
-    /// Leave empty for B1 mode (no sharing). Populated by trace mode for column efficiency.
+    /// Leave empty when no families share selectors. Populated by trace mode for column efficiency.
     pub shout_selector_groups: HashMap<u32, u64>,
 }
 

@@ -11,7 +11,6 @@ use super::constraint_builder::{build_r1cs_ccs, Constraint};
 ///
 /// This is a Tier 2.1 trace CCS with fixed columns over time (`t` rows),
 /// AIR-like wiring invariants, and a compact subset of ISA semantics guards.
-/// It is not yet full RV32 B1 semantics parity.
 ///
 /// Witness layout (column-major trace region):
 /// `cell(trace_col, row) = trace_base + trace_col * t + row`.

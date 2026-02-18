@@ -7,7 +7,7 @@
 //! paper-exact crosschecks from dominating CI time.
 
 use neo_fold::pi_ccs::FoldingMode;
-use neo_fold::riscv_shard::Rv32B1;
+use neo_fold::riscv_trace_shard::Rv32TraceWiring;
 use neo_math::F;
 use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvOpcode};
 use neo_reductions::engines::CrosscheckCfg;
@@ -42,10 +42,10 @@ fn test_riscv_program_crosscheck_tiny_trace() {
         outputs: true,
     };
 
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
         .xlen(32)
-        .ram_bytes(0x40)
-        .chunk_size(1)
+        .chunk_rows(1)
+        .min_trace_len(3)
         .max_steps(3)
         .mode(FoldingMode::OptimizedWithCrosscheck(crosscheck_cfg))
         .reg_output_claim(/*reg=*/ 1, /*expected=*/ F::from_u64(12))
@@ -85,10 +85,10 @@ fn test_riscv_program_crosscheck_full_flags_one_step() {
         outputs: true,
     };
 
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
         .xlen(32)
-        .ram_bytes(0x40)
-        .chunk_size(1)
+        .chunk_rows(1)
+        .min_trace_len(1)
         .max_steps(1)
         .mode(FoldingMode::OptimizedWithCrosscheck(crosscheck_cfg))
         .reg_output_claim(/*reg=*/ 1, /*expected=*/ F::from_u64(7))
@@ -128,10 +128,10 @@ fn test_riscv_program_crosscheck_full_flags_two_steps() {
         outputs: true,
     };
 
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
         .xlen(32)
-        .ram_bytes(0x40)
-        .chunk_size(1)
+        .chunk_rows(1)
+        .min_trace_len(2)
         .max_steps(2)
         .mode(FoldingMode::OptimizedWithCrosscheck(crosscheck_cfg))
         .reg_output_claim(/*reg=*/ 1, /*expected=*/ F::from_u64(12))

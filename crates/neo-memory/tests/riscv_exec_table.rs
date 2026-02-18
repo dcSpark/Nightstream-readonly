@@ -6,7 +6,7 @@ use neo_memory::riscv::lookups::{
 use neo_vm_trace::trace_program;
 
 #[test]
-fn rv32_exec_table_matches_rv32_b1_lane_conventions_addi_halt() {
+fn rv32_exec_table_matches_trace_lane_conventions_addi_halt() {
     // Program: ADDI x1, x0, 1; HALT
     let program = vec![
         RiscvInstruction::IAlu {

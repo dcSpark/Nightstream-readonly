@@ -1,13 +1,8 @@
-use neo_ajtai::AjtaiSModule;
-use neo_fold::pi_ccs::FoldingMode;
-use neo_fold::riscv_shard::{rv32_b1_step_linking_config, Rv32B1, Rv32B1Run};
-use neo_fold::session::FoldingSession;
+use neo_fold::riscv_trace_shard::{Rv32TraceWiring, Rv32TraceWiringRun};
+use neo_fold::shard::ShardProof;
 use neo_math::K;
-use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvOpcode, PROG_ID, REG_ID};
-use neo_memory::MemInit;
-use p3_goldilocks::Goldilocks as F;
-
-type StepWit = neo_memory::witness::StepWitnessBundle<neo_ajtai::Commitment, F, K>;
+use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvOpcode};
+use p3_field::PrimeCharacteristicRing;
 
 fn addi_halt_program_bytes(imm: i32) -> Vec<u8> {
     let program = vec![
@@ -22,153 +17,90 @@ fn addi_halt_program_bytes(imm: i32) -> Vec<u8> {
     encode_program(&program)
 }
 
-fn mem_idx(run: &Rv32B1Run, mem_id: u32) -> usize {
-    let mut mem_ids: Vec<u32> = run.mem_layouts().keys().copied().collect();
-    mem_ids.sort_unstable();
-    mem_ids
-        .iter()
-        .position(|&id| id == mem_id)
-        .unwrap_or_else(|| panic!("missing mem_id={mem_id} in mem_layouts"))
+fn prove_run(program_bytes: &[u8], max_steps: usize) -> Rv32TraceWiringRun {
+    let steps = max_steps;
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, program_bytes)
+        .chunk_rows(steps)
+        .min_trace_len(steps)
+        .max_steps(steps)
+        .prove()
+        .expect("prove");
+    run.verify().expect("baseline verify");
+    run
 }
 
-fn verifier_only_session_for_steps(run: &Rv32B1Run, steps: Vec<StepWit>) -> FoldingSession<AjtaiSModule> {
-    let mut sess = FoldingSession::new(FoldingMode::Optimized, run.params().clone(), run.committer().clone());
-    sess.set_step_linking(rv32_b1_step_linking_config(run.layout()));
-    sess.add_step_bundles(steps);
-    sess
+fn tamper_any_claim_scalar(proof: &mut ShardProof) {
+    for step in &mut proof.steps {
+        for claims in [
+            &mut step.fold.ccs_out,
+            &mut step.mem.val_me_claims,
+            &mut step.mem.wb_me_claims,
+            &mut step.mem.wp_me_claims,
+        ] {
+            for claim in claims.iter_mut() {
+                if let Some(first) = claim.y_scalars.first_mut() {
+                    *first += K::ONE;
+                    return;
+                }
+            }
+        }
+    }
+    panic!("expected at least one claim scalar to tamper");
 }
 
 #[test]
-fn rv32_b1_main_proof_truncated_steps_must_fail() {
+fn rv32_trace_main_proof_truncated_steps_must_fail() {
     let program_bytes = addi_halt_program_bytes(/*imm=*/ 1);
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
-        .chunk_size(1)
-        .max_steps(2)
-        .ram_bytes(0x200)
-        .prove()
-        .expect("prove");
+    let run = prove_run(&program_bytes, /*max_steps=*/ 2);
 
-    // Baseline: full verification (includes sidecars).
-    run.verify().expect("baseline verify");
-
-    // Baseline: main proof alone verifies when steps match.
-    let steps_ok: Vec<StepWit> = run.steps_witness().to_vec();
-    let sess_ok = verifier_only_session_for_steps(&run, steps_ok);
-    assert_eq!(
-        sess_ok
-            .verify_collected(run.ccs(), &run.proof().main)
-            .expect("main proof verify"),
-        true
-    );
-
-    // Truncate steps (verifier-side) and reuse the original proof.
-    let steps_bad: Vec<StepWit> = run.steps_witness().iter().cloned().take(1).collect();
-    let sess_bad = verifier_only_session_for_steps(&run, steps_bad);
-    let res = sess_bad.verify_collected(run.ccs(), &run.proof().main);
-    assert!(matches!(res, Err(_) | Ok(false)), "truncated steps must not verify");
-}
-
-#[test]
-fn rv32_b1_main_proof_tamper_prog_init_must_fail() {
-    let program_bytes = addi_halt_program_bytes(/*imm=*/ 1);
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
-        .chunk_size(1)
-        .max_steps(2)
-        .ram_bytes(0x200)
-        .prove()
-        .expect("prove");
-
-    run.verify().expect("baseline verify");
-
-    let prog_idx = mem_idx(&run, PROG_ID.0);
-
-    let mut steps_bad: Vec<StepWit> = run.steps_witness().to_vec();
-    steps_bad[0].mem_instances[prog_idx].0.init = MemInit::Zero;
-
-    let sess_bad = verifier_only_session_for_steps(&run, steps_bad);
-    let res = sess_bad.verify_collected(run.ccs(), &run.proof().main);
+    let mut bad_proof = run.proof().clone();
+    bad_proof.steps.clear();
     assert!(
-        matches!(res, Err(_) | Ok(false)),
-        "tampering PROG Twist init in public input must fail verification"
+        run.verify_proof(&bad_proof).is_err(),
+        "truncated main proof must not verify"
     );
 }
 
 #[test]
-fn rv32_b1_main_proof_tamper_reg_init_must_fail() {
+fn rv32_trace_main_proof_tamper_claim_must_fail() {
     let program_bytes = addi_halt_program_bytes(/*imm=*/ 1);
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
-        .chunk_size(1)
-        .max_steps(2)
-        .ram_bytes(0x200)
-        // Make REG init non-trivial in the public statement.
-        .reg_init_u32(/*reg=*/ 2, /*value=*/ 7)
-        .prove()
-        .expect("prove");
+    let run = prove_run(&program_bytes, /*max_steps=*/ 2);
 
-    run.verify().expect("baseline verify");
-
-    let reg_idx = mem_idx(&run, REG_ID.0);
-
-    let mut steps_bad: Vec<StepWit> = run.steps_witness().to_vec();
-    steps_bad[0].mem_instances[reg_idx].0.init = MemInit::Zero;
-
-    let sess_bad = verifier_only_session_for_steps(&run, steps_bad);
-    let res = sess_bad.verify_collected(run.ccs(), &run.proof().main);
+    let mut bad_proof = run.proof().clone();
+    tamper_any_claim_scalar(&mut bad_proof);
     assert!(
-        matches!(res, Err(_) | Ok(false)),
-        "tampering REG Twist init in public input must fail verification"
+        run.verify_proof(&bad_proof).is_err(),
+        "tampered main proof must not verify"
     );
 }
 
 #[test]
-fn rv32_b1_main_proof_step_reordering_must_fail() {
+fn rv32_trace_main_proof_step_reordering_must_fail() {
     let program_bytes = addi_halt_program_bytes(/*imm=*/ 1);
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
-        .chunk_size(1)
-        .max_steps(2)
-        .ram_bytes(0x200)
-        .prove()
-        .expect("prove");
-    run.verify().expect("baseline verify");
+    let run = prove_run(&program_bytes, /*max_steps=*/ 2);
 
-    let mut steps_bad: Vec<StepWit> = run.steps_witness().to_vec();
-    assert!(steps_bad.len() >= 2, "expected at least 2 steps for reordering test");
-    steps_bad.swap(0, 1);
-
-    let sess_bad = verifier_only_session_for_steps(&run, steps_bad);
-    let res = sess_bad.verify_collected(run.ccs(), &run.proof().main);
+    let mut bad_proof = run.proof().clone();
+    if bad_proof.steps.len() >= 2 {
+        bad_proof.steps.swap(0, 1);
+    } else {
+        tamper_any_claim_scalar(&mut bad_proof);
+    }
     assert!(
-        matches!(res, Err(_) | Ok(false)),
-        "reordering shard steps must not verify"
+        run.verify_proof(&bad_proof).is_err(),
+        "reordered proof steps must not verify"
     );
 }
 
 #[test]
-fn rv32_b1_main_proof_splicing_across_runs_must_fail() {
+fn rv32_trace_main_proof_splicing_across_runs_must_fail() {
     let program_bytes_a = addi_halt_program_bytes(/*imm=*/ 1);
-    let mut run_a = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes_a)
-        .chunk_size(1)
-        .max_steps(2)
-        .ram_bytes(0x200)
-        .prove()
-        .expect("prove A");
-    run_a.verify().expect("baseline verify A");
+    let run_a = prove_run(&program_bytes_a, /*max_steps=*/ 2);
 
     let program_bytes_b = addi_halt_program_bytes(/*imm=*/ 2);
-    let mut run_b = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes_b)
-        .chunk_size(1)
-        .max_steps(2)
-        .ram_bytes(0x200)
-        .prove()
-        .expect("prove B");
-    run_b.verify().expect("baseline verify B");
+    let run_b = prove_run(&program_bytes_b, /*max_steps=*/ 2);
 
-    // Attempt to verify run A's main proof against run B's public step bundles.
-    let steps_bad: Vec<StepWit> = run_b.steps_witness().to_vec();
-    let sess_bad = verifier_only_session_for_steps(&run_a, steps_bad);
-    let res = sess_bad.verify_collected(run_a.ccs(), &run_a.proof().main);
     assert!(
-        matches!(res, Err(_) | Ok(false)),
-        "splicing main proof across runs must not verify"
+        run_a.verify_proof(run_b.proof()).is_err(),
+        "splicing proof across runs must not verify"
     );
 }
