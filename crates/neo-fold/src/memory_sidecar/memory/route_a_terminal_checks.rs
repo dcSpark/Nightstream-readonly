@@ -162,7 +162,7 @@ pub(crate) fn verify_route_a_decode_terminals(
             opcode_flags[7] * (K::ONE - rd_is_zero),
             opcode_flags[8] * (K::ONE - rd_is_zero),
         ];
-        let alu_reg_table_delta = funct7_bits[5] * (funct3_is[0] + funct3_is[5]);
+        let alu_reg_table_delta = w2_alu_reg_table_delta_from_bits(funct7_bits, funct3_is);
         let alu_imm_table_delta = funct7_bits[5] * funct3_is[5];
         let rs2_decode = decode_open_col(decode_layout.rs2)?;
         let imm_i = decode_open_col(decode_layout.imm_i)?;

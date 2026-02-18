@@ -902,6 +902,23 @@ pub(crate) fn w2_decode_bitness_residuals(opcode_flags: [K; 12], funct3_is: [K; 
 }
 
 #[inline]
+pub(crate) fn w2_alu_reg_table_delta_from_bits(funct7_bits: [K; 7], funct3_is: [K; 8]) -> K {
+    let is_rv32m = funct7_bits[0];
+
+    let base_delta = funct7_bits[5] * (funct3_is[0] + funct3_is[5]);
+    let rv32m_delta = K::from(F::from_u64(9)) * funct3_is[0]
+        + K::from(F::from_u64(6)) * funct3_is[1]
+        + K::from(F::from_u64(10)) * funct3_is[2]
+        + K::from(F::from_u64(8)) * funct3_is[3]
+        + K::from(F::from_u64(15)) * funct3_is[4]
+        + K::from(F::from_u64(9)) * funct3_is[5]
+        + K::from(F::from_u64(16)) * funct3_is[6]
+        + K::from(F::from_u64(19)) * funct3_is[7];
+
+    (K::ONE - is_rv32m) * base_delta + is_rv32m * rv32m_delta
+}
+
+#[inline]
 pub(crate) fn w2_alu_branch_lookup_residuals(
     active: K,
     halted: K,
@@ -960,6 +977,9 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
     let branch_table_expected =
         K::from(F::from_u64(10)) - K::from(F::from_u64(5)) * funct3_bits[2] + (funct3_bits[1] * funct3_bits[2]);
     let shift_selector = funct3_is[1] + funct3_is[5];
+    let funct7_m_tail =
+        funct7_bits[1] + funct7_bits[2] + funct7_bits[3] + funct7_bits[4] + funct7_bits[5] + funct7_bits[6];
+    let alu_reg_table_delta_expected = w2_alu_reg_table_delta_from_bits(funct7_bits, funct3_is);
 
     [
         op_alu_imm * (shout_has_lookup - K::ONE),
@@ -976,8 +996,8 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
         op_alu_reg * (shout_table_id - alu_table_base - alu_reg_table_delta),
         op_alu_imm * (shout_table_id - alu_table_base - alu_imm_table_delta),
         op_branch * (shout_table_id - branch_table_expected),
-        op_alu_reg * funct7_bits[0],
-        alu_reg_table_delta - funct7_bits[5] * (funct3_is[0] + funct3_is[5]),
+        op_alu_reg * funct7_bits[0] * funct7_m_tail,
+        alu_reg_table_delta - alu_reg_table_delta_expected,
         alu_imm_table_delta - funct7_bits[5] * funct3_is[5],
         op_lui * rd_has_write - op_lui_write,
         op_auipc * rd_has_write - op_auipc_write,

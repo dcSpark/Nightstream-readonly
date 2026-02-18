@@ -615,9 +615,27 @@ pub(crate) fn build_route_a_decode_time_claims(
         let rd_is_zero_vals = decoded
             .get(&decode.rd_is_zero)
             .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing rd_is_zero decode column".into()))?;
+        let funct7_b0_vals = decoded
+            .get(&decode.funct7_bit[0])
+            .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing funct7_bit[0] decode column".into()))?;
+        let funct7_b1_vals = decoded
+            .get(&decode.funct7_bit[1])
+            .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing funct7_bit[1] decode column".into()))?;
+        let funct7_b2_vals = decoded
+            .get(&decode.funct7_bit[2])
+            .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing funct7_bit[2] decode column".into()))?;
+        let funct7_b3_vals = decoded
+            .get(&decode.funct7_bit[3])
+            .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing funct7_bit[3] decode column".into()))?;
+        let funct7_b4_vals = decoded
+            .get(&decode.funct7_bit[4])
+            .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing funct7_bit[4] decode column".into()))?;
         let funct7_b5_vals = decoded
             .get(&decode.funct7_bit[5])
             .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing funct7_bit[5] decode column".into()))?;
+        let funct7_b6_vals = decoded
+            .get(&decode.funct7_bit[6])
+            .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing funct7_bit[6] decode column".into()))?;
         let op_lui_vals = decoded
             .get(&decode.op_lui)
             .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing op_lui decode column".into()))?;
@@ -642,9 +660,24 @@ pub(crate) fn build_route_a_decode_time_claims(
         let funct3_is1_vals = decoded
             .get(&decode.funct3_is[1])
             .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing funct3_is[1] decode column".into()))?;
+        let funct3_is2_vals = decoded
+            .get(&decode.funct3_is[2])
+            .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing funct3_is[2] decode column".into()))?;
+        let funct3_is3_vals = decoded
+            .get(&decode.funct3_is[3])
+            .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing funct3_is[3] decode column".into()))?;
+        let funct3_is4_vals = decoded
+            .get(&decode.funct3_is[4])
+            .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing funct3_is[4] decode column".into()))?;
         let funct3_is5_vals = decoded
             .get(&decode.funct3_is[5])
             .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing funct3_is[5] decode column".into()))?;
+        let funct3_is6_vals = decoded
+            .get(&decode.funct3_is[6])
+            .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing funct3_is[6] decode column".into()))?;
+        let funct3_is7_vals = decoded
+            .get(&decode.funct3_is[7])
+            .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing funct3_is[7] decode column".into()))?;
         let rs2_vals = decoded
             .get(&decode.rs2)
             .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): missing rs2 decode column".into()))?;
@@ -669,8 +702,27 @@ pub(crate) fn build_route_a_decode_time_claims(
             op_jalr_write.push(op_jalr_vals[j] * rd_keep);
             op_alu_imm_write.push(op_alu_imm_vals[j] * rd_keep);
             op_alu_reg_write.push(op_alu_reg_vals[j] * rd_keep);
-            alu_reg_delta.push(funct7_b5_vals[j] * (funct3_is0_vals[j] + funct3_is5_vals[j]));
-            alu_imm_delta.push(funct7_b5_vals[j] * funct3_is5_vals[j]);
+            let funct7_bits = [
+                funct7_b0_vals[j],
+                funct7_b1_vals[j],
+                funct7_b2_vals[j],
+                funct7_b3_vals[j],
+                funct7_b4_vals[j],
+                funct7_b5_vals[j],
+                funct7_b6_vals[j],
+            ];
+            let funct3_is = [
+                funct3_is0_vals[j],
+                funct3_is1_vals[j],
+                funct3_is2_vals[j],
+                funct3_is3_vals[j],
+                funct3_is4_vals[j],
+                funct3_is5_vals[j],
+                funct3_is6_vals[j],
+                funct3_is7_vals[j],
+            ];
+            alu_reg_delta.push(w2_alu_reg_table_delta_from_bits(funct7_bits, funct3_is));
+            alu_imm_delta.push(funct7_bits[5] * funct3_is[5]);
             alu_imm_shift_rhs_delta.push((funct3_is1_vals[j] + funct3_is5_vals[j]) * (rs2_vals[j] - imm_i_vals[j]));
         }
         decoded.insert(decode.op_lui_write, op_lui_write);
@@ -801,7 +853,7 @@ pub(crate) fn build_route_a_decode_time_claims(
             opcode_flags[8] * (K::ONE - rd_is_zero),
         ];
         let shout_table_id = decode_value_at(decode.shout_table_id, j)?;
-        let alu_reg_table_delta = funct7_bits[5] * (funct3_is[0] + funct3_is[5]);
+        let alu_reg_table_delta = w2_alu_reg_table_delta_from_bits(funct7_bits, funct3_is);
         let alu_imm_table_delta = funct7_bits[5] * funct3_is[5];
         let alu_imm_shift_rhs_delta = (funct3_is[1] + funct3_is[5]) * (rs2_decode - imm_i);
         let selector_residuals = w2_decode_selector_residuals(
@@ -974,7 +1026,7 @@ pub(crate) fn build_route_a_decode_time_claims(
     let fields_weights = w2_decode_pack_weight_vector(r_cycle, W2_FIELDS_RESIDUAL_COUNT);
     let fields_oracle = FormulaOracleSparseTime::new(
         fields_sparse_cols,
-        4,
+        5,
         r_cycle,
         Box::new(move |vals: &[K]| {
             let mut idx = 0usize;
@@ -1062,7 +1114,7 @@ pub(crate) fn build_route_a_decode_time_claims(
                 opcode_flags[7] * rd_keep,
                 opcode_flags[8] * rd_keep,
             ];
-            let alu_reg_table_delta = funct7_bits[5] * (funct3_is[0] + funct3_is[5]);
+            let alu_reg_table_delta = w2_alu_reg_table_delta_from_bits(funct7_bits, funct3_is);
             let alu_imm_table_delta = funct7_bits[5] * funct3_is[5];
             let alu_imm_shift_rhs_delta = (funct3_is[1] + funct3_is[5]) * (rs2_decode - imm_i);
             let selector_residuals = w2_decode_selector_residuals(

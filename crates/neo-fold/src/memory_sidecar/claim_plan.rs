@@ -302,7 +302,7 @@ impl RouteATimeClaimPlan {
         if decode_stage_enabled {
             out.push(TimeClaimMeta {
                 label: b"decode/fields",
-                degree_bound: 4,
+                degree_bound: 5,
                 is_dynamic: false,
             });
             out.push(TimeClaimMeta {

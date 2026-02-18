@@ -371,10 +371,17 @@ where
                         let ell = 1usize;
                         (0usize, d, n_side, ell, Vec::new())
                     }
-                    LutTableSpec::RiscvOpcodePacked { .. } => {
-                        return Err(ShardBuildError::InvalidInit(
-                            "RiscvOpcodePacked is not supported in the chunked builder path".into(),
-                        ));
+                    LutTableSpec::RiscvOpcodePacked { opcode, xlen } => {
+                        if *xlen != 32 {
+                            return Err(ShardBuildError::InvalidInit(format!(
+                                "RiscvOpcodePacked requires xlen=32 in shared-bus mode (got xlen={xlen})"
+                            )));
+                        }
+                        let d = crate::riscv::packed::rv32_packed_d(*opcode)
+                            .map_err(|e| ShardBuildError::InvalidInit(format!("invalid packed opcode spec: {e}")))?;
+                        let n_side = 2usize;
+                        let ell = 1usize;
+                        (0usize, d, n_side, ell, Vec::new())
                     }
                     LutTableSpec::RiscvOpcodeEventTablePacked { .. } => {
                         return Err(ShardBuildError::InvalidInit(

@@ -197,14 +197,23 @@ pub fn verify_route_a_memory_step(
             MemOrLutProof::Shout(_proof) => {}
             _ => return Err(PiCcsError::InvalidInput("expected Shout proof".into())),
         }
-        if matches!(
-            inst.table_spec,
-            Some(LutTableSpec::RiscvOpcodePacked { .. } | LutTableSpec::RiscvOpcodeEventTablePacked { .. })
-        ) {
+        let packed_layout = rv32_packed_shout_layout(&inst.table_spec)?;
+        if matches!(packed_layout, Some((_op, time_bits)) if time_bits != 0) {
             return Err(PiCcsError::InvalidInput(
-                "packed RISC-V Shout table specs are not supported on the shared CPU bus".into(),
+                "RiscvOpcodeEventTablePacked is not supported in shared-bus Route-A verification".into(),
             ));
         }
+        let packed_opcode = match &inst.table_spec {
+            Some(LutTableSpec::RiscvOpcodePacked { opcode, xlen }) => {
+                if *xlen != 32 {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "RiscvOpcodePacked requires xlen=32 in Route-A verification (got xlen={xlen})"
+                    )));
+                }
+                Some(*opcode)
+            }
+            _ => None,
+        };
 
         let ell_addr = inst.d * inst.ell;
         let expected_lanes = inst.lanes.max(1);
@@ -298,10 +307,23 @@ pub fn verify_route_a_memory_step(
         // - adapter (time rounds only) per lane
         // - aggregated bitness for (addr_bits, has_lookup)
         {
-            let mut opens: Vec<K> = Vec::with_capacity(expected_lanes * (ell_addr + 1));
-            for lane in lane_opens.iter() {
-                opens.extend_from_slice(&lane.addr_bits);
-                opens.push(lane.has_lookup);
+            let mut opens: Vec<K> = Vec::new();
+            if let Some(op) = packed_opcode {
+                for lane in lane_opens.iter() {
+                    let mut lane_terms = neo_memory::riscv::packed::rv32_collect_packed_bitness_terms(
+                        op,
+                        lane.addr_bits.as_slice(),
+                        lane.has_lookup,
+                        lane.val,
+                    )?;
+                    opens.append(&mut lane_terms);
+                }
+            } else {
+                opens.reserve(expected_lanes * (ell_addr + 1));
+                for lane in lane_opens.iter() {
+                    opens.extend_from_slice(&lane.addr_bits);
+                    opens.push(lane.has_lookup);
+                }
             }
             let weights = bitness_weights(r_cycle, opens.len(), 0x5348_4F55_54u64 + proof_idx as u64);
             let mut acc = K::ZERO;
@@ -321,7 +343,17 @@ pub fn verify_route_a_memory_step(
                 shout_trace_sums.has_lookup += lane.has_lookup;
                 shout_trace_sums.val += lane.val;
                 shout_trace_sums.table_id += lane.has_lookup * lane_table_id;
-                let (lhs, rhs) = unpack_interleaved_halves_lsb(&lane.addr_bits)?;
+                let (lhs, rhs) = if packed_opcode.is_some() {
+                    let lhs = *lane.addr_bits.first().ok_or_else(|| {
+                        PiCcsError::InvalidInput("packed Shout trace linkage requires lhs in addr_bits[0]".into())
+                    })?;
+                    let rhs = *lane.addr_bits.get(1).ok_or_else(|| {
+                        PiCcsError::InvalidInput("packed Shout trace linkage requires rhs in addr_bits[1]".into())
+                    })?;
+                    (lhs, rhs)
+                } else {
+                    unpack_interleaved_halves_lsb(&lane.addr_bits)?
+                };
                 if lane.shared_addr_group {
                     let inv_count = K::from_u64(lane.shared_addr_group_size as u64).inverse();
                     shout_trace_sums.lhs += lhs * inv_count;
@@ -344,6 +376,11 @@ pub fn verify_route_a_memory_step(
                 .ok_or_else(|| PiCcsError::ProtocolError("shout claim schedule lane idx drift".into()))?;
 
             if lane_claims.gamma_group.is_some() {
+                if packed_opcode.is_some() {
+                    return Err(PiCcsError::ProtocolError(
+                        "packed shout lane unexpectedly assigned to gamma group".into(),
+                    ));
+                }
                 if !pre.is_active {
                     if pre.addr_claim_sum != K::ZERO || pre.addr_final != K::ZERO || lane.has_lookup != K::ZERO {
                         return Err(PiCcsError::ProtocolError(
@@ -368,6 +405,27 @@ pub fn verify_route_a_memory_step(
                 let value_final = batched_final_values[value_idx];
                 let adapter_claim = batched_claimed_sums[adapter_idx];
                 let adapter_final = batched_final_values[adapter_idx];
+
+                if packed_opcode.is_some() {
+                    // Packed Route-A lanes are verified as zero-sum constraints. The claimed sums
+                    // must be zero, but terminal evaluations at the sampled random point are not
+                    // required to be zero in general.
+                    if value_claim != K::ZERO || adapter_claim != K::ZERO {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "packed shout lane zero-claim invariant mismatch at lut_idx={proof_idx}, lane_idx={lane_idx}: value_claim={value_claim:?}, adapter_claim={adapter_claim:?}"
+                        )));
+                    }
+                    if pre.is_active
+                        || pre.addr_claim_sum != K::ZERO
+                        || pre.addr_final != K::ZERO
+                        || pre.table_eval_at_r_addr != K::ZERO
+                    {
+                        return Err(PiCcsError::ProtocolError(
+                            "packed shout lane addr-pre invariants mismatch".into(),
+                        ));
+                    }
+                    continue;
+                }
 
                 let expected_value_final = chi_cycle_at_r_time * lane.has_lookup * lane.val;
                 if expected_value_final != value_final {

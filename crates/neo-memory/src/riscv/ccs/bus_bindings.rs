@@ -71,8 +71,14 @@ fn validate_trace_shout_table_id(table_id: u32) -> Result<(), String> {
 }
 
 #[inline]
-fn trace_lookup_addr_group_for_table_id(table_id: u32) -> Option<u32> {
-    rv32_trace_lookup_addr_group_for_table_id(table_id)
+fn trace_lookup_addr_group_for_table_id(table_id: u32, ell_addr: usize) -> Option<u32> {
+    // Canonical opcode addr-sharing only applies to implicit interleaved keys (ell_addr = 64 in RV32).
+    // Packed opcode layouts use opcode-local widths and must not share this 64-bit group.
+    if table_id <= REMU_TABLE_ID && ell_addr != 2 * RV32_XLEN {
+        None
+    } else {
+        rv32_trace_lookup_addr_group_for_table_id(table_id)
+    }
 }
 
 #[inline]
@@ -103,7 +109,7 @@ fn derive_trace_shout_shapes(
                 table_id,
                 ell_addr: 2 * RV32_XLEN,
                 n_vals: 1usize,
-                addr_group: trace_lookup_addr_group_for_table_id(table_id),
+                addr_group: trace_lookup_addr_group_for_table_id(table_id, 2 * RV32_XLEN),
                 selector_group: trace_lookup_selector_group_for_table_id(table_id),
             },
         );
@@ -135,7 +141,7 @@ fn derive_trace_shout_shapes(
                     spec.table_id, prev.n_vals, spec.n_vals
                 ));
             }
-            let inferred_group = trace_lookup_addr_group_for_table_id(spec.table_id);
+            let inferred_group = trace_lookup_addr_group_for_table_id(spec.table_id, spec.ell_addr);
             if prev.addr_group != inferred_group {
                 return Err(format!(
                     "RV32 trace shared bus: conflicting addr_group for table_id={} (base/spec mismatch: {:?} vs {:?})",
@@ -156,7 +162,7 @@ fn derive_trace_shout_shapes(
                     table_id: spec.table_id,
                     ell_addr: spec.ell_addr,
                     n_vals: spec.n_vals,
-                    addr_group: trace_lookup_addr_group_for_table_id(spec.table_id),
+                    addr_group: trace_lookup_addr_group_for_table_id(spec.table_id, spec.ell_addr),
                     selector_group: trace_lookup_selector_group_for_table_id(spec.table_id),
                 },
             );
@@ -602,6 +608,7 @@ pub fn rv32_trace_shared_bus_extraction_with_specs(
     let mut shout_key_binding_added = HashSet::<(bool, usize, usize, usize, usize)>::new();
     for (i, shape) in shout_shapes.iter().enumerate() {
         let lane0 = &bus.shout_cols[i].lanes[0];
+        let is_packed_opcode_lane = shape.table_id <= REMU_TABLE_ID && shape.ell_addr != 2 * RV32_XLEN;
         if let Some(binding) = trace_shout_binding(layout, shape.table_id) {
             let mut dedup_binding = binding.clone();
             if let Some(addr_base) = dedup_binding.addr {
@@ -627,7 +634,15 @@ pub fn rv32_trace_shared_bus_extraction_with_specs(
         let key = (lane0.addr_bits.start, lane0.addr_bits.end);
         let shared_addr_group = addr_range_counts.get(&key).copied().unwrap_or(0) > 1;
         let selector_first = selector_bitness_added.insert(lane0.has_lookup);
-        if shared_addr_group {
+        if is_packed_opcode_lane {
+            // Packed opcode lanes carry mixed field elements in addr_bits; addr-bit booleanity does not apply.
+            if selector_first {
+                builder.add_shout_instance_padding_value_only(&bus, lane0);
+            } else {
+                builder.add_shout_instance_value_padding_only(&bus, lane0);
+            }
+            builder.add_shout_instance_addr_padding_only(&bus, lane0);
+        } else if shared_addr_group {
             if selector_first {
                 builder.add_shout_instance_padding_value_only(&bus, lane0);
             } else {
