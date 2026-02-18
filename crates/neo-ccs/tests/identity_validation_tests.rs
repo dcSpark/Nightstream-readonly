@@ -1,4 +1,4 @@
-//! Tests for M₀ = I_n validation required by Ajtai/NC pipeline.
+//! Tests for legacy identity-first validation helpers used by Ajtai/NC-specific paths.
 
 #![allow(non_snake_case)]
 
@@ -7,7 +7,7 @@ use neo_ccs::{r1cs_to_ccs, CcsStructure, Mat};
 use neo_math::F;
 use p3_field::PrimeCharacteristicRing;
 
-/// Test that a valid square CCS with M₀ = I passes validation
+/// Test that square R1CS output can be normalized to identity-first when needed.
 #[test]
 fn test_identity_validation_valid_square_ccs() {
     // Create a simple square R1CS (4x4)
@@ -23,11 +23,13 @@ fn test_identity_validation_valid_square_ccs() {
     B[(0, 1)] = F::ONE;
     C[(0, 2)] = F::ONE;
 
-    // r1cs_to_ccs should produce identity-first CCS for square input
+    // r1cs_to_ccs always produces 3-matrix embedding now.
     let ccs = r1cs_to_ccs(A, B, C);
+    assert_eq!(ccs.matrices.len(), 3);
 
-    // Should pass validation
-    assert!(ccs.assert_m0_is_identity_for_nc().is_ok());
+    // Explicit identity-first normalization still supports legacy validation paths.
+    let ccs_normalized = ccs.ensure_identity_first().expect("normalize");
+    assert!(ccs_normalized.assert_m0_is_identity_for_nc().is_ok());
 }
 
 /// Test that a non-square CCS fails validation with clear error
@@ -157,20 +159,21 @@ fn test_happy_path_square_r1cs_to_validated_ccs() {
     B[(4, 2)] = F::ONE;
     C[(4, 2)] = F::ONE;
 
-    // Convert to CCS (should be identity-first for square)
+    // Convert to CCS (3-matrix embedding, no auto identity insertion).
     let ccs = r1cs_to_ccs(A, B, C);
 
     // Verify it's square
     assert_eq!(ccs.n, ccs.m);
     assert_eq!(ccs.n, n);
 
-    // Verify M₀ is identity
-    assert!(ccs.matrices[0].is_identity());
+    // By default the first matrix is A, not identity.
+    assert!(!ccs.matrices[0].is_identity());
+    assert_eq!(ccs.matrices.len(), 3);
 
-    // Validation should pass
-    assert!(ccs.assert_m0_is_identity_for_nc().is_ok());
+    // Legacy validation path requires explicit normalization.
+    assert!(ccs.assert_m0_is_identity_for_nc().is_err());
 
-    // ensure_identity_first should be a no-op
+    // ensure_identity_first produces identity-first form for square CCS.
     let ccs_normalized = ccs.ensure_identity_first().expect("normalize");
     assert!(ccs_normalized.assert_m0_is_identity_for_nc().is_ok());
 }

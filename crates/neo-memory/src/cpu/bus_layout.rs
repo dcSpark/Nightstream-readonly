@@ -1,4 +1,5 @@
 use core::ops::Range;
+use std::collections::HashMap;
 
 /// Canonical layout for the shared CPU bus tail inside the CPU witness `z`.
 ///
@@ -16,7 +17,7 @@ use core::ops::Range;
 /// - lanes in order, each lane is:
 ///   - `addr_bits[0..ell_addr)`
 ///   - `has_lookup`
-///   - `val`
+///   - `vals[0..n_vals)`
 ///
 /// Within each Twist instance:
 /// - `ra_bits[0..ell_addr)`
@@ -41,7 +42,15 @@ pub struct BusLayout {
 pub struct ShoutCols {
     pub addr_bits: Range<usize>,
     pub has_lookup: usize,
-    pub val: usize,
+    pub vals: Vec<usize>,
+}
+
+impl ShoutCols {
+    #[inline]
+    pub fn primary_val(&self) -> usize {
+        debug_assert!(!self.vals.is_empty(), "ShoutCols must have at least one value column");
+        self.vals[0]
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -49,8 +58,27 @@ pub struct ShoutInstanceCols {
     /// Lookup lanes for this Shout instance.
     ///
     /// Each lane has the canonical per-step bus slice:
-    /// `[addr_bits, has_lookup, val]`.
+    /// `[addr_bits, has_lookup, vals[0..n_vals)]`.
     pub lanes: Vec<ShoutCols>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct ShoutInstanceShape {
+    pub ell_addr: usize,
+    pub lanes: usize,
+    /// Number of value columns per lane.
+    pub n_vals: usize,
+    /// Optional address-sharing group id.
+    ///
+    /// Instances with the same `addr_group` reuse the same `addr_bits` columns
+    /// per lane and allocate only fresh `[has_lookup, val]` columns.
+    pub addr_group: Option<u64>,
+    /// Optional selector-sharing group id.
+    ///
+    /// Instances with the same `selector_group` reuse `has_lookup` columns per lane and
+    /// allocate only fresh `val` columns. This is safe only for families that are known
+    /// to have identical `has_lookup` patterns over time.
+    pub selector_group: Option<u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -152,33 +180,101 @@ pub fn build_bus_layout_for_instances_with_shout_and_twist_lanes(
     shout_ell_addrs_and_lanes: impl IntoIterator<Item = (usize, usize)>,
     twist_ell_addrs_and_lanes: impl IntoIterator<Item = (usize, usize)>,
 ) -> Result<BusLayout, String> {
+    build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes(
+        m,
+        m_in,
+        chunk_size,
+        shout_ell_addrs_and_lanes
+            .into_iter()
+            .map(|(ell_addr, lanes)| ShoutInstanceShape {
+                ell_addr,
+                lanes,
+                n_vals: 1,
+                addr_group: None,
+                selector_group: None,
+            }),
+        twist_ell_addrs_and_lanes,
+    )
+}
+
+pub fn build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes(
+    m: usize,
+    m_in: usize,
+    chunk_size: usize,
+    shout_shapes: impl IntoIterator<Item = ShoutInstanceShape>,
+    twist_ell_addrs_and_lanes: impl IntoIterator<Item = (usize, usize)>,
+) -> Result<BusLayout, String> {
     if chunk_size == 0 {
         return Err("BusLayout: chunk_size must be >= 1".into());
     }
 
     let mut col = 0usize;
+    let mut shared_addr_bits = HashMap::<(u64, usize), (usize, Range<usize>)>::new();
+    let mut shared_selectors = HashMap::<(u64, usize), usize>::new();
 
     let mut shout_cols = Vec::<ShoutInstanceCols>::new();
-    for (ell_addr, lanes) in shout_ell_addrs_and_lanes {
+    for shape in shout_shapes {
+        let ell_addr = shape.ell_addr;
+        let lanes = shape.lanes;
+        let n_vals = shape.n_vals.max(1);
         let lanes = lanes.max(1);
         let mut lane_cols = Vec::<ShoutCols>::with_capacity(lanes);
-        for _lane in 0..lanes {
-            let addr_bits = col..(col + ell_addr);
-            col = col
-                .checked_add(ell_addr)
-                .ok_or_else(|| "BusLayout: column overflow (shout addr_bits)".to_string())?;
-            let has_lookup = col;
-            col = col
-                .checked_add(1)
-                .ok_or_else(|| "BusLayout: column overflow (shout has_lookup)".to_string())?;
-            let val = col;
-            col = col
-                .checked_add(1)
-                .ok_or_else(|| "BusLayout: column overflow (shout val)".to_string())?;
+        for lane_idx in 0..lanes {
+            let addr_bits = if let Some(group_id) = shape.addr_group {
+                let key = (group_id, lane_idx);
+                if let Some((prev_ell, prev_range)) = shared_addr_bits.get(&key) {
+                    if *prev_ell != ell_addr {
+                        return Err(format!(
+                            "BusLayout: shared shout addr group mismatch for group_id={group_id}, lane={lane_idx} (prev ell_addr={}, new ell_addr={ell_addr})",
+                            *prev_ell
+                        ));
+                    }
+                    prev_range.clone()
+                } else {
+                    let range = col..(col + ell_addr);
+                    col = col
+                        .checked_add(ell_addr)
+                        .ok_or_else(|| "BusLayout: column overflow (shout shared addr_bits)".to_string())?;
+                    shared_addr_bits.insert(key, (ell_addr, range.clone()));
+                    range
+                }
+            } else {
+                let range = col..(col + ell_addr);
+                col = col
+                    .checked_add(ell_addr)
+                    .ok_or_else(|| "BusLayout: column overflow (shout addr_bits)".to_string())?;
+                range
+            };
+            let has_lookup = if let Some(group_id) = shape.selector_group {
+                let key = (group_id, lane_idx);
+                if let Some(prev) = shared_selectors.get(&key) {
+                    *prev
+                } else {
+                    let out = col;
+                    col = col
+                        .checked_add(1)
+                        .ok_or_else(|| "BusLayout: column overflow (shout has_lookup)".to_string())?;
+                    shared_selectors.insert(key, out);
+                    out
+                }
+            } else {
+                let out = col;
+                col = col
+                    .checked_add(1)
+                    .ok_or_else(|| "BusLayout: column overflow (shout has_lookup)".to_string())?;
+                out
+            };
+            let mut vals = Vec::with_capacity(n_vals);
+            for _ in 0..n_vals {
+                vals.push(col);
+                col = col
+                    .checked_add(1)
+                    .ok_or_else(|| "BusLayout: column overflow (shout val)".to_string())?;
+            }
             lane_cols.push(ShoutCols {
                 addr_bits,
                 has_lookup,
-                val,
+                vals,
             });
         }
         shout_cols.push(ShoutInstanceCols { lanes: lane_cols });

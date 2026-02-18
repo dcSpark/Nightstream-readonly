@@ -74,7 +74,7 @@ pub fn prog_rom_layout_and_init_words<F: PrimeCharacteristicRing>(
 /// The ROM value at address `base + 4*i` is the little-endian `u32` formed from
 /// `program_bytes[4*i..4*i+4]`.
 ///
-/// This matches the RV32 B1 step circuit convention:
+/// This matches the RV32 trace-wiring convention:
 /// - instruction fetch address is the architectural PC (byte address),
 /// - instruction fetch value is a 32-bit word.
 pub fn prog_init_words<F: PrimeCharacteristicRing>(

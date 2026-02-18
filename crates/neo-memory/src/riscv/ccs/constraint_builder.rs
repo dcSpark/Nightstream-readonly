@@ -14,26 +14,6 @@ pub(super) struct Constraint<Ff: PrimeCharacteristicRing + Copy> {
 }
 
 impl<Ff: PrimeCharacteristicRing + Copy> Constraint<Ff> {
-    pub fn eq_const(condition_col: usize, const_one_col: usize, left: usize, c: u64) -> Self {
-        Self {
-            condition_col,
-            negate_condition: false,
-            additional_condition_cols: Vec::new(),
-            b_terms: vec![(left, Ff::ONE), (const_one_col, -Ff::from_u64(c))],
-            c_terms: Vec::new(),
-        }
-    }
-
-    pub fn zero(condition_col: usize, col: usize) -> Self {
-        Self {
-            condition_col,
-            negate_condition: false,
-            additional_condition_cols: Vec::new(),
-            b_terms: vec![(col, Ff::ONE)],
-            c_terms: Vec::new(),
-        }
-    }
-
     pub fn terms(condition_col: usize, negate_condition: bool, b_terms: Vec<(usize, Ff)>) -> Self {
         Self {
             condition_col,
@@ -41,27 +21,6 @@ impl<Ff: PrimeCharacteristicRing + Copy> Constraint<Ff> {
             additional_condition_cols: Vec::new(),
             b_terms,
             c_terms: Vec::new(),
-        }
-    }
-
-    pub fn terms_or(condition_cols: &[usize], negate_condition: bool, b_terms: Vec<(usize, Ff)>) -> Self {
-        assert!(!condition_cols.is_empty(), "need at least one condition column");
-        Self {
-            condition_col: condition_cols[0],
-            negate_condition,
-            additional_condition_cols: condition_cols[1..].to_vec(),
-            b_terms,
-            c_terms: Vec::new(),
-        }
-    }
-
-    pub fn mul(left: usize, right: usize, out: usize) -> Self {
-        Self {
-            condition_col: left,
-            negate_condition: false,
-            additional_condition_cols: Vec::new(),
-            b_terms: vec![(right, Ff::ONE)],
-            c_terms: vec![(out, Ff::ONE)],
         }
     }
 }
@@ -73,17 +32,19 @@ pub(super) fn build_r1cs_ccs(
     const_one_col: usize,
 ) -> Result<CcsStructure<F>, String> {
     if m == 0 {
-        return Err("RV32 B1 CCS: m must be >= 1".into());
+        return Err("RV32 trace CCS: m must be >= 1".into());
     }
     if n == 0 {
-        return Err("RV32 B1 CCS: n must be >= 1".into());
+        return Err("RV32 trace CCS: n must be >= 1".into());
     }
     if const_one_col >= m {
-        return Err(format!("RV32 B1 CCS: const_one_col({const_one_col}) must be < m({m})"));
+        return Err(format!(
+            "RV32 trace CCS: const_one_col({const_one_col}) must be < m({m})"
+        ));
     }
     if constraints.len() > n {
         return Err(format!(
-            "RV32 B1 CCS: too many constraints ({}) for CCS with n={} m={}",
+            "RV32 trace CCS: too many constraints ({}) for CCS with n={} m={}",
             constraints.len(),
             n,
             m
@@ -137,12 +98,7 @@ pub(super) fn build_r1cs_ccs(
         ],
     );
 
-    // Match `neo_ccs::r1cs_to_ccs`: insert identity-first only when square.
-    let (matrices, f) = if n == m {
-        (vec![CcsMatrix::Identity { n }, a, b, c], f_base.insert_var_at_front())
-    } else {
-        (vec![a, b, c], f_base)
-    };
+    let matrices = vec![a, b, c];
 
-    CcsStructure::new_sparse(matrices, f).map_err(|e| format!("RV32 B1 CCS: invalid structure: {e:?}"))
+    CcsStructure::new_sparse(matrices, f_base).map_err(|e| format!("RV32 trace CCS: invalid structure: {e:?}"))
 }

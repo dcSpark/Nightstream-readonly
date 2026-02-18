@@ -123,7 +123,9 @@ fn build_trivial_fold_run_and_instance() -> (FoldRunInstance, FoldRunWitness) {
         steps: vec![StepProof {
             fold: step,
             mem: MemSidecarProof {
-                cpu_me_claims_val: Vec::new(),
+                val_me_claims: Vec::new(),
+                wb_me_claims: Vec::new(),
+                wp_me_claims: Vec::new(),
                 shout_addr_pre: Default::default(),
                 proofs: Vec::new(),
             },
@@ -133,7 +135,9 @@ fn build_trivial_fold_run_and_instance() -> (FoldRunInstance, FoldRunWitness) {
                 labels: Vec::new(),
                 round_polys: Vec::new(),
             },
-            val_fold: None,
+            val_fold: Vec::new(),
+            wb_fold: Vec::new(),
+            wp_fold: Vec::new(),
         }],
         output_proof: None,
     };
@@ -286,7 +290,7 @@ fn fold_run_circuit_optimized_nontrivial_satisfied() {
     };
     let initial_accumulator = acc.me.clone();
 
-    let mut session = FoldingSession::new(FoldingMode::PaperExact, params, l.clone())
+    let mut session = FoldingSession::new(FoldingMode::Optimized, params, l.clone())
         .with_initial_accumulator(acc, &ccs)
         .expect("with_initial_accumulator");
 

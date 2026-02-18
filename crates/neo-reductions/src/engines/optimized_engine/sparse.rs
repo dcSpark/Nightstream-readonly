@@ -163,7 +163,7 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CscMat<Ff> {
     /// Only reads rows < n_eff.
     pub fn add_mul_transpose_into<Kf>(&self, x: &[Kf], y: &mut [Kf], n_eff: usize)
     where
-        Kf: Copy + core::ops::AddAssign + core::ops::Mul<Output = Kf> + From<Ff>,
+        Kf: Copy + core::ops::AddAssign + core::ops::Mul<Output = Kf> + From<Ff> + Send + Sync,
     {
         debug_assert!(n_eff <= self.nrows, "n_eff must be <= nrows");
         debug_assert!(
@@ -174,14 +174,40 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CscMat<Ff> {
         );
         debug_assert_eq!(y.len(), self.ncols);
 
-        for c in 0..self.ncols {
-            let s = self.col_ptr[c];
-            let e = self.col_ptr[c + 1];
-            for k in s..e {
-                let r = self.row_idx[k];
-                if r < n_eff {
-                    y[c] += Kf::from(self.vals[k]) * x[r];
+        #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+        {
+            y.par_iter_mut().enumerate().for_each(|(c, yc)| {
+                let s = self.col_ptr[c];
+                let e = self.col_ptr[c + 1];
+                if s == e {
+                    return;
                 }
+                let mut sum = *yc;
+                for k in s..e {
+                    let r = self.row_idx[k];
+                    if r < n_eff {
+                        sum += Kf::from(self.vals[k]) * x[r];
+                    }
+                }
+                *yc = sum;
+            });
+        }
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+        {
+            for c in 0..self.ncols {
+                let s = self.col_ptr[c];
+                let e = self.col_ptr[c + 1];
+                if s == e {
+                    continue;
+                }
+                let mut sum = y[c];
+                for k in s..e {
+                    let r = self.row_idx[k];
+                    if r < n_eff {
+                        sum += Kf::from(self.vals[k]) * x[r];
+                    }
+                }
+                y[c] = sum;
             }
         }
     }
@@ -190,14 +216,18 @@ impl<Ff: Field + PrimeCharacteristicRing + Copy + Send + Sync> CscMat<Ff> {
     /// Only updates rows < n_eff.
     pub fn add_mul_into<Kf>(&self, x: &[Kf], y: &mut [Kf], n_eff: usize)
     where
-        Kf: Copy + core::ops::AddAssign + core::ops::Mul<Output = Kf> + From<Ff>,
+        Kf: Copy + core::ops::AddAssign + core::ops::Mul<Output = Kf> + From<Ff> + PartialEq,
     {
         debug_assert!(n_eff <= self.nrows, "n_eff must be <= nrows");
         debug_assert!(y.len() >= n_eff, "y.len() must be >= n_eff");
         debug_assert_eq!(x.len(), self.ncols);
 
+        let zero = Kf::from(Ff::ZERO);
         for c in 0..self.ncols {
             let xc = x[c];
+            if xc == zero {
+                continue;
+            }
             let s = self.col_ptr[c];
             let e = self.col_ptr[c + 1];
             for k in s..e {

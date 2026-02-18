@@ -7,7 +7,7 @@
 //!
 //! # Proving integration scope (today)
 //!
-//! The shared-bus RV32 B1 proving path assumes:
+//! The shared-bus RV32 trace-wiring proving path assumes:
 //! - `xlen == 32` (RV32)
 //! - no compressed (RVC) instructions
 //! - 4-byte aligned PC and control-flow targets
@@ -60,7 +60,7 @@
 //! - Automatic detection of 16-bit vs 32-bit instructions
 //!
 //! ## System
-//! - ECALL (Jolt-style markers), FENCE
+//! - ECALL, FENCE
 //! - EBREAK and FENCE.I are not supported
 //!
 //! # Example
@@ -98,12 +98,13 @@ use neo_vm_trace::TwistId;
 /// Canonical Twist instance id for RISC-V data RAM.
 pub const RAM_ID: TwistId = TwistId(0);
 
-/// Canonical Twist instance id for the program ROM (B1 instruction fetch).
+/// Canonical Twist instance id for the program ROM instruction fetch.
 pub const PROG_ID: TwistId = TwistId(1);
 
-/// Jolt ECALL identifiers for marker/print syscalls.
-pub const JOLT_CYCLE_TRACK_ECALL_NUM: u32 = 0xC7C1E;
-pub const JOLT_PRINT_ECALL_NUM: u32 = 0x505249;
+/// Canonical Twist instance id for the architectural register file (x0..x31).
+///
+/// This is used by the RV32 trace-wiring circuit in "regfile-as-Twist" mode.
+pub const REG_ID: TwistId = TwistId(2);
 
 pub use alu::{compute_op, lookup_entry};
 pub use bits::{interleave_bits, uninterleave_bits};

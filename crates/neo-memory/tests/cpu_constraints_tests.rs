@@ -38,7 +38,7 @@ fn test_shout_bus_config() {
     let cfg = &bus.shout_cols[0].lanes[0];
     assert_eq!(cfg.addr_bits, 0..4);
     assert_eq!(cfg.has_lookup, 4);
-    assert_eq!(cfg.val, 5);
+    assert_eq!(cfg.primary_val(), 5);
     assert_eq!(bus.bus_cols, 6);
 }
 

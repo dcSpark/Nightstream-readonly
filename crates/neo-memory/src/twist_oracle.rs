@@ -18,6 +18,7 @@ use crate::mle::{eq_single, lt_eval};
 use crate::sparse_time::SparseIdxVec;
 use neo_math::K;
 use neo_reductions::sumcheck::RoundOracle;
+use p3_field::Field;
 use p3_field::PrimeCharacteristicRing;
 
 macro_rules! impl_round_oracle_via_core {
@@ -302,6 +303,4936 @@ impl RoundOracle for ShoutValueOracleSparse {
         self.val.fold_round_in_place(r);
         self.challenges.push(r);
         self.bit_idx += 1;
+    }
+}
+
+// ============================================================================
+// Packed-key RV32 ADD Shout (time-domain)
+// ============================================================================
+
+/// Sparse Route A oracle for RV32 packed ADD correctness:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs(t) + rhs(t) - val(t) - carry(t)·2^32)
+///
+/// This is a "no width bloat" alternative to the 64-bit addr-bit Shout encoding for `ADD`:
+/// instead of committing to 64 key bits, we commit to packed `lhs/rhs` plus a carry bit.
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedAddOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    carry: SparseIdxVec<K>,
+    val: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedAddOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        carry: SparseIdxVec<K>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(carry.len(), 1usize << ell_n);
+        debug_assert_eq!(val.len(), 1usize << ell_n);
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            rhs,
+            carry,
+            val,
+            degree_bound: 3,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedAddOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.has_lookup.len() == 1 {
+            let two32 = K::from_u64(1u64 << 32);
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let carry = self.carry.singleton_value();
+            let val = self.val.singleton_value();
+            let expr = lhs + rhs - val - carry * two32;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let two32 = K::from_u64(1u64 << 32);
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let carry0 = self.carry.get(child0);
+            let carry1 = self.carry.get(child1);
+            let val0 = self.val.get(child0);
+            let val1 = self.val.get(child1);
+
+            let expr0 = lhs0 + rhs0 - val0 - carry0 * two32;
+            let expr1 = lhs1 + rhs1 - val1 - carry1 * two32;
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+                let expr_x = interp(expr0, expr1, x);
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        self.carry.fold_round_in_place(r);
+        self.val.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle for RV32 packed SUB correctness:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs(t) - rhs(t) - val(t) + borrow(t)·2^32)
+///
+/// This is a "no width bloat" alternative to the 64-bit addr-bit Shout encoding for `SUB`:
+/// instead of committing to 64 key bits, we commit to packed `lhs/rhs` plus a borrow bit.
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedSubOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    borrow: SparseIdxVec<K>,
+    val: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedSubOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        borrow: SparseIdxVec<K>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(borrow.len(), 1usize << ell_n);
+        debug_assert_eq!(val.len(), 1usize << ell_n);
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            rhs,
+            borrow,
+            val,
+            degree_bound: 3,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedSubOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.has_lookup.len() == 1 {
+            let two32 = K::from_u64(1u64 << 32);
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let borrow = self.borrow.singleton_value();
+            let val = self.val.singleton_value();
+            let expr = lhs - rhs - val + borrow * two32;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let two32 = K::from_u64(1u64 << 32);
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let borrow0 = self.borrow.get(child0);
+            let borrow1 = self.borrow.get(child1);
+            let val0 = self.val.get(child0);
+            let val1 = self.val.get(child1);
+
+            let expr0 = lhs0 - rhs0 - val0 + borrow0 * two32;
+            let expr1 = lhs1 - rhs1 - val1 + borrow1 * two32;
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+                let expr_x = interp(expr0, expr1, x);
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        self.borrow.fold_round_in_place(r);
+        self.val.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+// ============================================================================
+// Packed-key RV32 MUL Shout (time-domain)
+// ============================================================================
+
+/// Sparse Route A oracle for RV32 packed MUL correctness:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs(t)·rhs(t) - val(t) - carry(t)·2^32)
+///
+/// Where:
+/// - `carry(t)` is the high 32 bits of the 64-bit product `lhs·rhs`, encoded as 32 Boolean columns,
+/// - `val(t)` is the low 32 bits (the `MUL` result).
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedMulOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    carry_bits: Vec<SparseIdxVec<K>>,
+    val: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedMulOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        carry_bits: Vec<SparseIdxVec<K>>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(val.len(), 1usize << ell_n);
+        debug_assert_eq!(carry_bits.len(), 32);
+        for (i, b) in carry_bits.iter().enumerate() {
+            debug_assert_eq!(
+                b.len(),
+                1usize << ell_n,
+                "carry_bits[{i}] length must match time domain"
+            );
+        }
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            rhs,
+            carry_bits,
+            val,
+            // Degree bound:
+            // - chi(t): multilinear (degree 1)
+            // - has_lookup(t): multilinear (degree 1)
+            // - lhs(t)·rhs(t): degree 2
+            // - val(t), carry(t): multilinear (degree 1)
+            // ⇒ total degree ≤ 1 + 1 + 2 = 4
+            degree_bound: 4,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedMulOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        let two32 = K::from_u64(1u64 << 32);
+
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let val = self.val.singleton_value();
+
+            let mut carry = K::ZERO;
+            for (i, b) in self.carry_bits.iter().enumerate() {
+                carry += b.singleton_value() * K::from_u64(1u64 << i);
+            }
+
+            let expr = lhs * rhs - val - carry * two32;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let val0 = self.val.get(child0);
+            let val1 = self.val.get(child1);
+
+            // Pre-fetch carry bit endpoints for this pair to avoid repeated sparse lookups per eval point.
+            let mut c0s: [K; 32] = [K::ZERO; 32];
+            let mut c1s: [K; 32] = [K::ZERO; 32];
+            for (i, b) in self.carry_bits.iter().enumerate() {
+                c0s[i] = b.get(child0);
+                c1s[i] = b.get(child1);
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let lhs_x = interp(lhs0, lhs1, x);
+                let rhs_x = interp(rhs0, rhs1, x);
+                let val_x = interp(val0, val1, x);
+
+                let mut carry_x = K::ZERO;
+                for j in 0..32 {
+                    let c_x = interp(c0s[j], c1s[j], x);
+                    carry_x += c_x * K::from_u64(1u64 << j);
+                }
+
+                let expr_x = lhs_x * rhs_x - val_x - carry_x * two32;
+                if expr_x == K::ZERO {
+                    continue;
+                }
+
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        for b in self.carry_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.val.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+// ============================================================================
+// Packed-key RV32 MULHU Shout (time-domain)
+// ============================================================================
+
+/// Sparse Route A oracle for RV32 packed MULHU correctness (unsigned high 32 bits):
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs(t)·rhs(t) - lo(t) - val(t)·2^32)
+///
+/// Where:
+/// - `lo(t)` is the low 32 bits of the 64-bit product `lhs·rhs`, encoded as 32 Boolean columns,
+/// - `val(t)` is the upper 32 bits (the `MULHU` result).
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedMulhuOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    lo_bits: Vec<SparseIdxVec<K>>,
+    val: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedMulhuOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        lo_bits: Vec<SparseIdxVec<K>>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(val.len(), 1usize << ell_n);
+        debug_assert_eq!(lo_bits.len(), 32);
+        for (i, b) in lo_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "lo_bits[{i}] length must match time domain");
+        }
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            rhs,
+            lo_bits,
+            val,
+            // Degree bound:
+            // - chi(t): multilinear (degree 1)
+            // - has_lookup(t): multilinear (degree 1)
+            // - lhs(t)·rhs(t): degree 2
+            // - lo(t), val(t): multilinear (degree 1)
+            // ⇒ total degree ≤ 1 + 1 + 2 = 4
+            degree_bound: 4,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedMulhuOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        let two32 = K::from_u64(1u64 << 32);
+
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let val = self.val.singleton_value();
+
+            let mut lo = K::ZERO;
+            for (i, b) in self.lo_bits.iter().enumerate() {
+                lo += b.singleton_value() * K::from_u64(1u64 << i);
+            }
+
+            let expr = lhs * rhs - lo - val * two32;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let val0 = self.val.get(child0);
+            let val1 = self.val.get(child1);
+
+            // Pre-fetch lo bit endpoints for this pair to avoid repeated sparse lookups per eval point.
+            let mut lo0s: [K; 32] = [K::ZERO; 32];
+            let mut lo1s: [K; 32] = [K::ZERO; 32];
+            for (i, b) in self.lo_bits.iter().enumerate() {
+                lo0s[i] = b.get(child0);
+                lo1s[i] = b.get(child1);
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let lhs_x = interp(lhs0, lhs1, x);
+                let rhs_x = interp(rhs0, rhs1, x);
+                let val_x = interp(val0, val1, x);
+
+                let mut lo_x = K::ZERO;
+                for j in 0..32 {
+                    let b_x = interp(lo0s[j], lo1s[j], x);
+                    lo_x += b_x * K::from_u64(1u64 << j);
+                }
+
+                let expr_x = lhs_x * rhs_x - lo_x - val_x * two32;
+                if expr_x == K::ZERO {
+                    continue;
+                }
+
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        for b in self.lo_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.val.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+// ============================================================================
+// Packed-key RV32 MULH / MULHSU helpers (time-domain)
+// ============================================================================
+
+/// Sparse Route A oracle for RV32 unsigned product decomposition:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs(t)·rhs(t) - lo(t) - hi(t)·2^32)
+///
+/// Where:
+/// - `lo(t)` is the low 32 bits of the 64-bit product, encoded as 32 Boolean columns,
+/// - `hi(t)` is a witness column intended to be the upper 32 bits.
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedMulHiOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    lo_bits: Vec<SparseIdxVec<K>>,
+    hi: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedMulHiOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        lo_bits: Vec<SparseIdxVec<K>>,
+        hi: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(hi.len(), 1usize << ell_n);
+        debug_assert_eq!(lo_bits.len(), 32);
+        for (i, b) in lo_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "lo_bits[{i}] length must match time domain");
+        }
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            rhs,
+            lo_bits,
+            hi,
+            // Degree bound:
+            // - chi(t): multilinear (degree 1)
+            // - has_lookup(t): multilinear (degree 1)
+            // - lhs(t)·rhs(t): degree 2
+            // ⇒ total degree ≤ 1 + 1 + 2 = 4
+            degree_bound: 4,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedMulHiOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        let two32 = K::from_u64(1u64 << 32);
+
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let hi = self.hi.singleton_value();
+
+            let mut lo = K::ZERO;
+            for (i, b) in self.lo_bits.iter().enumerate() {
+                lo += b.singleton_value() * K::from_u64(1u64 << i);
+            }
+
+            let expr = lhs * rhs - lo - hi * two32;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let hi0 = self.hi.get(child0);
+            let hi1 = self.hi.get(child1);
+
+            // Pre-fetch lo bit endpoints for this pair to avoid repeated sparse lookups per eval point.
+            let mut lo0s: [K; 32] = [K::ZERO; 32];
+            let mut lo1s: [K; 32] = [K::ZERO; 32];
+            for (i, b) in self.lo_bits.iter().enumerate() {
+                lo0s[i] = b.get(child0);
+                lo1s[i] = b.get(child1);
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let lhs_x = interp(lhs0, lhs1, x);
+                let rhs_x = interp(rhs0, rhs1, x);
+                let hi_x = interp(hi0, hi1, x);
+
+                let mut lo_x = K::ZERO;
+                for j in 0..32 {
+                    let b_x = interp(lo0s[j], lo1s[j], x);
+                    lo_x += b_x * K::from_u64(1u64 << j);
+                }
+
+                let expr_x = lhs_x * rhs_x - lo_x - hi_x * two32;
+                if expr_x == K::ZERO {
+                    continue;
+                }
+
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        for b in self.lo_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.hi.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle for RV32 packed MULH signed correction:
+///   Σ_t χ(t)·has_lookup(t)·(w0·(hi - s1·rhs - s2·lhs + k·2^32 - val) + w1·k(k-1)(k-2))
+///
+/// Where:
+/// - `hi` is the upper 32 bits of the unsigned product `lhs·rhs`,
+/// - `s1`, `s2` are witness sign bits (msb of lhs/rhs),
+/// - `k ∈ {0,1,2}` accounts for mod-2^32 normalization.
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedMulhAdapterOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    lhs_sign: SparseIdxVec<K>,
+    rhs_sign: SparseIdxVec<K>,
+    hi: SparseIdxVec<K>,
+    k: SparseIdxVec<K>,
+    val: SparseIdxVec<K>,
+    weights: [K; 2],
+    degree_bound: usize,
+}
+
+impl Rv32PackedMulhAdapterOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        lhs_sign: SparseIdxVec<K>,
+        rhs_sign: SparseIdxVec<K>,
+        hi: SparseIdxVec<K>,
+        k: SparseIdxVec<K>,
+        val: SparseIdxVec<K>,
+        weights: [K; 2],
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs_sign.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs_sign.len(), 1usize << ell_n);
+        debug_assert_eq!(hi.len(), 1usize << ell_n);
+        debug_assert_eq!(k.len(), 1usize << ell_n);
+        debug_assert_eq!(val.len(), 1usize << ell_n);
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            rhs,
+            lhs_sign,
+            rhs_sign,
+            hi,
+            k,
+            val,
+            weights,
+            // Degree bound:
+            // - chi(t): multilinear (degree 1)
+            // - has_lookup(t): multilinear (degree 1)
+            // - eq expr: degree 2 (sign·rhs)
+            // - range poly: degree 3
+            // ⇒ total degree ≤ 1 + 1 + 3 = 5
+            degree_bound: 5,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedMulhAdapterOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        let two32 = K::from_u64(1u64 << 32);
+        let w0 = self.weights[0];
+        let w1 = self.weights[1];
+
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let lhs_sign = self.lhs_sign.singleton_value();
+            let rhs_sign = self.rhs_sign.singleton_value();
+            let hi = self.hi.singleton_value();
+            let k = self.k.singleton_value();
+            let val = self.val.singleton_value();
+
+            let eq_expr = hi - lhs_sign * rhs - rhs_sign * lhs + k * two32 - val;
+            let range = k * (k - K::ONE) * (k - K::from_u64(2));
+            let expr = w0 * eq_expr + w1 * range;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let lhs_sign0 = self.lhs_sign.get(child0);
+            let lhs_sign1 = self.lhs_sign.get(child1);
+            let rhs_sign0 = self.rhs_sign.get(child0);
+            let rhs_sign1 = self.rhs_sign.get(child1);
+            let hi0 = self.hi.get(child0);
+            let hi1 = self.hi.get(child1);
+            let k0 = self.k.get(child0);
+            let k1 = self.k.get(child1);
+            let val0 = self.val.get(child0);
+            let val1 = self.val.get(child1);
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let lhs_x = interp(lhs0, lhs1, x);
+                let rhs_x = interp(rhs0, rhs1, x);
+                let lhs_sign_x = interp(lhs_sign0, lhs_sign1, x);
+                let rhs_sign_x = interp(rhs_sign0, rhs_sign1, x);
+                let hi_x = interp(hi0, hi1, x);
+                let k_x = interp(k0, k1, x);
+                let val_x = interp(val0, val1, x);
+
+                let eq_expr = hi_x - lhs_sign_x * rhs_x - rhs_sign_x * lhs_x + k_x * two32 - val_x;
+                let range = k_x * (k_x - K::ONE) * (k_x - K::from_u64(2));
+                let expr_x = w0 * eq_expr + w1 * range;
+                if expr_x == K::ZERO {
+                    continue;
+                }
+
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        self.lhs_sign.fold_round_in_place(r);
+        self.rhs_sign.fold_round_in_place(r);
+        self.hi.fold_round_in_place(r);
+        self.k.fold_round_in_place(r);
+        self.val.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle for RV32 packed MULHSU signed correction:
+///   Σ_t χ(t)·has_lookup(t)·(hi - s·rhs - val + b·2^32)
+///
+/// Where:
+/// - `hi` is the upper 32 bits of the unsigned product `lhs·rhs`,
+/// - `s` is the witness sign bit of `lhs`,
+/// - `b ∈ {0,1}` is a borrow bit for mod-2^32 normalization.
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedMulhsuAdapterOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    lhs_sign: SparseIdxVec<K>,
+    hi: SparseIdxVec<K>,
+    borrow: SparseIdxVec<K>,
+    val: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedMulhsuAdapterOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        lhs_sign: SparseIdxVec<K>,
+        hi: SparseIdxVec<K>,
+        borrow: SparseIdxVec<K>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs_sign.len(), 1usize << ell_n);
+        debug_assert_eq!(hi.len(), 1usize << ell_n);
+        debug_assert_eq!(borrow.len(), 1usize << ell_n);
+        debug_assert_eq!(val.len(), 1usize << ell_n);
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            rhs,
+            lhs_sign,
+            hi,
+            borrow,
+            val,
+            // Degree bound:
+            // - chi(t): multilinear (degree 1)
+            // - has_lookup(t): multilinear (degree 1)
+            // - eq expr: degree 2 (sign·rhs)
+            // ⇒ total degree ≤ 1 + 1 + 2 = 4
+            degree_bound: 4,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedMulhsuAdapterOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        let two32 = K::from_u64(1u64 << 32);
+
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let lhs_sign = self.lhs_sign.singleton_value();
+            let hi = self.hi.singleton_value();
+            let borrow = self.borrow.singleton_value();
+            let val = self.val.singleton_value();
+            let expr = hi - lhs_sign * rhs - val + borrow * two32;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let lhs_sign0 = self.lhs_sign.get(child0);
+            let lhs_sign1 = self.lhs_sign.get(child1);
+            let hi0 = self.hi.get(child0);
+            let hi1 = self.hi.get(child1);
+            let borrow0 = self.borrow.get(child0);
+            let borrow1 = self.borrow.get(child1);
+            let val0 = self.val.get(child0);
+            let val1 = self.val.get(child1);
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let rhs_x = interp(rhs0, rhs1, x);
+                let lhs_sign_x = interp(lhs_sign0, lhs_sign1, x);
+                let hi_x = interp(hi0, hi1, x);
+                let borrow_x = interp(borrow0, borrow1, x);
+                let val_x = interp(val0, val1, x);
+
+                let expr_x = hi_x - lhs_sign_x * rhs_x - val_x + borrow_x * two32;
+                if expr_x == K::ZERO {
+                    continue;
+                }
+
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        self.lhs_sign.fold_round_in_place(r);
+        self.hi.fold_round_in_place(r);
+        self.borrow.fold_round_in_place(r);
+        self.val.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle for RV32 packed EQ correctness (Ajtai-representable):
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (val(t) - Π_i (1 - diff_bit_i(t)))
+///
+/// Where `diff_bits` encode `diff = lhs - rhs (mod 2^32)` (checked by the adapter oracle).
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedEqOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    diff_bits: Vec<SparseIdxVec<K>>,
+    val: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedEqOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        diff_bits: Vec<SparseIdxVec<K>>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(val.len(), 1usize << ell_n);
+        debug_assert_eq!(diff_bits.len(), 32);
+        for (i, b) in diff_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "diff_bits[{i}] length must match time domain");
+        }
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            diff_bits,
+            val,
+            // Degree bound:
+            // - chi(t): multilinear (degree 1)
+            // - has_lookup(t): multilinear (degree 1)
+            // - Π_i (1 - diff_bit_i(t)): product of 32 linear terms (degree 32)
+            // ⇒ total degree ≤ 1 + 1 + 32 = 34
+            degree_bound: 34,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedEqOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let val = self.val.singleton_value();
+            let mut prod = K::ONE;
+            for b in self.diff_bits.iter() {
+                let bit = b.singleton_value();
+                prod *= K::ONE - bit;
+            }
+            let expr = val - prod;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let val0 = self.val.get(child0);
+            let val1 = self.val.get(child1);
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+                let val_x = interp(val0, val1, x);
+                let mut prod_x = K::ONE;
+                for b in self.diff_bits.iter() {
+                    let b0 = b.get(child0);
+                    let b1 = b.get(child1);
+                    let bit_x = interp(b0, b1, x);
+                    prod_x *= K::ONE - bit_x;
+                }
+                let expr_x = val_x - prod_x;
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        for b in self.diff_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.val.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle for RV32 packed EQ/NEQ diff decomposition check:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs(t) - rhs(t) - diff(t) + borrow(t)·2^32)
+///
+/// Where:
+/// - `borrow(t)` is the SUB borrow bit (1 iff lhs < rhs),
+/// - `diff(t) = Σ_i 2^i · diff_bit_i(t)` is the u32 wraparound difference `lhs - rhs (mod 2^32)`.
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedEqAdapterOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    borrow: SparseIdxVec<K>,
+    diff_bits: Vec<SparseIdxVec<K>>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedEqAdapterOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        borrow: SparseIdxVec<K>,
+        diff_bits: Vec<SparseIdxVec<K>>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(borrow.len(), 1usize << ell_n);
+        debug_assert_eq!(diff_bits.len(), 32);
+        for (i, b) in diff_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "diff_bits[{i}] length must match time domain");
+        }
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            rhs,
+            borrow,
+            diff_bits,
+            degree_bound: 3,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedEqAdapterOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.has_lookup.len() == 1 {
+            let two32 = K::from_u64(1u64 << 32);
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let borrow = self.borrow.singleton_value();
+            let mut diff = K::ZERO;
+            for (i, b) in self.diff_bits.iter().enumerate() {
+                let bit = b.singleton_value();
+                diff += bit * K::from_u64(1u64 << i);
+            }
+            let expr = lhs - rhs - diff + borrow * two32;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let two32 = K::from_u64(1u64 << 32);
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let borrow0 = self.borrow.get(child0);
+            let borrow1 = self.borrow.get(child1);
+            let mut diff0 = K::ZERO;
+            let mut diff1 = K::ZERO;
+            for (i, b) in self.diff_bits.iter().enumerate() {
+                let pow = K::from_u64(1u64 << i);
+                diff0 += b.get(child0) * pow;
+                diff1 += b.get(child1) * pow;
+            }
+            let expr0 = lhs0 - rhs0 - diff0 + borrow0 * two32;
+            let expr1 = lhs1 - rhs1 - diff1 + borrow1 * two32;
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+                let expr_x = interp(expr0, expr1, x);
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        self.borrow.fold_round_in_place(r);
+        for b in self.diff_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle for RV32 packed NEQ correctness (Ajtai-representable):
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (val(t) - (1 - Π_i (1 - diff_bit_i(t))))
+///
+/// Where `diff_bits` encode `diff = lhs - rhs (mod 2^32)` (checked by the adapter oracle).
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedNeqOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    diff_bits: Vec<SparseIdxVec<K>>,
+    val: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedNeqOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        diff_bits: Vec<SparseIdxVec<K>>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(val.len(), 1usize << ell_n);
+        debug_assert_eq!(diff_bits.len(), 32);
+        for (i, b) in diff_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "diff_bits[{i}] length must match time domain");
+        }
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            diff_bits,
+            val,
+            // Same degree bound as EQ: 1 + 1 + 32 = 34.
+            degree_bound: 34,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedNeqOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let val = self.val.singleton_value();
+            let mut prod = K::ONE;
+            for b in self.diff_bits.iter() {
+                let bit = b.singleton_value();
+                prod *= K::ONE - bit;
+            }
+            let expr = val + prod - K::ONE;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let val0 = self.val.get(child0);
+            let val1 = self.val.get(child1);
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+                let val_x = interp(val0, val1, x);
+                let mut prod_x = K::ONE;
+                for b in self.diff_bits.iter() {
+                    let b0 = b.get(child0);
+                    let b1 = b.get(child1);
+                    let bit_x = interp(b0, b1, x);
+                    prod_x *= K::ONE - bit_x;
+                }
+                let expr_x = val_x + prod_x - K::ONE;
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        for b in self.diff_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.val.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle for RV32 packed NEQ diff decomposition check:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs(t) - rhs(t) - diff(t) + borrow(t)·2^32)
+///
+/// See [`Rv32PackedEqAdapterOracleSparseTime`] for details; this is identical but kept as a
+/// distinct type for call-site clarity.
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedNeqAdapterOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    borrow: SparseIdxVec<K>,
+    diff_bits: Vec<SparseIdxVec<K>>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedNeqAdapterOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        borrow: SparseIdxVec<K>,
+        diff_bits: Vec<SparseIdxVec<K>>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(borrow.len(), 1usize << ell_n);
+        debug_assert_eq!(diff_bits.len(), 32);
+        for (i, b) in diff_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "diff_bits[{i}] length must match time domain");
+        }
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            rhs,
+            borrow,
+            diff_bits,
+            degree_bound: 3,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedNeqAdapterOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.has_lookup.len() == 1 {
+            let two32 = K::from_u64(1u64 << 32);
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let borrow = self.borrow.singleton_value();
+            let mut diff = K::ZERO;
+            for (i, b) in self.diff_bits.iter().enumerate() {
+                let bit = b.singleton_value();
+                diff += bit * K::from_u64(1u64 << i);
+            }
+            let expr = lhs - rhs - diff + borrow * two32;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let two32 = K::from_u64(1u64 << 32);
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let borrow0 = self.borrow.get(child0);
+            let borrow1 = self.borrow.get(child1);
+            let mut diff0 = K::ZERO;
+            let mut diff1 = K::ZERO;
+            for (i, b) in self.diff_bits.iter().enumerate() {
+                let pow = K::from_u64(1u64 << i);
+                diff0 += b.get(child0) * pow;
+                diff1 += b.get(child1) * pow;
+            }
+            let expr0 = lhs0 - rhs0 - diff0 + borrow0 * two32;
+            let expr1 = lhs1 - rhs1 - diff1 + borrow1 * two32;
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+                let expr_x = interp(expr0, expr1, x);
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        self.borrow.fold_round_in_place(r);
+        for b in self.diff_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.bit_idx += 1;
+    }
+}
+
+// ============================================================================
+// Packed-key RV32 SLTU Shout (time-domain)
+// ============================================================================
+
+/// Sparse Route A oracle for RV32 packed SLT (signed less-than) correctness.
+///
+/// We reduce signed comparison to unsigned comparison by XOR-biasing both operands with `2^31`
+/// (flip the sign bit). Let:
+///   lhs_b = lhs ⊕ 2^31, rhs_b = rhs ⊕ 2^31
+/// then `(lhs as i32) < (rhs as i32)` iff `lhs_b < rhs_b` as unsigned.
+///
+/// With witness bits `lhs_sign`, `rhs_sign` (intended as the msb of lhs/rhs), we implement the
+/// XOR-biasing arithmetically:
+///   x ⊕ 2^31 = x + (1 - 2·msb(x))·2^31.
+///
+/// The correctness constraint is:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs_b(t) - rhs_b(t) - diff(t) + out(t)·2^32)
+///
+/// Where `out(t)` is the SLT result bit (1 iff lhs < rhs in signed order, else 0) and `diff(t)`
+/// is the u32 difference `lhs_b - rhs_b (mod 2^32)`.
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedSltOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    lhs_sign: SparseIdxVec<K>,
+    rhs_sign: SparseIdxVec<K>,
+    diff: SparseIdxVec<K>,
+    out: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedSltOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        lhs_sign: SparseIdxVec<K>,
+        rhs_sign: SparseIdxVec<K>,
+        diff: SparseIdxVec<K>,
+        out: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs_sign.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs_sign.len(), 1usize << ell_n);
+        debug_assert_eq!(diff.len(), 1usize << ell_n);
+        debug_assert_eq!(out.len(), 1usize << ell_n);
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            rhs,
+            lhs_sign,
+            rhs_sign,
+            diff,
+            out,
+            degree_bound: 3,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedSltOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        let two31 = K::from_u64(1u64 << 31);
+        let two32 = K::from_u64(1u64 << 32);
+        let two = K::from_u64(2);
+
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let lhs_sign = self.lhs_sign.singleton_value();
+            let rhs_sign = self.rhs_sign.singleton_value();
+            let diff = self.diff.singleton_value();
+            let out = self.out.singleton_value();
+
+            let lhs_b = lhs + (K::ONE - two * lhs_sign) * two31;
+            let rhs_b = rhs + (K::ONE - two * rhs_sign) * two31;
+            let expr = lhs_b - rhs_b - diff + out * two32;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let lhs_sign0 = self.lhs_sign.get(child0);
+            let lhs_sign1 = self.lhs_sign.get(child1);
+            let rhs_sign0 = self.rhs_sign.get(child0);
+            let rhs_sign1 = self.rhs_sign.get(child1);
+            let diff0 = self.diff.get(child0);
+            let diff1 = self.diff.get(child1);
+            let out0 = self.out.get(child0);
+            let out1 = self.out.get(child1);
+
+            let lhs_b0 = lhs0 + (K::ONE - two * lhs_sign0) * two31;
+            let lhs_b1 = lhs1 + (K::ONE - two * lhs_sign1) * two31;
+            let rhs_b0 = rhs0 + (K::ONE - two * rhs_sign0) * two31;
+            let rhs_b1 = rhs1 + (K::ONE - two * rhs_sign1) * two31;
+
+            let expr0 = lhs_b0 - rhs_b0 - diff0 + out0 * two32;
+            let expr1 = lhs_b1 - rhs_b1 - diff1 + out1 * two32;
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+                let expr_x = interp(expr0, expr1, x);
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        self.lhs_sign.fold_round_in_place(r);
+        self.rhs_sign.fold_round_in_place(r);
+        self.diff.fold_round_in_place(r);
+        self.out.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle for RV32 packed SLTU correctness:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs(t) - rhs(t) - diff(t) + out(t)·2^32)
+///
+/// Where `out(t)` is the SLTU result bit (1 iff lhs < rhs, else 0) and `diff(t)` is the u32
+/// difference `lhs - rhs (mod 2^32)`.
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedSltuOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    diff: SparseIdxVec<K>,
+    out: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedSltuOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        diff: SparseIdxVec<K>,
+        out: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(diff.len(), 1usize << ell_n);
+        debug_assert_eq!(out.len(), 1usize << ell_n);
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            rhs,
+            diff,
+            out,
+            degree_bound: 3,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedSltuOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.has_lookup.len() == 1 {
+            let two32 = K::from_u64(1u64 << 32);
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let diff = self.diff.singleton_value();
+            let out = self.out.singleton_value();
+            let expr = lhs - rhs - diff + out * two32;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let two32 = K::from_u64(1u64 << 32);
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let diff0 = self.diff.get(child0);
+            let diff1 = self.diff.get(child1);
+            let out0 = self.out.get(child0);
+            let out1 = self.out.get(child1);
+
+            let expr0 = lhs0 - rhs0 - diff0 + out0 * two32;
+            let expr1 = lhs1 - rhs1 - diff1 + out1 * two32;
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+                let expr_x = interp(expr0, expr1, x);
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        self.diff.fold_round_in_place(r);
+        self.out.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+// ============================================================================
+// Packed-key RV32 SLL Shout (time-domain)
+// ============================================================================
+
+/// Sparse Route A oracle for RV32 packed SLL correctness:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs(t) · 2^{shamt(t)} - val(t) - carry(t)·2^32)
+///
+/// Where:
+/// - `shamt(t)` is the shift amount (0..31), encoded as 5 Boolean columns,
+/// - `carry(t)` is the high part of `(lhs << shamt)` as a u32 (range-checked separately),
+/// - `val(t)` is the low 32 bits of `(lhs << shamt)`.
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedSllOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    shamt_bits: Vec<SparseIdxVec<K>>,
+    carry_bits: Vec<SparseIdxVec<K>>,
+    val: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedSllOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        shamt_bits: Vec<SparseIdxVec<K>>,
+        carry_bits: Vec<SparseIdxVec<K>>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(val.len(), 1usize << ell_n);
+        debug_assert_eq!(shamt_bits.len(), 5);
+        for (i, b) in shamt_bits.iter().enumerate() {
+            debug_assert_eq!(
+                b.len(),
+                1usize << ell_n,
+                "shamt_bits[{i}] length must match time domain"
+            );
+        }
+        debug_assert_eq!(carry_bits.len(), 32);
+        for (i, b) in carry_bits.iter().enumerate() {
+            debug_assert_eq!(
+                b.len(),
+                1usize << ell_n,
+                "carry_bits[{i}] length must match time domain"
+            );
+        }
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            shamt_bits,
+            carry_bits,
+            val,
+            // Degree bound:
+            // - chi(t): multilinear (degree 1)
+            // - has_lookup(t): multilinear (degree 1)
+            // - lhs(t): multilinear (degree 1)
+            // - 2^{shamt(t)}: product of 5 linear terms in the shamt bits (degree 5)
+            // - val(t), carry(t): multilinear (degree 1)
+            // ⇒ total degree ≤ 1 + 1 + max(1+5, 1, 1) = 8
+            degree_bound: 8,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedSllOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        let two32 = K::from_u64(1u64 << 32);
+        let pow2_const: [K; 5] = [
+            K::from_u64(2),
+            K::from_u64(4),
+            K::from_u64(16),
+            K::from_u64(256),
+            K::from_u64(65536),
+        ];
+
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let val = self.val.singleton_value();
+
+            let mut pow2 = K::ONE;
+            for (b, c) in self.shamt_bits.iter().zip(pow2_const.iter()) {
+                let bit = b.singleton_value();
+                pow2 *= K::ONE + bit * (*c - K::ONE);
+            }
+
+            let mut carry = K::ZERO;
+            for (i, b) in self.carry_bits.iter().enumerate() {
+                carry += b.singleton_value() * K::from_u64(1u64 << i);
+            }
+
+            let expr = lhs * pow2 - val - carry * two32;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let val0 = self.val.get(child0);
+            let val1 = self.val.get(child1);
+
+            // Pre-fetch bit endpoints for this pair to avoid repeated sparse lookups per eval point.
+            let mut b0s: [K; 5] = [K::ZERO; 5];
+            let mut b1s: [K; 5] = [K::ZERO; 5];
+            for (i, b) in self.shamt_bits.iter().enumerate() {
+                b0s[i] = b.get(child0);
+                b1s[i] = b.get(child1);
+            }
+            let mut c0s: [K; 32] = [K::ZERO; 32];
+            let mut c1s: [K; 32] = [K::ZERO; 32];
+            for (i, b) in self.carry_bits.iter().enumerate() {
+                c0s[i] = b.get(child0);
+                c1s[i] = b.get(child1);
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let lhs_x = interp(lhs0, lhs1, x);
+                let val_x = interp(val0, val1, x);
+
+                let mut pow2_x = K::ONE;
+                for j in 0..5 {
+                    let b_x = interp(b0s[j], b1s[j], x);
+                    pow2_x *= K::ONE + b_x * (pow2_const[j] - K::ONE);
+                }
+
+                let mut carry_x = K::ZERO;
+                for j in 0..32 {
+                    let c_x = interp(c0s[j], c1s[j], x);
+                    carry_x += c_x * K::from_u64(1u64 << j);
+                }
+
+                let expr_x = lhs_x * pow2_x - val_x - carry_x * two32;
+                if expr_x == K::ZERO {
+                    continue;
+                }
+
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        for b in self.shamt_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        for b in self.carry_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.val.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+// ============================================================================
+// Packed-key RV32 SRL Shout (time-domain)
+// ============================================================================
+
+/// Sparse Route A oracle for RV32 packed SRL correctness:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs(t) - val(t)·2^{shamt(t)} - rem(t))
+///
+/// Where:
+/// - `shamt(t)` is the shift amount (0..31), encoded as 5 Boolean columns,
+/// - `rem(t)` is the remainder `lhs mod 2^{shamt}`, encoded as 32 Boolean columns,
+/// - `val(t)` is the SRL result (`lhs >> shamt`).
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedSrlOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    shamt_bits: Vec<SparseIdxVec<K>>,
+    rem_bits: Vec<SparseIdxVec<K>>,
+    val: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedSrlOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        shamt_bits: Vec<SparseIdxVec<K>>,
+        rem_bits: Vec<SparseIdxVec<K>>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(val.len(), 1usize << ell_n);
+        debug_assert_eq!(shamt_bits.len(), 5);
+        for (i, b) in shamt_bits.iter().enumerate() {
+            debug_assert_eq!(
+                b.len(),
+                1usize << ell_n,
+                "shamt_bits[{i}] length must match time domain"
+            );
+        }
+        debug_assert_eq!(rem_bits.len(), 32);
+        for (i, b) in rem_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "rem_bits[{i}] length must match time domain");
+        }
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            shamt_bits,
+            rem_bits,
+            val,
+            // Degree bound:
+            // - chi(t): multilinear (degree 1)
+            // - has_lookup(t): multilinear (degree 1)
+            // - lhs(t): multilinear (degree 1)
+            // - 2^{shamt(t)}: product of 5 linear terms in the shamt bits (degree 5)
+            // - val(t), rem(t): multilinear (degree 1)
+            // ⇒ total degree ≤ 1 + 1 + max(1+5, 1, 1) = 8
+            degree_bound: 8,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedSrlOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        let pow2_const: [K; 5] = [
+            K::from_u64(2),
+            K::from_u64(4),
+            K::from_u64(16),
+            K::from_u64(256),
+            K::from_u64(65536),
+        ];
+
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let val = self.val.singleton_value();
+
+            let mut pow2 = K::ONE;
+            for (b, c) in self.shamt_bits.iter().zip(pow2_const.iter()) {
+                let bit = b.singleton_value();
+                pow2 *= K::ONE + bit * (*c - K::ONE);
+            }
+
+            let mut rem = K::ZERO;
+            for (i, b) in self.rem_bits.iter().enumerate() {
+                rem += b.singleton_value() * K::from_u64(1u64 << i);
+            }
+
+            let expr = lhs - val * pow2 - rem;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let val0 = self.val.get(child0);
+            let val1 = self.val.get(child1);
+
+            // Pre-fetch bit endpoints for this pair to avoid repeated sparse lookups per eval point.
+            let mut b0s: [K; 5] = [K::ZERO; 5];
+            let mut b1s: [K; 5] = [K::ZERO; 5];
+            for (i, b) in self.shamt_bits.iter().enumerate() {
+                b0s[i] = b.get(child0);
+                b1s[i] = b.get(child1);
+            }
+            let mut r0s: [K; 32] = [K::ZERO; 32];
+            let mut r1s: [K; 32] = [K::ZERO; 32];
+            for (i, b) in self.rem_bits.iter().enumerate() {
+                r0s[i] = b.get(child0);
+                r1s[i] = b.get(child1);
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let lhs_x = interp(lhs0, lhs1, x);
+                let val_x = interp(val0, val1, x);
+
+                let mut pow2_x = K::ONE;
+                for j in 0..5 {
+                    let b_x = interp(b0s[j], b1s[j], x);
+                    pow2_x *= K::ONE + b_x * (pow2_const[j] - K::ONE);
+                }
+
+                let mut rem_x = K::ZERO;
+                for j in 0..32 {
+                    let r_x = interp(r0s[j], r1s[j], x);
+                    rem_x += r_x * K::from_u64(1u64 << j);
+                }
+
+                let expr_x = lhs_x - val_x * pow2_x - rem_x;
+                if expr_x == K::ZERO {
+                    continue;
+                }
+
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        for b in self.shamt_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        for b in self.rem_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.val.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle that enforces the SRL remainder is < 2^{shamt}:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · Σ_s eq(shamt(t), s) · Σ_{i≥s} 2^i · rem_bit_i(t)
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedSrlAdapterOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    shamt_bits: Vec<SparseIdxVec<K>>,
+    rem_bits: Vec<SparseIdxVec<K>>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedSrlAdapterOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        shamt_bits: Vec<SparseIdxVec<K>>,
+        rem_bits: Vec<SparseIdxVec<K>>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(shamt_bits.len(), 5);
+        for (i, b) in shamt_bits.iter().enumerate() {
+            debug_assert_eq!(
+                b.len(),
+                1usize << ell_n,
+                "shamt_bits[{i}] length must match time domain"
+            );
+        }
+        debug_assert_eq!(rem_bits.len(), 32);
+        for (i, b) in rem_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "rem_bits[{i}] length must match time domain");
+        }
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            shamt_bits,
+            rem_bits,
+            // Degree bound: chi (1) + gate (1) + eq_s(shamt) (5) + tail(rem) (1) = 8.
+            degree_bound: 8,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedSrlAdapterOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+
+            let mut shamt: [K; 5] = [K::ZERO; 5];
+            for (i, b) in self.shamt_bits.iter().enumerate() {
+                shamt[i] = b.singleton_value();
+            }
+
+            let mut rem: [K; 32] = [K::ZERO; 32];
+            for (i, b) in self.rem_bits.iter().enumerate() {
+                rem[i] = b.singleton_value();
+            }
+
+            // tail_sum[s] = Σ_{i≥s} 2^i · rem_i
+            let mut tail_sum: [K; 32] = [K::ZERO; 32];
+            let mut tail = K::ZERO;
+            for i in (0..32).rev() {
+                tail += rem[i] * K::from_u64(1u64 << i);
+                tail_sum[i] = tail;
+            }
+
+            // eq_s(shamt) for s in 0..32
+            let mut eq: [K; 32] = [K::ZERO; 32];
+            for s in 0..32usize {
+                let mut prod = K::ONE;
+                for j in 0..5usize {
+                    let b = shamt[j];
+                    if ((s >> j) & 1) == 1 {
+                        prod *= b;
+                    } else {
+                        prod *= K::ONE - b;
+                    }
+                }
+                eq[s] = prod;
+            }
+
+            let mut expr = K::ZERO;
+            for s in 0..32usize {
+                expr += eq[s] * tail_sum[s];
+            }
+
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            // Pre-fetch bit endpoints for this pair to avoid repeated sparse lookups per eval point.
+            let mut b0s: [K; 5] = [K::ZERO; 5];
+            let mut b1s: [K; 5] = [K::ZERO; 5];
+            for (i, b) in self.shamt_bits.iter().enumerate() {
+                b0s[i] = b.get(child0);
+                b1s[i] = b.get(child1);
+            }
+            let mut r0s: [K; 32] = [K::ZERO; 32];
+            let mut r1s: [K; 32] = [K::ZERO; 32];
+            for (i, b) in self.rem_bits.iter().enumerate() {
+                r0s[i] = b.get(child0);
+                r1s[i] = b.get(child1);
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let mut shamt: [K; 5] = [K::ZERO; 5];
+                for j in 0..5usize {
+                    shamt[j] = interp(b0s[j], b1s[j], x);
+                }
+
+                let mut rem: [K; 32] = [K::ZERO; 32];
+                for j in 0..32usize {
+                    rem[j] = interp(r0s[j], r1s[j], x);
+                }
+
+                // tail_sum[s] = Σ_{i≥s} 2^i · rem_i
+                let mut tail_sum: [K; 32] = [K::ZERO; 32];
+                let mut tail = K::ZERO;
+                for j in (0..32).rev() {
+                    tail += rem[j] * K::from_u64(1u64 << j);
+                    tail_sum[j] = tail;
+                }
+
+                // eq_s(shamt) for s in 0..32
+                let mut expr_x = K::ZERO;
+                for s in 0..32usize {
+                    let mut prod = K::ONE;
+                    for j in 0..5usize {
+                        let b = shamt[j];
+                        if ((s >> j) & 1) == 1 {
+                            prod *= b;
+                        } else {
+                            prod *= K::ONE - b;
+                        }
+                    }
+                    expr_x += prod * tail_sum[s];
+                }
+
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        for b in self.shamt_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        for b in self.rem_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.bit_idx += 1;
+    }
+}
+
+// ============================================================================
+// Packed-key RV32 SRA Shout (time-domain)
+// ============================================================================
+
+/// Sparse Route A oracle for RV32 packed SRA correctness:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (lhs(t) - val(t)·2^{shamt(t)} - rem(t) - sign(t)·2^32·(1 - 2^{shamt(t)}))
+///
+/// Where:
+/// - `shamt(t)` is the shift amount (0..31), encoded as 5 Boolean columns,
+/// - `sign(t)` is the sign bit of `lhs` (and the expected sign bit of `val`), encoded as 1 Boolean column,
+/// - `rem(t)` is the remainder in the signed floor-division identity:
+///     (lhs_signed) = (val_signed)·2^{shamt} + rem, with rem ∈ [0, 2^{shamt})
+///   encoded as 31 Boolean columns (bits 0..30),
+/// - `val(t)` is the SRA result (`(lhs as i32) >> shamt`, represented as u32 in the field).
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedSraOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    shamt_bits: Vec<SparseIdxVec<K>>,
+    sign: SparseIdxVec<K>,
+    rem_bits: Vec<SparseIdxVec<K>>,
+    val: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedSraOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        shamt_bits: Vec<SparseIdxVec<K>>,
+        sign: SparseIdxVec<K>,
+        rem_bits: Vec<SparseIdxVec<K>>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(val.len(), 1usize << ell_n);
+        debug_assert_eq!(sign.len(), 1usize << ell_n);
+        debug_assert_eq!(shamt_bits.len(), 5);
+        for (i, b) in shamt_bits.iter().enumerate() {
+            debug_assert_eq!(
+                b.len(),
+                1usize << ell_n,
+                "shamt_bits[{i}] length must match time domain"
+            );
+        }
+        debug_assert_eq!(rem_bits.len(), 31);
+        for (i, b) in rem_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "rem_bits[{i}] length must match time domain");
+        }
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            shamt_bits,
+            sign,
+            rem_bits,
+            val,
+            // Degree bound:
+            // - chi(t): multilinear (degree 1)
+            // - has_lookup(t): multilinear (degree 1)
+            // - lhs(t): multilinear (degree 1)
+            // - 2^{shamt(t)}: product of 5 linear terms in the shamt bits (degree 5)
+            // - val(t), rem(t), sign(t): multilinear (degree 1)
+            // ⇒ total degree ≤ 1 + 1 + max(1+5, 1, 1+5, 1) = 8
+            degree_bound: 8,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedSraOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        let two32 = K::from_u64(1u64 << 32);
+        let pow2_const: [K; 5] = [
+            K::from_u64(2),
+            K::from_u64(4),
+            K::from_u64(16),
+            K::from_u64(256),
+            K::from_u64(65536),
+        ];
+
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let val = self.val.singleton_value();
+            let sign = self.sign.singleton_value();
+
+            let mut pow2 = K::ONE;
+            for (b, c) in self.shamt_bits.iter().zip(pow2_const.iter()) {
+                let bit = b.singleton_value();
+                pow2 *= K::ONE + bit * (*c - K::ONE);
+            }
+
+            let mut rem = K::ZERO;
+            for (i, b) in self.rem_bits.iter().enumerate() {
+                rem += b.singleton_value() * K::from_u64(1u64 << i);
+            }
+
+            let corr = sign * two32 * (K::ONE - pow2);
+            let expr = lhs - val * pow2 - rem - corr;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let val0 = self.val.get(child0);
+            let val1 = self.val.get(child1);
+            let sign0 = self.sign.get(child0);
+            let sign1 = self.sign.get(child1);
+
+            // Pre-fetch bit endpoints for this pair to avoid repeated sparse lookups per eval point.
+            let mut b0s: [K; 5] = [K::ZERO; 5];
+            let mut b1s: [K; 5] = [K::ZERO; 5];
+            for (i, b) in self.shamt_bits.iter().enumerate() {
+                b0s[i] = b.get(child0);
+                b1s[i] = b.get(child1);
+            }
+            let mut r0s: [K; 31] = [K::ZERO; 31];
+            let mut r1s: [K; 31] = [K::ZERO; 31];
+            for (i, b) in self.rem_bits.iter().enumerate() {
+                r0s[i] = b.get(child0);
+                r1s[i] = b.get(child1);
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let lhs_x = interp(lhs0, lhs1, x);
+                let val_x = interp(val0, val1, x);
+                let sign_x = interp(sign0, sign1, x);
+
+                let mut pow2_x = K::ONE;
+                for j in 0..5 {
+                    let b_x = interp(b0s[j], b1s[j], x);
+                    pow2_x *= K::ONE + b_x * (pow2_const[j] - K::ONE);
+                }
+
+                let mut rem_x = K::ZERO;
+                for j in 0..31 {
+                    let r_x = interp(r0s[j], r1s[j], x);
+                    rem_x += r_x * K::from_u64(1u64 << j);
+                }
+
+                let corr_x = sign_x * two32 * (K::ONE - pow2_x);
+                let expr_x = lhs_x - val_x * pow2_x - rem_x - corr_x;
+                if expr_x == K::ZERO {
+                    continue;
+                }
+
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        for b in self.shamt_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.sign.fold_round_in_place(r);
+        for b in self.rem_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.val.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle that enforces the SRA remainder is < 2^{shamt}:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · Σ_s eq(shamt(t), s) · Σ_{i≥s} 2^i · rem_bit_i(t)
+///
+/// For SRA, we only carry 31 remainder bits (0..30). This is sufficient because `shamt ∈ [0,31]`
+/// and the remainder range is always `< 2^{shamt} ≤ 2^{31}`.
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedSraAdapterOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    shamt_bits: Vec<SparseIdxVec<K>>,
+    rem_bits: Vec<SparseIdxVec<K>>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedSraAdapterOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        shamt_bits: Vec<SparseIdxVec<K>>,
+        rem_bits: Vec<SparseIdxVec<K>>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(shamt_bits.len(), 5);
+        for (i, b) in shamt_bits.iter().enumerate() {
+            debug_assert_eq!(
+                b.len(),
+                1usize << ell_n,
+                "shamt_bits[{i}] length must match time domain"
+            );
+        }
+        debug_assert_eq!(rem_bits.len(), 31);
+        for (i, b) in rem_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "rem_bits[{i}] length must match time domain");
+        }
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            shamt_bits,
+            rem_bits,
+            // Degree bound: chi (1) + gate (1) + eq_s(shamt) (5) + tail(rem) (1) = 8.
+            degree_bound: 8,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedSraAdapterOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+
+            let mut shamt: [K; 5] = [K::ZERO; 5];
+            for (i, b) in self.shamt_bits.iter().enumerate() {
+                shamt[i] = b.singleton_value();
+            }
+
+            let mut rem: [K; 31] = [K::ZERO; 31];
+            for (i, b) in self.rem_bits.iter().enumerate() {
+                rem[i] = b.singleton_value();
+            }
+
+            // tail_sum[s] = Σ_{i≥s} 2^i · rem_i, with tail_sum[31]=0 (no bits >= 31).
+            let mut tail_sum: [K; 32] = [K::ZERO; 32];
+            let mut tail = K::ZERO;
+            for i in (0..31).rev() {
+                tail += rem[i] * K::from_u64(1u64 << i);
+                tail_sum[i] = tail;
+            }
+            tail_sum[31] = K::ZERO;
+
+            let mut expr = K::ZERO;
+            for s in 0..32usize {
+                let mut prod = K::ONE;
+                for j in 0..5usize {
+                    let b = shamt[j];
+                    if ((s >> j) & 1) == 1 {
+                        prod *= b;
+                    } else {
+                        prod *= K::ONE - b;
+                    }
+                }
+                expr += prod * tail_sum[s];
+            }
+
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            // Pre-fetch bit endpoints for this pair to avoid repeated sparse lookups per eval point.
+            let mut b0s: [K; 5] = [K::ZERO; 5];
+            let mut b1s: [K; 5] = [K::ZERO; 5];
+            for (i, b) in self.shamt_bits.iter().enumerate() {
+                b0s[i] = b.get(child0);
+                b1s[i] = b.get(child1);
+            }
+            let mut r0s: [K; 31] = [K::ZERO; 31];
+            let mut r1s: [K; 31] = [K::ZERO; 31];
+            for (i, b) in self.rem_bits.iter().enumerate() {
+                r0s[i] = b.get(child0);
+                r1s[i] = b.get(child1);
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let mut shamt: [K; 5] = [K::ZERO; 5];
+                for j in 0..5usize {
+                    shamt[j] = interp(b0s[j], b1s[j], x);
+                }
+
+                let mut rem: [K; 31] = [K::ZERO; 31];
+                for j in 0..31usize {
+                    rem[j] = interp(r0s[j], r1s[j], x);
+                }
+
+                // tail_sum[s] = Σ_{i≥s} 2^i · rem_i, with tail_sum[31]=0 (no bits >= 31).
+                let mut tail_sum: [K; 32] = [K::ZERO; 32];
+                let mut tail = K::ZERO;
+                for j in (0..31).rev() {
+                    tail += rem[j] * K::from_u64(1u64 << j);
+                    tail_sum[j] = tail;
+                }
+                tail_sum[31] = K::ZERO;
+
+                let mut expr_x = K::ZERO;
+                for s in 0..32usize {
+                    let mut prod = K::ONE;
+                    for j in 0..5usize {
+                        let b = shamt[j];
+                        if ((s >> j) & 1) == 1 {
+                            prod *= b;
+                        } else {
+                            prod *= K::ONE - b;
+                        }
+                    }
+                    expr_x += prod * tail_sum[s];
+                }
+
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        for b in self.shamt_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        for b in self.rem_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.bit_idx += 1;
+    }
+}
+
+// ============================================================================
+// Packed-key RV32 DIV*/REM* Shout (time-domain)
+// ============================================================================
+
+/// Sparse Route A oracle for RV32 packed DIVU correctness:
+///   Σ_t χ(t)·has_lookup(t)·( z(t)·(quot(t) - 0xFFFF_FFFF) + (1 - z(t))·(lhs(t) - rhs(t)·quot(t) - rem(t)) )
+///
+/// Where:
+/// - `quot(t)` is the DIVU output (lane.val),
+/// - `rem(t)` is an auxiliary witness column,
+/// - `z(t)` is a witness bit intended to be 1 iff `rhs(t) == 0`.
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedDivuOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    rem: SparseIdxVec<K>,
+    rhs_is_zero: SparseIdxVec<K>,
+    quot: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedDivuOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        rem: SparseIdxVec<K>,
+        rhs_is_zero: SparseIdxVec<K>,
+        quot: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rem.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs_is_zero.len(), 1usize << ell_n);
+        debug_assert_eq!(quot.len(), 1usize << ell_n);
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            rhs,
+            rem,
+            rhs_is_zero,
+            quot,
+            // Degree bound:
+            // - chi(t): multilinear (degree 1)
+            // - has_lookup(t): multilinear (degree 1)
+            // - rhs(t)·quot(t): degree 2
+            // - gated by (1 - z(t)): adds 1
+            // ⇒ total degree ≤ 1 + 1 + 2 + 1 = 5
+            degree_bound: 5,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedDivuOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        let all_ones = K::from_u64(u32::MAX as u64);
+
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let rem = self.rem.singleton_value();
+            let z = self.rhs_is_zero.singleton_value();
+            let quot = self.quot.singleton_value();
+
+            let expr = z * (quot - all_ones) + (K::ONE - z) * (lhs - rhs * quot - rem);
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let rem0 = self.rem.get(child0);
+            let rem1 = self.rem.get(child1);
+            let z0 = self.rhs_is_zero.get(child0);
+            let z1 = self.rhs_is_zero.get(child1);
+            let quot0 = self.quot.get(child0);
+            let quot1 = self.quot.get(child1);
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let lhs_x = interp(lhs0, lhs1, x);
+                let rhs_x = interp(rhs0, rhs1, x);
+                let rem_x = interp(rem0, rem1, x);
+                let z_x = interp(z0, z1, x);
+                let quot_x = interp(quot0, quot1, x);
+
+                let expr_x = z_x * (quot_x - all_ones) + (K::ONE - z_x) * (lhs_x - rhs_x * quot_x - rem_x);
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        self.rem.fold_round_in_place(r);
+        self.rhs_is_zero.fold_round_in_place(r);
+        self.quot.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle for RV32 packed REMU correctness:
+///   Σ_t χ(t)·has_lookup(t)·( z(t)·(rem(t) - lhs(t)) + (1 - z(t))·(lhs(t) - rhs(t)·quot(t) - rem(t)) )
+///
+/// Where:
+/// - `rem(t)` is the REMU output (lane.val),
+/// - `quot(t)` is an auxiliary witness column,
+/// - `z(t)` is a witness bit intended to be 1 iff `rhs(t) == 0`.
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedRemuOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    quot: SparseIdxVec<K>,
+    rhs_is_zero: SparseIdxVec<K>,
+    rem: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedRemuOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        quot: SparseIdxVec<K>,
+        rhs_is_zero: SparseIdxVec<K>,
+        rem: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(quot.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs_is_zero.len(), 1usize << ell_n);
+        debug_assert_eq!(rem.len(), 1usize << ell_n);
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            rhs,
+            quot,
+            rhs_is_zero,
+            rem,
+            // Degree bound:
+            // - chi(t): multilinear (degree 1)
+            // - has_lookup(t): multilinear (degree 1)
+            // - rhs(t)·quot(t): degree 2
+            // - gated by (1 - z(t)): adds 1
+            // ⇒ total degree ≤ 1 + 1 + 2 + 1 = 5
+            degree_bound: 5,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedRemuOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let quot = self.quot.singleton_value();
+            let z = self.rhs_is_zero.singleton_value();
+            let rem = self.rem.singleton_value();
+
+            let expr = z * (rem - lhs) + (K::ONE - z) * (lhs - rhs * quot - rem);
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let quot0 = self.quot.get(child0);
+            let quot1 = self.quot.get(child1);
+            let z0 = self.rhs_is_zero.get(child0);
+            let z1 = self.rhs_is_zero.get(child1);
+            let rem0 = self.rem.get(child0);
+            let rem1 = self.rem.get(child1);
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let lhs_x = interp(lhs0, lhs1, x);
+                let rhs_x = interp(rhs0, rhs1, x);
+                let quot_x = interp(quot0, quot1, x);
+                let z_x = interp(z0, z1, x);
+                let rem_x = interp(rem0, rem1, x);
+
+                let expr_x = z_x * (rem_x - lhs_x) + (K::ONE - z_x) * (lhs_x - rhs_x * quot_x - rem_x);
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        self.quot.fold_round_in_place(r);
+        self.rhs_is_zero.fold_round_in_place(r);
+        self.rem.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle for RV32 packed DIVU/REMU helpers (adapter):
+///   Σ_t χ(t)·has_lookup(t)·Σ_i w_i · c_i(t)
+///
+/// Constraints:
+/// - `c0 = rhs_is_zero·(1 - rhs_is_zero)`                 (boolean helper; redundant with bitness)
+/// - `c1 = rhs_is_zero·rhs`                               (rhs_is_zero => rhs==0)
+/// - `c2 = (1 - rhs_is_zero)·(rem - rhs - diff + 2^32)`    (remainder bound)
+/// - `c3 = diff - Σ 2^i·diff_bit_i`                       (u32 decomposition)
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedDivRemuAdapterOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    rhs_is_zero: SparseIdxVec<K>,
+    rem: SparseIdxVec<K>,
+    diff: SparseIdxVec<K>,
+    diff_bits: Vec<SparseIdxVec<K>>,
+    weights: [K; 4],
+    degree_bound: usize,
+}
+
+impl Rv32PackedDivRemuAdapterOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        rhs_is_zero: SparseIdxVec<K>,
+        rem: SparseIdxVec<K>,
+        diff: SparseIdxVec<K>,
+        diff_bits: Vec<SparseIdxVec<K>>,
+        weights: [K; 4],
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs_is_zero.len(), 1usize << ell_n);
+        debug_assert_eq!(rem.len(), 1usize << ell_n);
+        debug_assert_eq!(diff.len(), 1usize << ell_n);
+        debug_assert_eq!(diff_bits.len(), 32);
+        for (i, b) in diff_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "diff_bits[{i}] length must match time domain");
+        }
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            rhs,
+            rhs_is_zero,
+            rem,
+            diff,
+            diff_bits,
+            weights,
+            // Degree bound:
+            // - chi(t): multilinear (degree 1)
+            // - has_lookup(t): multilinear (degree 1)
+            // - remainder bound term multiplies by (1 - rhs_is_zero): degree 2
+            // ⇒ total degree ≤ 1 + 1 + 2 = 4
+            degree_bound: 4,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedDivRemuAdapterOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        let two32 = K::from_u64(1u64 << 32);
+        let w0 = self.weights[0];
+        let w1 = self.weights[1];
+        let w2 = self.weights[2];
+        let w3 = self.weights[3];
+
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let z = self.rhs_is_zero.singleton_value();
+            let rem = self.rem.singleton_value();
+            let diff = self.diff.singleton_value();
+
+            let mut sum = K::ZERO;
+            for (i, b) in self.diff_bits.iter().enumerate() {
+                sum += b.singleton_value() * K::from_u64(1u64 << i);
+            }
+
+            let c0 = z * (K::ONE - z);
+            let c1 = z * rhs;
+            let c2 = (K::ONE - z) * (rem - rhs - diff + two32);
+            let c3 = diff - sum;
+
+            let expr = w0 * c0 + w1 * c1 + w2 * c2 + w3 * c3;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let z0 = self.rhs_is_zero.get(child0);
+            let z1 = self.rhs_is_zero.get(child1);
+            let rem0 = self.rem.get(child0);
+            let rem1 = self.rem.get(child1);
+            let diff0 = self.diff.get(child0);
+            let diff1 = self.diff.get(child1);
+
+            let mut b0s: [K; 32] = [K::ZERO; 32];
+            let mut b1s: [K; 32] = [K::ZERO; 32];
+            for (j, b) in self.diff_bits.iter().enumerate() {
+                b0s[j] = b.get(child0);
+                b1s[j] = b.get(child1);
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let rhs_x = interp(rhs0, rhs1, x);
+                let z_x = interp(z0, z1, x);
+                let rem_x = interp(rem0, rem1, x);
+                let diff_x = interp(diff0, diff1, x);
+
+                let mut sum = K::ZERO;
+                for j in 0..32 {
+                    let b_x = interp(b0s[j], b1s[j], x);
+                    sum += b_x * K::from_u64(1u64 << j);
+                }
+
+                let c0 = z_x * (K::ONE - z_x);
+                let c1 = z_x * rhs_x;
+                let c2 = (K::ONE - z_x) * (rem_x - rhs_x - diff_x + two32);
+                let c3 = diff_x - sum;
+                let expr_x = w0 * c0 + w1 * c1 + w2 * c2 + w3 * c3;
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        self.rhs_is_zero.fold_round_in_place(r);
+        self.rem.fold_round_in_place(r);
+        self.diff.fold_round_in_place(r);
+        for b in self.diff_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle for RV32 packed DIV correctness (signed quotient output).
+///
+/// Uses auxiliary `q_abs` (unsigned quotient), sign bits, and a `q_is_zero` witness bit to
+/// handle the `-0` normalization case.
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedDivOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs_sign: SparseIdxVec<K>,
+    rhs_sign: SparseIdxVec<K>,
+    rhs_is_zero: SparseIdxVec<K>,
+    q_abs: SparseIdxVec<K>,
+    q_is_zero: SparseIdxVec<K>,
+    val: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedDivOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs_sign: SparseIdxVec<K>,
+        rhs_sign: SparseIdxVec<K>,
+        rhs_is_zero: SparseIdxVec<K>,
+        q_abs: SparseIdxVec<K>,
+        q_is_zero: SparseIdxVec<K>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs_sign.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs_sign.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs_is_zero.len(), 1usize << ell_n);
+        debug_assert_eq!(q_abs.len(), 1usize << ell_n);
+        debug_assert_eq!(q_is_zero.len(), 1usize << ell_n);
+        debug_assert_eq!(val.len(), 1usize << ell_n);
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs_sign,
+            rhs_sign,
+            rhs_is_zero,
+            q_abs,
+            q_is_zero,
+            val,
+            // This oracle composes abs-quotient sign logic (degree 4) with rhs_is_zero gating.
+            degree_bound: 7,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedDivOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        let two = K::from_u64(2);
+        let two32 = K::from_u64(1u64 << 32);
+        let all_ones = K::from_u64(u32::MAX as u64);
+
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let s1 = self.lhs_sign.singleton_value();
+            let s2 = self.rhs_sign.singleton_value();
+            let z = self.rhs_is_zero.singleton_value();
+            let q_abs = self.q_abs.singleton_value();
+            let q0 = self.q_is_zero.singleton_value();
+            let val = self.val.singleton_value();
+
+            let div_sign = s1 + s2 - two * s1 * s2;
+            let neg_q = (K::ONE - q0) * (two32 - q_abs);
+            let q_signed = (K::ONE - div_sign) * q_abs + div_sign * neg_q;
+
+            let expr = z * (val - all_ones) + (K::ONE - z) * (val - q_signed);
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let s10 = self.lhs_sign.get(child0);
+            let s11 = self.lhs_sign.get(child1);
+            let s20 = self.rhs_sign.get(child0);
+            let s21 = self.rhs_sign.get(child1);
+            let z0 = self.rhs_is_zero.get(child0);
+            let z1 = self.rhs_is_zero.get(child1);
+            let q0 = self.q_abs.get(child0);
+            let q1 = self.q_abs.get(child1);
+            let qz0 = self.q_is_zero.get(child0);
+            let qz1 = self.q_is_zero.get(child1);
+            let val0 = self.val.get(child0);
+            let val1 = self.val.get(child1);
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let s1 = interp(s10, s11, x);
+                let s2 = interp(s20, s21, x);
+                let z = interp(z0, z1, x);
+                let q_abs = interp(q0, q1, x);
+                let qz = interp(qz0, qz1, x);
+                let val = interp(val0, val1, x);
+
+                let div_sign = s1 + s2 - two * s1 * s2;
+                let neg_q = (K::ONE - qz) * (two32 - q_abs);
+                let q_signed = (K::ONE - div_sign) * q_abs + div_sign * neg_q;
+
+                let expr_x = z * (val - all_ones) + (K::ONE - z) * (val - q_signed);
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs_sign.fold_round_in_place(r);
+        self.rhs_sign.fold_round_in_place(r);
+        self.rhs_is_zero.fold_round_in_place(r);
+        self.q_abs.fold_round_in_place(r);
+        self.q_is_zero.fold_round_in_place(r);
+        self.val.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle for RV32 packed REM correctness (signed remainder output).
+///
+/// Uses auxiliary `r_abs` (unsigned remainder), the dividend sign bit, and `r_is_zero` to handle `-0`.
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct Rv32PackedRemOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    lhs_sign: SparseIdxVec<K>,
+    rhs_is_zero: SparseIdxVec<K>,
+    r_abs: SparseIdxVec<K>,
+    r_is_zero: SparseIdxVec<K>,
+    val: SparseIdxVec<K>,
+    degree_bound: usize,
+}
+
+impl Rv32PackedRemOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        lhs_sign: SparseIdxVec<K>,
+        rhs_is_zero: SparseIdxVec<K>,
+        r_abs: SparseIdxVec<K>,
+        r_is_zero: SparseIdxVec<K>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs_sign.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs_is_zero.len(), 1usize << ell_n);
+        debug_assert_eq!(r_abs.len(), 1usize << ell_n);
+        debug_assert_eq!(r_is_zero.len(), 1usize << ell_n);
+        debug_assert_eq!(val.len(), 1usize << ell_n);
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            lhs_sign,
+            rhs_is_zero,
+            r_abs,
+            r_is_zero,
+            val,
+            degree_bound: 7,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedRemOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        let two32 = K::from_u64(1u64 << 32);
+
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let s = self.lhs_sign.singleton_value();
+            let z = self.rhs_is_zero.singleton_value();
+            let r_abs = self.r_abs.singleton_value();
+            let r0 = self.r_is_zero.singleton_value();
+            let val = self.val.singleton_value();
+
+            let neg_r = (K::ONE - r0) * (two32 - r_abs);
+            let r_signed = (K::ONE - s) * r_abs + s * neg_r;
+            let expr = z * (val - lhs) + (K::ONE - z) * (val - r_signed);
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let s0 = self.lhs_sign.get(child0);
+            let s1 = self.lhs_sign.get(child1);
+            let z0 = self.rhs_is_zero.get(child0);
+            let z1 = self.rhs_is_zero.get(child1);
+            let r0_0 = self.r_abs.get(child0);
+            let r0_1 = self.r_abs.get(child1);
+            let rz0 = self.r_is_zero.get(child0);
+            let rz1 = self.r_is_zero.get(child1);
+            let val0 = self.val.get(child0);
+            let val1 = self.val.get(child1);
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let lhs_x = interp(lhs0, lhs1, x);
+                let s_x = interp(s0, s1, x);
+                let z_x = interp(z0, z1, x);
+                let r_abs_x = interp(r0_0, r0_1, x);
+                let rz_x = interp(rz0, rz1, x);
+                let val_x = interp(val0, val1, x);
+
+                let neg_r = (K::ONE - rz_x) * (two32 - r_abs_x);
+                let r_signed = (K::ONE - s_x) * r_abs_x + s_x * neg_r;
+                let expr_x = z_x * (val_x - lhs_x) + (K::ONE - z_x) * (val_x - r_signed);
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.lhs_sign.fold_round_in_place(r);
+        self.rhs_is_zero.fold_round_in_place(r);
+        self.r_abs.fold_round_in_place(r);
+        self.r_is_zero.fold_round_in_place(r);
+        self.val.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle for RV32 packed DIV/REM helpers (adapter).
+///
+/// This enforces:
+/// - zero-detection for `rhs`,
+/// - zero-detection for a signed-output magnitude (`q_abs` for DIV or `r_abs` for REM) to handle `-0`,
+/// - absolute-value division equation over u32 values when `rhs != 0`,
+/// - remainder bound `r_abs < |rhs|` when `rhs != 0`,
+/// - u32 decomposition of the remainder-bound witness `diff`.
+pub struct Rv32PackedDivRemAdapterOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    rhs_is_zero: SparseIdxVec<K>,
+    lhs_sign: SparseIdxVec<K>,
+    rhs_sign: SparseIdxVec<K>,
+    q_abs: SparseIdxVec<K>,
+    r_abs: SparseIdxVec<K>,
+    mag: SparseIdxVec<K>,
+    mag_is_zero: SparseIdxVec<K>,
+    diff: SparseIdxVec<K>,
+    diff_bits: Vec<SparseIdxVec<K>>,
+    weights: [K; 7],
+    degree_bound: usize,
+}
+
+impl Rv32PackedDivRemAdapterOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        rhs_is_zero: SparseIdxVec<K>,
+        lhs_sign: SparseIdxVec<K>,
+        rhs_sign: SparseIdxVec<K>,
+        q_abs: SparseIdxVec<K>,
+        r_abs: SparseIdxVec<K>,
+        mag: SparseIdxVec<K>,
+        mag_is_zero: SparseIdxVec<K>,
+        diff: SparseIdxVec<K>,
+        diff_bits: Vec<SparseIdxVec<K>>,
+        weights: [K; 7],
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs_is_zero.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs_sign.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs_sign.len(), 1usize << ell_n);
+        debug_assert_eq!(q_abs.len(), 1usize << ell_n);
+        debug_assert_eq!(r_abs.len(), 1usize << ell_n);
+        debug_assert_eq!(mag.len(), 1usize << ell_n);
+        debug_assert_eq!(mag_is_zero.len(), 1usize << ell_n);
+        debug_assert_eq!(diff.len(), 1usize << ell_n);
+        debug_assert_eq!(diff_bits.len(), 32);
+        for (i, b) in diff_bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "diff_bits[{i}] length must match time domain");
+        }
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs,
+            rhs,
+            rhs_is_zero,
+            lhs_sign,
+            rhs_sign,
+            q_abs,
+            r_abs,
+            mag,
+            mag_is_zero,
+            diff,
+            diff_bits,
+            weights,
+            degree_bound: 6,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedDivRemAdapterOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        let two = K::from_u64(2);
+        let two32 = K::from_u64(1u64 << 32);
+
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let rhs = self.rhs.singleton_value();
+            let z = self.rhs_is_zero.singleton_value();
+            let lhs_sign = self.lhs_sign.singleton_value();
+            let rhs_sign = self.rhs_sign.singleton_value();
+            let q_abs = self.q_abs.singleton_value();
+            let r_abs = self.r_abs.singleton_value();
+            let mag = self.mag.singleton_value();
+            let mag_z = self.mag_is_zero.singleton_value();
+            let diff = self.diff.singleton_value();
+
+            let mut sum = K::ZERO;
+            for (i, b) in self.diff_bits.iter().enumerate() {
+                sum += b.singleton_value() * K::from_u64(1u64 << i);
+            }
+
+            let lhs_abs = lhs + lhs_sign * (two32 - two * lhs);
+            let rhs_abs = rhs + rhs_sign * (two32 - two * rhs);
+
+            let c0 = z * (K::ONE - z);
+            let c1 = z * rhs;
+            let c2 = mag_z * (K::ONE - mag_z);
+            let c3 = mag_z * mag;
+            let c4 = (K::ONE - z) * (lhs_abs - rhs_abs * q_abs - r_abs);
+            let c5 = (K::ONE - z) * (r_abs - rhs_abs - diff + two32);
+            let c6 = diff - sum;
+
+            let w = &self.weights;
+            let expr = w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3 + w[4] * c4 + w[5] * c5 + w[6] * c6;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+            let z0 = self.rhs_is_zero.get(child0);
+            let z1 = self.rhs_is_zero.get(child1);
+            let lhs_sign0 = self.lhs_sign.get(child0);
+            let lhs_sign1 = self.lhs_sign.get(child1);
+            let rhs_sign0 = self.rhs_sign.get(child0);
+            let rhs_sign1 = self.rhs_sign.get(child1);
+            let q0 = self.q_abs.get(child0);
+            let q1 = self.q_abs.get(child1);
+            let r0 = self.r_abs.get(child0);
+            let r1 = self.r_abs.get(child1);
+            let mag0 = self.mag.get(child0);
+            let mag1 = self.mag.get(child1);
+            let mag_z0 = self.mag_is_zero.get(child0);
+            let mag_z1 = self.mag_is_zero.get(child1);
+            let diff0 = self.diff.get(child0);
+            let diff1 = self.diff.get(child1);
+
+            let mut b0s: [K; 32] = [K::ZERO; 32];
+            let mut b1s: [K; 32] = [K::ZERO; 32];
+            for (j, b) in self.diff_bits.iter().enumerate() {
+                b0s[j] = b.get(child0);
+                b1s[j] = b.get(child1);
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let lhs = interp(lhs0, lhs1, x);
+                let rhs = interp(rhs0, rhs1, x);
+                let z = interp(z0, z1, x);
+                let lhs_sign = interp(lhs_sign0, lhs_sign1, x);
+                let rhs_sign = interp(rhs_sign0, rhs_sign1, x);
+                let q_abs = interp(q0, q1, x);
+                let r_abs = interp(r0, r1, x);
+                let mag = interp(mag0, mag1, x);
+                let mag_z = interp(mag_z0, mag_z1, x);
+                let diff = interp(diff0, diff1, x);
+
+                let mut sum = K::ZERO;
+                for j in 0..32 {
+                    let b_x = interp(b0s[j], b1s[j], x);
+                    sum += b_x * K::from_u64(1u64 << j);
+                }
+
+                let lhs_abs = lhs + lhs_sign * (two32 - two * lhs);
+                let rhs_abs = rhs + rhs_sign * (two32 - two * rhs);
+
+                let c0 = z * (K::ONE - z);
+                let c1 = z * rhs;
+                let c2 = mag_z * (K::ONE - mag_z);
+                let c3 = mag_z * mag;
+                let c4 = (K::ONE - z) * (lhs_abs - rhs_abs * q_abs - r_abs);
+                let c5 = (K::ONE - z) * (r_abs - rhs_abs - diff + two32);
+                let c6 = diff - sum;
+
+                let w = &self.weights;
+                let expr_x = w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3 + w[4] * c4 + w[5] * c5 + w[6] * c6;
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        self.rhs_is_zero.fold_round_in_place(r);
+        self.lhs_sign.fold_round_in_place(r);
+        self.rhs_sign.fold_round_in_place(r);
+        self.q_abs.fold_round_in_place(r);
+        self.r_abs.fold_round_in_place(r);
+        self.mag.fold_round_in_place(r);
+        self.mag_is_zero.fold_round_in_place(r);
+        self.diff.fold_round_in_place(r);
+        for b in self.diff_bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.bit_idx += 1;
+    }
+}
+
+// ============================================================================
+// Packed-key RV32 bitwise Shout (AND/OR/XOR) via 2-bit digits (time-domain)
+// ============================================================================
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Rv32PackedBitwiseOp2 {
+    And,
+    Andn,
+    Or,
+    Xor,
+}
+
+#[inline]
+fn rv32_two_bit_digit_bits(inv2: K, inv6: K, x: K) -> (K, K) {
+    // Bits for x in {0,1,2,3}, represented as degree-3 polynomials over the field:
+    // - bit0: 0,1,0,1
+    // - bit1: 0,0,1,1
+    //
+    // Using Lagrange basis on {0,1,2,3}:
+    //   L1(x) = x(x-2)(x-3)/2
+    //   L2(x) = -x(x-1)(x-3)/2
+    //   L3(x) = x(x-1)(x-2)/6
+    //
+    // Then:
+    //   bit0(x) = L1(x) + L3(x)
+    //   bit1(x) = L2(x) + L3(x)
+    let xm1 = x - K::ONE;
+    let xm2 = x - K::from_u64(2);
+    let xm3 = x - K::from_u64(3);
+
+    let x_xm1 = x * xm1;
+    let l1 = (x * xm2 * xm3) * inv2;
+    let l3 = (x_xm1 * xm2) * inv6;
+    let l2 = -(x_xm1 * xm3) * inv2;
+
+    let bit0 = l1 + l3;
+    let bit1 = l2 + l3;
+    (bit0, bit1)
+}
+
+#[inline]
+fn rv32_two_bit_digit_op(inv2: K, inv6: K, op: Rv32PackedBitwiseOp2, a: K, b: K) -> K {
+    let (a0, a1) = rv32_two_bit_digit_bits(inv2, inv6, a);
+    let (b0, b1) = rv32_two_bit_digit_bits(inv2, inv6, b);
+
+    let two = K::from_u64(2);
+    match op {
+        Rv32PackedBitwiseOp2::And => {
+            let r0 = a0 * b0;
+            let r1 = a1 * b1;
+            r0 + two * r1
+        }
+        Rv32PackedBitwiseOp2::Andn => {
+            let r0 = a0 * (K::ONE - b0);
+            let r1 = a1 * (K::ONE - b1);
+            r0 + two * r1
+        }
+        Rv32PackedBitwiseOp2::Or => {
+            let r0 = a0 + b0 - a0 * b0;
+            let r1 = a1 + b1 - a1 * b1;
+            r0 + two * r1
+        }
+        Rv32PackedBitwiseOp2::Xor => {
+            let r0 = a0 + b0 - two * a0 * b0;
+            let r1 = a1 + b1 - two * a1 * b1;
+            r0 + two * r1
+        }
+    }
+}
+
+#[inline]
+fn rv32_digit4_range_poly(x: K) -> K {
+    // Vanishes exactly on {0,1,2,3}.
+    x * (x - K::ONE) * (x - K::from_u64(2)) * (x - K::from_u64(3))
+}
+
+pub struct Rv32PackedBitwiseAdapterOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    degree_bound: usize,
+
+    has_lookup: SparseIdxVec<K>,
+    lhs: SparseIdxVec<K>,
+    rhs: SparseIdxVec<K>,
+    lhs_digits: Vec<SparseIdxVec<K>>,
+    rhs_digits: Vec<SparseIdxVec<K>>,
+    weights: Vec<K>,
+}
+
+impl Rv32PackedBitwiseAdapterOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs: SparseIdxVec<K>,
+        rhs: SparseIdxVec<K>,
+        lhs_digits: Vec<SparseIdxVec<K>>,
+        rhs_digits: Vec<SparseIdxVec<K>>,
+        weights: Vec<K>,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs.len(), 1usize << ell_n);
+        debug_assert_eq!(rhs.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs_digits.len(), 16);
+        debug_assert_eq!(rhs_digits.len(), 16);
+        for (i, d) in lhs_digits.iter().enumerate() {
+            debug_assert_eq!(
+                d.len(),
+                1usize << ell_n,
+                "lhs_digits[{i}] length must match time domain"
+            );
+        }
+        for (i, d) in rhs_digits.iter().enumerate() {
+            debug_assert_eq!(
+                d.len(),
+                1usize << ell_n,
+                "rhs_digits[{i}] length must match time domain"
+            );
+        }
+        debug_assert_eq!(weights.len(), 34);
+
+        // Degree bound:
+        // - chi(t): multilinear (degree 1)
+        // - has_lookup(t): multilinear (degree 1)
+        // - digit4 range poly: degree 4
+        // ⇒ total degree ≤ 1 + 1 + 4 = 6
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            degree_bound: 6,
+            has_lookup,
+            lhs,
+            rhs,
+            lhs_digits,
+            rhs_digits,
+            weights,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedBitwiseAdapterOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        let w_lhs = self.weights[0];
+        let w_rhs = self.weights[1];
+        let w_digits = &self.weights[2..];
+
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let lhs = self.lhs.singleton_value();
+            let rhs = self.rhs.singleton_value();
+
+            let mut lhs_recon = K::ZERO;
+            let mut rhs_recon = K::ZERO;
+            for i in 0..16usize {
+                lhs_recon += self.lhs_digits[i].singleton_value() * K::from_u64(1u64 << (2 * i));
+                rhs_recon += self.rhs_digits[i].singleton_value() * K::from_u64(1u64 << (2 * i));
+            }
+
+            let mut range_sum = K::ZERO;
+            for (i, d) in self.lhs_digits.iter().enumerate() {
+                range_sum += w_digits[i] * rv32_digit4_range_poly(d.singleton_value());
+            }
+            for (i, d) in self.rhs_digits.iter().enumerate() {
+                range_sum += w_digits[16 + i] * rv32_digit4_range_poly(d.singleton_value());
+            }
+
+            let expr = w_lhs * (lhs - lhs_recon) + w_rhs * (rhs - rhs_recon) + range_sum;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let lhs0 = self.lhs.get(child0);
+            let lhs1 = self.lhs.get(child1);
+            let rhs0 = self.rhs.get(child0);
+            let rhs1 = self.rhs.get(child1);
+
+            let mut a0s: [K; 16] = [K::ZERO; 16];
+            let mut a1s: [K; 16] = [K::ZERO; 16];
+            for (i, d) in self.lhs_digits.iter().enumerate() {
+                a0s[i] = d.get(child0);
+                a1s[i] = d.get(child1);
+            }
+            let mut b0s: [K; 16] = [K::ZERO; 16];
+            let mut b1s: [K; 16] = [K::ZERO; 16];
+            for (i, d) in self.rhs_digits.iter().enumerate() {
+                b0s[i] = d.get(child0);
+                b1s[i] = d.get(child1);
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let lhs_x = interp(lhs0, lhs1, x);
+                let rhs_x = interp(rhs0, rhs1, x);
+
+                let mut lhs_recon = K::ZERO;
+                let mut rhs_recon = K::ZERO;
+                let mut range_sum = K::ZERO;
+                for j in 0..16usize {
+                    let aj = interp(a0s[j], a1s[j], x);
+                    let bj = interp(b0s[j], b1s[j], x);
+                    let pow = K::from_u64(1u64 << (2 * j));
+                    lhs_recon += aj * pow;
+                    rhs_recon += bj * pow;
+
+                    range_sum += w_digits[j] * rv32_digit4_range_poly(aj);
+                    range_sum += w_digits[16 + j] * rv32_digit4_range_poly(bj);
+                }
+
+                let expr = w_lhs * (lhs_x - lhs_recon) + w_rhs * (rhs_x - rhs_recon) + range_sum;
+                ys[i] += chi_x * gate_x * expr;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.lhs.fold_round_in_place(r);
+        self.rhs.fold_round_in_place(r);
+        for d in self.lhs_digits.iter_mut() {
+            d.fold_round_in_place(r);
+        }
+        for d in self.rhs_digits.iter_mut() {
+            d.fold_round_in_place(r);
+        }
+        self.bit_idx += 1;
+    }
+}
+
+pub struct Rv32PackedBitwiseOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    lhs_digits: Vec<SparseIdxVec<K>>,
+    rhs_digits: Vec<SparseIdxVec<K>>,
+    val: SparseIdxVec<K>,
+    op: Rv32PackedBitwiseOp2,
+    inv2: K,
+    inv6: K,
+    degree_bound: usize,
+}
+
+impl Rv32PackedBitwiseOracleSparseTime {
+    fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs_digits: Vec<SparseIdxVec<K>>,
+        rhs_digits: Vec<SparseIdxVec<K>>,
+        val: SparseIdxVec<K>,
+        op: Rv32PackedBitwiseOp2,
+    ) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(val.len(), 1usize << ell_n);
+        debug_assert_eq!(lhs_digits.len(), 16);
+        debug_assert_eq!(rhs_digits.len(), 16);
+        for (i, d) in lhs_digits.iter().enumerate() {
+            debug_assert_eq!(
+                d.len(),
+                1usize << ell_n,
+                "lhs_digits[{i}] length must match time domain"
+            );
+        }
+        for (i, d) in rhs_digits.iter().enumerate() {
+            debug_assert_eq!(
+                d.len(),
+                1usize << ell_n,
+                "rhs_digits[{i}] length must match time domain"
+            );
+        }
+
+        // Degree bound:
+        // - chi(t): multilinear (degree 1)
+        // - has_lookup(t): multilinear (degree 1)
+        // - bitwise digit op: degree 6 (two degree-3 bit extractors multiplied)
+        // ⇒ total degree ≤ 1 + 1 + 6 = 8
+        let inv2 = K::from_u64(2).inverse();
+        let inv6 = K::from_u64(6).inverse();
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            lhs_digits,
+            rhs_digits,
+            val,
+            op,
+            inv2,
+            inv6,
+            degree_bound: 8,
+        }
+    }
+}
+
+impl RoundOracle for Rv32PackedBitwiseOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let val = self.val.singleton_value();
+
+            let mut out = K::ZERO;
+            for i in 0..16usize {
+                let a = self.lhs_digits[i].singleton_value();
+                let b = self.rhs_digits[i].singleton_value();
+                let digit = rv32_two_bit_digit_op(self.inv2, self.inv6, self.op, a, b);
+                out += digit * K::from_u64(1u64 << (2 * i));
+            }
+            let expr = out - val;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let val0 = self.val.get(child0);
+            let val1 = self.val.get(child1);
+
+            let mut a0s: [K; 16] = [K::ZERO; 16];
+            let mut a1s: [K; 16] = [K::ZERO; 16];
+            for (j, d) in self.lhs_digits.iter().enumerate() {
+                a0s[j] = d.get(child0);
+                a1s[j] = d.get(child1);
+            }
+            let mut b0s: [K; 16] = [K::ZERO; 16];
+            let mut b1s: [K; 16] = [K::ZERO; 16];
+            for (j, d) in self.rhs_digits.iter().enumerate() {
+                b0s[j] = d.get(child0);
+                b1s[j] = d.get(child1);
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+
+                let val_x = interp(val0, val1, x);
+
+                let mut out = K::ZERO;
+                for j in 0..16usize {
+                    let a = interp(a0s[j], a1s[j], x);
+                    let b = interp(b0s[j], b1s[j], x);
+                    let digit = rv32_two_bit_digit_op(self.inv2, self.inv6, self.op, a, b);
+                    out += digit * K::from_u64(1u64 << (2 * j));
+                }
+
+                let expr = out - val_x;
+                ys[i] += chi_x * gate_x * expr;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        for d in self.lhs_digits.iter_mut() {
+            d.fold_round_in_place(r);
+        }
+        for d in self.rhs_digits.iter_mut() {
+            d.fold_round_in_place(r);
+        }
+        self.val.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+pub struct Rv32PackedAndOracleSparseTime {
+    core: Rv32PackedBitwiseOracleSparseTime,
+}
+impl Rv32PackedAndOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs_digits: Vec<SparseIdxVec<K>>,
+        rhs_digits: Vec<SparseIdxVec<K>>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        Self {
+            core: Rv32PackedBitwiseOracleSparseTime::new(
+                r_cycle,
+                has_lookup,
+                lhs_digits,
+                rhs_digits,
+                val,
+                Rv32PackedBitwiseOp2::And,
+            ),
+        }
+    }
+}
+impl_round_oracle_via_core!(Rv32PackedAndOracleSparseTime);
+
+pub struct Rv32PackedAndnOracleSparseTime {
+    core: Rv32PackedBitwiseOracleSparseTime,
+}
+impl Rv32PackedAndnOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs_digits: Vec<SparseIdxVec<K>>,
+        rhs_digits: Vec<SparseIdxVec<K>>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        Self {
+            core: Rv32PackedBitwiseOracleSparseTime::new(
+                r_cycle,
+                has_lookup,
+                lhs_digits,
+                rhs_digits,
+                val,
+                Rv32PackedBitwiseOp2::Andn,
+            ),
+        }
+    }
+}
+impl_round_oracle_via_core!(Rv32PackedAndnOracleSparseTime);
+
+pub struct Rv32PackedOrOracleSparseTime {
+    core: Rv32PackedBitwiseOracleSparseTime,
+}
+impl Rv32PackedOrOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs_digits: Vec<SparseIdxVec<K>>,
+        rhs_digits: Vec<SparseIdxVec<K>>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        Self {
+            core: Rv32PackedBitwiseOracleSparseTime::new(
+                r_cycle,
+                has_lookup,
+                lhs_digits,
+                rhs_digits,
+                val,
+                Rv32PackedBitwiseOp2::Or,
+            ),
+        }
+    }
+}
+impl_round_oracle_via_core!(Rv32PackedOrOracleSparseTime);
+
+pub struct Rv32PackedXorOracleSparseTime {
+    core: Rv32PackedBitwiseOracleSparseTime,
+}
+impl Rv32PackedXorOracleSparseTime {
+    pub fn new(
+        r_cycle: &[K],
+        has_lookup: SparseIdxVec<K>,
+        lhs_digits: Vec<SparseIdxVec<K>>,
+        rhs_digits: Vec<SparseIdxVec<K>>,
+        val: SparseIdxVec<K>,
+    ) -> Self {
+        Self {
+            core: Rv32PackedBitwiseOracleSparseTime::new(
+                r_cycle,
+                has_lookup,
+                lhs_digits,
+                rhs_digits,
+                val,
+                Rv32PackedBitwiseOp2::Xor,
+            ),
+        }
+    }
+}
+impl_round_oracle_via_core!(Rv32PackedXorOracleSparseTime);
+
+/// Sparse Route A oracle for u32 bit-decomposition consistency:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (x(t) - Σ_i 2^i · bit_i(t))
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct U32DecompOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    x: SparseIdxVec<K>,
+    bits: Vec<SparseIdxVec<K>>,
+    weights: Vec<K>,
+    degree_bound: usize,
+}
+
+impl U32DecompOracleSparseTime {
+    pub fn new(r_cycle: &[K], has_lookup: SparseIdxVec<K>, x: SparseIdxVec<K>, bits: Vec<SparseIdxVec<K>>) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(x.len(), 1usize << ell_n);
+        debug_assert_eq!(bits.len(), 32);
+        for (i, b) in bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "bits[{i}] length must match time domain");
+        }
+        let weights: Vec<K> = (0..32).map(|i| K::from_u64(1u64 << i)).collect();
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            x,
+            bits,
+            weights,
+            degree_bound: 3,
+        }
+    }
+}
+
+impl RoundOracle for U32DecompOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let x = self.x.singleton_value();
+            let mut sum = K::ZERO;
+            for (b, w) in self.bits.iter().zip(self.weights.iter()) {
+                sum += b.singleton_value() * *w;
+            }
+            let expr = x - sum;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let x0 = self.x.get(child0);
+            let x1 = self.x.get(child1);
+
+            let mut expr0 = x0;
+            let mut expr1 = x1;
+            for (b_col, w) in self.bits.iter().zip(self.weights.iter()) {
+                let b0 = b_col.get(child0);
+                let b1 = b_col.get(child1);
+                expr0 -= b0 * *w;
+                expr1 -= b1 * *w;
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+                let expr_x = interp(expr0, expr1, x);
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.x.fold_round_in_place(r);
+        for b in self.bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse Route A oracle for u5 bit-decomposition consistency:
+///   Σ_t χ_{r_cycle}(t) · has_lookup(t) · (x(t) - Σ_i 2^i · bit_i(t))
+///
+/// Intended usage: set the claimed sum to 0 to enforce correctness.
+pub struct U5DecompOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_lookup: SparseIdxVec<K>,
+    x: SparseIdxVec<K>,
+    bits: Vec<SparseIdxVec<K>>,
+    weights: Vec<K>,
+    degree_bound: usize,
+}
+
+impl U5DecompOracleSparseTime {
+    pub fn new(r_cycle: &[K], has_lookup: SparseIdxVec<K>, x: SparseIdxVec<K>, bits: Vec<SparseIdxVec<K>>) -> Self {
+        let ell_n = r_cycle.len();
+        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
+        debug_assert_eq!(x.len(), 1usize << ell_n);
+        debug_assert_eq!(bits.len(), 5);
+        for (i, b) in bits.iter().enumerate() {
+            debug_assert_eq!(b.len(), 1usize << ell_n, "bits[{i}] length must match time domain");
+        }
+        let weights: Vec<K> = (0..5).map(|i| K::from_u64(1u64 << i)).collect();
+
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_lookup,
+            x,
+            bits,
+            weights,
+            degree_bound: 3,
+        }
+    }
+}
+
+impl RoundOracle for U5DecompOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.has_lookup.len() == 1 {
+            let gate = self.has_lookup.singleton_value();
+            let x = self.x.singleton_value();
+            let mut sum = K::ZERO;
+            for (b, w) in self.bits.iter().zip(self.weights.iter()) {
+                sum += b.singleton_value() * *w;
+            }
+            let expr = x - sum;
+            let v = self.prefix_eq * gate * expr;
+            return vec![v; points.len()];
+        }
+
+        let pairs = gather_pairs_from_sparse(self.has_lookup.entries());
+        let half = self.has_lookup.len() / 2;
+        debug_assert!(pairs.iter().all(|&p| p < half));
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+
+            let gate0 = self.has_lookup.get(child0);
+            let gate1 = self.has_lookup.get(child1);
+            if gate0 == K::ZERO && gate1 == K::ZERO {
+                continue;
+            }
+
+            let x0 = self.x.get(child0);
+            let x1 = self.x.get(child1);
+
+            let mut expr0 = x0;
+            let mut expr1 = x1;
+            for (b_col, w) in self.bits.iter().zip(self.weights.iter()) {
+                let b0 = b_col.get(child0);
+                let b1 = b_col.get(child1);
+                expr0 -= b0 * *w;
+                expr1 -= b1 * *w;
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let gate_x = interp(gate0, gate1, x);
+                if gate_x == K::ZERO {
+                    continue;
+                }
+                let expr_x = interp(expr0, expr1, x);
+                if expr_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * gate_x * expr_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
+        self.has_lookup.fold_round_in_place(r);
+        self.x.fold_round_in_place(r);
+        for b in self.bits.iter_mut() {
+            b.fold_round_in_place(r);
+        }
+        self.bit_idx += 1;
+    }
+}
+
+/// Zero oracle over the time hypercube (for placeholder claims).
+pub struct ZeroOracleSparseTime {
+    rounds_remaining: usize,
+    degree_bound: usize,
+}
+
+impl ZeroOracleSparseTime {
+    pub fn new(num_rounds: usize, degree_bound: usize) -> Self {
+        Self {
+            rounds_remaining: num_rounds,
+            degree_bound,
+        }
+    }
+}
+
+impl RoundOracle for ZeroOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        vec![K::ZERO; points.len()]
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.rounds_remaining
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, _r: K) {
+        if self.rounds_remaining > 0 {
+            self.rounds_remaining -= 1;
+        }
     }
 }
 

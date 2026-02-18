@@ -36,7 +36,10 @@ use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
 use neo_math::ring::Rq as RqEl;
 use neo_math::{D, F, K};
 use neo_memory::ajtai::encode_vector_balanced_to_mat;
-use neo_memory::builder::{build_shard_witness_shared_cpu_bus_with_aux, CpuArithmetization, ShardWitnessAux};
+use neo_memory::builder::{
+    build_shard_witness_shared_cpu_bus_from_trace_with_aux, build_shard_witness_shared_cpu_bus_with_aux,
+    CpuArithmetization, ShardWitnessAux,
+};
 use neo_memory::plain::{LutTable, PlainMemLayout};
 use neo_memory::witness::LutTableSpec;
 use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
@@ -52,6 +55,7 @@ use crate::shard::{self, CommitMixers, ShardProof as FoldRun, ShardProverContext
 use crate::PiCcsError;
 use neo_reductions::engines::optimized_engine::oracle::SparseCache;
 use neo_reductions::engines::utils;
+use neo_vm_trace::VmTrace;
 
 #[inline]
 fn mode_uses_sparse_cache(mode: &FoldingMode) -> bool {
@@ -344,7 +348,7 @@ fn indices_from_spec(spec: &StepSpec) -> Vec<usize> {
 /// consistency with the protocol engine (which expects padded y-vectors).
 pub fn me_from_z_balanced<Lm: SModuleHomomorphism<F, Cmt>>(
     params: &NeoParams,
-    s: &CcsStructure<F>, // should be identity-first
+    s: &CcsStructure<F>, // rectangular or square CCS
     l: &Lm,
     z: &[F],
     r: &[K],
@@ -459,7 +463,7 @@ pub fn me_from_z_balanced<Lm: SModuleHomomorphism<F, Cmt>>(
 /// as specified by StepSpec indices.
 pub fn me_from_z_balanced_select<Lm: SModuleHomomorphism<F, Cmt>>(
     params: &NeoParams,
-    s: &CcsStructure<F>, // should be identity-first
+    s: &CcsStructure<F>, // rectangular or square CCS
     l: &Lm,
     z: &[F],
     r: &[K],
@@ -790,7 +794,7 @@ where
 
     /// Access the collected *public* per-step bundles (MCS + optional Twist/Shout instances).
     ///
-    /// This is useful for specialized verifiers (e.g. RV32 B1 statement checks) that need access
+    /// This is useful for specialized verifiers that need access
     /// to memory/lookup instances, not just the MCS list.
     pub fn steps_public(&self) -> Vec<StepInstanceBundle<Cmt, F, K>> {
         self.steps.iter().map(StepInstanceBundle::from).collect()
@@ -799,6 +803,10 @@ where
     /// Access the collected per-step witness bundles (includes private witness).
     pub fn steps_witness(&self) -> &[StepWitnessBundle<Cmt, F, K>] {
         &self.steps
+    }
+
+    pub fn steps_witness_mut(&mut self) -> &mut [StepWitnessBundle<Cmt, F, K>] {
+        &mut self.steps
     }
 
     /// Access auxiliary data captured during the most recent shared-CPU-bus witness build (if any).
@@ -1064,6 +1072,42 @@ where
         Ok(())
     }
 
+    /// Add shared-CPU-bus step bundles from an already-executed trace.
+    ///
+    /// This avoids re-running `trace_program` when the caller already has a `VmTrace`.
+    pub fn execute_shard_shared_cpu_bus_from_trace<A>(
+        &mut self,
+        trace: &VmTrace<u64, u64>,
+        max_steps: usize,
+        chunk_size: usize,
+        mem_layouts: &HashMap<u32, PlainMemLayout>,
+        lut_tables: &HashMap<u32, LutTable<F>>,
+        lut_table_specs: &HashMap<u32, LutTableSpec>,
+        lut_lanes: &HashMap<u32, usize>,
+        initial_mem: &HashMap<(u32, u64), F>,
+        cpu_arith: &A,
+    ) -> Result<(), PiCcsError>
+    where
+        A: CpuArithmetization<F, Cmt>,
+    {
+        let (bundles, aux) = build_shard_witness_shared_cpu_bus_from_trace_with_aux(
+            trace,
+            max_steps,
+            chunk_size,
+            mem_layouts,
+            lut_tables,
+            lut_table_specs,
+            lut_lanes,
+            initial_mem,
+            cpu_arith,
+        )
+        .map_err(|e| PiCcsError::InvalidInput(format!("shared-bus witness build failed: {e:?}")))?;
+
+        self.add_step_bundles(bundles);
+        self.shared_bus_aux = Some(aux);
+        Ok(())
+    }
+
     /// Check if any steps have Twist (memory) instances.
     pub fn has_twist_instances(&self) -> bool {
         self.steps.iter().any(|s| !s.mem_instances.is_empty())
@@ -1119,6 +1163,22 @@ where
         }
         if self.steps.is_empty() {
             return Ok(s);
+        }
+
+        // Shared CPU bus is the only supported Route-A witness format.
+        let step0 = &self.steps[0];
+        let is_shared_bus = step0
+            .mem_instances
+            .iter()
+            .all(|(inst, wit)| inst.comms.is_empty() && wit.mats.is_empty())
+            && step0
+                .lut_instances
+                .iter()
+                .all(|(inst, wit)| inst.comms.is_empty() && wit.mats.is_empty());
+        if !is_shared_bus {
+            return Err(PiCcsError::InvalidInput(
+                "legacy no-shared CPU bus witness format was removed; use shared-bus witness bundles".into(),
+            ));
         }
 
         let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> =
@@ -1669,10 +1729,16 @@ where
             }
         };
 
-        // For CCS-only sessions (no Twist/Shout), val-lane obligations should be empty
-        // For Twist+Shout sessions, val-lane obligations are expected and valid
+        // Val-lane obligations are expected when the session carries any sidecar val lane:
+        // Twist/Shout folds, or WB/WP folds over RV32 trace openings.
         let has_twist_or_shout = self.has_twist_instances() || self.has_shout_instances();
-        if !has_twist_or_shout && !outputs.obligations.val.is_empty() {
+        let has_wb_or_wp = run.steps.iter().any(|step| {
+            !step.mem.wb_me_claims.is_empty()
+                || !step.mem.wp_me_claims.is_empty()
+                || !step.wb_fold.is_empty()
+                || !step.wp_fold.is_empty()
+        });
+        if !(has_twist_or_shout || has_wb_or_wp) && !outputs.obligations.val.is_empty() {
             return Err(PiCcsError::ProtocolError(
                 "CCS-only session verification produced unexpected val-lane obligations".into(),
             ));
@@ -1838,7 +1904,13 @@ where
         };
 
         let has_twist_or_shout = self.has_twist_instances() || self.has_shout_instances();
-        if !has_twist_or_shout && !outputs.obligations.val.is_empty() {
+        let has_wb_or_wp = run.steps.iter().any(|step| {
+            !step.mem.wb_me_claims.is_empty()
+                || !step.mem.wp_me_claims.is_empty()
+                || !step.wb_fold.is_empty()
+                || !step.wp_fold.is_empty()
+        });
+        if !(has_twist_or_shout || has_wb_or_wp) && !outputs.obligations.val.is_empty() {
             return Err(PiCcsError::ProtocolError(
                 "CCS-only session verification produced unexpected val-lane obligations".into(),
             ));

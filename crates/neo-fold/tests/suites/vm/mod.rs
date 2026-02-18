@@ -1,0 +1,4 @@
+mod riscv_chunk_size_auto;
+mod riscv_exec_table_extraction;
+mod test_riscv_wasm_demo_memory;
+mod vm_opcode_dispatch_tests;

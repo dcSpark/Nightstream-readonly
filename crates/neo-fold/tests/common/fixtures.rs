@@ -217,7 +217,7 @@ pub struct ShardFixture {
 
 fn build_twist_shout_2step_fixture_inner(seed: u64, bad_lookup_step1: bool) -> ShardFixture {
     // Keep CCS small but ensure it can fit the shared CPU bus tail.
-    // Must be square (n==m) due to identity-first ME semantics.
+    // Keep this fixture square for simplicity; rectangular CCS is supported.
     let n = 32usize;
     let ccs = create_identity_ccs(n);
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
@@ -295,6 +295,7 @@ fn build_twist_shout_2step_fixture_inner(seed: u64, bad_lookup_step1: bool) -> S
     let lut_ell = lut_table.n_side.trailing_zeros() as usize;
 
     let mem_inst0 = neo_memory::witness::MemInstance::<Cmt, F> {
+        mem_id: 0,
         comms: Vec::new(),
         k: mem_layout.k,
         d: mem_layout.d,
@@ -306,6 +307,7 @@ fn build_twist_shout_2step_fixture_inner(seed: u64, bad_lookup_step1: bool) -> S
     };
     let mem_wit0 = neo_memory::witness::MemWitness { mats: Vec::new() };
     let lut_inst0 = neo_memory::witness::LutInstance::<Cmt, F> {
+        table_id: lut_table.table_id,
         comms: Vec::new(),
         k: lut_table.k,
         d: lut_table.d,
@@ -315,10 +317,13 @@ fn build_twist_shout_2step_fixture_inner(seed: u64, bad_lookup_step1: bool) -> S
         ell: lut_ell,
         table_spec: None,
         table: lut_table.content.clone(),
+        addr_group: None,
+        selector_group: None,
     };
     let lut_wit0 = neo_memory::witness::LutWitness { mats: Vec::new() };
 
     let mem_inst1 = neo_memory::witness::MemInstance::<Cmt, F> {
+        mem_id: 0,
         comms: Vec::new(),
         k: mem_layout.k,
         d: mem_layout.d,
@@ -330,6 +335,7 @@ fn build_twist_shout_2step_fixture_inner(seed: u64, bad_lookup_step1: bool) -> S
     };
     let mem_wit1 = neo_memory::witness::MemWitness { mats: Vec::new() };
     let lut_inst1 = neo_memory::witness::LutInstance::<Cmt, F> {
+        table_id: lut_table.table_id,
         comms: Vec::new(),
         k: lut_table.k,
         d: lut_table.d,
@@ -339,6 +345,8 @@ fn build_twist_shout_2step_fixture_inner(seed: u64, bad_lookup_step1: bool) -> S
         ell: lut_ell,
         table_spec: None,
         table: lut_table.content.clone(),
+        addr_group: None,
+        selector_group: None,
     };
     let lut_wit1 = neo_memory::witness::LutWitness { mats: Vec::new() };
 

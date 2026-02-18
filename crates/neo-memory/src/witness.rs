@@ -24,6 +24,51 @@ pub enum LutTableSpec {
     /// - Address bits are little-endian and correspond to `interleave_bits(rs1, rs2)`.
     RiscvOpcode { opcode: RiscvOpcode, xlen: usize },
 
+    /// A packed-key (non-bit-addressed) variant of `RiscvOpcode`, intended for "no width bloat"
+    /// Shout/ALU proofs that do **not** commit to `ell_addr=64` addr-bit columns.
+    ///
+    /// Current implementation status:
+    /// - Supported: `xlen = 32` for selected RV32 ops, including:
+    ///   - bitwise: `And | Andn | Or | Xor`
+    ///   - arithmetic: `Add | Sub`
+    ///   - compares: `Eq | Neq | Slt | Sltu`
+    ///   - shifts: `Sll | Srl | Sra`
+    ///   - RV32M: `Mul | Mulh | Mulhu | Mulhsu | Div | Divu | Rem | Remu`
+    /// - Witness convention: the Shout lane's `addr_bits` slice is repurposed as packed columns.
+    ///   The exact layout depends on `opcode`; the suffix columns are always `[has_lookup, val_u32]`.
+    ///   Examples:
+    ///   - `Add/Sub` (d=3): `[lhs_u32, rhs_u32, aux_bit]` (carry for `Add`, borrow for `Sub`)
+    ///   - `Eq/Neq` (d=35): `[lhs_u32, rhs_u32, borrow_bit, diff_bits[0..32]]` where `val_u32` is the out bit
+    ///   - `Mul` (d=34): `[lhs_u32, rhs_u32, hi_bits[0..32]]` where `val_u32` is the low 32 bits
+    ///   - `Mulhu` (d=34): `[lhs_u32, rhs_u32, lo_bits[0..32]]` where `val_u32` is the high 32 bits
+    ///   - `Sltu` (d=35): `[lhs_u32, rhs_u32, diff_u32, diff_bits[0..32]]` where `val_u32` is the out bit
+    ///   - `Sll/Srl/Sra` (d=38): `[lhs_u32, shamt_bits[0..5], ...]`
+    ///
+    /// For packed-key instances, Route-A enforces correctness directly via time-domain constraints
+    /// (claimed sum forced to 0); table MLE evaluation is not used.
+    RiscvOpcodePacked { opcode: RiscvOpcode, xlen: usize },
+
+    /// An "event table" packed-key variant of `RiscvOpcodePacked` for RV32.
+    ///
+    /// Instead of storing one Shout lane over time (one row per cycle), the witness stores only
+    /// the executed lookup events (one row per lookup). Each event row carries:
+    /// - a prefix of `time_bits` boolean columns encoding the original Route-A time index `t`
+    ///   (little-endian), and
+    /// - the same packed columns as `RiscvOpcodePacked` for `opcode`.
+    ///
+    /// The Route-A protocol then links the event table back to the CPU trace via a "scatter"
+    /// check at a random time point `r_cycle` (Jolt-ish): roughly,
+    ///   Σ_events hash(event)·χ_{r_cycle}(t_event) == Σ_t hash(trace[t])·χ_{r_cycle}(t).
+    ///
+    /// Notes:
+    /// - This is RV32-only (`xlen = 32`), `n_side = 2`, `ell = 1`.
+    /// - `time_bits` must match the Route-A `ell_n` used for the time domain.
+    RiscvOpcodeEventTablePacked {
+        opcode: RiscvOpcode,
+        xlen: usize,
+        time_bits: usize,
+    },
+
     /// Implicit identity table over 32-bit addresses: `table[addr] = addr`.
     ///
     /// Addressing convention:
@@ -39,6 +84,12 @@ impl LutTableSpec {
             LutTableSpec::RiscvOpcode { opcode, xlen } => {
                 Ok(crate::riscv::lookups::evaluate_opcode_mle(*opcode, r_addr, *xlen))
             }
+            LutTableSpec::RiscvOpcodePacked { .. } => Err(PiCcsError::InvalidInput(
+                "RiscvOpcodePacked does not support eval_table_mle (not bit-addressed)".into(),
+            )),
+            LutTableSpec::RiscvOpcodeEventTablePacked { .. } => Err(PiCcsError::InvalidInput(
+                "RiscvOpcodeEventTablePacked does not support eval_table_mle (not bit-addressed)".into(),
+            )),
             LutTableSpec::IdentityU32 => {
                 if r_addr.len() != 32 {
                     return Err(PiCcsError::InvalidInput(format!(
@@ -54,6 +105,11 @@ impl LutTableSpec {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MemInstance<C, F> {
+    /// Logical memory instance identifier (e.g. RISC-V `PROG_ID/REG_ID/RAM_ID`).
+    ///
+    /// This is used by higher-level protocols to link Twist instances to CPU trace columns
+    /// without relying on a fixed instance ordering.
+    pub mem_id: u32,
     pub comms: Vec<C>,
     pub k: usize,
     pub d: usize,
@@ -129,6 +185,8 @@ impl<C, F> MemInstance<C, F> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct LutInstance<C, F> {
+    /// Logical shout table identifier.
+    pub table_id: u32,
     pub comms: Vec<C>,
     pub k: usize,
     pub d: usize,
@@ -146,6 +204,12 @@ pub struct LutInstance<C, F> {
     #[serde(default)]
     pub table_spec: Option<LutTableSpec>,
     pub table: Vec<F>,
+    /// Optional address-sharing group id for shared-bus column layout.
+    #[serde(default)]
+    pub addr_group: Option<u64>,
+    /// Optional selector-sharing group id for shared-bus column layout.
+    #[serde(default)]
+    pub selector_group: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
