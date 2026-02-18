@@ -323,6 +323,15 @@ pub struct CpuConstraintBuilder<F: Field> {
     constraints: Vec<CpuConstraint<F>>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShoutPaddingMode {
+    Full,
+    WithoutSelectorBitness,
+    ValueOnly,
+    ValuePaddingOnly,
+    AddrBitBitnessOnly,
+}
+
 impl<F: Field> CpuConstraintBuilder<F> {
     /// Create a new constraint builder.
     ///
@@ -600,86 +609,71 @@ impl<F: Field> CpuConstraintBuilder<F> {
 
     /// Add Shout selector/bitness/padding constraints only (no CPU linkage).
     pub fn add_shout_instance_padding(&mut self, layout: &BusLayout, shout: &ShoutCols) {
-        for j in 0..layout.chunk_size {
-            let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
-            let bus_val = layout.bus_cell(shout.primary_val(), j);
-
-            // Ensure bus selector is boolean so gated-bit constraints imply true {0,1} bitness.
-            self.add_boolean_constraint(CpuConstraintLabel::ShoutHasLookupBoolean, bus_has_lookup);
-
-            // Padding: (1 - has_lookup) * val = 0
-            self.constraints.push(CpuConstraint::new_zero_negated(
-                CpuConstraintLabel::LookupValueZeroPadding,
-                bus_has_lookup,
-                bus_val,
-            ));
-
-            // Lookup key bits:
-            // - Bitness: bit is 0 when inactive, boolean when active
-            for col_id in shout.addr_bits.clone() {
-                let bit = layout.bus_cell(col_id, j);
-                self.add_gated_bit_constraint(CpuConstraintLabel::ShoutAddrBitBitness, bit, bus_has_lookup);
-            }
-        }
+        self.add_shout_instance_padding_mode(layout, shout, ShoutPaddingMode::Full);
     }
 
     /// Add Shout addr-bit/value padding constraints without selector booleanity.
     pub fn add_shout_instance_padding_without_selector_bitness(&mut self, layout: &BusLayout, shout: &ShoutCols) {
-        for j in 0..layout.chunk_size {
-            let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
-            let bus_val = layout.bus_cell(shout.primary_val(), j);
-
-            // Padding: (1 - has_lookup) * val = 0
-            self.constraints.push(CpuConstraint::new_zero_negated(
-                CpuConstraintLabel::LookupValueZeroPadding,
-                bus_has_lookup,
-                bus_val,
-            ));
-
-            // Lookup key bits:
-            // - Bitness: bit is 0 when inactive, boolean when active
-            for col_id in shout.addr_bits.clone() {
-                let bit = layout.bus_cell(col_id, j);
-                self.add_gated_bit_constraint(CpuConstraintLabel::ShoutAddrBitBitness, bit, bus_has_lookup);
-            }
-        }
+        self.add_shout_instance_padding_mode(layout, shout, ShoutPaddingMode::WithoutSelectorBitness);
     }
 
     /// Add Shout selector/value padding only (no addr-bit constraints).
     pub fn add_shout_instance_padding_value_only(&mut self, layout: &BusLayout, shout: &ShoutCols) {
-        for j in 0..layout.chunk_size {
-            let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
-            let bus_val = layout.bus_cell(shout.primary_val(), j);
-
-            self.add_boolean_constraint(CpuConstraintLabel::ShoutHasLookupBoolean, bus_has_lookup);
-            self.constraints.push(CpuConstraint::new_zero_negated(
-                CpuConstraintLabel::LookupValueZeroPadding,
-                bus_has_lookup,
-                bus_val,
-            ));
-        }
+        self.add_shout_instance_padding_mode(layout, shout, ShoutPaddingMode::ValueOnly);
     }
 
     /// Add Shout value padding only (no selector booleanity, no addr-bit constraints).
     pub fn add_shout_instance_value_padding_only(&mut self, layout: &BusLayout, shout: &ShoutCols) {
-        for j in 0..layout.chunk_size {
-            let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
-            let bus_val = layout.bus_cell(shout.primary_val(), j);
-
-            self.constraints.push(CpuConstraint::new_zero_negated(
-                CpuConstraintLabel::LookupValueZeroPadding,
-                bus_has_lookup,
-                bus_val,
-            ));
-        }
+        self.add_shout_instance_padding_mode(layout, shout, ShoutPaddingMode::ValuePaddingOnly);
     }
 
     /// Add unconditional addr-bit booleanity constraints for one shared-address Shout group.
     pub fn add_shout_instance_addr_bit_bitness(&mut self, layout: &BusLayout, shout: &ShoutCols) {
+        self.add_shout_instance_padding_mode(layout, shout, ShoutPaddingMode::AddrBitBitnessOnly);
+    }
+
+    fn add_shout_instance_padding_mode(&mut self, layout: &BusLayout, shout: &ShoutCols, mode: ShoutPaddingMode) {
+        let add_selector_bitness = matches!(mode, ShoutPaddingMode::Full | ShoutPaddingMode::ValueOnly);
+        let add_value_padding = matches!(
+            mode,
+            ShoutPaddingMode::Full
+                | ShoutPaddingMode::WithoutSelectorBitness
+                | ShoutPaddingMode::ValueOnly
+                | ShoutPaddingMode::ValuePaddingOnly
+        );
+        let add_gated_addr_bitness = matches!(mode, ShoutPaddingMode::Full | ShoutPaddingMode::WithoutSelectorBitness);
+        let add_unconditional_addr_bitness = matches!(mode, ShoutPaddingMode::AddrBitBitnessOnly);
+
         for j in 0..layout.chunk_size {
-            for col_id in shout.addr_bits.clone() {
-                let bit = layout.bus_cell(col_id, j);
-                self.add_boolean_constraint(CpuConstraintLabel::ShoutAddrBitBitness, bit);
+            let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
+
+            if add_selector_bitness {
+                self.add_boolean_constraint(CpuConstraintLabel::ShoutHasLookupBoolean, bus_has_lookup);
+            }
+
+            if add_value_padding {
+                let bus_val = layout.bus_cell(shout.primary_val(), j);
+                self.constraints.push(CpuConstraint::new_zero_negated(
+                    CpuConstraintLabel::LookupValueZeroPadding,
+                    bus_has_lookup,
+                    bus_val,
+                ));
+            }
+
+            if add_gated_addr_bitness {
+                // Bitness: bit is 0 when inactive, boolean when active.
+                for col_id in shout.addr_bits.clone() {
+                    let bit = layout.bus_cell(col_id, j);
+                    self.add_gated_bit_constraint(CpuConstraintLabel::ShoutAddrBitBitness, bit, bus_has_lookup);
+                }
+            }
+
+            if add_unconditional_addr_bitness {
+                // Unconditionally enforce bit ∈ {0,1}.
+                for col_id in shout.addr_bits.clone() {
+                    let bit = layout.bus_cell(col_id, j);
+                    self.add_boolean_constraint(CpuConstraintLabel::ShoutAddrBitBitness, bit);
+                }
             }
         }
     }
