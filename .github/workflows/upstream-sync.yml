@@ -1,0 +1,44 @@
+name: Upstream Sync
+
+on:
+  schedule:
+    - cron: "0 */8 * * *" # every 15 min
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: upstream-sync-main
+  cancel-in-progress: true
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream and fetch
+        run: |
+          git remote add upstream https://github.com/LFDT-Nightstream/Nightstream.git || true
+          git fetch upstream main
+
+      - name: Fast-forward main from upstream
+        run: |
+          git checkout main
+          if [ "$(git rev-parse HEAD)" = "$(git rev-parse upstream/main)" ]; then
+            echo "Already up to date"
+            exit 0
+          fi
+          git merge --ff-only upstream/main
+
+      - name: Push to fork
+        run: git push origin main
