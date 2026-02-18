@@ -19,7 +19,7 @@ use crate::pi_ccs::FoldingMode;
 use crate::session::FoldingSession;
 use crate::shard::{ShardProof, StepLinkingConfig};
 use crate::PiCcsError;
-use neo_ajtai::AjtaiSModule;
+use neo_ajtai::{AjtaiSModule, Commitment as Cmt};
 use neo_ccs::relations::{McsInstance, McsWitness};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::CcsStructure;
@@ -1429,6 +1429,8 @@ impl Rv32TraceWiring {
             used_mem_ids,
             used_shout_table_ids,
             output_binding_cfg,
+            ram_d,
+            width_lookup_addr_d,
             prove_duration,
             prove_phase_durations,
             verify_duration: None,
@@ -1446,6 +1448,8 @@ pub struct Rv32TraceWiringRun {
     used_mem_ids: Vec<u32>,
     used_shout_table_ids: Vec<u32>,
     output_binding_cfg: Option<OutputBindingConfig>,
+    ram_d: usize,
+    width_lookup_addr_d: usize,
     prove_duration: Duration,
     prove_phase_durations: Rv32TraceProvePhaseDurations,
     verify_duration: Option<Duration>,
@@ -1538,5 +1542,352 @@ impl Rv32TraceWiringRun {
 
     pub fn steps_public(&self) -> Vec<neo_memory::witness::StepInstanceBundle<neo_ajtai::Commitment, F, K>> {
         self.session.steps_public()
+    }
+
+    /// Rows per trace step (= layout.t), needed by [`Rv32TraceWiring::build_verifier`].
+    pub fn step_rows(&self) -> usize {
+        self.layout.t
+    }
+
+    /// RAM address width (bits) used during this proving run.
+    pub fn ram_d(&self) -> usize {
+        self.ram_d
+    }
+
+    /// Width-lookup address bits used during this proving run (0 when width lookup is absent).
+    pub fn width_lookup_addr_d(&self) -> usize {
+        self.width_lookup_addr_d
+    }
+}
+
+/// Verification context for RV32 trace-wiring proofs.
+///
+/// Created by [`Rv32TraceWiring::build_verifier`].  Contains the CCS and session
+/// state required to verify proofs without re-running the guest.
+pub struct Rv32TraceWiringVerifier {
+    session: FoldingSession<AjtaiSModule>,
+    ccs: CcsStructure<F>,
+    _layout: Rv32TraceCcsLayout,
+    mem_layouts: HashMap<u32, PlainMemLayout>,
+    statement_initial_mem: HashMap<(u32, u64), F>,
+    output_binding_cfg: Option<OutputBindingConfig>,
+}
+
+impl Rv32TraceWiringVerifier {
+    /// Verify a `ShardProof` against externally supplied public step instances.
+    pub fn verify(
+        &self,
+        proof: &ShardProof,
+        steps_public: &[neo_memory::witness::StepInstanceBundle<Cmt, F, K>],
+    ) -> Result<bool, PiCcsError> {
+        crate::riscv_shard::rv32_b1_enforce_chunk0_mem_init_matches_statement(
+            &self.mem_layouts,
+            &self.statement_initial_mem,
+            steps_public,
+        )?;
+
+        if let Some(ob_cfg) = &self.output_binding_cfg {
+            self.session
+                .verify_with_external_steps_and_output_binding(&self.ccs, steps_public, proof, ob_cfg)
+        } else {
+            self.session
+                .verify_with_external_steps(&self.ccs, steps_public, proof)
+        }
+    }
+}
+
+impl Rv32TraceWiring {
+    /// Build only the verification context (CCS + session) without executing the
+    /// program or proving.
+    ///
+    /// The caller must supply execution-dependent sizing values that were recorded
+    /// during the proving run:
+    /// - `step_rows`: rows per trace step (= [`Rv32TraceWiringRun::step_rows`]).
+    /// - `ram_d`: RAM address width in bits (= [`Rv32TraceWiringRun::ram_d`]).
+    /// - `width_lookup_addr_d`: width-lookup address bits
+    ///   (= [`Rv32TraceWiringRun::width_lookup_addr_d`]; pass 0 when width lookup
+    ///   is absent).
+    pub fn build_verifier(
+        self,
+        step_rows: usize,
+        ram_d: usize,
+        width_lookup_addr_d: usize,
+    ) -> Result<Rv32TraceWiringVerifier, PiCcsError> {
+        if self.xlen != 32 {
+            return Err(PiCcsError::InvalidInput(format!(
+                "RV32 trace wiring requires xlen == 32 (got {})",
+                self.xlen
+            )));
+        }
+        if self.program_bytes.is_empty() {
+            return Err(PiCcsError::InvalidInput("program_bytes must be non-empty".into()));
+        }
+        if self.program_bytes.len() % 4 != 0 {
+            return Err(PiCcsError::InvalidInput(
+                "program_bytes must be 4-byte aligned (RVC is not supported)".into(),
+            ));
+        }
+        if step_rows == 0 {
+            return Err(PiCcsError::InvalidInput("step_rows must be non-zero".into()));
+        }
+
+        let program = decode_program(&self.program_bytes)
+            .map_err(|e| PiCcsError::InvalidInput(format!("decode_program failed: {e}")))?;
+
+        let (prog_layout, prog_init_words) =
+            prog_rom_layout_and_init_words::<F>(PROG_ID, /*base_addr=*/ 0, &self.program_bytes)
+                .map_err(|e| PiCcsError::InvalidInput(format!("prog_rom_layout_and_init_words failed: {e}")))?;
+
+        let ram_init_map = self.ram_init.clone();
+        let reg_init_map = self.reg_init.clone();
+        let output_claims = self.output_claims.clone();
+        let output_target = self.output_target;
+
+        let wants_ram_output = matches!(output_target, OutputTarget::Ram) && !output_claims.is_empty();
+        let include_ram_sidecar =
+            program_requires_ram_sidecar(&program) || !ram_init_map.is_empty() || wants_ram_output;
+
+        let ram_k = 1usize
+            .checked_shl(ram_d as u32)
+            .ok_or_else(|| PiCcsError::InvalidInput(format!("RAM address width too large: d={ram_d}")))?;
+
+        let mut mem_layouts: HashMap<u32, PlainMemLayout> = HashMap::from([
+            (
+                REG_ID.0,
+                PlainMemLayout {
+                    k: 32,
+                    d: 5,
+                    n_side: 2,
+                    lanes: 2,
+                },
+            ),
+            (PROG_ID.0, prog_layout.clone()),
+        ]);
+        if include_ram_sidecar {
+            mem_layouts.insert(
+                RAM_ID.0,
+                PlainMemLayout {
+                    k: ram_k,
+                    d: ram_d,
+                    n_side: 2,
+                    lanes: 1,
+                },
+            );
+        }
+
+        let inferred_shout_ops = infer_required_trace_shout_opcodes(&program);
+        let shout_ops = match &self.shout_ops {
+            Some(override_ops) => {
+                let missing: HashSet<RiscvOpcode> = inferred_shout_ops
+                    .difference(override_ops)
+                    .copied()
+                    .collect();
+                if !missing.is_empty() {
+                    let mut missing_names: Vec<String> = missing.into_iter().map(|op| format!("{op:?}")).collect();
+                    missing_names.sort_unstable();
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "trace shout_ops override must be a superset of required opcodes; missing [{}]",
+                        missing_names.join(", ")
+                    )));
+                }
+                override_ops.clone()
+            }
+            None => inferred_shout_ops,
+        };
+
+        let mut table_specs = rv32_trace_table_specs(&shout_ops);
+        let mut base_shout_table_ids: Vec<u32> = table_specs.keys().copied().collect();
+        base_shout_table_ids.sort_unstable();
+        for (&table_id, spec) in &self.extra_lut_table_specs {
+            if table_specs.contains_key(&table_id) {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "extra_lut_table_spec collides with existing table_id={table_id}"
+                )));
+            }
+            table_specs.insert(table_id, spec.clone());
+        }
+
+        let decode_layout = Rv32DecodeSidecarLayout::new();
+        let decode_lookup_bus_specs: Vec<TraceShoutBusSpec> = {
+            let decode_lookup_cols = rv32_decode_lookup_backed_cols(&decode_layout);
+            decode_lookup_cols
+                .iter()
+                .copied()
+                .map(|col_id| TraceShoutBusSpec {
+                    table_id: rv32_decode_lookup_table_id_for_col(col_id),
+                    ell_addr: prog_layout.d,
+                    n_vals: 1usize,
+                })
+                .collect()
+        };
+
+        let include_width_lookup = program_requires_width_lookup(&program);
+        let width_layout = Rv32WidthSidecarLayout::new();
+        let width_lookup_bus_specs: Vec<TraceShoutBusSpec> = if include_width_lookup && width_lookup_addr_d > 0 {
+            let width_lookup_cols = rv32_width_lookup_backed_cols(&width_layout);
+            width_lookup_cols
+                .iter()
+                .copied()
+                .map(|col_id| TraceShoutBusSpec {
+                    table_id: rv32_width_lookup_table_id_for_col(col_id),
+                    ell_addr: width_lookup_addr_d,
+                    n_vals: 1usize,
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let mut all_extra_shout_specs = self.extra_shout_bus_specs.clone();
+        all_extra_shout_specs.extend(decode_lookup_bus_specs);
+        all_extra_shout_specs.extend(width_lookup_bus_specs);
+
+        let mut layout = Rv32TraceCcsLayout::new(step_rows)
+            .map_err(|e| PiCcsError::InvalidInput(format!("Rv32TraceCcsLayout::new failed: {e}")))?;
+
+        let ccs_reserved_rows;
+        {
+            let (bus_region_len, reserved_rows) = rv32_trace_shared_bus_requirements_with_specs(
+                &layout,
+                &base_shout_table_ids,
+                &all_extra_shout_specs,
+                &mem_layouts,
+            )
+            .map_err(|e| {
+                PiCcsError::InvalidInput(format!("rv32_trace_shared_bus_requirements_with_specs failed: {e}"))
+            })?;
+            layout.m = layout
+                .m
+                .checked_add(bus_region_len)
+                .ok_or_else(|| PiCcsError::InvalidInput("trace layout m overflow after bus tail reservation".into()))?;
+            ccs_reserved_rows = reserved_rows;
+        }
+
+        let ccs_base = if ccs_reserved_rows == 0 {
+            build_rv32_trace_wiring_ccs(&layout)
+                .map_err(|e| PiCcsError::InvalidInput(format!("build_rv32_trace_wiring_ccs failed: {e}")))?
+        } else {
+            build_rv32_trace_wiring_ccs_with_reserved_rows(&layout, ccs_reserved_rows)
+                .map_err(|e| PiCcsError::InvalidInput(format!("build_rv32_trace_wiring_ccs_with_reserved_rows failed: {e}")))?
+        };
+
+        let session = FoldingSession::<AjtaiSModule>::new_ajtai(self.mode.clone(), &ccs_base)?;
+
+        let decode_lookup_tables = build_rv32_decode_lookup_tables(&prog_layout, &prog_init_words);
+        let mut lut_tables = decode_lookup_tables;
+        if include_width_lookup && width_lookup_addr_d > 0 {
+            let width_k = 1usize.checked_shl(width_lookup_addr_d as u32).ok_or_else(|| {
+                PiCcsError::InvalidInput(format!("width lookup addr width too large: d={width_lookup_addr_d}"))
+            })?;
+            let width_lookup_cols = rv32_width_lookup_backed_cols(&width_layout);
+            for &col_id in width_lookup_cols.iter() {
+                let table_id = rv32_width_lookup_table_id_for_col(col_id);
+                lut_tables.insert(
+                    table_id,
+                    LutTable {
+                        table_id,
+                        k: width_k,
+                        d: width_lookup_addr_d,
+                        n_side: 2,
+                        content: vec![F::ZERO; width_k],
+                    },
+                );
+            }
+        }
+
+        let mut cpu = R1csCpu::new(
+            ccs_base,
+            session.params().clone(),
+            session.committer().clone(),
+            layout.m_in,
+            &lut_tables,
+            &table_specs,
+            rv32_trace_chunk_to_witness(layout.clone()),
+        )
+        .map_err(|e| PiCcsError::InvalidInput(format!("R1csCpu::new failed: {e}")))?;
+
+        let mut prog_init_pairs: Vec<(u64, F)> = prog_init_words
+            .into_iter()
+            .filter_map(|((mem_id, addr), value)| (mem_id == PROG_ID.0 && value != F::ZERO).then_some((addr, value)))
+            .collect();
+        prog_init_pairs.sort_by_key(|(addr, _)| *addr);
+        let mut initial_mem: HashMap<(u32, u64), F> = HashMap::new();
+        for &(addr, value) in &prog_init_pairs {
+            if value != F::ZERO {
+                initial_mem.insert((PROG_ID.0, addr), value);
+            }
+        }
+        for (&reg, &value) in &reg_init_map {
+            let v = F::from_u64(value as u32 as u64);
+            if v != F::ZERO {
+                initial_mem.insert((REG_ID.0, reg), v);
+            }
+        }
+        for (&addr, &value) in &ram_init_map {
+            let v = F::from_u64(value as u32 as u64);
+            if v != F::ZERO {
+                initial_mem.insert((RAM_ID.0, addr), v);
+            }
+        }
+
+        cpu = cpu
+            .with_shared_cpu_bus(
+                rv32_trace_shared_cpu_bus_config_with_specs(
+                    &layout,
+                    &base_shout_table_ids,
+                    &all_extra_shout_specs,
+                    mem_layouts.clone(),
+                    initial_mem.clone(),
+                )
+                .map_err(|e| {
+                    PiCcsError::InvalidInput(format!("rv32_trace_shared_cpu_bus_config_with_specs failed: {e}"))
+                })?,
+                layout.t,
+            )
+            .map_err(|e| PiCcsError::InvalidInput(format!("shared bus inject failed: {e}")))?;
+
+        let ccs = cpu.ccs.clone();
+
+        let mut session = FoldingSession::<AjtaiSModule>::new_ajtai(self.mode, &ccs)?;
+        session.set_step_linking(StepLinkingConfig::new(vec![(layout.pc_final, layout.pc0)]));
+
+        let output_binding_cfg = if output_claims.is_empty() {
+            None
+        } else {
+            let out_mem_id = match output_target {
+                OutputTarget::Ram => RAM_ID.0,
+                OutputTarget::Reg => REG_ID.0,
+            };
+            let out_layout = mem_layouts.get(&out_mem_id).ok_or_else(|| {
+                PiCcsError::InvalidInput(format!(
+                    "output binding: missing PlainMemLayout for mem_id={out_mem_id}"
+                ))
+            })?;
+            let expected_k = 1usize
+                .checked_shl(out_layout.d as u32)
+                .ok_or_else(|| PiCcsError::InvalidInput("output binding: 2^d overflow".into()))?;
+            if out_layout.k != expected_k {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "output binding: mem_id={out_mem_id} has k={}, but expected 2^d={} (d={})",
+                    out_layout.k, expected_k, out_layout.d
+                )));
+            }
+            let mut mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
+            mem_ids.sort_unstable();
+            let mem_idx = mem_ids
+                .iter()
+                .position(|&id| id == out_mem_id)
+                .ok_or_else(|| PiCcsError::InvalidInput("output binding: mem_id not in mem_layouts".into()))?;
+            Some(OutputBindingConfig::new(out_layout.d, output_claims).with_mem_idx(mem_idx))
+        };
+
+        Ok(Rv32TraceWiringVerifier {
+            session,
+            ccs,
+            _layout: layout,
+            mem_layouts,
+            statement_initial_mem: initial_mem,
+            output_binding_cfg,
+        })
     }
 }
