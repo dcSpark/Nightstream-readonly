@@ -1,6 +1,6 @@
 use std::time::{Duration, Instant};
 
-use neo_fold::riscv_shard::Rv32B1;
+use neo_fold::riscv_trace_shard::Rv32TraceWiring;
 use neo_memory::riscv::lookups::{encode_program, BranchCondition, RiscvInstruction, RiscvOpcode};
 
 struct ScaleRow {
@@ -41,8 +41,9 @@ fn nightstream_prefix_lengths_1_to_10_and_256_halt_terminated() {
         let trace_len = n + 1;
         let ns_total_start = Instant::now();
 
-        let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
-            .chunk_size(trace_len)
+        let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+            .min_trace_len(trace_len)
+            .chunk_rows(trace_len)
             .max_steps(trace_len)
             .prove()
             .expect("Nightstream prove");

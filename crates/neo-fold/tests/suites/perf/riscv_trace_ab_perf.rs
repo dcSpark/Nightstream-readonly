@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use neo_fold::riscv_shard::Rv32B1;
+use neo_fold::riscv_trace_shard::{Rv32TraceWiring, Rv32TraceWiringRun};
 use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvMemOp, RiscvOpcode};
 
 #[derive(Clone, Copy, Debug)]
@@ -14,8 +14,8 @@ struct Stats {
 }
 
 #[test]
-#[ignore = "perf-style test: run with `cargo test -p neo-fold --release --test riscv_b1_ab_perf -- --ignored --nocapture`"]
-fn rv32_b1_ab_perf_single_chunk() {
+#[ignore = "perf-style test: run with `cargo test -p neo-fold --release --test riscv_trace_ab_perf -- --ignored --nocapture`"]
+fn rv32_trace_ab_perf_single_chunk() {
     let repeats = env_usize("AB_REPEATS", 64);
     let warmups = env_usize("AB_WARMUPS", 1);
     let samples = env_usize("AB_SAMPLES", 7);
@@ -84,7 +84,7 @@ fn rv32_b1_ab_perf_single_chunk() {
 
     println!();
     println!("{:=<96}", "");
-    println!("RV32 B1 A/B PERF (single chunk, fixed program)");
+    println!("RV32 Trace A/B PERF (single chunk, fixed program)");
     println!("{:=<96}", "");
     println!(
         "config: repeats={} instructions={} warmups={} samples={}",
@@ -116,11 +116,11 @@ fn rv32_b1_ab_perf_single_chunk() {
     println!();
 }
 
-fn run_once(program_bytes: &[u8], max_steps: usize) -> Result<neo_fold::riscv_shard::Rv32B1Run, neo_fold::PiCcsError> {
-    Rv32B1::from_rom(/*program_base=*/ 0, program_bytes)
+fn run_once(program_bytes: &[u8], max_steps: usize) -> Result<Rv32TraceWiringRun, neo_fold::PiCcsError> {
+    Rv32TraceWiring::from_rom(/*program_base=*/ 0, program_bytes)
         .xlen(32)
-        .ram_bytes(0x40)
-        .chunk_size(max_steps)
+        .min_trace_len(max_steps)
+        .chunk_rows(max_steps)
         .max_steps(max_steps)
         .shout_auto_minimal()
         .prove()

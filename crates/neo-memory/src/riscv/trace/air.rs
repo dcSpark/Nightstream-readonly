@@ -30,11 +30,6 @@ impl Rv32TraceAir {
         gate * x
     }
 
-    #[inline]
-    fn gated_eq(gate: F, a: F, b: F) -> F {
-        gate * (a - b)
-    }
-
     pub fn assert_satisfied(&self, wit: &Rv32TraceWitness) -> Result<(), String> {
         let l = &self.layout;
         if wit.cols.len() != l.cols {
@@ -65,18 +60,12 @@ impl Rv32TraceAir {
 
             let active = col(l.active, i);
             let halted = col(l.halted, i);
-            let rd_has_write = col(l.rd_has_write, i);
-            let ram_has_read = col(l.ram_has_read, i);
-            let ram_has_write = col(l.ram_has_write, i);
             let shout_has_lookup = col(l.shout_has_lookup, i);
 
             // Booleans.
             for (name, v) in [
                 ("active", active),
                 ("halted", halted),
-                ("rd_has_write", rd_has_write),
-                ("ram_has_read", ram_has_read),
-                ("ram_has_write", ram_has_write),
                 ("shout_has_lookup", shout_has_lookup),
             ] {
                 let e = Self::bool_check(v);
@@ -84,70 +73,16 @@ impl Rv32TraceAir {
                     return Err(format!("row {i}: {name} not boolean"));
                 }
             }
-            for (bit, c) in l.rd_bit.iter().copied().enumerate() {
-                let e = Self::bool_check(col(c, i));
-                if !Self::is_zero(e) {
-                    return Err(format!("row {i}: rd_bit[{bit}] not boolean"));
-                }
-            }
-            for (bit, c) in l.funct3_bit.iter().copied().enumerate() {
-                let e = Self::bool_check(col(c, i));
-                if !Self::is_zero(e) {
-                    return Err(format!("row {i}: funct3_bit[{bit}] not boolean"));
-                }
-            }
-            for (bit, c) in l.rs1_bit.iter().copied().enumerate() {
-                let e = Self::bool_check(col(c, i));
-                if !Self::is_zero(e) {
-                    return Err(format!("row {i}: rs1_bit[{bit}] not boolean"));
-                }
-            }
-            for (bit, c) in l.rs2_bit.iter().copied().enumerate() {
-                let e = Self::bool_check(col(c, i));
-                if !Self::is_zero(e) {
-                    return Err(format!("row {i}: rs2_bit[{bit}] not boolean"));
-                }
-            }
-            for (bit, c) in l.funct7_bit.iter().copied().enumerate() {
-                let e = Self::bool_check(col(c, i));
-                if !Self::is_zero(e) {
-                    return Err(format!("row {i}: funct7_bit[{bit}] not boolean"));
-                }
-            }
-            for (bit, c) in l.ram_rv_low_bit.iter().copied().enumerate() {
-                let e = Self::bool_check(col(c, i));
-                if !Self::is_zero(e) {
-                    return Err(format!("row {i}: ram_rv_low_bit[{bit}] not boolean"));
-                }
-            }
-            for (bit, c) in l.rs2_low_bit.iter().copied().enumerate() {
-                let e = Self::bool_check(col(c, i));
-                if !Self::is_zero(e) {
-                    return Err(format!("row {i}: rs2_low_bit[{bit}] not boolean"));
-                }
-            }
-
             // Padding invariants: inactive rows must not carry "hidden" values.
             let inv_active = F::ONE - active;
             for (name, c) in [
                 ("instr_word", l.instr_word),
-                ("opcode", l.opcode),
-                ("funct3", l.funct3),
-                ("funct7", l.funct7),
-                ("rd", l.rd),
-                ("rs1", l.rs1),
-                ("rs2", l.rs2),
-                ("prog_addr", l.prog_addr),
-                ("prog_value", l.prog_value),
                 ("rs1_addr", l.rs1_addr),
                 ("rs1_val", l.rs1_val),
                 ("rs2_addr", l.rs2_addr),
                 ("rs2_val", l.rs2_val),
-                ("rd_has_write", l.rd_has_write),
                 ("rd_addr", l.rd_addr),
                 ("rd_val", l.rd_val),
-                ("ram_has_read", l.ram_has_read),
-                ("ram_has_write", l.ram_has_write),
                 ("ram_addr", l.ram_addr),
                 ("ram_rv", l.ram_rv),
                 ("ram_wv", l.ram_wv),
@@ -155,83 +90,11 @@ impl Rv32TraceAir {
                 ("shout_val", l.shout_val),
                 ("shout_lhs", l.shout_lhs),
                 ("shout_rhs", l.shout_rhs),
+                ("jalr_drop_bit", l.jalr_drop_bit),
             ] {
                 let e = Self::gated_zero(inv_active, col(c, i));
                 if !Self::is_zero(e) {
                     return Err(format!("row {i}: inactive padding violated ({name} != 0)"));
-                }
-            }
-
-            // rd packing: rd == Σ 2^k * rd_bit[k].
-            {
-                let rd = col(l.rd, i);
-                let expect = col(l.rd_bit[0], i)
-                    + F::from_u64(2) * col(l.rd_bit[1], i)
-                    + F::from_u64(4) * col(l.rd_bit[2], i)
-                    + F::from_u64(8) * col(l.rd_bit[3], i)
-                    + F::from_u64(16) * col(l.rd_bit[4], i);
-                if !Self::is_zero(rd - expect) {
-                    return Err(format!("row {i}: rd packing mismatch"));
-                }
-            }
-
-            // rd_is_zero prefix products.
-            {
-                let b0 = col(l.rd_bit[0], i);
-                let b1 = col(l.rd_bit[1], i);
-                let b2 = col(l.rd_bit[2], i);
-                let b3 = col(l.rd_bit[3], i);
-                let b4 = col(l.rd_bit[4], i);
-
-                let z01 = col(l.rd_is_zero_01, i);
-                let z012 = col(l.rd_is_zero_012, i);
-                let z0123 = col(l.rd_is_zero_0123, i);
-                let z = col(l.rd_is_zero, i);
-
-                let e = z01 - (F::ONE - b0) * (F::ONE - b1);
-                if !Self::is_zero(e) {
-                    return Err(format!("row {i}: rd_is_zero_01 mismatch"));
-                }
-                let e = z012 - z01 * (F::ONE - b2);
-                if !Self::is_zero(e) {
-                    return Err(format!("row {i}: rd_is_zero_012 mismatch"));
-                }
-                let e = z0123 - z012 * (F::ONE - b3);
-                if !Self::is_zero(e) {
-                    return Err(format!("row {i}: rd_is_zero_0123 mismatch"));
-                }
-                let e = z - z0123 * (F::ONE - b4);
-                if !Self::is_zero(e) {
-                    return Err(format!("row {i}: rd_is_zero mismatch"));
-                }
-            }
-
-            // Sound x0 invariant: if rd_has_write==1 then rd != 0.
-            {
-                let e = rd_has_write * col(l.rd_is_zero, i);
-                if !Self::is_zero(e) {
-                    return Err(format!("row {i}: rd_has_write implies rd != 0 violated"));
-                }
-            }
-
-            // If rd_has_write==0, write fields must be 0.
-            {
-                let inv = F::ONE - rd_has_write;
-                if !Self::is_zero(Self::gated_zero(inv, col(l.rd_addr, i))) {
-                    return Err(format!("row {i}: rd_addr must be 0 when rd_has_write=0"));
-                }
-                if !Self::is_zero(Self::gated_zero(inv, col(l.rd_val, i))) {
-                    return Err(format!("row {i}: rd_val must be 0 when rd_has_write=0"));
-                }
-            }
-
-            // RAM bus padding: inactive values must be 0 when their flags are 0.
-            {
-                if !Self::is_zero(Self::gated_zero(F::ONE - ram_has_read, col(l.ram_rv, i))) {
-                    return Err(format!("row {i}: ram_rv must be 0 when ram_has_read=0"));
-                }
-                if !Self::is_zero(Self::gated_zero(F::ONE - ram_has_write, col(l.ram_wv, i))) {
-                    return Err(format!("row {i}: ram_wv must be 0 when ram_has_write=0"));
                 }
             }
 
@@ -245,29 +108,6 @@ impl Rv32TraceAir {
                 }
                 if !Self::is_zero(Self::gated_zero(F::ONE - shout_has_lookup, col(l.shout_rhs, i))) {
                     return Err(format!("row {i}: shout_rhs must be 0 when shout_has_lookup=0"));
-                }
-            }
-
-            // Active → PROG fetch binds (pc_before, instr_word).
-            {
-                if !Self::is_zero(Self::gated_eq(active, col(l.prog_addr, i), col(l.pc_before, i))) {
-                    return Err(format!("row {i}: PROG addr mismatch"));
-                }
-                if !Self::is_zero(Self::gated_eq(active, col(l.prog_value, i), col(l.instr_word, i))) {
-                    return Err(format!("row {i}: PROG value mismatch"));
-                }
-            }
-
-            // Active → REG addr bindings; rd_has_write → rd_addr binding.
-            {
-                if !Self::is_zero(Self::gated_eq(active, col(l.rs1_addr, i), col(l.rs1, i))) {
-                    return Err(format!("row {i}: rs1_addr != rs1 field"));
-                }
-                if !Self::is_zero(Self::gated_eq(active, col(l.rs2_addr, i), col(l.rs2, i))) {
-                    return Err(format!("row {i}: rs2_addr != rs2 field"));
-                }
-                if !Self::is_zero(Self::gated_eq(rd_has_write, col(l.rd_addr, i), col(l.rd, i))) {
-                    return Err(format!("row {i}: rd_addr != rd field when rd_has_write=1"));
                 }
             }
         }

@@ -114,6 +114,7 @@ fn absorb_step_memory_binds_table_spec() {
     let make_step = |opcode: RiscvOpcode| StepInstanceBundle::<Cmt, F, K> {
         mcs_inst: dummy_mcs.clone(),
         lut_insts: vec![LutInstance {
+            table_id: 0,
             comms: Vec::new(),
             k: 0,
             d: 64,
@@ -123,6 +124,8 @@ fn absorb_step_memory_binds_table_spec() {
             ell: 1,
             table_spec: Some(LutTableSpec::RiscvOpcode { opcode, xlen: 32 }),
             table: vec![],
+            addr_group: None,
+            selector_group: None,
         }],
         mem_insts: vec![],
         _phantom: PhantomData,
@@ -156,6 +159,7 @@ fn route_a_shout_implicit_table_spec_verifies() {
     let out = compute_op(opcode, rs1, rs2, xlen);
 
     let inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 64,
@@ -165,6 +169,8 @@ fn route_a_shout_implicit_table_spec_verifies() {
         ell: 1,
         table_spec: Some(LutTableSpec::RiscvOpcode { opcode, xlen }),
         table: vec![],
+        addr_group: None,
+        selector_group: None,
     };
     let wit = LutWitness { mats: Vec::new() };
 
@@ -186,7 +192,7 @@ fn route_a_shout_implicit_table_spec_verifies() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"implicit-shout-table-spec");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -201,7 +207,7 @@ fn route_a_shout_implicit_table_spec_verifies() {
     let mut tr_verify = Poseidon2Transcript::new(b"implicit-shout-table-spec");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -220,7 +226,7 @@ fn route_a_shout_implicit_table_spec_verifies() {
         xlen,
     });
     let err = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify_bad,
         &params,
         &ccs,
@@ -246,6 +252,7 @@ fn route_a_shout_implicit_identity_u32_table_spec_verifies() {
     let out = addr;
 
     let inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 32,
@@ -255,6 +262,8 @@ fn route_a_shout_implicit_identity_u32_table_spec_verifies() {
         ell: 1,
         table_spec: Some(LutTableSpec::IdentityU32),
         table: vec![],
+        addr_group: None,
+        selector_group: None,
     };
     let wit = LutWitness { mats: Vec::new() };
 
@@ -276,7 +285,7 @@ fn route_a_shout_implicit_identity_u32_table_spec_verifies() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"implicit-shout-identity-u32-table-spec");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -291,7 +300,7 @@ fn route_a_shout_implicit_identity_u32_table_spec_verifies() {
     let mut tr_verify = Poseidon2Transcript::new(b"implicit-shout-identity-u32-table-spec");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -307,7 +316,7 @@ fn route_a_shout_implicit_identity_u32_table_spec_verifies() {
     let mut steps_public_bad = [StepInstanceBundle::from(&step_bundle)];
     steps_public_bad[0].lut_insts[0].table_spec = None;
     let err = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify_bad,
         &params,
         &ccs,

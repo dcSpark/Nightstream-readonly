@@ -12,8 +12,8 @@ use neo_memory::cpu::build_bus_layout_for_instances_with_shout_and_twist_lanes;
 use neo_memory::riscv::ccs::{build_rv32_trace_wiring_ccs, rv32_trace_ccs_witness_from_exec_table, Rv32TraceCcsLayout};
 use neo_memory::riscv::exec_table::Rv32ExecTable;
 use neo_memory::riscv::lookups::{
-    decode_program, encode_program, interleave_bits, uninterleave_bits, RiscvCpu, RiscvInstruction, RiscvMemory,
-    RiscvOpcode, RiscvShoutTables, PROG_ID,
+    decode_program, encode_program, uninterleave_bits, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode,
+    RiscvShoutTables, PROG_ID,
 };
 use neo_memory::riscv::trace::extract_shout_lanes_over_time;
 use neo_memory::witness::{LutInstance, LutTableSpec, LutWitness, StepInstanceBundle, StepWitnessBundle};
@@ -21,10 +21,9 @@ use neo_params::NeoParams;
 use neo_transcript::Poseidon2Transcript;
 use neo_transcript::Transcript;
 use neo_vm_trace::trace_program;
-use neo_vm_trace::ShoutEvent;
 use p3_field::PrimeCharacteristicRing;
 
-use crate::suite::{default_mixers, setup_ajtai_committer};
+use crate::suite::{default_mixers, setup_ajtai_committer, widen_ccs_cols_for_test};
 
 fn build_shout_only_bus_z(
     m: usize,
@@ -79,7 +78,7 @@ fn build_shout_only_bus_z(
             z[bus.bus_cell(cols.has_lookup, j)] = if has_lookup { F::ONE } else { F::ZERO };
 
             if has_lookup {
-                z[bus.bus_cell(cols.val, j)] = F::from_u64(lane.value[j]);
+                z[bus.bus_cell(cols.primary_val(), j)] = F::from_u64(lane.value[j]);
             }
 
             if has_lookup {
@@ -135,36 +134,46 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_mul_semantics_redteam() {
     let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 16).expect("trace_program");
 
     let mut exec = Rv32ExecTable::from_trace_padded_pow2(&trace, /*min_len=*/ 4).expect("from_trace_padded_pow2");
-    // RV32 B1 does not currently emit MUL Shout events. Inject one so we can red-team the packed-key
-    // semantics constraints without relying on the legacy `ell_addr=64` addr-bit encoding.
     let mul_id = RiscvShoutTables::new(32).opcode_to_id(RiscvOpcode::Mul);
-    let mut injected = false;
     for row in exec.rows.iter_mut() {
-        if !row.active {
-            continue;
+        if row.active {
+            row.shout_events.retain(|ev| ev.shout_id == mul_id);
         }
-        let Some(RiscvInstruction::RAlu {
-            op: RiscvOpcode::Mul, ..
-        }) = row.decoded
-        else {
-            continue;
-        };
-        if !row.shout_events.is_empty() {
-            continue;
-        }
-        let rs1 = row.reg_read_lane0.as_ref().map(|io| io.value).unwrap_or(0) as u32;
-        let rs2 = row.reg_read_lane1.as_ref().map(|io| io.value).unwrap_or(0) as u32;
-        let key = interleave_bits(rs1 as u64, rs2 as u64) as u64;
-        let val = rs1.wrapping_mul(rs2) as u64;
-        row.shout_events.push(ShoutEvent {
-            shout_id: mul_id,
-            key,
-            value: val,
-        });
-        injected = true;
-        break;
     }
-    assert!(injected, "expected to inject at least one MUL Shout event");
+    let mul_rows = exec
+        .rows
+        .iter()
+        .filter(|row| {
+            row.active
+                && matches!(
+                    row.decoded,
+                    Some(RiscvInstruction::RAlu {
+                        op: RiscvOpcode::Mul,
+                        ..
+                    })
+                )
+        })
+        .count();
+    let mul_shout_rows = exec
+        .rows
+        .iter()
+        .filter(|row| {
+            row.active
+                && matches!(
+                    row.decoded,
+                    Some(RiscvInstruction::RAlu {
+                        op: RiscvOpcode::Mul,
+                        ..
+                    })
+                )
+                && row.shout_events.iter().any(|ev| ev.shout_id == mul_id)
+        })
+        .count();
+    assert!(mul_rows > 0, "expected at least one MUL row");
+    assert_eq!(
+        mul_shout_rows, mul_rows,
+        "native MUL shout coverage mismatch (mul_rows={mul_rows}, shout_rows={mul_shout_rows})"
+    );
     exec.validate_cycle_chain().expect("cycle chain");
     exec.validate_pc_chain().expect("pc chain");
     exec.validate_halted_tail().expect("halted tail");
@@ -172,8 +181,14 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_mul_semantics_redteam() {
         .expect("inactive rows");
 
     let layout = Rv32TraceCcsLayout::new(exec.rows.len()).expect("trace CCS layout");
-    let (x, w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
-    let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
+    let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
+    let mut ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
+    let min_m = layout
+        .m_in
+        .checked_add((/*bus_cols=*/ 34usize + 2usize).checked_mul(exec.rows.len()).expect("bus cols * steps"))
+        .expect("m_in + bus region");
+    widen_ccs_cols_for_test(&mut ccs, min_m);
+    w.resize(ccs.m - layout.m_in, F::ZERO);
 
     // Params + committer.
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n.max(ccs.m)).expect("params");
@@ -200,6 +215,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_mul_semantics_redteam() {
     let shout_lanes = extract_shout_lanes_over_time(&exec, &shout_table_ids).expect("extract shout lanes");
 
     let mul_lut_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 34,
@@ -212,6 +228,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_mul_semantics_redteam() {
             xlen: 32,
         }),
         table: Vec::new(),
+    addr_group: None,
+    selector_group: None,
     };
 
     let mut mul_z = build_shout_only_bus_z(
@@ -253,6 +271,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_mul_semantics_redteam() {
     let mul_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(&params, &mul_z);
     let mul_c = l.commit(&mul_Z);
     let mul_lut_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: vec![mul_c],
         ..mul_lut_inst
     };
@@ -267,12 +286,9 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_mul_semantics_redteam() {
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =
         steps_witness.iter().map(StepInstanceBundle::from).collect();
 
-    // The prover may either:
-    // - reject because the tampered witness no longer satisfies the protocol invariants, or
-    // - emit a proof that fails verification.
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-mul-semantics-redteam");
-    let Ok(proof) = fold_shard_prove(
-        FoldingMode::PaperExact,
+    if let Ok(proof) = fold_shard_prove(
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -281,20 +297,18 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_mul_semantics_redteam() {
         &[],
         &l,
         mixers,
-    ) else {
-        return;
-    };
-
-    let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-mul-semantics-redteam");
-    fold_shard_verify(
-        FoldingMode::PaperExact,
-        &mut tr_verify,
-        &params,
-        &ccs,
-        &steps_instance,
-        &[],
-        &proof,
-        mixers,
-    )
-    .expect_err("tampered packed MUL carry bit must be caught by Route-A time constraints");
+    ) {
+        let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-mul-semantics-redteam");
+        fold_shard_verify(
+            FoldingMode::Optimized,
+            &mut tr_verify,
+            &params,
+            &ccs,
+            &steps_instance,
+            &[],
+            &proof,
+            mixers,
+        )
+        .expect_err("tampered packed MUL carry bit must be caught by Route-A time constraints");
+    }
 }

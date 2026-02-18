@@ -199,7 +199,7 @@ fn output_binding_e2e_wrong_claim_fails() -> Result<(), PiCcsError> {
 
     let mut tr_prove = Poseidon2Transcript::new(b"output-binding-e2e");
     let proof = fold_shard_prove_with_output_binding(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -214,7 +214,7 @@ fn output_binding_e2e_wrong_claim_fails() -> Result<(), PiCcsError> {
 
     let mut tr_verify_ok = Poseidon2Transcript::new(b"output-binding-e2e");
     let _outputs_ok = fold_shard_verify_with_output_binding(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify_ok,
         &params,
         &ccs,
@@ -227,7 +227,7 @@ fn output_binding_e2e_wrong_claim_fails() -> Result<(), PiCcsError> {
 
     let mut tr_verify_bad = Poseidon2Transcript::new(b"output-binding-e2e");
     let res = fold_shard_verify_with_output_binding(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify_bad,
         &params,
         &ccs,

@@ -23,7 +23,7 @@ use neo_transcript::Transcript;
 use neo_vm_trace::trace_program;
 use p3_field::PrimeCharacteristicRing;
 
-use crate::suite::{default_mixers, setup_ajtai_committer};
+use crate::suite::{default_mixers, setup_ajtai_committer, widen_ccs_cols_for_test};
 
 fn build_shout_only_bus_z(
     m: usize,
@@ -77,7 +77,7 @@ fn build_shout_only_bus_z(
         for j in 0..t {
             let has = lane.has_lookup[j];
             z[bus.bus_cell(cols.has_lookup, j)] = if has { F::ONE } else { F::ZERO };
-            z[bus.bus_cell(cols.val, j)] = if has { F::from_u64(lane.value[j]) } else { F::ZERO };
+            z[bus.bus_cell(cols.primary_val(), j)] = if has { F::from_u64(lane.value[j]) } else { F::ZERO };
 
             // Packed-key layout (ell_addr=35):
             // [lhs_u32, rhs_u32, borrow_bit, diff_bits[0..32]].
@@ -140,8 +140,14 @@ fn riscv_trace_no_shared_cpu_bus_shout_eq_semantics_redteam() {
         .expect("inactive rows");
 
     let layout = Rv32TraceCcsLayout::new(exec.rows.len()).expect("trace CCS layout");
-    let (x, w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
-    let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
+    let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
+    let mut ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
+    let min_m = layout
+        .m_in
+        .checked_add((/*bus_cols=*/ 35usize + 2usize).checked_mul(exec.rows.len()).expect("bus cols * steps"))
+        .expect("m_in + bus region");
+    widen_ccs_cols_for_test(&mut ccs, min_m);
+    w.resize(ccs.m - layout.m_in, F::ZERO);
 
     // Params + committer.
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n.max(ccs.m)).expect("params");
@@ -168,6 +174,7 @@ fn riscv_trace_no_shared_cpu_bus_shout_eq_semantics_redteam() {
     let shout_lanes = extract_shout_lanes_over_time(&exec, &shout_table_ids).expect("extract shout lanes");
 
     let eq_lut_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 35,
@@ -180,6 +187,8 @@ fn riscv_trace_no_shared_cpu_bus_shout_eq_semantics_redteam() {
             xlen: 32,
         }),
         table: Vec::new(),
+    addr_group: None,
+    selector_group: None,
     };
 
     let mut eq_z = build_shout_only_bus_z(
@@ -224,6 +233,7 @@ fn riscv_trace_no_shared_cpu_bus_shout_eq_semantics_redteam() {
     let eq_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(&params, &eq_z);
     let eq_c = l.commit(&eq_Z);
     let eq_lut_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: vec![eq_c],
         ..eq_lut_inst
     };
@@ -242,8 +252,8 @@ fn riscv_trace_no_shared_cpu_bus_shout_eq_semantics_redteam() {
     // - reject because the witness no longer satisfies the protocol invariants, or
     // - emit a proof that fails verification.
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-eq-semantics-redteam");
-    let Ok(proof) = fold_shard_prove(
-        FoldingMode::PaperExact,
+    if let Ok(proof) = fold_shard_prove(
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -252,20 +262,18 @@ fn riscv_trace_no_shared_cpu_bus_shout_eq_semantics_redteam() {
         &[],
         &l,
         mixers,
-    ) else {
-        return;
-    };
-
-    let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-eq-semantics-redteam");
-    fold_shard_verify(
-        FoldingMode::PaperExact,
-        &mut tr_verify,
-        &params,
-        &ccs,
-        &steps_instance,
-        &[],
-        &proof,
-        mixers,
-    )
-    .expect_err("tampered packed EQ borrow witness must be caught by Route-A time constraints");
+    ) {
+        let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-eq-semantics-redteam");
+        fold_shard_verify(
+            FoldingMode::Optimized,
+            &mut tr_verify,
+            &params,
+            &ccs,
+            &steps_instance,
+            &[],
+            &proof,
+            mixers,
+        )
+        .expect_err("tampered packed EQ borrow witness must be caught by Route-A time constraints");
+    }
 }

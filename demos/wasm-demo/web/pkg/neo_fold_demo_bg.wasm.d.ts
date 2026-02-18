@@ -3,7 +3,7 @@
 export const memory: WebAssembly.Memory;
 export const init_panic_hook: () => void;
 export const prove_verify_test_export_json: (a: number, b: number) => [number, number, number];
-export const prove_verify_rv32_b1_fibonacci_asm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+export const prove_verify_rv32_trace_fibonacci_asm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
 export const __wbg_neofoldsession_free: (a: number, b: number) => void;
 export const neofoldsession_new: (a: number, b: number) => [number, number, number];
 export const neofoldsession_step_count: (a: number) => number;

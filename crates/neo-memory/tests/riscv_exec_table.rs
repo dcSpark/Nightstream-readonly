@@ -6,7 +6,7 @@ use neo_memory::riscv::lookups::{
 use neo_vm_trace::trace_program;
 
 #[test]
-fn rv32_exec_table_matches_rv32_b1_lane_conventions_addi_halt() {
+fn rv32_exec_table_matches_trace_lane_conventions_addi_halt() {
     // Program: ADDI x1, x0, 1; HALT
     let program = vec![
         RiscvInstruction::IAlu {
@@ -194,5 +194,45 @@ fn rv32_shout_event_table_includes_rv32m_rows() {
             .iter()
             .any(|row| row.opcode == Some(RiscvOpcode::Mul)),
         "expected RV32M (MUL) rows in trace shout event table"
+    );
+}
+
+#[test]
+fn rv32_exec_table_rejects_jalr_non_strict_target_tamper() {
+    // Program:
+    //   ADDI x1, x0, 8
+    //   JALR x2, x1, 0
+    //   HALT
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 8,
+        },
+        RiscvInstruction::Jalr { rd: 2, rs1: 1, imm: 0 },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let decoded_program = decode_program(&program_bytes).expect("decode_program");
+    let mut cpu = RiscvCpu::new(/*xlen=*/ 32);
+    cpu.load_program(/*base=*/ 0, decoded_program);
+    let twist = RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
+    let shout = RiscvShoutTables::new(/*xlen=*/ 32);
+    let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 16).expect("trace_program");
+    let mut table = Rv32ExecTable::from_trace(&trace).expect("Rv32ExecTable::from_trace");
+
+    // Tamper the JALR row target so it no longer equals rs1+imm under strict policy.
+    let jalr_row = table
+        .rows
+        .iter_mut()
+        .find(|r| matches!(r.decoded, Some(RiscvInstruction::Jalr { .. })))
+        .expect("expected one JALR row");
+    jalr_row.pc_after = jalr_row.pc_after.wrapping_add(4);
+
+    assert!(
+        table.validate_jalr_strict_alignment_policy().is_err(),
+        "tampered JALR target should fail strict alignment policy validation"
     );
 }

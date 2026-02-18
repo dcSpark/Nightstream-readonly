@@ -1,6 +1,13 @@
 use neo_fold::riscv_trace_shard::Rv32TraceWiring;
+use neo_math::K;
+use neo_memory::riscv::ccs::TraceShoutBusSpec;
 use neo_memory::riscv::lookups::{
-    encode_program, BranchCondition, RiscvInstruction, RiscvOpcode, PROG_ID, RAM_ID, REG_ID,
+    encode_program, BranchCondition, RiscvInstruction, RiscvMemOp, RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID,
+    REG_ID,
+};
+use neo_memory::riscv::trace::{
+    rv32_decode_lookup_backed_cols, rv32_is_decode_lookup_table_id, rv32_width_lookup_backed_cols,
+    Rv32DecodeSidecarLayout, Rv32WidthSidecarLayout,
 };
 use p3_field::PrimeCharacteristicRing;
 
@@ -53,10 +60,32 @@ fn rv32_trace_wiring_runner_prove_verify() {
         .collect();
     mem_ids.sort_unstable();
     let mut expected_mem_ids = vec![PROG_ID.0, RAM_ID.0, REG_ID.0];
+    expected_mem_ids.retain(|&id| id != RAM_ID.0);
     expected_mem_ids.sort_unstable();
     assert_eq!(
         mem_ids, expected_mem_ids,
-        "trace runner should include PROG/REG/RAM sidecar instances even without output binding"
+        "trace runner should default to used-sidecar instantiation (no RAM sidecar when unused)"
+    );
+    assert_eq!(
+        run.used_memory_ids(),
+        expected_mem_ids.as_slice(),
+        "run artifact should record auto-derived S_memory"
+    );
+    let add_table_id = RiscvShoutTables::new(32).opcode_to_id(RiscvOpcode::Add).0;
+    let used_lookup_ids = run.used_shout_table_ids();
+    assert!(
+        used_lookup_ids.contains(&add_table_id),
+        "run artifact should include opcode-backed S_lookup tables"
+    );
+    let decode_lookup_count = used_lookup_ids
+        .iter()
+        .copied()
+        .filter(|table_id| rv32_is_decode_lookup_table_id(*table_id))
+        .count();
+    assert_eq!(
+        decode_lookup_count,
+        rv32_decode_lookup_backed_cols(&Rv32DecodeSidecarLayout::new()).len(),
+        "run artifact should include decode lookup families in S_lookup"
     );
 }
 
@@ -135,25 +164,141 @@ fn rv32_trace_wiring_runner_shared_bus_default_and_legacy_fallback_differ() {
         .prove()
         .expect("trace wiring prove");
 
-    let run_legacy = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+    let legacy_err = match Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
         .shared_cpu_bus(false)
         .min_trace_len(1)
         .prove()
-        .expect("trace wiring prove (legacy no-shared fallback)");
+    {
+        Ok(_) => panic!("legacy no-shared fallback must be rejected"),
+        Err(e) => e,
+    };
 
+    let msg = legacy_err.to_string();
     assert!(
-        run_shared.ccs_num_variables() > run_legacy.ccs_num_variables(),
-        "shared-bus trace path must reserve bus-tail columns in the main CCS"
+        msg.contains("no-shared fallback is removed"),
+        "unexpected no-shared rejection error: {msg}"
     );
     assert_eq!(
         run_shared.ccs_num_variables(),
         run_shared.layout().m,
         "shared-bus trace layout width must match CCS width"
     );
-    assert_eq!(
-        run_legacy.ccs_num_variables(),
-        run_legacy.layout().m,
-        "legacy trace layout width must match CCS width"
+}
+
+#[test]
+fn rv32_trace_wiring_runner_shout_override_must_superset_inferred_set() {
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let err = match Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .shout_ops([RiscvOpcode::Xor])
+        .prove()
+    {
+        Ok(_) => panic!("shout override that misses required tables must fail"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("superset") && msg.contains("Add"),
+        "unexpected error message: {msg}"
+    );
+}
+
+#[test]
+fn rv32_trace_wiring_runner_rejects_extra_shout_spec_without_table_spec() {
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let err = match Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .extra_shout_bus_specs([TraceShoutBusSpec {
+            table_id: 1000,
+            ell_addr: 13,
+            n_vals: 1usize,
+        }])
+        .prove()
+    {
+        Ok(_) => panic!("extra shout geometry without table spec must fail"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("extra_shout_bus_specs includes table_id=1000 without a table spec"),
+        "unexpected error message: {msg}"
+    );
+}
+
+#[test]
+fn rv32_trace_wiring_runner_accepts_extra_shout_spec_with_matching_table_spec() {
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .extra_lut_table_spec(1000, neo_memory::witness::LutTableSpec::IdentityU32)
+        .extra_shout_bus_specs([TraceShoutBusSpec {
+            table_id: 1000,
+            ell_addr: 32,
+            n_vals: 1usize,
+        }])
+        .prove()
+        .expect("trace wiring prove with extra table/spec");
+    run.verify()
+        .expect("trace wiring verify with extra table/spec");
+
+    assert!(
+        run.used_shout_table_ids().contains(&1000),
+        "run should record extra table_id in used shout set"
+    );
+}
+
+#[test]
+fn rv32_trace_wiring_runner_rejects_extra_table_spec_colliding_with_opcode_table() {
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let add_table_id = RiscvShoutTables::new(32).opcode_to_id(RiscvOpcode::Add).0;
+    let err = match Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .extra_lut_table_spec(add_table_id, neo_memory::witness::LutTableSpec::IdentityU32)
+        .prove()
+    {
+        Ok(_) => panic!("extra_lut_table_spec collision with inferred opcode table must fail"),
+        Err(e) => e,
+    };
+    let msg = err.to_string();
+    assert!(
+        msg.contains("extra_lut_table_spec collides with existing table_id"),
+        "unexpected error message: {msg}"
     );
 }
 
@@ -218,7 +363,6 @@ fn rv32_trace_wiring_runner_chunked_ivc_step_linking() {
     let program_bytes = encode_program(&program);
 
     let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
-        .shared_cpu_bus(false)
         .chunk_rows(2)
         .prove()
         .expect("trace wiring prove with chunked ivc");
@@ -263,7 +407,6 @@ fn rv32_trace_wiring_runner_chunked_ivc_batches_no_shared_val_lanes_per_mem() {
     let program_bytes = encode_program(&program);
 
     let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
-        .shared_cpu_bus(false)
         .chunk_rows(2)
         .prove()
         .expect("trace wiring prove with chunked ivc");
@@ -274,33 +417,242 @@ fn rv32_trace_wiring_runner_chunked_ivc_batches_no_shared_val_lanes_per_mem() {
     assert_eq!(steps_public.len(), 2, "expected two public steps");
     assert_eq!(shard_proof.steps.len(), 2, "expected two proof steps");
 
-    // Step 0: no previous step, so there is one val claim per mem instance.
-    let mem_count_step0 = steps_public[0].mem_insts.len();
+    // Step 0 (shared-bus): one current CPU val claim.
     let proof_step0 = &shard_proof.steps[0];
     assert_eq!(
         proof_step0.mem.val_me_claims.len(),
-        mem_count_step0,
-        "step0 must emit one current val claim per mem instance"
+        1,
+        "step0(shared) must emit one current CPU val claim"
     );
     assert_eq!(
         proof_step0.val_fold.len(),
-        mem_count_step0,
-        "step0 must emit one val-fold proof per mem instance"
+        1,
+        "step0(shared) must emit one val-fold proof"
     );
 
-    // Step 1: has previous step, so val claims are [current..., previous...], but
-    // proof lanes are batched per mem instance.
-    let mem_count_step1 = steps_public[1].mem_insts.len();
+    // Step 1 (shared-bus): val claims are [current_cpu, previous_cpu], each with its own fold proof.
     let proof_step1 = &shard_proof.steps[1];
     assert_eq!(
         proof_step1.mem.val_me_claims.len(),
-        mem_count_step1 * 2,
-        "step1 must emit current+previous val claims per mem instance"
+        2,
+        "step1(shared) must emit current+previous CPU val claims"
     );
     assert_eq!(
         proof_step1.val_fold.len(),
-        mem_count_step1,
-        "step1 must batch val-fold proofs per mem instance"
+        2,
+        "step1(shared) must emit one val-fold proof per claim"
+    );
+}
+
+#[test]
+fn rv32_trace_wiring_runner_wb_wp_folds_are_emitted_and_required() {
+    // Program: ADDI x1, x0, 1; HALT
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .prove()
+        .expect("trace wiring prove");
+    run.verify().expect("trace wiring verify");
+
+    let proof = run.proof().clone();
+    assert_eq!(proof.steps.len(), 1, "expected one step proof");
+    assert!(
+        !proof.steps[0].mem.wb_me_claims.is_empty(),
+        "expected WB ME claims for RV32 trace route-A"
+    );
+    assert!(
+        !proof.steps[0].mem.wp_me_claims.is_empty(),
+        "expected WP ME claims for RV32 trace route-A"
+    );
+    assert!(
+        !proof.steps[0].wb_fold.is_empty(),
+        "expected wb_fold proofs for RV32 trace route-A"
+    );
+    assert!(
+        !proof.steps[0].wp_fold.is_empty(),
+        "expected wp_fold proofs for RV32 trace route-A"
+    );
+
+    let mut proof_missing_wb = proof.clone();
+    proof_missing_wb.steps[0].wb_fold.clear();
+    assert!(
+        run.verify_proof(&proof_missing_wb).is_err(),
+        "missing wb_fold must fail verification"
+    );
+
+    let mut proof_missing_wp = proof.clone();
+    proof_missing_wp.steps[0].wp_fold.clear();
+    assert!(
+        run.verify_proof(&proof_missing_wp).is_err(),
+        "missing wp_fold must fail verification"
+    );
+}
+
+#[test]
+fn rv32_trace_wiring_runner_decode_openings_are_embedded_in_wp_and_required() {
+    // Program: ADDI x1, x0, 1; HALT
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .prove()
+        .expect("trace wiring prove");
+    run.verify().expect("trace wiring verify");
+
+    let proof = run.proof().clone();
+    assert_eq!(proof.steps.len(), 1, "expected one step proof");
+    assert_eq!(proof.steps[0].mem.wp_me_claims.len(), 1, "expected one WP ME claim");
+    let mut proof_missing_decode_me = proof.clone();
+    let decode_layout = Rv32DecodeSidecarLayout::new();
+    let decode_open_cols = rv32_decode_lookup_backed_cols(&decode_layout);
+    let me = &mut proof_missing_decode_me.steps[0].mem.wp_me_claims[0];
+    let decode_start = me
+        .y_scalars
+        .len()
+        .checked_sub(decode_open_cols.len())
+        .expect("decode openings must be appended to WP ME tail");
+    let decode_idx = decode_open_cols
+        .iter()
+        .position(|&c| c == decode_layout.op_alu_imm)
+        .expect("decode opening column must be present");
+    me.y_scalars[decode_start + decode_idx] += K::ONE;
+    assert!(
+        run.verify_proof(&proof_missing_decode_me).is_err(),
+        "tampered decode lookup opening embedded in WP ME must fail verification"
+    );
+}
+
+#[test]
+fn rv32_trace_wiring_runner_width_openings_on_wp_are_required() {
+    // Program: ADDI x1, x0, 1; HALT
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .prove()
+        .expect("trace wiring prove");
+    run.verify().expect("trace wiring verify");
+
+    let proof = run.proof().clone();
+    assert_eq!(proof.steps.len(), 1, "expected one step proof");
+    assert_eq!(proof.steps[0].mem.wp_me_claims.len(), 1, "expected one WP ME claim");
+
+    let mut proof_tampered_width_open = proof.clone();
+    let width_layout = Rv32WidthSidecarLayout::new();
+    let width_open_cols = rv32_width_lookup_backed_cols(&width_layout);
+    let wp_me = &mut proof_tampered_width_open.steps[0].mem.wp_me_claims[0];
+    let width_open_start = wp_me
+        .y_scalars
+        .len()
+        .checked_sub(width_open_cols.len())
+        .expect("width openings must be appended to WP ME tail");
+    let width_idx = width_open_cols
+        .iter()
+        .position(|&c| c == width_layout.rs2_low_bit[0])
+        .expect("width opening column must be present");
+    wp_me.y_scalars[width_open_start + width_idx] += K::ONE;
+    assert!(
+        run.verify_proof(&proof_tampered_width_open).is_err(),
+        "tampered width lookup opening embedded in WP ME must fail verification"
+    );
+}
+
+#[test]
+fn rv32_trace_wiring_runner_control_claims_are_emitted_and_required() {
+    // Program: ADDI x1, x0, 1; HALT
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .prove()
+        .expect("trace wiring prove");
+    run.verify().expect("trace wiring verify");
+
+    let proof = run.proof().clone();
+    assert_eq!(proof.steps.len(), 1, "expected one step proof");
+
+    let labels = &proof.steps[0].batched_time.labels;
+    let find_w4 = |label: &'static [u8]| -> usize {
+        labels
+            .iter()
+            .position(|l| *l == label)
+            .expect("missing required control stage claim label in batched_time")
+    };
+    let control_linear_idx = find_w4(b"control/next_pc_linear");
+    let control_control_idx = find_w4(b"control/next_pc_control");
+    let control_branch_idx = find_w4(b"control/branch_semantics");
+    let _control_writeback_idx = find_w4(b"control/writeback");
+    assert!(
+        control_linear_idx < labels.len() && control_control_idx < labels.len() && control_branch_idx < labels.len(),
+        "control stage labels must be present in batched_time"
+    );
+
+    let mut proof_missing_control_claim = proof.clone();
+    let _ = proof_missing_control_claim.steps[0]
+        .batched_time
+        .claimed_sums
+        .remove(control_control_idx);
+    let _ = proof_missing_control_claim.steps[0]
+        .batched_time
+        .degree_bounds
+        .remove(control_control_idx);
+    let _ = proof_missing_control_claim.steps[0]
+        .batched_time
+        .labels
+        .remove(control_control_idx);
+    let _ = proof_missing_control_claim.steps[0]
+        .batched_time
+        .round_polys
+        .remove(control_control_idx);
+    assert!(
+        run.verify_proof(&proof_missing_control_claim).is_err(),
+        "missing control/next_pc_control claim artifact must fail verification"
+    );
+
+    let mut proof_tampered_control_round = proof.clone();
+    let coeff = proof_tampered_control_round.steps[0]
+        .batched_time
+        .round_polys[control_control_idx]
+        .get_mut(0)
+        .and_then(|round| round.get_mut(0))
+        .expect("control/next_pc_control first-round coeff must exist");
+    *coeff += K::ONE;
+    assert!(
+        run.verify_proof(&proof_tampered_control_round).is_err(),
+        "tampered control/next_pc_control round polynomial must fail verification"
     );
 }
 
@@ -321,6 +673,35 @@ fn rv32_trace_wiring_runner_rejects_zero_chunk_rows() {
     assert!(msg.contains("chunk_rows"), "unexpected error message: {msg}");
 }
 
+#[test]
+fn rv32_trace_wiring_runner_rejects_amo_via_wb_decode_scope_lock() {
+    // Program includes one AMO row. In Tier 2.1 trace mode this is rejected by WB/decode stage
+    // decode residuals (scope lock), not by the N0 main-trace CCS.
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 5,
+        },
+        RiscvInstruction::Amo {
+            op: RiscvMemOp::AmoaddW,
+            rd: 2,
+            rs1: 0,
+            rs2: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    assert!(
+        Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+            .prove()
+            .is_err(),
+        "AMO must be rejected in Tier 2.1 trace mode via WB/decode stage scope lock"
+    );
+}
+
 fn prove_verify_trace_program(program: Vec<RiscvInstruction>) {
     let program_bytes = encode_program(&program);
     let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
@@ -329,17 +710,6 @@ fn prove_verify_trace_program(program: Vec<RiscvInstruction>) {
         .prove()
         .expect("trace wiring prove");
     run.verify().expect("trace wiring verify");
-}
-
-fn prove_verify_trace_program_legacy_no_shared(program: Vec<RiscvInstruction>) {
-    let program_bytes = encode_program(&program);
-    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
-        .shared_cpu_bus(false)
-        .min_trace_len(program.len())
-        .max_steps(program.len())
-        .prove()
-        .expect("trace wiring prove (legacy no-shared)");
-    run.verify().expect("trace wiring verify (legacy no-shared)");
 }
 
 #[test]
@@ -468,5 +838,4 @@ fn rv32_trace_wiring_runner_accepts_full_mixed_sequence_halt() {
     ];
     program.push(RiscvInstruction::Halt);
     prove_verify_trace_program(program.clone());
-    prove_verify_trace_program_legacy_no_shared(program);
 }

@@ -794,7 +794,7 @@ where
 
     /// Access the collected *public* per-step bundles (MCS + optional Twist/Shout instances).
     ///
-    /// This is useful for specialized verifiers (e.g. RV32 B1 statement checks) that need access
+    /// This is useful for specialized verifiers that need access
     /// to memory/lookup instances, not just the MCS list.
     pub fn steps_public(&self) -> Vec<StepInstanceBundle<Cmt, F, K>> {
         self.steps.iter().map(StepInstanceBundle::from).collect()
@@ -803,6 +803,10 @@ where
     /// Access the collected per-step witness bundles (includes private witness).
     pub fn steps_witness(&self) -> &[StepWitnessBundle<Cmt, F, K>] {
         &self.steps
+    }
+
+    pub fn steps_witness_mut(&mut self) -> &mut [StepWitnessBundle<Cmt, F, K>] {
+        &mut self.steps
     }
 
     /// Access auxiliary data captured during the most recent shared-CPU-bus witness build (if any).
@@ -1161,20 +1165,20 @@ where
             return Ok(s);
         }
 
-        // No-shared-bus mode carries Twist/Shout witnesses in separately committed mats and keeps
-        // the main CPU CCS in pure trace shape. In that mode we must *not* inject shared-bus
-        // copyout columns into the accumulator-prepared CCS.
+        // Shared CPU bus is the only supported Route-A witness format.
         let step0 = &self.steps[0];
-        let using_no_shared_bus = step0
+        let is_shared_bus = step0
             .mem_instances
             .iter()
-            .all(|(inst, wit)| !inst.comms.is_empty() && !wit.mats.is_empty())
+            .all(|(inst, wit)| inst.comms.is_empty() && wit.mats.is_empty())
             && step0
                 .lut_instances
                 .iter()
-                .all(|(inst, wit)| !inst.comms.is_empty() && !wit.mats.is_empty());
-        if using_no_shared_bus {
-            return Ok(s);
+                .all(|(inst, wit)| inst.comms.is_empty() && wit.mats.is_empty());
+        if !is_shared_bus {
+            return Err(PiCcsError::InvalidInput(
+                "legacy no-shared CPU bus witness format was removed; use shared-bus witness bundles".into(),
+            ));
         }
 
         let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> =
@@ -1725,10 +1729,16 @@ where
             }
         };
 
-        // For CCS-only sessions (no Twist/Shout), val-lane obligations should be empty
-        // For Twist+Shout sessions, val-lane obligations are expected and valid
+        // Val-lane obligations are expected when the session carries any sidecar val lane:
+        // Twist/Shout folds, or WB/WP folds over RV32 trace openings.
         let has_twist_or_shout = self.has_twist_instances() || self.has_shout_instances();
-        if !has_twist_or_shout && !outputs.obligations.val.is_empty() {
+        let has_wb_or_wp = run.steps.iter().any(|step| {
+            !step.mem.wb_me_claims.is_empty()
+                || !step.mem.wp_me_claims.is_empty()
+                || !step.wb_fold.is_empty()
+                || !step.wp_fold.is_empty()
+        });
+        if !(has_twist_or_shout || has_wb_or_wp) && !outputs.obligations.val.is_empty() {
             return Err(PiCcsError::ProtocolError(
                 "CCS-only session verification produced unexpected val-lane obligations".into(),
             ));
@@ -1894,7 +1904,13 @@ where
         };
 
         let has_twist_or_shout = self.has_twist_instances() || self.has_shout_instances();
-        if !has_twist_or_shout && !outputs.obligations.val.is_empty() {
+        let has_wb_or_wp = run.steps.iter().any(|step| {
+            !step.mem.wb_me_claims.is_empty()
+                || !step.mem.wp_me_claims.is_empty()
+                || !step.wb_fold.is_empty()
+                || !step.wp_fold.is_empty()
+        });
+        if !(has_twist_or_shout || has_wb_or_wp) && !outputs.obligations.val.is_empty() {
             return Err(PiCcsError::ProtocolError(
                 "CCS-only session verification produced unexpected val-lane obligations".into(),
             ));

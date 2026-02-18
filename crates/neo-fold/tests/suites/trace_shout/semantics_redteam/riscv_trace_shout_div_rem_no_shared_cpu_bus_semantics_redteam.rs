@@ -12,8 +12,8 @@ use neo_memory::cpu::build_bus_layout_for_instances_with_shout_and_twist_lanes;
 use neo_memory::riscv::ccs::{build_rv32_trace_wiring_ccs, rv32_trace_ccs_witness_from_exec_table, Rv32TraceCcsLayout};
 use neo_memory::riscv::exec_table::Rv32ExecTable;
 use neo_memory::riscv::lookups::{
-    decode_program, encode_program, interleave_bits, uninterleave_bits, RiscvCpu, RiscvInstruction, RiscvMemory,
-    RiscvOpcode, RiscvShoutTables, PROG_ID,
+    decode_program, encode_program, uninterleave_bits, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode,
+    RiscvShoutTables, PROG_ID,
 };
 use neo_memory::riscv::trace::extract_shout_lanes_over_time;
 use neo_memory::witness::{LutInstance, LutTableSpec, LutWitness, StepInstanceBundle, StepWitnessBundle};
@@ -21,7 +21,6 @@ use neo_params::NeoParams;
 use neo_transcript::Poseidon2Transcript;
 use neo_transcript::Transcript;
 use neo_vm_trace::trace_program;
-use neo_vm_trace::ShoutEvent;
 use p3_field::{Field, PrimeCharacteristicRing};
 
 use crate::suite::{default_mixers, setup_ajtai_committer};
@@ -145,7 +144,7 @@ fn build_paged_shout_only_bus_zs_packed_div(
         for j in 0..t {
             let has = lane_data.has_lookup[j];
             z[bus.bus_cell(cols.has_lookup, j)] = if has { F::ONE } else { F::ZERO };
-            z[bus.bus_cell(cols.val, j)] = if has { F::from_u64(lane_data.value[j]) } else { F::ZERO };
+            z[bus.bus_cell(cols.primary_val(), j)] = if has { F::from_u64(lane_data.value[j]) } else { F::ZERO };
 
             let mut packed = [F::ZERO; 43];
             if has {
@@ -278,7 +277,7 @@ fn build_paged_shout_only_bus_zs_packed_rem(
         for j in 0..t {
             let has = lane_data.has_lookup[j];
             z[bus.bus_cell(cols.has_lookup, j)] = if has { F::ONE } else { F::ZERO };
-            z[bus.bus_cell(cols.val, j)] = if has { F::from_u64(lane_data.value[j]) } else { F::ZERO };
+            z[bus.bus_cell(cols.primary_val(), j)] = if has { F::from_u64(lane_data.value[j]) } else { F::ZERO };
 
             let mut packed = [F::ZERO; 43];
             if has {
@@ -360,8 +359,8 @@ fn build_paged_shout_only_bus_zs_packed_rem(
 #[test]
 fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
     // Same program as the e2e test; tamper:
-    // - DIV q_is_zero on a row where q_abs != 0, and
-    // - REM r_is_zero on a row where r_abs != 0.
+    // - DIV rhs_is_zero on a non-trivial lookup row, and
+    // - REM rhs_is_zero on a non-trivial lookup row.
     let program = vec![
         RiscvInstruction::Lui { rd: 1, imm: -7 },
         RiscvInstruction::Lui { rd: 2, imm: 3 },
@@ -442,43 +441,80 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
     let tables = RiscvShoutTables::new(32);
     let div_id = tables.opcode_to_id(RiscvOpcode::Div);
     let rem_id = tables.opcode_to_id(RiscvOpcode::Rem);
-    let mut injected_div = false;
-    let mut injected_rem = false;
     for row in exec.rows.iter_mut() {
-        if !row.active {
-            continue;
-        }
-        row.shout_events.clear();
-        let Some(RiscvInstruction::RAlu { op, .. }) = row.decoded else {
-            continue;
-        };
-        let rs1 = row.reg_read_lane0.as_ref().map(|io| io.value).unwrap_or(0) as u32;
-        let rs2 = row.reg_read_lane1.as_ref().map(|io| io.value).unwrap_or(0) as u32;
-        let key = interleave_bits(rs1 as u64, rs2 as u64) as u64;
-        match op {
-            RiscvOpcode::Div => {
-                row.shout_events.clear();
-                row.shout_events.push(ShoutEvent {
-                    shout_id: div_id,
-                    key,
-                    value: div_signed(rs1, rs2) as u64,
-                });
-                injected_div = true;
-            }
-            RiscvOpcode::Rem => {
-                row.shout_events.clear();
-                row.shout_events.push(ShoutEvent {
-                    shout_id: rem_id,
-                    key,
-                    value: rem_signed(rs1, rs2) as u64,
-                });
-                injected_rem = true;
-            }
-            _ => {}
+        if row.active {
+            row.shout_events
+                .retain(|ev| ev.shout_id == div_id || ev.shout_id == rem_id);
         }
     }
-    assert!(injected_div, "expected to inject a DIV Shout event");
-    assert!(injected_rem, "expected to inject a REM Shout event");
+    let div_rows = exec
+        .rows
+        .iter()
+        .filter(|row| {
+            row.active
+                && matches!(
+                    row.decoded,
+                    Some(RiscvInstruction::RAlu {
+                        op: RiscvOpcode::Div,
+                        ..
+                    })
+                )
+        })
+        .count();
+    let div_shout_rows = exec
+        .rows
+        .iter()
+        .filter(|row| {
+            row.active
+                && matches!(
+                    row.decoded,
+                    Some(RiscvInstruction::RAlu {
+                        op: RiscvOpcode::Div,
+                        ..
+                    })
+                )
+                && row.shout_events.iter().any(|ev| ev.shout_id == div_id)
+        })
+        .count();
+    let rem_rows = exec
+        .rows
+        .iter()
+        .filter(|row| {
+            row.active
+                && matches!(
+                    row.decoded,
+                    Some(RiscvInstruction::RAlu {
+                        op: RiscvOpcode::Rem,
+                        ..
+                    })
+                )
+        })
+        .count();
+    let rem_shout_rows = exec
+        .rows
+        .iter()
+        .filter(|row| {
+            row.active
+                && matches!(
+                    row.decoded,
+                    Some(RiscvInstruction::RAlu {
+                        op: RiscvOpcode::Rem,
+                        ..
+                    })
+                )
+                && row.shout_events.iter().any(|ev| ev.shout_id == rem_id)
+        })
+        .count();
+    assert!(div_rows > 0, "expected at least one DIV row");
+    assert!(rem_rows > 0, "expected at least one REM row");
+    assert!(
+        div_shout_rows > 0 && div_shout_rows <= div_rows,
+        "native DIV shout coverage mismatch (div_rows={div_rows}, div_shout_rows={div_shout_rows})"
+    );
+    assert!(
+        rem_shout_rows > 0 && rem_shout_rows <= rem_rows,
+        "native REM shout coverage mismatch (rem_rows={rem_rows}, rem_shout_rows={rem_shout_rows})"
+    );
     exec.validate_cycle_chain().expect("cycle chain");
     exec.validate_pc_chain().expect("pc chain");
     exec.validate_halted_tail().expect("halted tail");
@@ -515,6 +551,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
     assert_eq!(shout_lanes.len(), 2);
 
     let div_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 43,
@@ -527,8 +564,11 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
             xlen: 32,
         }),
         table: Vec::new(),
+    addr_group: None,
+    selector_group: None,
     };
     let rem_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 43,
@@ -541,6 +581,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
             xlen: 32,
         }),
         table: Vec::new(),
+    addr_group: None,
+    selector_group: None,
     };
 
     let page_ell_addrs =
@@ -553,8 +595,21 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
     let j = shout_lanes[0]
         .has_lookup
         .iter()
-        .position(|&b| b)
-        .expect("expected at least one DIV lookup");
+        .enumerate()
+        .find_map(|(idx, &has)| {
+            if !has {
+                return None;
+            }
+            let (lhs_u64, rhs_u64) = uninterleave_bits(shout_lanes[0].key[idx] as u128);
+            let lhs = lhs_u64 as u32;
+            let rhs = rhs_u64 as u32;
+            if lhs != 0 || rhs != 0 {
+                Some(idx)
+            } else {
+                None
+            }
+        })
+        .expect("expected a non-trivial DIV lookup");
     let bus = build_bus_layout_for_instances_with_shout_and_twist_lanes(
         ccs.m,
         layout.m_in,
@@ -564,12 +619,12 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
     )
     .expect("bus layout");
     let cols = &bus.shout_cols[0].lanes[0];
-    let q_is_zero_col_id = cols
+    let div_rhs_is_zero_col_id = cols
         .addr_bits
         .clone()
-        .nth(9)
-        .expect("expected addr_bits[9] for q_is_zero");
-    let cell = bus.bus_cell(q_is_zero_col_id, j);
+        .nth(5)
+        .expect("expected addr_bits[5] for rhs_is_zero");
+    let cell = bus.bus_cell(div_rhs_is_zero_col_id, j);
     div_zs[0][cell] = if div_zs[0][cell] == F::ONE { F::ZERO } else { F::ONE };
 
     let mut div_comms = Vec::with_capacity(div_zs.len());
@@ -580,6 +635,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
         div_mats.push(Z);
     }
     let div_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: div_comms,
         ..div_inst
     };
@@ -593,19 +649,25 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
         .iter()
         .enumerate()
         .find_map(|(idx, &has)| {
-            if has && shout_lanes[1].value[idx] != 0 {
+            if !has {
+                return None;
+            }
+            let (lhs_u64, rhs_u64) = uninterleave_bits(shout_lanes[1].key[idx] as u128);
+            let lhs = lhs_u64 as u32;
+            let rhs = rhs_u64 as u32;
+            if lhs != 0 || rhs != 0 {
                 Some(idx)
             } else {
                 None
             }
         })
-        .expect("expected at least one REM lookup with nonzero remainder");
-    let r_is_zero_col_id = cols
+        .expect("expected a non-trivial REM lookup");
+    let rem_rhs_is_zero_col_id = cols
         .addr_bits
         .clone()
-        .nth(9)
-        .expect("expected addr_bits[9] for r_is_zero");
-    let rem_cell = bus.bus_cell(r_is_zero_col_id, j_rem);
+        .nth(5)
+        .expect("expected addr_bits[5] for rhs_is_zero");
+    let rem_cell = bus.bus_cell(rem_rhs_is_zero_col_id, j_rem);
     rem_zs[0][rem_cell] = if rem_zs[0][rem_cell] == F::ONE { F::ZERO } else { F::ONE };
 
     let mut rem_comms = Vec::with_capacity(rem_zs.len());
@@ -616,6 +678,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
         rem_mats.push(Z);
     }
     let rem_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: rem_comms,
         ..rem_inst
     };
@@ -630,10 +693,9 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =
         steps_witness.iter().map(StepInstanceBundle::from).collect();
 
-    // The prover may either reject, or emit a proof that fails verification.
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-div-rem-semantics-redteam");
-    let Ok(proof) = fold_shard_prove(
-        FoldingMode::PaperExact,
+    if let Ok(proof) = fold_shard_prove(
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -642,20 +704,18 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_div_rem_semantics_redteam() {
         &[],
         &l,
         mixers,
-    ) else {
-        return;
-    };
-
-    let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-div-rem-semantics-redteam");
-    fold_shard_verify(
-        FoldingMode::PaperExact,
-        &mut tr_verify,
-        &params,
-        &ccs,
-        &steps_instance,
-        &[],
-        &proof,
-        mixers,
-    )
-    .expect_err("tampered packed DIV/REM zero flags must be caught by Route-A time constraints");
+    ) {
+        let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-div-rem-semantics-redteam");
+        fold_shard_verify(
+            FoldingMode::Optimized,
+            &mut tr_verify,
+            &params,
+            &ccs,
+            &steps_instance,
+            &[],
+            &proof,
+            mixers,
+        )
+        .expect_err("tampered packed DIV/REM rhs_is_zero flags must be caught by Route-A time constraints");
+    }
 }

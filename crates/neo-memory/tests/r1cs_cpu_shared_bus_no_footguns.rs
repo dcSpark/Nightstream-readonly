@@ -145,6 +145,8 @@ fn with_shared_cpu_bus_injects_constraints_and_forces_const_one() {
                 inc: None,
             }],
         )]),
+        shout_addr_groups: HashMap::new(),
+        shout_selector_groups: HashMap::new(),
     };
 
     let cpu = cpu
@@ -169,6 +171,85 @@ fn with_shared_cpu_bus_injects_constraints_and_forces_const_one() {
     assert_eq!(mcs_inst.x[0], F::ONE, "const_one_col should be forced to 1");
 
     // The injected constraints should be satisfiable for the constructed witness.
+    check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).expect("satisfiable");
+}
+
+#[test]
+fn with_shared_cpu_bus_accepts_empty_shout_bindings_for_padding_only_mode() {
+    let n = 64usize;
+    let ccs = empty_identity_first_r1cs_ccs(n);
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
+
+    let mut tables: HashMap<u32, LutTable<F>> = HashMap::new();
+    tables.insert(
+        1,
+        LutTable {
+            table_id: 1,
+            k: 2,
+            d: 1,
+            n_side: 2,
+            content: vec![F::ZERO, F::ONE],
+        },
+    );
+
+    let cpu = R1csCpu::new(
+        ccs.clone(),
+        params,
+        NoopCommit::default(),
+        /*m_in=*/ 1,
+        &tables,
+        &HashMap::new(),
+        Box::new(|_step| vec![F::ZERO]),
+    )
+    .expect("R1csCpu::new");
+
+    let cfg = SharedCpuBusConfig::<F> {
+        mem_layouts: HashMap::new(),
+        initial_mem: HashMap::new(),
+        const_one_col: 0,
+        // Empty binding vector => padding/bitness-only shout lane constraints.
+        shout_cpu: HashMap::from([(1, Vec::<ShoutCpuBinding>::new())]),
+        twist_cpu: HashMap::new(),
+        shout_addr_groups: HashMap::new(),
+        shout_selector_groups: HashMap::new(),
+    };
+
+    let cpu = cpu
+        .with_shared_cpu_bus(cfg, /*chunk_size=*/ 1)
+        .expect("enable shared_cpu_bus with empty shout bindings");
+
+    assert!(
+        ccs_matrix_has_any_nonzero(&cpu.ccs.matrices[1]),
+        "expected injected shout padding/bitness constraints in A matrix"
+    );
+    assert!(
+        ccs_matrix_has_any_nonzero(&cpu.ccs.matrices[2]),
+        "expected injected shout padding/bitness constraints in B matrix"
+    );
+
+    let trace = VmTrace {
+        steps: vec![StepTrace {
+            cycle: 0,
+            pc_before: 0,
+            pc_after: 0,
+            opcode: 0,
+            regs_before: Vec::new(),
+            regs_after: Vec::new(),
+            twist_events: Vec::new(),
+            shout_events: vec![ShoutEvent {
+                shout_id: ShoutId(1),
+                key: 1,
+                value: 7,
+            }],
+            halted: false,
+        }],
+    };
+
+    let mcss = CpuArithmetization::build_ccs_steps(&cpu, &trace).expect("build ccs steps");
+    assert_eq!(mcss.len(), 1);
+    let (mcs_inst, mcs_wit) = &mcss[0];
+    assert_eq!(mcs_inst.x.len(), 1);
+    assert_eq!(mcs_inst.x[0], F::ONE, "const_one_col should be forced to 1");
     check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).expect("satisfiable");
 }
 
@@ -248,6 +329,8 @@ fn shared_bus_shout_lane_assignment_is_in_order_and_resets_per_step() {
         const_one_col: 0,
         shout_cpu: HashMap::from([(1, vec![shout_lane0_cfg, shout_lane1_cfg])]),
         twist_cpu: HashMap::new(),
+        shout_addr_groups: HashMap::new(),
+        shout_selector_groups: HashMap::new(),
     };
 
     let cpu = cpu
@@ -327,20 +410,20 @@ fn shared_bus_shout_lane_assignment_is_in_order_and_resets_per_step() {
     // Step j=0: lane0=(key=0,val=5), lane1=(key=1,val=7).
     assert_eq!(z[layout.bus_cell(lane0.has_lookup, 0)], F::ONE);
     assert_eq!(z[layout.bus_cell(lane0.addr_bits.start, 0)], F::ZERO);
-    assert_eq!(z[layout.bus_cell(lane0.val, 0)], F::from_u64(5));
+    assert_eq!(z[layout.bus_cell(lane0.primary_val(), 0)], F::from_u64(5));
 
     assert_eq!(z[layout.bus_cell(lane1.has_lookup, 0)], F::ONE);
     assert_eq!(z[layout.bus_cell(lane1.addr_bits.start, 0)], F::ONE);
-    assert_eq!(z[layout.bus_cell(lane1.val, 0)], F::from_u64(7));
+    assert_eq!(z[layout.bus_cell(lane1.primary_val(), 0)], F::from_u64(7));
 
     // Step j=1: lane0=(key=1,val=9), lane1=(key=0,val=11).
     assert_eq!(z[layout.bus_cell(lane0.has_lookup, 1)], F::ONE);
     assert_eq!(z[layout.bus_cell(lane0.addr_bits.start, 1)], F::ONE);
-    assert_eq!(z[layout.bus_cell(lane0.val, 1)], F::from_u64(9));
+    assert_eq!(z[layout.bus_cell(lane0.primary_val(), 1)], F::from_u64(9));
 
     assert_eq!(z[layout.bus_cell(lane1.has_lookup, 1)], F::ONE);
     assert_eq!(z[layout.bus_cell(lane1.addr_bits.start, 1)], F::ZERO);
-    assert_eq!(z[layout.bus_cell(lane1.val, 1)], F::from_u64(11));
+    assert_eq!(z[layout.bus_cell(lane1.primary_val(), 1)], F::from_u64(11));
 
     // The injected constraints should be satisfiable for the constructed witness.
     check_ccs_rowwise_zero(&cpu.ccs, &mcs_inst.x, &mcs_wit.w).expect("satisfiable");
@@ -388,6 +471,8 @@ fn shared_bus_rejects_shout_lane_overflow_in_one_step() {
             }],
         )]),
         twist_cpu: HashMap::new(),
+        shout_addr_groups: HashMap::new(),
+        shout_selector_groups: HashMap::new(),
     };
 
     let cpu = cpu
@@ -447,6 +532,8 @@ fn with_shared_cpu_bus_rejects_non_public_const_one() {
         const_one_col: 1, // not < m_in
         shout_cpu: HashMap::new(),
         twist_cpu: HashMap::new(),
+        shout_addr_groups: HashMap::new(),
+        shout_selector_groups: HashMap::new(),
     };
 
     assert!(
@@ -520,6 +607,8 @@ fn with_shared_cpu_bus_rejects_bindings_in_bus_tail() {
                 inc: None,
             }],
         )]),
+        shout_addr_groups: HashMap::new(),
+        shout_selector_groups: HashMap::new(),
     };
 
     assert!(

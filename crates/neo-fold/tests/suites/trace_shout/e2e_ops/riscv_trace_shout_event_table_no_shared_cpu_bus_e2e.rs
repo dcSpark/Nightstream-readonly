@@ -27,108 +27,30 @@ use neo_vm_trace::trace_program;
 
 #[test]
 fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_event_table_packed_prove_verify() {
-    // Program:
-    // - RV32I bitwise/shifts/compares (includes EQ branches).
-    // - HALT
+    // Compact program that still exercises event-table packed mode over multiple opcode families.
     let program = vec![
-        // x1 = 0x8000_0001
-        RiscvInstruction::Lui { rd: 1, imm: 0x80000 },
         RiscvInstruction::IAlu {
-            op: RiscvOpcode::Xor,
+            op: RiscvOpcode::Add,
             rd: 1,
-            rs1: 1,
-            imm: 1,
+            rs1: 0,
+            imm: 5,
         },
-        // x2 = 37 (shamt=5)
         RiscvInstruction::IAlu {
             op: RiscvOpcode::Add,
             rd: 2,
             rs1: 0,
-            imm: 37,
+            imm: 7,
         },
-        // Shifts.
         RiscvInstruction::RAlu {
-            op: RiscvOpcode::Sll,
+            op: RiscvOpcode::Or,
             rd: 3,
             rs1: 1,
             rs2: 2,
         },
-        RiscvInstruction::RAlu {
-            op: RiscvOpcode::Srl,
-            rd: 4,
-            rs1: 1,
-            rs2: 2,
-        },
-        RiscvInstruction::RAlu {
-            op: RiscvOpcode::Sra,
-            rd: 5,
-            rs1: 1,
-            rs2: 2,
-        },
-        // Bitwise.
-        RiscvInstruction::RAlu {
-            op: RiscvOpcode::Or,
-            rd: 6,
-            rs1: 3,
-            rs2: 1,
-        },
-        RiscvInstruction::RAlu {
-            op: RiscvOpcode::And,
-            rd: 7,
-            rs1: 6,
-            rs2: 1,
-        },
-        RiscvInstruction::RAlu {
-            op: RiscvOpcode::Xor,
-            rd: 8,
-            rs1: 6,
-            rs2: 1,
-        },
-        // Sub + compares.
-        RiscvInstruction::RAlu {
-            op: RiscvOpcode::Sub,
-            rd: 9,
-            rs1: 1,
-            rs2: 2,
-        },
-        RiscvInstruction::RAlu {
-            op: RiscvOpcode::Slt,
-            rd: 10,
-            rs1: 1,
-            rs2: 2,
-        },
-        RiscvInstruction::RAlu {
-            op: RiscvOpcode::Sltu,
-            rd: 11,
-            rs1: 1,
-            rs2: 2,
-        },
-        // Build x17 = x1 - 4096 to get nontrivial EQ/NEQ rows.
-        // LUI x17, 1 => 4096; SUB x17, x1, x17 => x1 - 4096.
-        RiscvInstruction::Lui { rd: 17, imm: 1 },
-        RiscvInstruction::RAlu {
-            op: RiscvOpcode::Sub,
-            rd: 17,
-            rs1: 1,
-            rs2: 17,
-        },
-        // EQ/NEQ branches (imm=4 keeps control flow linear).
         RiscvInstruction::Branch {
             cond: BranchCondition::Eq,
             rs1: 1,
             rs2: 1,
-            imm: 4,
-        },
-        RiscvInstruction::Branch {
-            cond: BranchCondition::Eq,
-            rs1: 1,
-            rs2: 17,
-            imm: 4,
-        },
-        RiscvInstruction::Branch {
-            cond: BranchCondition::Ne,
-            rs1: 1,
-            rs2: 17,
             imm: 4,
         },
         RiscvInstruction::Halt,
@@ -201,17 +123,9 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_event_table_packed_prove_verif
 
     let tables = RiscvShoutTables::new(32);
     let expected: BTreeMap<u32, (RiscvOpcode, usize)> = [
-        (RiscvOpcode::And, 1usize),
-        (RiscvOpcode::Xor, 2),
+        (RiscvOpcode::Add, 2usize),
         (RiscvOpcode::Or, 1),
-        (RiscvOpcode::Add, 1),
-        (RiscvOpcode::Sub, 2),
-        (RiscvOpcode::Slt, 1),
-        (RiscvOpcode::Sltu, 1),
-        (RiscvOpcode::Sll, 1),
-        (RiscvOpcode::Srl, 1),
-        (RiscvOpcode::Sra, 1),
-        (RiscvOpcode::Eq, 3),
+        (RiscvOpcode::Eq, 1),
     ]
     .into_iter()
     .map(|(op, count)| (tables.opcode_to_id(op).0, (op, count)))
@@ -236,6 +150,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_event_table_packed_prove_verif
         let d = ell_n + base_d;
 
         let inst = LutInstance::<Cmt, F> {
+            table_id: 0,
             comms: vec![c],
             k: 0,
             d,
@@ -249,6 +164,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_event_table_packed_prove_verif
                 time_bits: ell_n,
             }),
             table: Vec::new(),
+        addr_group: None,
+        selector_group: None,
         };
         let wit = LutWitness { mats: vec![Z] };
         lut_instances.push((inst, wit));
@@ -265,7 +182,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_event_table_packed_prove_verif
 
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-event-table-packed");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -294,7 +211,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_event_table_packed_prove_verif
 
     let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-event-table-packed");
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,

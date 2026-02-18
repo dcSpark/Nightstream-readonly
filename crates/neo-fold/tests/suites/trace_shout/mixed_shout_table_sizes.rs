@@ -81,6 +81,7 @@ fn make_shout_instance(
     let ell = table.n_side.trailing_zeros() as usize;
     (
         neo_memory::witness::LutInstance {
+            table_id: table.table_id,
             comms: Vec::new(),
             k: table.k,
             d: table.d,
@@ -90,6 +91,8 @@ fn make_shout_instance(
             ell,
             table_spec: None,
             table: table.content.clone(),
+            addr_group: None,
+            selector_group: None,
         },
         neo_memory::witness::LutWitness { mats: Vec::new() },
     )
@@ -219,7 +222,7 @@ fn mixed_shout_tables_16_and_256_entries_same_step() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"mixed-shout-sizes");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -246,7 +249,7 @@ fn mixed_shout_tables_16_and_256_entries_same_step() {
     let mut tr_verify = Poseidon2Transcript::new(b"mixed-shout-sizes");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,

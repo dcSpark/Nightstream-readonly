@@ -594,6 +594,7 @@ fn cpu_lookup_shadow_fork_attack_should_be_rejected() {
     };
 
     let lut_inst = LutInstance::<Cmt, F> {
+        table_id: lut_table.table_id,
         comms: Vec::new(),
         k: lut_table.k,
         d: lut_table.d,
@@ -603,6 +604,8 @@ fn cpu_lookup_shadow_fork_attack_should_be_rejected() {
         ell: lut_table.n_side.trailing_zeros() as usize,
         table_spec: None,
         table: lut_table.content.clone(),
+    addr_group: None,
+    selector_group: None,
     };
     let lut_wit = LutWitness { mats: Vec::new() };
 

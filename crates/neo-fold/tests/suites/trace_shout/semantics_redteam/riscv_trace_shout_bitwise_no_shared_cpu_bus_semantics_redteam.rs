@@ -23,7 +23,7 @@ use neo_transcript::Transcript;
 use neo_vm_trace::trace_program;
 use p3_field::PrimeCharacteristicRing;
 
-use crate::suite::{default_mixers, setup_ajtai_committer};
+use crate::suite::{default_mixers, setup_ajtai_committer, widen_ccs_cols_for_test};
 
 fn build_shout_only_bus_z_packed_bitwise(
     m: usize,
@@ -67,7 +67,7 @@ fn build_shout_only_bus_z_packed_bitwise(
     for j in 0..t {
         let has = lane_data.has_lookup[j];
         z[bus.bus_cell(cols.has_lookup, j)] = if has { F::ONE } else { F::ZERO };
-        z[bus.bus_cell(cols.val, j)] = if has { F::from_u64(lane_data.value[j]) } else { F::ZERO };
+        z[bus.bus_cell(cols.primary_val(), j)] = if has { F::from_u64(lane_data.value[j]) } else { F::ZERO };
 
         let mut packed = [F::ZERO; 34];
         if has {
@@ -136,8 +136,14 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_bitwise_packed_semantics_redte
         .expect("inactive rows");
 
     let layout = Rv32TraceCcsLayout::new(exec.rows.len()).expect("trace CCS layout");
-    let (x, w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
-    let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
+    let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
+    let mut ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
+    let min_m = layout
+        .m_in
+        .checked_add((/*bus_cols=*/ 34usize + 2usize).checked_mul(exec.rows.len()).expect("bus cols * steps"))
+        .expect("m_in + bus region");
+    widen_ccs_cols_for_test(&mut ccs, min_m);
+    w.resize(ccs.m - layout.m_in, F::ZERO);
 
     // Params + committer.
     let mut params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n.max(ccs.m)).expect("params");
@@ -182,6 +188,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_bitwise_packed_semantics_redte
         .enumerate()
     {
         let inst = LutInstance::<Cmt, F> {
+            table_id: 0,
             comms: Vec::new(),
             k: 0,
             d: 34,
@@ -191,6 +198,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_bitwise_packed_semantics_redte
             ell: 1,
             table_spec: Some(LutTableSpec::RiscvOpcodePacked { opcode, xlen: 32 }),
             table: Vec::new(),
+        addr_group: None,
+        selector_group: None,
         };
 
         let mut z =
@@ -236,8 +245,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_bitwise_packed_semantics_redte
     // - reject because the tampered witness no longer satisfies the protocol invariants, or
     // - emit a proof that fails verification.
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-bitwise-packed-redteam");
-    let Ok(proof) = fold_shard_prove(
-        FoldingMode::PaperExact,
+    if let Ok(proof) = fold_shard_prove(
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -246,20 +255,18 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_bitwise_packed_semantics_redte
         &[],
         &l,
         mixers,
-    ) else {
-        return;
-    };
-
-    let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-bitwise-packed-redteam");
-    fold_shard_verify(
-        FoldingMode::PaperExact,
-        &mut tr_verify,
-        &params,
-        &ccs,
-        &steps_instance,
-        &[],
-        &proof,
-        mixers,
-    )
-    .expect_err("tampered packed bitwise digit must be caught by Route-A time constraints");
+    ) {
+        let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-bitwise-packed-redteam");
+        fold_shard_verify(
+            FoldingMode::Optimized,
+            &mut tr_verify,
+            &params,
+            &ccs,
+            &steps_instance,
+            &[],
+            &proof,
+            mixers,
+        )
+        .expect_err("tampered packed bitwise digit must be caught by Route-A time constraints");
+    }
 }

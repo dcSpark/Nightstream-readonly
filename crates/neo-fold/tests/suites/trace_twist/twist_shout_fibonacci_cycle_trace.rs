@@ -409,9 +409,10 @@ fn twist_shout_fibonacci_cycle_trace() {
                     .unwrap_or(0)
             );
             println!(
-                "mem_sidecar: val_me_claims={} twist_me_claims_time={} proofs={}",
+                "mem_sidecar: val_me_claims={} wb_me_claims={} wp_me_claims={} proofs={}",
                 step_proof.mem.val_me_claims.len(),
-                step_proof.mem.twist_me_claims_time.len(),
+                step_proof.mem.wb_me_claims.len(),
+                step_proof.mem.wp_me_claims.len(),
                 step_proof.mem.proofs.len()
             );
             println!(
@@ -487,20 +488,23 @@ fn twist_shout_fibonacci_cycle_trace() {
                     total_children
                 );
             }
-            if step_proof.twist_time_fold.is_empty() {
-                println!("twist_time_lane: <none>");
-            } else {
-                let total_children: usize = step_proof
-                    .twist_time_fold
-                    .iter()
-                    .map(|p| p.dec_children.len())
-                    .sum();
-                println!(
-                    "twist_time_lane: proofs={} total_dec_children={}",
-                    step_proof.twist_time_fold.len(),
-                    total_children
-                );
-            }
+            let wb_children: usize = step_proof
+                .wb_fold
+                .iter()
+                .map(|p| p.dec_children.len())
+                .sum();
+            let wp_children: usize = step_proof
+                .wp_fold
+                .iter()
+                .map(|p| p.dec_children.len())
+                .sum();
+            println!(
+                "wb_lane: proofs={} total_dec_children={} | wp_lane: proofs={} total_dec_children={}",
+                step_proof.wb_fold.len(),
+                wb_children,
+                step_proof.wp_fold.len(),
+                wp_children
+            );
         }
     }
 }

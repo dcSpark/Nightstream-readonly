@@ -88,7 +88,7 @@ fn write_shout_lane_row(
 #[test]
 fn route_a_shout_identity_u32_range_check_two_lanes_same_value_verifies() {
     let ccs = create_identity_ccs(TEST_M);
-    let mut session = FoldingSession::<AjtaiSModule>::new_ajtai_seeded(FoldingMode::PaperExact, &ccs, [7u8; 32])
+    let mut session = FoldingSession::<AjtaiSModule>::new_ajtai_seeded(FoldingMode::Optimized, &ccs, [7u8; 32])
         .expect("new_ajtai_seeded");
     let params = session.params().clone();
 
@@ -96,6 +96,7 @@ fn route_a_shout_identity_u32_range_check_two_lanes_same_value_verifies() {
     let x: u64 = 0x1234_5678;
 
     let inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 32,
@@ -105,6 +106,8 @@ fn route_a_shout_identity_u32_range_check_two_lanes_same_value_verifies() {
         ell: 1,
         table_spec: Some(LutTableSpec::IdentityU32),
         table: vec![],
+    addr_group: None,
+    selector_group: None,
     };
     let wit = LutWitness { mats: Vec::new() };
 
@@ -135,7 +138,7 @@ fn route_a_shout_identity_u32_range_check_two_lanes_same_value_verifies() {
 #[test]
 fn route_a_shout_identity_u32_range_check_rejects_wrong_val() {
     let ccs = create_identity_ccs(TEST_M);
-    let mut session = FoldingSession::<AjtaiSModule>::new_ajtai_seeded(FoldingMode::PaperExact, &ccs, [8u8; 32])
+    let mut session = FoldingSession::<AjtaiSModule>::new_ajtai_seeded(FoldingMode::Optimized, &ccs, [8u8; 32])
         .expect("new_ajtai_seeded");
     let params = session.params().clone();
 
@@ -143,6 +146,7 @@ fn route_a_shout_identity_u32_range_check_rejects_wrong_val() {
     let bad: u64 = x.wrapping_add(5);
 
     let inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 32,
@@ -152,6 +156,8 @@ fn route_a_shout_identity_u32_range_check_rejects_wrong_val() {
         ell: 1,
         table_spec: Some(LutTableSpec::IdentityU32),
         table: vec![],
+    addr_group: None,
+    selector_group: None,
     };
     let wit = LutWitness { mats: Vec::new() };
 

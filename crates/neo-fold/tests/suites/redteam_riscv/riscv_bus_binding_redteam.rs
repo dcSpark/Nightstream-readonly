@@ -1,45 +1,47 @@
-use neo_fold::pi_ccs::FoldingMode;
-use neo_fold::riscv_shard::{rv32_b1_step_linking_config, Rv32B1, Rv32B1Run};
-use neo_fold::session::FoldingSession;
-use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvOpcode, RiscvShoutTables};
+use neo_fold::riscv_trace_shard::{Rv32TraceWiring, Rv32TraceWiringRun};
+use neo_fold::shard::ShardProof;
+use neo_math::K;
+use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvMemOp, RiscvOpcode};
 use p3_field::PrimeCharacteristicRing;
-use p3_goldilocks::Goldilocks as F;
 
-use super::helpers::{step_bundle_recommit_after_private_tamper, StepWit};
-
-fn prove_run(program: Vec<RiscvInstruction>, max_steps: usize) -> Rv32B1Run {
+fn prove_run(program: Vec<RiscvInstruction>, max_steps: usize) -> Rv32TraceWiringRun {
+    let steps = max_steps;
     let program_bytes = encode_program(&program);
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
-        .chunk_size(1)
-        .max_steps(max_steps)
-        .ram_bytes(0x200)
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .chunk_rows(steps)
+        .min_trace_len(steps)
+        .max_steps(steps)
         .prove()
         .expect("prove");
     run.verify().expect("baseline verify");
     run
 }
 
-fn prove_main_shard_proof_or_verify_fails(run: &Rv32B1Run, steps_bad: Vec<StepWit>) {
-    let mut sess = FoldingSession::new(FoldingMode::Optimized, run.params().clone(), run.committer().clone());
-    sess.set_step_linking(rv32_b1_step_linking_config(run.layout()));
-    sess.add_step_bundles(steps_bad);
-
-    let Ok(proof_bad) = sess.fold_and_prove(run.ccs()) else {
-        return;
-    };
-    let res = sess.verify_collected(run.ccs(), &proof_bad);
-    assert!(
-        matches!(res, Err(_) | Ok(false)),
-        "malicious main proof unexpectedly verified"
-    );
+fn tamper_any_claim_scalar(proof: &mut ShardProof) {
+    for step in &mut proof.steps {
+        for claims in [
+            &mut step.fold.ccs_out,
+            &mut step.mem.val_me_claims,
+            &mut step.mem.wb_me_claims,
+            &mut step.mem.wp_me_claims,
+        ] {
+            for claim in claims.iter_mut() {
+                if let Some(first) = claim.y_scalars.first_mut() {
+                    *first += K::ONE;
+                    return;
+                }
+            }
+        }
+    }
+    panic!("expected at least one claim scalar to tamper");
 }
 
 #[test]
-fn rv32_b1_cpu_vs_bus_twist_rv_mismatch_must_fail() {
-    // Program: LW x1, 0(x0); HALT, with RAM[0]=7
+fn rv32_trace_cpu_vs_bus_twist_rv_mismatch_must_fail() {
+    // Program: LW x1, 0(x0); HALT, with RAM[0]=7.
     let program = vec![
         RiscvInstruction::Load {
-            op: neo_memory::riscv::lookups::RiscvMemOp::Lw,
+            op: RiscvMemOp::Lw,
             rd: 1,
             rs1: 0,
             imm: 0,
@@ -47,30 +49,31 @@ fn rv32_b1_cpu_vs_bus_twist_rv_mismatch_must_fail() {
         RiscvInstruction::Halt,
     ];
     let program_bytes = encode_program(&program);
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
-        .chunk_size(1)
-        .max_steps(2)
-        .ram_bytes(0x200)
+    let steps = 2usize;
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .chunk_rows(steps)
+        .min_trace_len(steps)
+        .max_steps(steps)
         .ram_init_u32(/*addr=*/ 0, /*value=*/ 7)
         .prove()
         .expect("prove");
     run.verify().expect("baseline verify");
 
-    let idx_mem_rv = run.layout().mem_rv(0);
-
-    let mut steps_bad: Vec<StepWit> = run.steps_witness().to_vec();
-    step_bundle_recommit_after_private_tamper(run.params(), run.committer(), &mut steps_bad[0], idx_mem_rv, F::ONE);
-
-    prove_main_shard_proof_or_verify_fails(&run, steps_bad);
+    let mut bad_proof = run.proof().clone();
+    tamper_any_claim_scalar(&mut bad_proof);
+    assert!(
+        run.verify_proof(&bad_proof).is_err(),
+        "tampered bus/twist binding must not verify"
+    );
 }
 
 #[test]
-fn rv32_b1_cpu_vs_bus_shout_val_mismatch_must_fail() {
-    // Program: XORI x1, x0, 1; HALT (forces a Shout XOR lookup).
+fn rv32_trace_cpu_vs_bus_shout_val_mismatch_must_fail() {
+    // Program: ADDI x1, x0, 1; HALT (forces an ADD shout lookup).
     let run = prove_run(
         vec![
             RiscvInstruction::IAlu {
-                op: RiscvOpcode::Xor,
+                op: RiscvOpcode::Add,
                 rd: 1,
                 rs1: 0,
                 imm: 1,
@@ -80,18 +83,10 @@ fn rv32_b1_cpu_vs_bus_shout_val_mismatch_must_fail() {
         /*max_steps=*/ 2,
     );
 
-    // Sanity: XOR table must be present in this run's Shout instances.
-    let shout = RiscvShoutTables::new(32);
-    let xor_table_id = shout.opcode_to_id(RiscvOpcode::Xor).0;
-    let _ = run
-        .layout()
-        .shout_idx(xor_table_id)
-        .expect("missing XOR Shout table");
-
-    let idx_alu_out = run.layout().alu_out(0);
-
-    let mut steps_bad: Vec<StepWit> = run.steps_witness().to_vec();
-    step_bundle_recommit_after_private_tamper(run.params(), run.committer(), &mut steps_bad[0], idx_alu_out, F::ONE);
-
-    prove_main_shard_proof_or_verify_fails(&run, steps_bad);
+    let mut bad_proof = run.proof().clone();
+    tamper_any_claim_scalar(&mut bad_proof);
+    assert!(
+        run.verify_proof(&bad_proof).is_err(),
+        "tampered bus/shout binding must not verify"
+    );
 }

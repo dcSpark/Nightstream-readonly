@@ -445,14 +445,14 @@ async function runRv32Fibonacci({ id, asm, riscv, doSpartan, bundle, threads }) 
   if (!Number.isFinite(chunkSize) || chunkSize <= 0) throw new Error("Invalid riscv.chunk_size");
   if (!Number.isFinite(maxSteps) || maxSteps < 0) throw new Error("Invalid riscv.max_steps");
 
-  log(id, "Running RV32 Fibonacci prove+verify…");
+  log(id, "Running RV32 trace Fibonacci prove+verify…");
   log(id, `Input text size: ${fmtBytes(src.length)}`);
   log(id, `Config: n=${n} ram_bytes=${ramBytes} chunk_size=${chunkSize} max_steps=${maxSteps}`);
 
   async function runOnce() {
     phase(id, "Proving…");
     const totalStart = performance.now();
-    const result = wasm.prove_verify_rv32_b1_fibonacci_asm(
+    const result = wasm.prove_verify_rv32_trace_fibonacci_asm(
       src,
       n,
       ramBytes,
@@ -486,7 +486,7 @@ async function runRv32Fibonacci({ id, asm, riscv, doSpartan, bundle, threads }) 
       notifyThreadsDisabled(id, threadsDisableReason);
 
       await ensureWasm({ id, bundle: "pkg", threads: 0 });
-      log(id, "Retrying RV32 Fibonacci prove+verify in single-thread mode…", "warn");
+      log(id, "Retrying RV32 trace Fibonacci prove+verify in single-thread mode…", "warn");
       ({ result, totalMs } = await runOnce());
     } else {
       throw e;

@@ -8,7 +8,7 @@
 //!
 //! # RISC-V Support
 //!
-//! The current proving integration is RV32-focused (e.g. the shared-bus RV32 B1 path assumes
+//! The current proving integration is RV32-focused (e.g. the shared-bus RV32 trace path assumes
 //! `xlen == 32`, no compressed instructions, and 4-byte aligned control flow).
 //! RV64 proving is not yet supported by the Shout key encoding used in this path.
 //!

@@ -206,6 +206,7 @@ fn build_one_step_fixture(seed: u64) -> SharedBusFixture {
     let mem_wit = neo_memory::witness::MemWitness { mats: Vec::new() };
 
     let lut_inst = neo_memory::witness::LutInstance::<Cmt, F> {
+        table_id: lut_table.table_id,
         comms: Vec::new(),
         k: lut_table.k,
         d: lut_table.d,
@@ -215,6 +216,8 @@ fn build_one_step_fixture(seed: u64) -> SharedBusFixture {
         ell: lut_ell,
         table_spec: None,
         table: lut_table.content.clone(),
+    addr_group: None,
+    selector_group: None,
     };
     let lut_wit = neo_memory::witness::LutWitness { mats: Vec::new() };
 
@@ -251,7 +254,7 @@ fn build_one_step_fixture(seed: u64) -> SharedBusFixture {
 fn prove_and_verify_shared(fx: &SharedBusFixture) -> Result<(), PiCcsError> {
     let mut tr = Poseidon2Transcript::new(b"shared-cpu-bus");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr,
         &fx.params,
         &fx.ccs,
@@ -264,7 +267,7 @@ fn prove_and_verify_shared(fx: &SharedBusFixture) -> Result<(), PiCcsError> {
 
     let mut tr_v = Poseidon2Transcript::new(b"shared-cpu-bus");
     let _outputs = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_v,
         &fx.params,
         &fx.ccs,
@@ -288,7 +291,7 @@ fn shared_cpu_bus_tamper_bus_opening_fails() {
 
     let mut tr = Poseidon2Transcript::new(b"shared-cpu-bus");
     let mut proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr,
         &fx.params,
         &fx.ccs,
@@ -315,7 +318,7 @@ fn shared_cpu_bus_tamper_bus_opening_fails() {
     let mut tr_v = Poseidon2Transcript::new(b"shared-cpu-bus");
     assert!(
         fold_shard_verify(
-            FoldingMode::PaperExact,
+            FoldingMode::Optimized,
             &mut tr_v,
             &fx.params,
             &fx.ccs,
@@ -335,7 +338,7 @@ fn shared_cpu_bus_missing_cpu_me_claim_val_fails() {
 
     let mut tr = Poseidon2Transcript::new(b"shared-cpu-bus");
     let mut proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr,
         &fx.params,
         &fx.ccs,
@@ -353,7 +356,7 @@ fn shared_cpu_bus_missing_cpu_me_claim_val_fails() {
     let mut tr_v = Poseidon2Transcript::new(b"shared-cpu-bus");
     assert!(
         fold_shard_verify(
-            FoldingMode::PaperExact,
+            FoldingMode::Optimized,
             &mut tr_v,
             &fx.params,
             &fx.ccs,

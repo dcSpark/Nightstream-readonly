@@ -72,6 +72,7 @@ fn metadata_only_lut_instance(table: &LutTable<F>, steps: usize) -> (LutInstance
     let ell = table.n_side.trailing_zeros() as usize;
     (
         LutInstance {
+            table_id: table.table_id,
             comms: Vec::new(),
             k: table.k,
             d: table.d,
@@ -81,6 +82,8 @@ fn metadata_only_lut_instance(table: &LutTable<F>, steps: usize) -> (LutInstance
             ell,
             table_spec: None,
             table: table.content.clone(),
+            addr_group: None,
+            selector_group: None,
         },
         LutWitness { mats: Vec::new() },
     )

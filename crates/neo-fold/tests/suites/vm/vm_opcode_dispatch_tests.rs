@@ -285,6 +285,7 @@ fn metadata_only_lut_instance(table: &LutTable<F>, steps: usize) -> (LutInstance
     let ell = table.n_side.trailing_zeros() as usize;
     (
         LutInstance {
+            table_id: table.table_id,
             comms: Vec::new(),
             k: table.k,
             d: table.d,
@@ -294,6 +295,8 @@ fn metadata_only_lut_instance(table: &LutTable<F>, steps: usize) -> (LutInstance
             ell,
             table_spec: None,
             table: table.content.clone(),
+            addr_group: None,
+            selector_group: None,
         },
         LutWitness { mats: Vec::new() },
     )
@@ -378,7 +381,7 @@ fn vm_simple_add_program() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"vm-add-program");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -393,7 +396,7 @@ fn vm_simple_add_program() {
     let mut tr_verify = Poseidon2Transcript::new(b"vm-add-program");
     let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -514,7 +517,7 @@ fn vm_register_file_operations() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"vm-register-file");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -529,7 +532,7 @@ fn vm_register_file_operations() {
     let mut tr_verify = Poseidon2Transcript::new(b"vm-register-file");
     let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -614,7 +617,7 @@ fn vm_combined_bytecode_and_data_memory() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"vm-combined-rom-ram");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -629,7 +632,7 @@ fn vm_combined_bytecode_and_data_memory() {
     let mut tr_verify = Poseidon2Transcript::new(b"vm-combined-rom-ram");
     let steps_public = [StepInstanceBundle::from(&step_bundle)];
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
@@ -681,7 +684,7 @@ fn vm_invalid_opcode_claim_fails() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"vm-invalid-opcode-claim");
     let proof_result = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -697,7 +700,7 @@ fn vm_invalid_opcode_claim_fails() {
         let steps_public = [StepInstanceBundle::from(&step_bundle)];
         assert!(
             fold_shard_verify(
-                FoldingMode::PaperExact,
+                FoldingMode::Optimized,
                 &mut tr_verify,
                 &params,
                 &ccs,
@@ -776,7 +779,7 @@ fn vm_multi_instruction_sequence() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"vm-multi-instr");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -791,7 +794,7 @@ fn vm_multi_instruction_sequence() {
     let mut tr_verify = Poseidon2Transcript::new(b"vm-multi-instr");
     let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = steps.iter().map(StepInstanceBundle::from).collect();
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,

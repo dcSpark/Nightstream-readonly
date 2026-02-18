@@ -2,17 +2,18 @@ use std::collections::HashMap;
 
 use neo_memory::plain::PlainMemLayout;
 use neo_memory::riscv::ccs::{
-    build_rv32_b1_decode_plumbing_sidecar_ccs, build_rv32_b1_semantics_sidecar_ccs, build_rv32_b1_step_ccs,
+    build_rv32_trace_wiring_ccs, build_rv32_trace_wiring_ccs_with_reserved_rows,
+    rv32_trace_shared_bus_requirements_with_specs, Rv32TraceCcsLayout, TraceShoutBusSpec,
 };
+use neo_memory::riscv::exec_table::Rv32ExecTable;
 use neo_memory::riscv::lookups::{
-    encode_program, RiscvInstruction, RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID, REG_ID,
+    decode_program, encode_program, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode, RiscvShoutTables, PROG_ID,
+    RAM_ID, REG_ID,
 };
-use neo_memory::riscv::rom_init::prog_rom_layout_and_init_words;
-use p3_goldilocks::Goldilocks as F;
+use neo_memory::riscv::trace::{rv32_decode_lookup_table_id_for_col, Rv32DecodeSidecarLayout};
+use neo_vm_trace::trace_program;
 
-#[test]
-fn nightstream_single_addi_constraint_counts() {
-    // Program: ADDI x1, x0, 1; HALT
+fn addi_halt_exec_table() -> Rv32ExecTable {
     let program = vec![
         RiscvInstruction::IAlu {
             op: RiscvOpcode::Add,
@@ -23,16 +24,29 @@ fn nightstream_single_addi_constraint_counts() {
         RiscvInstruction::Halt,
     ];
     let program_bytes = encode_program(&program);
+    let decoded_program = decode_program(&program_bytes).expect("decode_program");
 
-    let (prog_layout, _prog_init) = prog_rom_layout_and_init_words::<F>(PROG_ID, /*base_addr=*/ 0, &program_bytes)
-        .expect("prog_rom_layout_and_init_words");
+    let mut cpu = RiscvCpu::new(/*xlen=*/ 32);
+    cpu.load_program(/*base=*/ 0, decoded_program);
+    let twist = RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
+    let shout = RiscvShoutTables::new(/*xlen=*/ 32);
+    let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 16).expect("trace_program");
 
-    let mem_layouts = HashMap::from([
+    let exec = Rv32ExecTable::from_trace_padded_pow2(&trace, /*min_len=*/ 4).expect("from_trace_padded_pow2");
+    exec.validate_cycle_chain().expect("cycle chain");
+    exec.validate_pc_chain().expect("pc chain");
+    exec.validate_halted_tail().expect("halted tail");
+    exec.validate_inactive_rows_are_empty().expect("inactive rows");
+    exec
+}
+
+fn sample_mem_layouts() -> HashMap<u32, PlainMemLayout> {
+    HashMap::from([
         (
-            RAM_ID.0,
+            PROG_ID.0,
             PlainMemLayout {
-                k: 4,
-                d: 2,
+                k: 16,
+                d: 4,
                 n_side: 2,
                 lanes: 1,
             },
@@ -46,80 +60,67 @@ fn nightstream_single_addi_constraint_counts() {
                 lanes: 2,
             },
         ),
-        (PROG_ID.0, prog_layout),
-    ]);
+        (
+            RAM_ID.0,
+            PlainMemLayout {
+                k: 16,
+                d: 4,
+                n_side: 2,
+                lanes: 1,
+            },
+        ),
+    ])
+}
 
-    let shout = RiscvShoutTables::new(/*xlen=*/ 32);
-    let shout_table_ids = vec![shout.opcode_to_id(RiscvOpcode::Add).0];
+fn decode_selector_specs(prog_d: usize) -> Vec<TraceShoutBusSpec> {
+    let decode = Rv32DecodeSidecarLayout::new();
+    [decode.rd_has_write, decode.ram_has_read, decode.ram_has_write]
+        .into_iter()
+        .map(|col| TraceShoutBusSpec {
+            table_id: rv32_decode_lookup_table_id_for_col(col),
+            ell_addr: prog_d,
+            n_vals: 1usize,
+        })
+        .collect()
+}
 
-    let (ccs, layout) =
-        build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, /*chunk_size=*/ 1).expect("build_rv32_b1_step_ccs");
+#[test]
+fn trace_single_addi_constraint_shapes_are_consistent() {
+    let exec = addi_halt_exec_table();
+    let layout = Rv32TraceCcsLayout::new(exec.rows.len()).expect("trace CCS layout");
+    let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
 
-    let nightstream_constraints = ccs.n;
-    let nightstream_witness_cols = ccs.m;
-    let nightstream_constraints_p2 = nightstream_constraints.next_power_of_two();
-    let nightstream_witness_cols_p2 = nightstream_witness_cols.next_power_of_two();
-
-    let decode_ccs =
-        build_rv32_b1_decode_plumbing_sidecar_ccs(&layout).expect("build_rv32_b1_decode_plumbing_sidecar_ccs");
-    let decode_constraints = decode_ccs.n;
-    let decode_witness_cols = decode_ccs.m;
-    let decode_constraints_p2 = decode_constraints.next_power_of_two();
-    let decode_witness_cols_p2 = decode_witness_cols.next_power_of_two();
-
-    let semantics_ccs =
-        build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("build_rv32_b1_semantics_sidecar_ccs");
-    let semantics_constraints = semantics_ccs.n;
-    let semantics_witness_cols = semantics_ccs.m;
-    let semantics_constraints_p2 = semantics_constraints.next_power_of_two();
-    let semantics_witness_cols_p2 = semantics_witness_cols.next_power_of_two();
-
-    assert_eq!(nightstream_constraints, 142, "step CCS constraint count regression");
+    assert_eq!(layout.t, 4, "expected power-of-two padded rows for ADDI+HALT");
     assert_eq!(
-        decode_constraints, 101,
-        "decode sidecar CCS constraint count regression"
+        layout.m,
+        layout.m_in + layout.trace.cols * layout.t,
+        "layout width regression"
     );
-    assert_eq!(
-        semantics_constraints, 139,
-        "semantics sidecar CCS constraint count regression"
-    );
+    assert_eq!(ccs.m, layout.m, "CCS witness width must match layout");
+    assert!(ccs.n > layout.t, "CCS must contain non-trivial constraints");
+}
 
-    println!();
-    println!(
-        "{:<36} {:>4}   {:<14} {:>11} {:>12}   {}",
-        "System", "XLEN", "Instruction", "Constraints", "Witness cols", "Notes"
+#[test]
+fn trace_single_addi_reserved_rows_affect_constraints_only() {
+    let exec = addi_halt_exec_table();
+    let layout = Rv32TraceCcsLayout::new(exec.rows.len()).expect("trace CCS layout");
+    let ccs_base = build_rv32_trace_wiring_ccs(&layout).expect("base trace CCS");
+
+    let mem_layouts = sample_mem_layouts();
+    let decode_specs = decode_selector_specs(mem_layouts[&PROG_ID.0].d);
+    let add_table_id = RiscvShoutTables::new(32).opcode_to_id(RiscvOpcode::Add).0;
+    let (_bus_region_len, reserved_rows) =
+        rv32_trace_shared_bus_requirements_with_specs(&layout, &[add_table_id], &decode_specs, &mem_layouts)
+            .expect("trace shared bus requirements");
+
+    let ccs_reserved =
+        build_rv32_trace_wiring_ccs_with_reserved_rows(&layout, reserved_rows).expect("trace CCS with reserved rows");
+
+    assert!(reserved_rows > 0, "expected non-zero reserved rows for shared bus padding");
+    assert_eq!(
+        ccs_reserved.n,
+        ccs_base.n + reserved_rows,
+        "reserved rows should only increase row count"
     );
-    println!("{}", "-".repeat(110));
-    println!(
-        "{:<36} {:>4}   {:<14} {:>11} {:>12}   shout_tables={}, constraints_p2={}, witness_cols_p2={}",
-        "Nightstream (RV32 B1 step CCS)",
-        32,
-        "ADDI x1,x0,1",
-        nightstream_constraints,
-        nightstream_witness_cols,
-        shout_table_ids.len(),
-        nightstream_constraints_p2,
-        nightstream_witness_cols_p2
-    );
-    println!(
-        "{:<36} {:>4}   {:<14} {:>11} {:>12}   constraints_p2={}, witness_cols_p2={}",
-        "Nightstream (RV32 B1 decode plumbing sidecar CCS)",
-        32,
-        "ADDI x1,x0,1",
-        decode_constraints,
-        decode_witness_cols,
-        decode_constraints_p2,
-        decode_witness_cols_p2
-    );
-    println!(
-        "{:<36} {:>4}   {:<14} {:>11} {:>12}   constraints_p2={}, witness_cols_p2={}",
-        "Nightstream (RV32 B1 semantics sidecar CCS)",
-        32,
-        "ADDI x1,x0,1",
-        semantics_constraints,
-        semantics_witness_cols,
-        semantics_constraints_p2,
-        semantics_witness_cols_p2
-    );
-    println!();
+    assert_eq!(ccs_reserved.m, ccs_base.m, "reserved rows should not change witness width");
 }

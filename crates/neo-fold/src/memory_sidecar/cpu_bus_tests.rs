@@ -186,6 +186,7 @@ fn minimal_bus_steps(
     };
 
     let lut = LutInstance::<Commitment, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 1usize << shout_d,
         d: shout_d,
@@ -195,6 +196,8 @@ fn minimal_bus_steps(
         ell: shout_ell,
         table_spec: None,
         table: Vec::new(),
+    addr_group: None,
+    selector_group: None,
     };
 
     let mem = MemInstance::<Commitment, F> {

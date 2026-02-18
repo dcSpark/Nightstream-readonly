@@ -47,7 +47,13 @@ fn shared_cpu_bus_copyout_indices_match_bus_layout() {
 
     let shout0 = &bus.shout_cols[0].lanes[0];
     let twist0 = &bus.twist_cols[0].lanes[0];
-    let col_ids = [shout0.has_lookup, shout0.val, twist0.has_write, twist0.wv, twist0.inc];
+    let col_ids = [
+        shout0.has_lookup,
+        shout0.primary_val(),
+        twist0.has_write,
+        twist0.wv,
+        twist0.inc,
+    ];
 
     for col_id in col_ids {
         let z_idx = bus.bus_cell(col_id, 0);

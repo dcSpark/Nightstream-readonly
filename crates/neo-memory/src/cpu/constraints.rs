@@ -41,7 +41,8 @@ use neo_ccs::{CcsMatrix, CscMat};
 use p3_field::{Field, PrimeCharacteristicRing};
 
 use crate::cpu::bus_layout::{
-    build_bus_layout_for_instances_with_shout_and_twist_lanes, BusLayout, ShoutCols, TwistCols,
+    build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, BusLayout, ShoutCols, ShoutInstanceShape,
+    TwistCols,
 };
 use crate::witness::{LutInstance, MemInstance};
 
@@ -96,10 +97,20 @@ pub struct TwistCpuBinding {
     pub inc: Option<usize>,
 }
 
+/// Sentinel column id used to disable a Twist CPU linkage field on a lane.
+///
+/// This is only valid for `TwistCpuBinding` fields and is interpreted by the constraint builder
+/// as "no CPU binding for this selector/value/address family". In that mode the lane is still
+/// protected by canonical bus padding/bitness constraints.
+pub const CPU_BUS_COL_DISABLED: usize = usize::MAX;
+
 /// Per-instance CPU→bus binding for a Shout (lookup) bus slice.
 #[derive(Clone, Debug)]
 pub struct ShoutCpuBinding {
     /// CPU selector column for a lookup op (must equal bus `has_lookup`).
+    ///
+    /// `CPU_BUS_COL_DISABLED` disables selector/value linkage for this lane while still allowing
+    /// optional key binding through `addr` (conditioned by bus `has_lookup`).
     pub has_lookup: usize,
     /// Optional packed integer lookup key/address column.
     ///
@@ -111,6 +122,8 @@ pub struct ShoutCpuBinding {
     /// set this to `None`.
     pub addr: Option<usize>,
     /// CPU lookup output/value column (must equal bus `val` when `has_lookup=1`).
+    ///
+    /// `CPU_BUS_COL_DISABLED` disables value linkage for this lane.
     pub val: usize,
 }
 
@@ -392,62 +405,82 @@ impl<F: Field> CpuConstraintBuilder<F> {
             let bus_inc = layout.bus_cell(twist.inc, j);
 
             // CPU columns are assumed to be chunked (contiguous, per-step): col(j) = col_base + j.
-            let cpu_has_read = cpu.has_read + j;
-            let cpu_has_write = cpu.has_write + j;
-            let cpu_read_addr = cpu.read_addr + j;
-            let cpu_write_addr = cpu.write_addr + j;
-            let cpu_rv = cpu.rv + j;
-            let cpu_wv = cpu.wv + j;
-            let cpu_inc = cpu.inc.map(|col| col + j);
+            let cpu_has_read = (cpu.has_read != CPU_BUS_COL_DISABLED).then_some(cpu.has_read + j);
+            let cpu_has_write = (cpu.has_write != CPU_BUS_COL_DISABLED).then_some(cpu.has_write + j);
+            let cpu_read_addr = (cpu.read_addr != CPU_BUS_COL_DISABLED).then_some(cpu.read_addr + j);
+            let cpu_write_addr = (cpu.write_addr != CPU_BUS_COL_DISABLED).then_some(cpu.write_addr + j);
+            let cpu_rv = (cpu.rv != CPU_BUS_COL_DISABLED).then_some(cpu.rv + j);
+            let cpu_wv = (cpu.wv != CPU_BUS_COL_DISABLED).then_some(cpu.wv + j);
+            let cpu_inc = cpu
+                .inc
+                .and_then(|col| (col != CPU_BUS_COL_DISABLED).then_some(col + j));
 
             // Ensure bus selectors are boolean so gated-bit constraints imply true {0,1} bitness.
             self.add_boolean_constraint(CpuConstraintLabel::TwistHasReadBoolean, bus_has_read);
             self.add_boolean_constraint(CpuConstraintLabel::TwistHasWriteBoolean, bus_has_write);
 
-            // Value binding constraints
-            // has_read * (rv_cpu - bus_rv) = 0
-            self.constraints.push(CpuConstraint::new_eq(
-                CpuConstraintLabel::LoadValueBinding,
-                cpu_has_read,
-                cpu_rv,
-                bus_rv,
-            ));
-
-            // has_write * (wv_cpu - bus_wv) = 0
-            self.constraints.push(CpuConstraint::new_eq(
-                CpuConstraintLabel::StoreValueBinding,
-                cpu_has_write,
-                cpu_wv,
-                bus_wv,
-            ));
-
-            // Selector binding: cpu_has_* == bus_has_*
-            self.add_equality_constraint(CpuConstraintLabel::LoadSelectorBinding, cpu_has_read, bus_has_read);
-            self.add_equality_constraint(CpuConstraintLabel::StoreSelectorBinding, cpu_has_write, bus_has_write);
-
-            // Address binding (bit-pack):
-            // - has_read  * (read_addr - pack(ra_bits)) = 0
-            // - has_write * (write_addr - pack(wa_bits)) = 0
-            self.constraints.push(CpuConstraint::new_terms(
-                CpuConstraintLabel::LoadAddressBinding,
-                cpu_has_read,
-                false,
-                pack_addr_bits::<F>(cpu_read_addr, twist.ra_bits.clone(), layout, j),
-            ));
-            self.constraints.push(CpuConstraint::new_terms(
-                CpuConstraintLabel::StoreAddressBinding,
-                cpu_has_write,
-                false,
-                pack_addr_bits::<F>(cpu_write_addr, twist.wa_bits.clone(), layout, j),
-            ));
-
-            // Optional: bind CPU increment semantics if provided.
-            if let Some(cpu_inc) = cpu_inc {
+            if let Some(cpu_has_read) = cpu_has_read {
+                let cpu_rv = cpu_rv.expect("Twist read binding requires rv column");
+                let cpu_read_addr = cpu_read_addr.expect("Twist read binding requires read_addr column");
+                // has_read * (rv_cpu - bus_rv) = 0
                 self.constraints.push(CpuConstraint::new_eq(
-                    CpuConstraintLabel::IncrementBinding,
+                    CpuConstraintLabel::LoadValueBinding,
+                    cpu_has_read,
+                    cpu_rv,
+                    bus_rv,
+                ));
+                // Selector binding: cpu_has_read == bus_has_read
+                self.add_equality_constraint(CpuConstraintLabel::LoadSelectorBinding, cpu_has_read, bus_has_read);
+                // has_read * (read_addr - pack(ra_bits)) = 0
+                self.constraints.push(CpuConstraint::new_terms(
+                    CpuConstraintLabel::LoadAddressBinding,
+                    cpu_has_read,
+                    false,
+                    pack_addr_bits::<F>(cpu_read_addr, twist.ra_bits.clone(), layout, j),
+                ));
+            } else {
+                // Explicitly force the read selector to 0 when the lane is unbound.
+                self.constraints.push(CpuConstraint::new_zero(
+                    CpuConstraintLabel::LoadSelectorBinding,
+                    self.const_one_col,
+                    bus_has_read,
+                ));
+            }
+
+            if let Some(cpu_has_write) = cpu_has_write {
+                let cpu_wv = cpu_wv.expect("Twist write binding requires wv column");
+                let cpu_write_addr = cpu_write_addr.expect("Twist write binding requires write_addr column");
+                // has_write * (wv_cpu - bus_wv) = 0
+                self.constraints.push(CpuConstraint::new_eq(
+                    CpuConstraintLabel::StoreValueBinding,
                     cpu_has_write,
-                    cpu_inc,
-                    bus_inc,
+                    cpu_wv,
+                    bus_wv,
+                ));
+                // Selector binding: cpu_has_write == bus_has_write
+                self.add_equality_constraint(CpuConstraintLabel::StoreSelectorBinding, cpu_has_write, bus_has_write);
+                // has_write * (write_addr - pack(wa_bits)) = 0
+                self.constraints.push(CpuConstraint::new_terms(
+                    CpuConstraintLabel::StoreAddressBinding,
+                    cpu_has_write,
+                    false,
+                    pack_addr_bits::<F>(cpu_write_addr, twist.wa_bits.clone(), layout, j),
+                ));
+                // Optional: bind CPU increment semantics if provided.
+                if let Some(cpu_inc) = cpu_inc {
+                    self.constraints.push(CpuConstraint::new_eq(
+                        CpuConstraintLabel::IncrementBinding,
+                        cpu_has_write,
+                        cpu_inc,
+                        bus_inc,
+                    ));
+                }
+            } else {
+                // Explicitly force the write selector to 0 when the lane is unbound.
+                self.constraints.push(CpuConstraint::new_zero(
+                    CpuConstraintLabel::StoreSelectorBinding,
+                    self.const_one_col,
+                    bus_has_write,
                 ));
             }
 
@@ -512,43 +545,67 @@ impl<F: Field> CpuConstraintBuilder<F> {
 
     /// Add constraints for a Shout (lookup) instance using an explicit per-instance CPU binding.
     pub fn add_shout_instance_bound(&mut self, layout: &BusLayout, shout: &ShoutCols, cpu: &ShoutCpuBinding) {
+        self.add_shout_instance_linkage_bound(layout, shout, cpu);
+        self.add_shout_instance_padding(layout, shout);
+    }
+
+    /// Add Shout CPU linkage constraints only (no selector bitness / inactive padding).
+    pub fn add_shout_instance_linkage_bound(&mut self, layout: &BusLayout, shout: &ShoutCols, cpu: &ShoutCpuBinding) {
         for j in 0..layout.chunk_size {
             // Bus column indices
             let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
-            let bus_val = layout.bus_cell(shout.val, j);
+            let bus_val = layout.bus_cell(shout.primary_val(), j);
 
             // CPU columns are assumed to be chunked (contiguous, per-step): col(j) = col_base + j.
-            let cpu_has_lookup = cpu.has_lookup + j;
-            let cpu_val = cpu.val + j;
+            let cpu_has_lookup = (cpu.has_lookup != CPU_BUS_COL_DISABLED).then_some(cpu.has_lookup + j);
+            let cpu_val = (cpu.val != CPU_BUS_COL_DISABLED).then_some(cpu.val + j);
 
-            // Ensure bus selector is boolean so gated-bit constraints imply true {0,1} bitness.
-            self.add_boolean_constraint(CpuConstraintLabel::ShoutHasLookupBoolean, bus_has_lookup);
+            if let (Some(cpu_has_lookup), Some(cpu_val)) = (cpu_has_lookup, cpu_val) {
+                // Value binding: is_lookup * (lookup_output - bus_val) = 0
+                self.constraints.push(CpuConstraint::new_eq(
+                    CpuConstraintLabel::LookupValueBinding,
+                    cpu_has_lookup,
+                    cpu_val,
+                    bus_val,
+                ));
 
-            // Value binding: is_lookup * (lookup_output - bus_val) = 0
-            self.constraints.push(CpuConstraint::new_eq(
-                CpuConstraintLabel::LookupValueBinding,
-                cpu_has_lookup,
-                cpu_val,
-                bus_val,
-            ));
+                // Selector binding: cpu_has_lookup == bus_has_lookup
+                self.add_equality_constraint(
+                    CpuConstraintLabel::LookupSelectorBinding,
+                    cpu_has_lookup,
+                    bus_has_lookup,
+                );
+            } else if cpu_has_lookup.is_some() || cpu_val.is_some() {
+                debug_assert!(
+                    false,
+                    "ShoutCpuBinding must set both has_lookup and val, or disable both with CPU_BUS_COL_DISABLED"
+                );
+            }
 
-            // Selector binding: cpu_has_lookup == bus_has_lookup
-            self.add_equality_constraint(
-                CpuConstraintLabel::LookupSelectorBinding,
-                cpu_has_lookup,
-                bus_has_lookup,
-            );
-
-            // Optional key binding (bit-pack): is_lookup * (lookup_key - pack(addr_bits)) = 0
+            // Optional key binding (bit-pack): is_lookup * (lookup_key - pack(addr_bits)) = 0.
+            //
+            // If CPU selector linkage is disabled for this lane, use bus `has_lookup` as the gate.
             if let Some(cpu_addr_base) = cpu.addr {
                 let cpu_addr = cpu_addr_base + j;
+                let gate_col = cpu_has_lookup.unwrap_or(bus_has_lookup);
                 self.constraints.push(CpuConstraint::new_terms(
                     CpuConstraintLabel::LookupKeyBinding,
-                    cpu_has_lookup,
+                    gate_col,
                     false,
                     pack_addr_bits::<F>(cpu_addr, shout.addr_bits.clone(), layout, j),
                 ));
             }
+        }
+    }
+
+    /// Add Shout selector/bitness/padding constraints only (no CPU linkage).
+    pub fn add_shout_instance_padding(&mut self, layout: &BusLayout, shout: &ShoutCols) {
+        for j in 0..layout.chunk_size {
+            let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
+            let bus_val = layout.bus_cell(shout.primary_val(), j);
+
+            // Ensure bus selector is boolean so gated-bit constraints imply true {0,1} bitness.
+            self.add_boolean_constraint(CpuConstraintLabel::ShoutHasLookupBoolean, bus_has_lookup);
 
             // Padding: (1 - has_lookup) * val = 0
             self.constraints.push(CpuConstraint::new_zero_negated(
@@ -562,6 +619,67 @@ impl<F: Field> CpuConstraintBuilder<F> {
             for col_id in shout.addr_bits.clone() {
                 let bit = layout.bus_cell(col_id, j);
                 self.add_gated_bit_constraint(CpuConstraintLabel::ShoutAddrBitBitness, bit, bus_has_lookup);
+            }
+        }
+    }
+
+    /// Add Shout addr-bit/value padding constraints without selector booleanity.
+    pub fn add_shout_instance_padding_without_selector_bitness(&mut self, layout: &BusLayout, shout: &ShoutCols) {
+        for j in 0..layout.chunk_size {
+            let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
+            let bus_val = layout.bus_cell(shout.primary_val(), j);
+
+            // Padding: (1 - has_lookup) * val = 0
+            self.constraints.push(CpuConstraint::new_zero_negated(
+                CpuConstraintLabel::LookupValueZeroPadding,
+                bus_has_lookup,
+                bus_val,
+            ));
+
+            // Lookup key bits:
+            // - Bitness: bit is 0 when inactive, boolean when active
+            for col_id in shout.addr_bits.clone() {
+                let bit = layout.bus_cell(col_id, j);
+                self.add_gated_bit_constraint(CpuConstraintLabel::ShoutAddrBitBitness, bit, bus_has_lookup);
+            }
+        }
+    }
+
+    /// Add Shout selector/value padding only (no addr-bit constraints).
+    pub fn add_shout_instance_padding_value_only(&mut self, layout: &BusLayout, shout: &ShoutCols) {
+        for j in 0..layout.chunk_size {
+            let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
+            let bus_val = layout.bus_cell(shout.primary_val(), j);
+
+            self.add_boolean_constraint(CpuConstraintLabel::ShoutHasLookupBoolean, bus_has_lookup);
+            self.constraints.push(CpuConstraint::new_zero_negated(
+                CpuConstraintLabel::LookupValueZeroPadding,
+                bus_has_lookup,
+                bus_val,
+            ));
+        }
+    }
+
+    /// Add Shout value padding only (no selector booleanity, no addr-bit constraints).
+    pub fn add_shout_instance_value_padding_only(&mut self, layout: &BusLayout, shout: &ShoutCols) {
+        for j in 0..layout.chunk_size {
+            let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
+            let bus_val = layout.bus_cell(shout.primary_val(), j);
+
+            self.constraints.push(CpuConstraint::new_zero_negated(
+                CpuConstraintLabel::LookupValueZeroPadding,
+                bus_has_lookup,
+                bus_val,
+            ));
+        }
+    }
+
+    /// Add unconditional addr-bit booleanity constraints for one shared-address Shout group.
+    pub fn add_shout_instance_addr_bit_bitness(&mut self, layout: &BusLayout, shout: &ShoutCols) {
+        for j in 0..layout.chunk_size {
+            for col_id in shout.addr_bits.clone() {
+                let bit = layout.bus_cell(col_id, j);
+                self.add_boolean_constraint(CpuConstraintLabel::ShoutAddrBitBitness, bit);
             }
         }
     }
@@ -850,6 +968,39 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints<F: Field + PrimeCharacteristic
     lut_insts: &[LutInstance<Cmt, F>],
     mem_insts: &[MemInstance<Cmt, F>],
 ) -> Result<CcsStructure<F>, String> {
+    let shout_cpu: Vec<Option<ShoutCpuBinding>> = shout_cpu.iter().cloned().map(Some).collect();
+    let empty_groups = std::collections::HashMap::new();
+    extend_ccs_with_shared_cpu_bus_constraints_optional_shout(
+        base_ccs,
+        m_in,
+        const_one_col,
+        &shout_cpu,
+        twist_cpu,
+        lut_insts,
+        mem_insts,
+        &empty_groups,
+        &empty_groups,
+    )
+}
+
+/// Extend a CPU CCS with shared-bus constraints, allowing per-lane Shout linkage opt-out.
+///
+/// When a Shout lane binding is `None`, only canonical Shout padding/bitness constraints are
+/// injected for that lane (no CPU selector/value/key linkage equalities).
+pub fn extend_ccs_with_shared_cpu_bus_constraints_optional_shout<
+    F: Field + PrimeCharacteristicRing + Copy + Eq + Send + Sync,
+    Cmt,
+>(
+    base_ccs: &CcsStructure<F>,
+    m_in: usize,
+    const_one_col: usize,
+    shout_cpu: &[Option<ShoutCpuBinding>],
+    twist_cpu: &[TwistCpuBinding],
+    lut_insts: &[LutInstance<Cmt, F>],
+    mem_insts: &[MemInstance<Cmt, F>],
+    shout_addr_groups: &std::collections::HashMap<u32, u64>,
+    shout_selector_groups: &std::collections::HashMap<u32, u64>,
+) -> Result<CcsStructure<F>, String> {
     let total_shout_lanes: usize = lut_insts.iter().map(|l| l.lanes.max(1)).sum();
     if shout_cpu.len() != total_shout_lanes {
         return Err(format!(
@@ -899,13 +1050,17 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints<F: Field + PrimeCharacteristic
         chunk_size = 1;
     }
 
-    let layout = build_bus_layout_for_instances_with_shout_and_twist_lanes(
+    let layout = build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes(
         base_ccs.m,
         m_in,
         chunk_size,
-        lut_insts
-            .iter()
-            .map(|inst| (inst.d * inst.ell, inst.lanes.max(1))),
+        lut_insts.iter().map(|inst| ShoutInstanceShape {
+            ell_addr: inst.d * inst.ell,
+            lanes: inst.lanes.max(1),
+            n_vals: 1usize,
+            addr_group: shout_addr_groups.get(&inst.table_id).copied(),
+            selector_group: shout_selector_groups.get(&inst.table_id).copied(),
+        }),
         mem_insts
             .iter()
             .map(|inst| (inst.d * inst.ell, inst.lanes.max(1))),
@@ -916,13 +1071,68 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints<F: Field + PrimeCharacteristic
     }
 
     let mut builder = CpuConstraintBuilder::<F>::new(base_ccs.n, base_ccs.m, const_one_col);
+    let mut addr_range_counts = std::collections::HashMap::<(usize, usize), usize>::new();
+    for inst_cols in layout.shout_cols.iter() {
+        for lane_cols in inst_cols.lanes.iter() {
+            let key = (lane_cols.addr_bits.start, lane_cols.addr_bits.end);
+            *addr_range_counts.entry(key).or_insert(0) += 1;
+        }
+    }
+    let mut addr_range_bitness_added = std::collections::HashSet::<(usize, usize)>::new();
+    let mut selector_bitness_added = std::collections::HashSet::<usize>::new();
+    let mut shout_key_binding_added = std::collections::HashSet::<(bool, usize, usize, usize, usize)>::new();
     let mut shout_lane_idx = 0usize;
     for inst_cols in layout.shout_cols.iter() {
         for lane_cols in inst_cols.lanes.iter() {
+            let key = (lane_cols.addr_bits.start, lane_cols.addr_bits.end);
+            let shared_addr_group = addr_range_counts.get(&key).copied().unwrap_or(0) > 1;
             let cpu = shout_cpu
                 .get(shout_lane_idx)
                 .ok_or_else(|| format!("missing shout_cpu binding at lane_idx={shout_lane_idx}"))?;
-            builder.add_shout_instance_bound(&layout, lane_cols, cpu);
+            if let Some(cpu) = cpu {
+                let mut dedup_cpu = cpu.clone();
+                if let Some(addr_base) = dedup_cpu.addr {
+                    let (is_bus_gate, gate_base) = if dedup_cpu.has_lookup == CPU_BUS_COL_DISABLED {
+                        (true, lane_cols.has_lookup)
+                    } else {
+                        (false, dedup_cpu.has_lookup)
+                    };
+                    let key_sig = (
+                        is_bus_gate,
+                        gate_base,
+                        addr_base,
+                        lane_cols.addr_bits.start,
+                        lane_cols.addr_bits.end,
+                    );
+                    if !shout_key_binding_added.insert(key_sig) {
+                        dedup_cpu.addr = None;
+                    }
+                }
+                builder.add_shout_instance_linkage_bound(&layout, lane_cols, &dedup_cpu);
+            } else {
+                // no linkage
+            }
+            let selector_first = selector_bitness_added.insert(lane_cols.has_lookup);
+            if shared_addr_group {
+                // Shared address bits across multiple table instances cannot use per-instance
+                // `(1-has_lookup)*addr_bit=0` gating: inactive instances would overconstrain
+                // active ones. Enforce has/value padding per-instance and addr-bit booleanity
+                // once per shared range.
+                if selector_first {
+                    builder.add_shout_instance_padding_value_only(&layout, lane_cols);
+                } else {
+                    builder.add_shout_instance_value_padding_only(&layout, lane_cols);
+                }
+                if addr_range_bitness_added.insert(key) {
+                    builder.add_shout_instance_addr_bit_bitness(&layout, lane_cols);
+                }
+            } else {
+                if selector_first {
+                    builder.add_shout_instance_padding(&layout, lane_cols);
+                } else {
+                    builder.add_shout_instance_padding_without_selector_bitness(&layout, lane_cols);
+                }
+            }
             shout_lane_idx += 1;
         }
     }
@@ -1058,7 +1268,7 @@ pub fn create_shout_padding_constraints<F: Field>(layout: &BusLayout, shout: &Sh
     let mut constraints = Vec::new();
     for j in 0..layout.chunk_size {
         let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
-        let bus_val = layout.bus_cell(shout.val, j);
+        let bus_val = layout.bus_cell(shout.primary_val(), j);
 
         // (1 - has_lookup) * val = 0
         constraints.push(CpuConstraint::new_zero_negated(

@@ -239,6 +239,32 @@ impl Rv32ExecTable {
         Ok(())
     }
 
+    /// Validate strict JALR next-PC policy used by trace-wiring control claims.
+    ///
+    /// Current trace-wiring control stage enforces `pc_after = rs1_val + imm_i` for JALR rows
+    /// (no committed drop-bit helper columns). Under this policy, traces requiring ISA-level
+    /// JALR masking are out of scope and must be rejected during trace construction.
+    pub fn validate_jalr_strict_alignment_policy(&self) -> Result<(), String> {
+        for r in &self.rows {
+            if !r.active {
+                continue;
+            }
+            let Some(crate::riscv::lookups::RiscvInstruction::Jalr { imm, .. }) = r.decoded.as_ref() else {
+                continue;
+            };
+            let rs1_val = r.reg_read_lane0.as_ref().map(|io| io.value).unwrap_or(0);
+            let imm_u32 = *imm as u32 as u64;
+            let expected_pc_after = rs1_val.wrapping_add(imm_u32);
+            if r.pc_after != expected_pc_after {
+                return Err(format!(
+                    "strict JALR policy violated at cycle {}: pc_after={:#x}, expected rs1+imm={:#x} (rs1={:#x}, imm={:#x})",
+                    r.cycle, r.pc_after, expected_pc_after, rs1_val, imm_u32
+                ));
+            }
+        }
+        Ok(())
+    }
+
     /// Validate REG lane semantics by replaying the register file from an initial state.
     ///
     /// - `init_regs` maps `reg_idx (0..31)` → value (u32 stored in u64).
@@ -314,7 +340,7 @@ impl Rv32ExecTable {
 
     /// Validate RAM twist semantics by replaying the RAM state from an initial state.
     ///
-    /// - `init_ram` maps `byte_addr` → word value (u32 stored in u64) under the RV32 B1 convention.
+    /// - `init_ram` maps `byte_addr` → word value (u32 stored in u64) under the RV32 trace convention.
     /// - Unspecified addresses default to 0.
     /// - Multiple RAM events in a cycle are applied in trace order (e.g. SB/SH read-modify-write).
     pub fn validate_ram_semantics(&self, init_ram: &HashMap<u64, u64>) -> Result<(), String> {
@@ -586,7 +612,7 @@ impl Rv32ExecRow {
             }
         }
 
-        // Light sanity check: make sure the trace's lane policy matches Rv32 B1's convention.
+        // Light sanity check: make sure the trace's lane policy matches RV32 trace conventions.
         //
         // - lane0 reads rs1_field always
         // - lane1 reads rs2_field

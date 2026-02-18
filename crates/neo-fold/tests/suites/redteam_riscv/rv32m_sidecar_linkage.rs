@@ -1,91 +1,48 @@
-use neo_fold::{pi_ccs_prove_simple, pi_ccs_verify};
-use neo_memory::ajtai::encode_vector_balanced_to_mat;
-use neo_memory::riscv::ccs::build_rv32_b1_rv32m_sidecar_ccs;
+use neo_fold::riscv_trace_shard::Rv32TraceWiring;
+use neo_math::K;
 use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvOpcode};
-use neo_transcript::Poseidon2Transcript;
-use neo_transcript::Transcript;
 use p3_field::PrimeCharacteristicRing;
-use p3_goldilocks::Goldilocks as F;
-
-use neo_fold::riscv_shard::Rv32B1;
 
 #[test]
-fn rv32m_sidecar_is_bound_to_main_witness_commitment() {
-    // Program: MUL x1, x0, x0; HALT
+fn rv32_trace_claims_are_bound_to_main_commitment() {
+    // Program: ADDI x1, x0, 1; HALT
     let program = vec![
-        RiscvInstruction::RAlu {
-            op: RiscvOpcode::Mul,
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
             rd: 1,
             rs1: 0,
-            rs2: 0,
+            imm: 1,
         },
         RiscvInstruction::Halt,
     ];
     let program_bytes = encode_program(&program);
+    let steps = 2usize;
 
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
-        .chunk_size(1)
-        .ram_bytes(4)
-        .max_steps(2)
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .chunk_rows(steps)
+        .min_trace_len(steps)
+        .max_steps(steps)
         .prove()
         .expect("prove");
     run.verify().expect("baseline verify");
 
-    // Build the RV32M sidecar CCS and collect the per-step MCS instances/witnesses.
-    let rv32m_ccs = build_rv32_b1_rv32m_sidecar_ccs(run.layout()).expect("build rv32m sidecar ccs");
-
-    let mut mcs_insts = Vec::with_capacity(run.steps_witness().len());
-    let mut mcs_wits = Vec::with_capacity(run.steps_witness().len());
-    for step in run.steps_witness() {
-        let (inst, wit) = &step.mcs;
-        mcs_insts.push(inst.clone());
-        mcs_wits.push(wit.clone());
+    let mut bad_proof = run.proof().clone();
+    let mut tampered = false;
+    for step in &mut bad_proof.steps {
+        for claim in &mut step.mem.val_me_claims {
+            if let Some(first) = claim.y_scalars.first_mut() {
+                *first += K::ONE;
+                tampered = true;
+                break;
+            }
+        }
+        if tampered {
+            break;
+        }
     }
-
-    // Tamper with one RV32M-relevant witness coordinate (mul_hi at j=0),
-    // while keeping the *original* MCS instances (commitments) fixed.
-    let idx = run.layout().mul_hi(0);
-    let m_in = mcs_insts[0].m_in;
+    assert!(tampered, "expected at least one claim scalar to tamper");
     assert!(
-        idx >= m_in,
-        "expected mul_hi to be in the private witness region (idx={idx}, m_in={m_in})"
-    );
-
-    let mut z0 = Vec::with_capacity(mcs_insts[0].m_in + mcs_wits[0].w.len());
-    z0.extend_from_slice(&mcs_insts[0].x);
-    z0.extend_from_slice(&mcs_wits[0].w);
-    assert_eq!(z0.len(), rv32m_ccs.m, "unexpected step witness width");
-
-    z0[idx] += F::ONE;
-    let z0_tampered = encode_vector_balanced_to_mat(run.params(), &z0);
-
-    mcs_wits[0].w = z0[m_in..].to_vec();
-    mcs_wits[0].Z = z0_tampered;
-
-    let num_steps = mcs_insts.len();
-    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/rv32m_sidecar_batch");
-    tr.append_message(b"rv32m_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
-
-    // The prover may either:
-    // - reject because the witness no longer matches the commitment, or
-    // - produce a proof that fails verification.
-    let Ok((me_out, proof)) = pi_ccs_prove_simple(
-        &mut tr,
-        run.params(),
-        &rv32m_ccs,
-        &mcs_insts,
-        &mcs_wits,
-        run.committer(),
-    ) else {
-        return;
-    };
-
-    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/rv32m_sidecar_batch");
-    tr.append_message(b"rv32m_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
-    let ok = pi_ccs_verify(&mut tr, run.params(), &rv32m_ccs, &mcs_insts, &[], &me_out, &proof)
-        .expect("rv32m sidecar verify");
-    assert!(
-        !ok,
-        "rv32m sidecar verification unexpectedly succeeded with a tampered witness"
+        run.verify_proof(&bad_proof).is_err(),
+        "tampered trace claims must not verify"
     );
 }

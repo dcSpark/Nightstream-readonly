@@ -6,7 +6,7 @@ use neo_ajtai::Commitment as Cmt;
 use neo_ccs::relations::{McsInstance, McsWitness};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_fold::pi_ccs::FoldingMode;
-use neo_fold::shard::fold_shard_prove;
+use neo_fold::shard::{fold_shard_prove, fold_shard_verify};
 use neo_math::F;
 use neo_memory::cpu::build_bus_layout_for_instances_with_shout_and_twist_lanes;
 use neo_memory::riscv::ccs::{build_rv32_trace_wiring_ccs, rv32_trace_ccs_witness_from_exec_table, Rv32TraceCcsLayout};
@@ -16,7 +16,7 @@ use neo_memory::riscv::lookups::{
     RiscvShoutTables, PROG_ID,
 };
 use neo_memory::riscv::trace::extract_shout_lanes_over_time;
-use neo_memory::witness::{LutInstance, LutTableSpec, LutWitness, StepWitnessBundle};
+use neo_memory::witness::{LutInstance, LutTableSpec, LutWitness, StepInstanceBundle, StepWitnessBundle};
 use neo_params::NeoParams;
 use neo_transcript::Poseidon2Transcript;
 use neo_transcript::Transcript;
@@ -77,7 +77,7 @@ fn build_shout_only_bus_z(
         for j in 0..t {
             let has = lane.has_lookup[j];
             z[bus.bus_cell(cols.has_lookup, j)] = if has { F::ONE } else { F::ZERO };
-            z[bus.bus_cell(cols.val, j)] = if has { F::from_u64(lane.value[j]) } else { F::ZERO };
+            z[bus.bus_cell(cols.primary_val(), j)] = if has { F::from_u64(lane.value[j]) } else { F::ZERO };
 
             // Packed-key layout: [lhs_u32, rhs_u32, borrow_bit]
             let mut packed = [F::ZERO; 3];
@@ -175,6 +175,7 @@ fn riscv_trace_no_shared_cpu_bus_shout_sub_linkage_redteam() {
     let shout_lanes = extract_shout_lanes_over_time(&exec, &shout_table_ids).expect("extract shout lanes");
 
     let sub_lut_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 3,
@@ -187,6 +188,8 @@ fn riscv_trace_no_shared_cpu_bus_shout_sub_linkage_redteam() {
             xlen: 32,
         }),
         table: Vec::new(),
+    addr_group: None,
+    selector_group: None,
     };
     let sub_z = build_shout_only_bus_z(
         ccs.m,
@@ -201,6 +204,7 @@ fn riscv_trace_no_shared_cpu_bus_shout_sub_linkage_redteam() {
     let sub_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(&params, &sub_z);
     let sub_c = l.commit(&sub_Z);
     let sub_lut_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: vec![sub_c],
         ..sub_lut_inst
     };
@@ -212,11 +216,13 @@ fn riscv_trace_no_shared_cpu_bus_shout_sub_linkage_redteam() {
         mem_instances: Vec::new(),
         _phantom: PhantomData,
     }];
-    // Trace CCS now binds ALU/writeback values directly, so tampering `shout_val` is
-    // rejected during prove (before sidecar linkage checks).
+    let steps_instance: Vec<StepInstanceBundle<Cmt, F, neo_math::K>> =
+        steps_witness.iter().map(StepInstanceBundle::from).collect();
+
+    // In no-shared mode, shout linkage is validated during Route-A verification.
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-sub-redteam");
-    fold_shard_prove(
-        FoldingMode::PaperExact,
+    let proof = fold_shard_prove(
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -226,5 +232,18 @@ fn riscv_trace_no_shared_cpu_bus_shout_sub_linkage_redteam() {
         &l,
         mixers,
     )
-    .expect_err("tampered trace shout_val must fail under trace CCS semantics");
+    .expect("tampered trace shout_val should still admit a proof object before verify checks");
+
+    let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-sub-redteam");
+    fold_shard_verify(
+        FoldingMode::Optimized,
+        &mut tr_verify,
+        &params,
+        &ccs,
+        &steps_instance,
+        &[],
+        &proof,
+        mixers,
+    )
+    .expect_err("tampered trace shout_val must fail during no-shared shout linkage verification");
 }

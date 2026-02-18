@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use neo_fold::riscv_shard::Rv32B1;
+use neo_fold::riscv_trace_shard::Rv32TraceWiring;
 use neo_memory::riscv::lookups::{encode_program, BranchCondition, RiscvInstruction, RiscvOpcode};
 
 struct ScaleRow {
@@ -39,11 +39,11 @@ fn nightstream_prefix_lengths_1_to_10_and_256() {
         let ns_program_bytes = encode_program(&ns_program);
 
         let ns_total_start = Instant::now();
-        let mut ns_run = Rv32B1::from_rom(/*program_base=*/ 0, &ns_program_bytes)
+        let mut ns_run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &ns_program_bytes)
             // IMPORTANT: avoid "fold per instruction".
-            // Use a single chunk that covers the entire prefix so this is one proof for `n` instructions.
-            .chunk_size(n)
-            .ram_bytes(4)
+            // Use a single folding chunk that covers the entire prefix so this is one proof for `n` instructions.
+            .min_trace_len(n)
+            .chunk_rows(n)
             .max_steps(n)
             .prove()
             .expect("Nightstream prove");

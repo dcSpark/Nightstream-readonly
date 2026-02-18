@@ -77,7 +77,7 @@ fn build_shout_only_bus_z(
         for j in 0..t {
             let has = lane.has_lookup[j];
             z[bus.bus_cell(cols.has_lookup, j)] = if has { F::ONE } else { F::ZERO };
-            z[bus.bus_cell(cols.val, j)] = if has { F::from_u64(lane.value[j]) } else { F::ZERO };
+            z[bus.bus_cell(cols.primary_val(), j)] = if has { F::from_u64(lane.value[j]) } else { F::ZERO };
 
             // Packed-key layout: [lhs_u32, rhs_u32, borrow_bit]
             let mut packed = [F::ZERO; 3];
@@ -169,6 +169,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_sub_prove_verify() {
     let shout_lanes = extract_shout_lanes_over_time(&exec, &shout_table_ids).expect("extract shout lanes");
 
     let sub_lut_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: Vec::new(),
         k: 0,
         d: 3,
@@ -181,6 +182,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_sub_prove_verify() {
             xlen: 32,
         }),
         table: Vec::new(),
+    addr_group: None,
+    selector_group: None,
     };
     let sub_z = build_shout_only_bus_z(
         ccs.m,
@@ -195,6 +198,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_sub_prove_verify() {
     let sub_Z = neo_memory::ajtai::encode_vector_balanced_to_mat(&params, &sub_z);
     let sub_c = l.commit(&sub_Z);
     let sub_lut_inst = LutInstance::<Cmt, F> {
+        table_id: 0,
         comms: vec![sub_c],
         ..sub_lut_inst
     };
@@ -211,7 +215,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_sub_prove_verify() {
 
     let mut tr_prove = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-sub");
     let proof = fold_shard_prove(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_prove,
         &params,
         &ccs,
@@ -225,7 +229,7 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_sub_prove_verify() {
 
     let mut tr_verify = Poseidon2Transcript::new(b"riscv-trace-no-shared-bus-shout-sub");
     let _ = fold_shard_verify(
-        FoldingMode::PaperExact,
+        FoldingMode::Optimized,
         &mut tr_verify,
         &params,
         &ccs,
