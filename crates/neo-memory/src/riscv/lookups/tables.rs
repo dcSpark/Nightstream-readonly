@@ -275,12 +275,23 @@ impl RiscvShoutTables {
 
 impl Shout<u64> for RiscvShoutTables {
     fn lookup(&mut self, shout_id: ShoutId, key: u64) -> u64 {
-        // The key is an interleaved index containing both operands
         if let Some(op) = self.id_to_opcode(shout_id) {
             let (rs1, rs2) = uninterleave_bits(key as u128);
             compute_op(op, rs1, rs2, self.xlen)
+        } else if shout_id == crate::riscv::mul_decomp::MUL8_SHOUT_ID {
+            let a = (key & 0xFF) as u16;
+            let b = ((key >> 8) & 0xFF) as u16;
+            (a as u64) * (b as u64)
+        } else if shout_id == crate::riscv::mul_decomp::ADD8ACC_SHOUT_ID {
+            let sum_in = (key & 0xFF) as u16;
+            let add = ((key >> 8) & 0xFF) as u16;
+            let carry_in = ((key >> 16) & 0x7) as u8;
+            let t = sum_in + add;
+            let sum_out = (t & 0xFF) as u64;
+            let carry_out = (carry_in + ((t >> 8) as u8)) as u64;
+            sum_out | (carry_out << 8)
         } else {
-            0 // Unknown table
+            0
         }
     }
 }

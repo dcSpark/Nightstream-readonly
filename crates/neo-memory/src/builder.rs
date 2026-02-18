@@ -379,6 +379,8 @@ where
                         ));
                     }
                     LutTableSpec::IdentityU32 => (0usize, 32usize, 2usize, 1usize, Vec::new()),
+                    LutTableSpec::Mul8 => (0usize, crate::riscv::mul_decomp::MUL8_ADDR_BITS, 2usize, 1usize, Vec::new()),
+                    LutTableSpec::Add8Acc => (0usize, crate::riscv::mul_decomp::ADD8ACC_ADDR_BITS, 2usize, 1usize, Vec::new()),
                 }
             } else {
                 let table = lut_tables.get(&table_id).ok_or_else(|| {

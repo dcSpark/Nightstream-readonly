@@ -974,7 +974,7 @@ pub(crate) fn build_route_a_decode_time_claims(
     let fields_weights = w2_decode_pack_weight_vector(r_cycle, W2_FIELDS_RESIDUAL_COUNT);
     let fields_oracle = FormulaOracleSparseTime::new(
         fields_sparse_cols,
-        4,
+        5,
         r_cycle,
         Box::new(move |vals: &[K]| {
             let mut idx = 0usize;

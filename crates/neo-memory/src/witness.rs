@@ -2,12 +2,14 @@ use neo_ccs::matrix::Mat;
 use neo_ccs::relations::{McsInstance, McsWitness};
 use neo_math::K;
 use neo_reductions::error::PiCcsError;
+use p3_field::PrimeCharacteristicRing;
 use serde::{Deserialize, Serialize};
 use std::marker::PhantomData;
 use std::ops::Range;
 
 use crate::mem_init::MemInit;
 use crate::riscv::lookups::RiscvOpcode;
+use crate::riscv::mul_decomp;
 
 fn default_one_usize() -> usize {
     1
@@ -76,6 +78,21 @@ pub enum LutTableSpec {
     /// - `d = 32` (one bit per dimension)
     /// - Address bits are little-endian
     IdentityU32,
+
+    /// 8×8 → 16-bit byte multiplication subtable.
+    ///
+    /// `table[(a, b)] = a * b` where a, b ∈ [0, 255].
+    /// Address: 16-bit flat `a | (b << 8)`, value: 16-bit product.
+    /// - `d = 16`, `n_side = 2`, `ell = 1`, `k = 0` (implicit)
+    Mul8,
+
+    /// Byte addition with carry accumulation subtable.
+    ///
+    /// `table[(sum_in, add, carry_in)] = sum_out | (carry_out << 8)`
+    /// where sum_in, add ∈ [0, 255] and carry_in ∈ [0, 7].
+    /// Address: 19-bit flat `sum_in | (add << 8) | (carry_in << 16)`.
+    /// - `d = 19`, `n_side = 2`, `ell = 1`, `k = 0` (implicit)
+    Add8Acc,
 }
 
 impl LutTableSpec {
@@ -98,6 +115,36 @@ impl LutTableSpec {
                     )));
                 }
                 Ok(crate::identity::eval_identity_mle_le(r_addr))
+            }
+            LutTableSpec::Mul8 => {
+                if r_addr.len() != mul_decomp::MUL8_ADDR_BITS {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Mul8: expected r_addr.len()={}, got {}",
+                        mul_decomp::MUL8_ADDR_BITS,
+                        r_addr.len()
+                    )));
+                }
+                let table_u64 = mul_decomp::build_mul8_table();
+                let table_f: Vec<neo_math::F> = table_u64
+                    .iter()
+                    .map(|&v| neo_math::F::from_u64(v))
+                    .collect();
+                Ok(crate::mle::mle_eval(&table_f, r_addr))
+            }
+            LutTableSpec::Add8Acc => {
+                if r_addr.len() != mul_decomp::ADD8ACC_ADDR_BITS {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Add8Acc: expected r_addr.len()={}, got {}",
+                        mul_decomp::ADD8ACC_ADDR_BITS,
+                        r_addr.len()
+                    )));
+                }
+                let table_u64 = mul_decomp::build_add8acc_table();
+                let table_f: Vec<neo_math::F> = table_u64
+                    .iter()
+                    .map(|&v| neo_math::F::from_u64(v))
+                    .collect();
+                Ok(crate::mle::mle_eval(&table_f, r_addr))
             }
         }
     }

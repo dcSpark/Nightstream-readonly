@@ -164,6 +164,14 @@ pub fn check_shout_semantics<F: PrimeField>(
                     ));
                 }
                 Some(LutTableSpec::IdentityU32) => F::from_u64(addrs[j]),
+                Some(LutTableSpec::Mul8) => {
+                    let table = crate::riscv::mul_decomp::build_mul8_table();
+                    F::from_u64(table[addr])
+                }
+                Some(LutTableSpec::Add8Acc) => {
+                    let table = crate::riscv::mul_decomp::build_add8acc_table();
+                    F::from_u64(table[addr])
+                }
                 None => {
                     if addr >= inst.table.len() {
                         return Err(PiCcsError::InvalidInput(format!(

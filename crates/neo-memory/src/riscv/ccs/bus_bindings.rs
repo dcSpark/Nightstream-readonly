@@ -33,6 +33,8 @@ pub struct TraceShoutBusSpec {
     pub table_id: u32,
     pub ell_addr: usize,
     pub n_vals: usize,
+    /// Number of parallel lookup lanes per step. Defaults to 1 for standard opcode tables.
+    pub lanes: usize,
 }
 
 #[inline]
@@ -86,6 +88,7 @@ struct TraceShoutShape {
     table_id: u32,
     ell_addr: usize,
     n_vals: usize,
+    lanes: usize,
     addr_group: Option<u32>,
     selector_group: Option<u32>,
 }
@@ -104,6 +107,7 @@ fn derive_trace_shout_shapes(
                 table_id,
                 ell_addr: 2 * RV32_XLEN,
                 n_vals: 1usize,
+                lanes: 1usize,
                 addr_group: trace_lookup_addr_group_for_table_shape(table_id, 2 * RV32_XLEN),
                 selector_group: trace_lookup_selector_group_for_table_id(table_id),
             },
@@ -157,6 +161,7 @@ fn derive_trace_shout_shapes(
                     table_id: spec.table_id,
                     ell_addr: spec.ell_addr,
                     n_vals: spec.n_vals,
+                    lanes: spec.lanes.max(1),
                     addr_group: trace_lookup_addr_group_for_table_shape(spec.table_id, spec.ell_addr),
                     selector_group: trace_lookup_selector_group_for_table_id(spec.table_id),
                 },
@@ -265,7 +270,7 @@ fn resolve_trace_decode_selector_cols(
         layout.t,
         shout_shapes.iter().map(|shape| ShoutInstanceShape {
             ell_addr: shape.ell_addr,
-            lanes: 1usize,
+            lanes: shape.lanes.max(1),
             n_vals: shape.n_vals.max(1),
             addr_group: shape.addr_group.map(|v| v as u64),
             selector_group: shape.selector_group.map(|v| v as u64),
@@ -375,9 +380,20 @@ pub fn rv32_trace_shared_cpu_bus_config_with_specs(
 
     let mut shout_cpu = HashMap::new();
     for shape in &shout_shapes {
-        // Opcode lookup families remain reduction-owned; decode/width families bind key columns.
         let binding = trace_shout_binding(layout, shape.table_id);
-        shout_cpu.insert(shape.table_id, binding.into_iter().collect());
+        let mut bindings: Vec<ShoutCpuBinding> = binding.into_iter().collect();
+        let target_lanes = shape.lanes.max(1);
+        if !bindings.is_empty() || target_lanes > 1 {
+            let disabled = ShoutCpuBinding {
+                has_lookup: CPU_BUS_COL_DISABLED,
+                addr: None,
+                val: CPU_BUS_COL_DISABLED,
+            };
+            while bindings.len() < target_lanes {
+                bindings.push(disabled.clone());
+            }
+        }
+        shout_cpu.insert(shape.table_id, bindings);
     }
 
     let mut mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
@@ -499,41 +515,46 @@ pub fn rv32_trace_shared_bus_extraction_with_specs(
     mem_ids.sort_unstable();
 
     let mut shout_cols = 0usize;
-    let mut seen_addr_groups = HashMap::<u32, usize>::new();
-    let mut seen_selector_groups = HashSet::<u32>::new();
+    let mut seen_addr_groups = HashMap::<u32, HashMap<usize, usize>>::new();
+    let mut seen_selector_groups = HashSet::<(u32, usize)>::new();
     for shape in &shout_shapes {
-        if let Some(group) = shape.addr_group {
-            if let Some(prev_ell) = seen_addr_groups.insert(group, shape.ell_addr) {
-                if prev_ell != shape.ell_addr {
-                    return Err(format!(
-                        "RV32 trace shared bus: addr_group={} has conflicting ell_addr ({} vs {})",
-                        group, prev_ell, shape.ell_addr
-                    ));
+        let lanes = shape.lanes.max(1);
+        for lane_idx in 0..lanes {
+            if let Some(group) = shape.addr_group {
+                let group_lanes = seen_addr_groups.entry(group).or_default();
+                if let Some(&prev_ell) = group_lanes.get(&lane_idx) {
+                    if prev_ell != shape.ell_addr {
+                        return Err(format!(
+                            "RV32 trace shared bus: addr_group={} lane={} has conflicting ell_addr ({} vs {})",
+                            group, lane_idx, prev_ell, shape.ell_addr
+                        ));
+                    }
+                } else {
+                    group_lanes.insert(lane_idx, shape.ell_addr);
+                    shout_cols = shout_cols
+                        .checked_add(shape.ell_addr)
+                        .ok_or_else(|| "RV32 trace shared bus: shout shared-addr width overflow".to_string())?;
                 }
             } else {
                 shout_cols = shout_cols
                     .checked_add(shape.ell_addr)
-                    .ok_or_else(|| "RV32 trace shared bus: shout shared-addr width overflow".to_string())?;
+                    .ok_or_else(|| "RV32 trace shared bus: shout lane width overflow".to_string())?;
             }
-        } else {
-            shout_cols = shout_cols
-                .checked_add(shape.ell_addr)
-                .ok_or_else(|| "RV32 trace shared bus: shout lane width overflow".to_string())?;
-        }
-        if let Some(selector_group) = shape.selector_group {
-            if seen_selector_groups.insert(selector_group) {
+            if let Some(selector_group) = shape.selector_group {
+                if seen_selector_groups.insert((selector_group, lane_idx)) {
+                    shout_cols = shout_cols
+                        .checked_add(1)
+                        .ok_or_else(|| "RV32 trace shared bus: shout selector width overflow".to_string())?;
+                }
+            } else {
                 shout_cols = shout_cols
                     .checked_add(1)
                     .ok_or_else(|| "RV32 trace shared bus: shout selector width overflow".to_string())?;
             }
-        } else {
             shout_cols = shout_cols
-                .checked_add(1)
-                .ok_or_else(|| "RV32 trace shared bus: shout selector width overflow".to_string())?;
+                .checked_add(shape.n_vals)
+                .ok_or_else(|| "RV32 trace shared bus: shout value width overflow".to_string())?;
         }
-        shout_cols = shout_cols
-            .checked_add(shape.n_vals)
-            .ok_or_else(|| "RV32 trace shared bus: shout value width overflow".to_string())?;
     }
 
     let mut twist_cols = 0usize;
@@ -579,7 +600,7 @@ pub fn rv32_trace_shared_bus_extraction_with_specs(
         layout.t,
         shout_shapes.iter().map(|shape| ShoutInstanceShape {
             ell_addr: shape.ell_addr,
-            lanes: 1usize,
+            lanes: shape.lanes.max(1),
             n_vals: shape.n_vals.max(1),
             addr_group: shape.addr_group.map(|v| v as u64),
             selector_group: shape.selector_group.map(|v| v as u64),
@@ -641,6 +662,10 @@ pub fn rv32_trace_shared_bus_extraction_with_specs(
             builder.add_shout_instance_padding(&bus, lane0);
         } else {
             builder.add_shout_instance_padding_without_selector_bitness(&bus, lane0);
+        }
+
+        for lane_cols in &bus.shout_cols[i].lanes[1..] {
+            builder.add_shout_instance_padding(&bus, lane_cols);
         }
     }
 

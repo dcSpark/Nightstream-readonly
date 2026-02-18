@@ -296,6 +296,8 @@ fn shout_meta_for_bus(
                 Err("RiscvOpcodeEventTablePacked is not supported in shared-bus circuits".into())
             }
             LutTableSpec::IdentityU32 => Ok((32usize, 2usize)),
+            LutTableSpec::Mul8 => Ok((neo_memory::riscv::mul_decomp::MUL8_ADDR_BITS, 2usize)),
+            LutTableSpec::Add8Acc => Ok((neo_memory::riscv::mul_decomp::ADD8ACC_ADDR_BITS, 2usize)),
         }
     } else {
         Err(format!("missing shout table metadata for table_id={table_id}"))

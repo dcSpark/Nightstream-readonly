@@ -54,6 +54,7 @@ fn decode_selector_specs(prog_d: usize) -> Vec<TraceShoutBusSpec> {
             table_id: rv32_decode_lookup_table_id_for_col(col),
             ell_addr: prog_d,
             n_vals: 1usize,
+            lanes: 1,
         })
         .collect()
 }
@@ -66,6 +67,7 @@ fn width_selector_specs(cycle_d: usize) -> Vec<TraceShoutBusSpec> {
             table_id: rv32_width_lookup_table_id_for_col(col),
             ell_addr: cycle_d,
             n_vals: 1usize,
+            lanes: 1,
         })
         .collect()
 }
@@ -173,6 +175,7 @@ fn rv32_trace_shared_bus_with_specs_adds_custom_shout_width() {
         table_id: 1000,
         ell_addr: 13,
         n_vals: 1usize,
+        lanes: 1,
     });
     let (bus_region_len, reserved_rows) =
         rv32_trace_shared_bus_requirements_with_specs(&layout, &[3u32], &specs, &mem_layouts)
@@ -196,6 +199,7 @@ fn rv32_trace_shared_cpu_bus_config_with_specs_keeps_padding_only_bindings() {
         table_id: 1001,
         ell_addr: 17,
         n_vals: 1usize,
+        lanes: 1,
     });
     let (bus_region_len, _) = rv32_trace_shared_bus_requirements_with_specs(&layout, &[3u32], &specs, &mem_layouts)
         .expect("trace shared bus requirements with extra spec");
@@ -227,6 +231,7 @@ fn rv32_trace_shared_bus_with_specs_rejects_conflicting_ell_addr() {
         table_id: 3,
         ell_addr: 63,
         n_vals: 1usize,
+        lanes: 1,
     });
     let err = rv32_trace_shared_bus_requirements_with_specs(&layout, &[3u32], &extra, &mem_layouts)
         .expect_err("conflicting table width must fail");

@@ -138,6 +138,8 @@ where
                     return Err("RiscvOpcodeEventTablePacked is not supported in the shared-bus R1csCpu path".into());
                 }
                 LutTableSpec::IdentityU32 => (32usize, 2usize),
+                LutTableSpec::Mul8 => (crate::riscv::mul_decomp::MUL8_ADDR_BITS, 2usize),
+                LutTableSpec::Add8Acc => (crate::riscv::mul_decomp::ADD8ACC_ADDR_BITS, 2usize),
             };
             match shout_meta.entry(*id) {
                 Entry::Vacant(v) => {

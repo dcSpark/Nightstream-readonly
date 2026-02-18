@@ -230,6 +230,28 @@ pub(crate) fn prove_shout_addr_pre_time(
                         )?;
                         (Box::new(o), sum)
                     }
+                    Some(LutTableSpec::Mul8) => {
+                        let table = neo_memory::riscv::mul_decomp::build_mul8_table();
+                        let (o, sum) = SmallTableAddressLookupOracleSparse::new_sparse_time(
+                            inst_ell_addr,
+                            &table,
+                            &addr_bits,
+                            &has_lookup,
+                            r_cycle,
+                        )?;
+                        (Box::new(o), sum)
+                    }
+                    Some(LutTableSpec::Add8Acc) => {
+                        let table = neo_memory::riscv::mul_decomp::build_add8acc_table();
+                        let (o, sum) = SmallTableAddressLookupOracleSparse::new_sparse_time(
+                            inst_ell_addr,
+                            &table,
+                            &addr_bits,
+                            &has_lookup,
+                            r_cycle,
+                        )?;
+                        (Box::new(o), sum)
+                    }
                 };
 
                 claimed_sums[flat_lane_idx] = lane_sum;

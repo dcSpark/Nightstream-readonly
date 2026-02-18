@@ -8,6 +8,9 @@ use super::encode::encode_instruction;
 use super::isa::{BranchCondition, RiscvInstruction, RiscvMemOp, RiscvOpcode};
 use super::tables::RiscvShoutTables;
 use super::{POSEIDON2_ECALL_NUM, POSEIDON2_READ_ECALL_NUM};
+use crate::riscv::mul_decomp::{
+    self, decompose_mul32, MulLookupRow, ADD8ACC_SHOUT_ID, MUL8_SHOUT_ID,
+};
 
 /// A RISC-V CPU that can be traced using Neo's VmCpu trait.
 ///
@@ -247,13 +250,50 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
         match instr {
             RiscvInstruction::RAlu { op, rd, rs1: _, rs2: _ } => {
                 match op {
-                    // RV32 trace mode does not require Shout tables for RV32M semantics.
-                    // (They are checked by the RV32M sidecar CCS; Shout is only used for the remainder-bound SLTU check.)
                     RiscvOpcode::Mul
                     | RiscvOpcode::Mulh
                     | RiscvOpcode::Mulhu
                     | RiscvOpcode::Mulhsu
-                    | RiscvOpcode::Div
+                        if self.xlen == 32 =>
+                    {
+                        let rs1_u32 = rs1_val as u32;
+                        let rs2_u32 = rs2_val as u32;
+                        let rs1_i32 = rs1_u32 as i32;
+                        let rs2_i32 = rs2_u32 as i32;
+
+                        let result = match op {
+                            RiscvOpcode::Mul => rs1_u32.wrapping_mul(rs2_u32) as u64,
+                            RiscvOpcode::Mulh => {
+                                let product = (rs1_i32 as i64) * (rs2_i32 as i64);
+                                (product >> 32) as i32 as u32 as u64
+                            }
+                            RiscvOpcode::Mulhu => {
+                                let product = (rs1_u32 as u64) * (rs2_u32 as u64);
+                                (product >> 32) as u32 as u64
+                            }
+                            RiscvOpcode::Mulhsu => {
+                                let product = (rs1_i32 as i64) * (rs2_u32 as i64);
+                                (product >> 32) as i32 as u32 as u64
+                            }
+                            _ => unreachable!(),
+                        };
+                        self.write_reg(twist, rd, result);
+
+                        let decomp = decompose_mul32(rs1_u32, rs2_u32);
+                        for row in &decomp.lookups {
+                            match row {
+                                MulLookupRow::Mul8 { a, b, .. } => {
+                                    let key = mul_decomp::mul8_key(*a, *b);
+                                    let _ = shout.lookup(MUL8_SHOUT_ID, key);
+                                }
+                                MulLookupRow::Add8Acc { sum_in, add, carry_in, .. } => {
+                                    let key = mul_decomp::add8acc_key(*sum_in, *add, *carry_in);
+                                    let _ = shout.lookup(ADD8ACC_SHOUT_ID, key);
+                                }
+                            }
+                        }
+                    }
+                    RiscvOpcode::Div
                     | RiscvOpcode::Divu
                     | RiscvOpcode::Rem
                     | RiscvOpcode::Remu
@@ -265,25 +305,6 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                         let rs2_i32 = rs2_u32 as i32;
 
                         match op {
-                            RiscvOpcode::Mul => {
-                                let result = rs1_u32.wrapping_mul(rs2_u32) as u64;
-                                self.write_reg(twist, rd, result);
-                            }
-                            RiscvOpcode::Mulh => {
-                                let product = (rs1_i32 as i64) * (rs2_i32 as i64);
-                                let result = (product >> 32) as i32 as u32;
-                                self.write_reg(twist, rd, result as u64);
-                            }
-                            RiscvOpcode::Mulhu => {
-                                let product = (rs1_u32 as u64) * (rs2_u32 as u64);
-                                let result = (product >> 32) as u32;
-                                self.write_reg(twist, rd, result as u64);
-                            }
-                            RiscvOpcode::Mulhsu => {
-                                let product = (rs1_i32 as i64) * (rs2_u32 as i64);
-                                let result = (product >> 32) as i32 as u32;
-                                self.write_reg(twist, rd, result as u64);
-                            }
                             RiscvOpcode::Div | RiscvOpcode::Rem => {
                                 let divisor_is_zero = rs2_u32 == 0;
                                 let (quot_i32, rem_i32) = if divisor_is_zero {
@@ -300,7 +321,6 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                                 };
                                 self.write_reg(twist, rd, result as u64);
 
-                                // Record a single Shout event for the remainder bound, only when divisor != 0.
                                 if !divisor_is_zero {
                                     let rem_abs = (rem_i32 as i64).abs() as u64;
                                     let divisor_abs = (rs2_i32 as i64).abs() as u64;
@@ -324,7 +344,6 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                                 };
                                 self.write_reg(twist, rd, result);
 
-                                // Record a single Shout event for the remainder bound, only when divisor != 0.
                                 if divisor != 0 {
                                     let sltu_id = shout_tables.opcode_to_id(RiscvOpcode::Sltu);
                                     let index = interleave_bits(rem, divisor) as u64;

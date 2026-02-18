@@ -431,7 +431,8 @@ pub fn rv32_decode_lookup_backed_row_from_instr_word(
     };
     let branch_table_expected: u64 =
         10 - 5 * ((funct3_u64 >> 2) & 1) + (((funct3_u64 >> 1) & 1) * ((funct3_u64 >> 2) & 1));
-    row[layout.shout_table_id] = if opcode_u64 == 0x33 {
+    let is_mext = funct7_u64 & 1;
+    row[layout.shout_table_id] = if opcode_u64 == 0x33 && is_mext == 0 {
         F::from_u64(alu_table_base + (funct7_b5 * (f3_is_0 + f3_is_5)))
     } else if opcode_u64 == 0x13 {
         F::from_u64(alu_table_base + (funct7_b5 * f3_is_5))

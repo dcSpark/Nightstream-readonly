@@ -15,6 +15,7 @@ use neo_memory::cpu::{
 };
 use neo_memory::identity::shout_oracle::IdentityAddressLookupOracleSparse;
 use neo_memory::mle::{eq_points, lt_eval};
+use neo_memory::riscv::mul_oracle::SmallTableAddressLookupOracleSparse;
 use neo_memory::riscv::shout_oracle::RiscvAddressLookupOracleSparse;
 use neo_memory::riscv::trace::{
     rv32_decode_lookup_backed_cols, rv32_decode_lookup_backed_row_from_instr_word, rv32_decode_lookup_table_id_for_col,

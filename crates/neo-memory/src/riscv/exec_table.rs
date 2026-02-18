@@ -638,36 +638,7 @@ impl Rv32ExecRow {
             .cloned()
             .collect();
 
-        // Shout events
-        let mut shout_events = step.shout_events.clone();
-        if shout_events.is_empty() {
-            // Backfill RV32M shout events for trace/event-table consumers.
-            //
-            // Some trace builders currently omit explicit Shout events for RV32M rows even when
-            // the operation is semantically Shout-backed. Reconstruct the canonical event from the
-            // decoded op and the architectural operands.
-            if let RiscvInstruction::RAlu { op, .. } = &decoded {
-                let is_rv32m = matches!(
-                    op,
-                    RiscvOpcode::Mul
-                        | RiscvOpcode::Mulh
-                        | RiscvOpcode::Mulhu
-                        | RiscvOpcode::Mulhsu
-                        | RiscvOpcode::Div
-                        | RiscvOpcode::Divu
-                        | RiscvOpcode::Rem
-                        | RiscvOpcode::Remu
-                );
-                if is_rv32m {
-                    let rs1_val = reg_read_lane0.value;
-                    let rs2_val = reg_read_lane1.value;
-                    let shout_id = RiscvShoutTables::new(/*xlen=*/ 32).opcode_to_id(*op);
-                    let key = interleave_bits(rs1_val, rs2_val) as u64;
-                    let value = compute_op(*op, rs1_val, rs2_val, /*xlen=*/ 32);
-                    shout_events.push(ShoutEvent { shout_id, key, value });
-                }
-            }
-        }
+        let shout_events = step.shout_events.clone();
 
         Ok(Self {
             active: true,

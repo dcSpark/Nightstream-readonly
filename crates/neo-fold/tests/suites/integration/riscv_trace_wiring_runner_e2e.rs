@@ -230,6 +230,7 @@ fn rv32_trace_wiring_runner_rejects_extra_shout_spec_without_table_spec() {
             table_id: 1000,
             ell_addr: 13,
             n_vals: 1usize,
+            lanes: 1,
         }])
         .prove()
     {
@@ -262,6 +263,7 @@ fn rv32_trace_wiring_runner_accepts_extra_shout_spec_with_matching_table_spec() 
             table_id: 1000,
             ell_addr: 32,
             n_vals: 1usize,
+            lanes: 1,
         }])
         .prove()
         .expect("trace wiring prove with extra table/spec");

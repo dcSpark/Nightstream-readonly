@@ -6,6 +6,8 @@ pub mod ccs;
 pub mod elf_loader;
 pub mod exec_table;
 pub mod lookups;
+pub mod mul_decomp;
+pub mod mul_oracle;
 pub mod rom_init;
 pub mod shout_oracle;
 pub mod sparse_access;

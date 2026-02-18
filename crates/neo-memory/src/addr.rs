@@ -244,6 +244,36 @@ pub fn validate_shout_bit_addressing<Cmt, F>(inst: &LutInstance<Cmt, F>) -> Resu
                     )));
                 }
             }
+            LutTableSpec::Mul8 => {
+                if inst.n_side != 2 || inst.ell != 1 {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Shout(Mul8): expected n_side=2, ell=1, got n_side={}, ell={}",
+                        inst.n_side, inst.ell
+                    )));
+                }
+                if inst.d != crate::riscv::mul_decomp::MUL8_ADDR_BITS {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Shout(Mul8): expected d={}, got d={}",
+                        crate::riscv::mul_decomp::MUL8_ADDR_BITS,
+                        inst.d
+                    )));
+                }
+            }
+            LutTableSpec::Add8Acc => {
+                if inst.n_side != 2 || inst.ell != 1 {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Shout(Add8Acc): expected n_side=2, ell=1, got n_side={}, ell={}",
+                        inst.n_side, inst.ell
+                    )));
+                }
+                if inst.d != crate::riscv::mul_decomp::ADD8ACC_ADDR_BITS {
+                    return Err(PiCcsError::InvalidInput(format!(
+                        "Shout(Add8Acc): expected d={}, got d={}",
+                        crate::riscv::mul_decomp::ADD8ACC_ADDR_BITS,
+                        inst.d
+                    )));
+                }
+            }
         }
 
         return Ok(());

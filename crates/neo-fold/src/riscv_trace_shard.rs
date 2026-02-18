@@ -454,19 +454,28 @@ fn rv32_trace_chunk_to_witness_checked(
     Ok(x.into_iter().chain(w).collect())
 }
 
+/// MUL/MULH/MULHU/MULHSU are handled via Mul8/Add8Acc subtable decomposition,
+/// not via the standard implicit opcode shout table.
+const MUL_DECOMPOSED_OPS: [RiscvOpcode; 4] = [
+    RiscvOpcode::Mul,
+    RiscvOpcode::Mulh,
+    RiscvOpcode::Mulhu,
+    RiscvOpcode::Mulhsu,
+];
+
 fn infer_required_trace_shout_opcodes(program: &[RiscvInstruction]) -> HashSet<RiscvOpcode> {
     let mut ops = HashSet::new();
-    // Required for shared wiring (address/PC arithmetic).
     ops.insert(RiscvOpcode::Add);
     for instr in program {
         match instr {
             RiscvInstruction::RAlu { op, .. } | RiscvInstruction::IAlu { op, .. } => {
-                ops.insert(*op);
+                if !MUL_DECOMPOSED_OPS.contains(op) {
+                    ops.insert(*op);
+                }
             }
             RiscvInstruction::Branch { cond, .. } => {
                 ops.insert(cond.to_shout_opcode());
             }
-            // Address arithmetic in these classes uses ADD shout semantics.
             RiscvInstruction::Load { .. }
             | RiscvInstruction::Store { .. }
             | RiscvInstruction::Jalr { .. }
@@ -477,6 +486,21 @@ fn infer_required_trace_shout_opcodes(program: &[RiscvInstruction]) -> HashSet<R
         }
     }
     ops
+}
+
+fn program_uses_multiply(program: &[RiscvInstruction]) -> bool {
+    program.iter().any(|instr| {
+        matches!(
+            instr,
+            RiscvInstruction::RAlu {
+                op: RiscvOpcode::Mul
+                    | RiscvOpcode::Mulh
+                    | RiscvOpcode::Mulhu
+                    | RiscvOpcode::Mulhsu,
+                ..
+            }
+        )
+    })
 }
 
 fn program_requires_ram_sidecar(program: &[RiscvInstruction]) -> bool {
@@ -1057,6 +1081,7 @@ impl Rv32TraceWiring {
                     table_id: rv32_decode_lookup_table_id_for_col(col_id),
                     ell_addr: prog_layout.d,
                     n_vals: 1usize,
+                    lanes: 1,
                 })
                 .collect()
         } else {
@@ -1071,11 +1096,33 @@ impl Rv32TraceWiring {
                     table_id: rv32_width_lookup_table_id_for_col(col_id),
                     ell_addr: width_lookup_addr_d,
                     n_vals: 1usize,
+                    lanes: 1,
                 })
                 .collect()
         } else {
             Vec::new()
         };
+
+        let uses_mul = program_uses_multiply(&program);
+        let mul_bus_specs: Vec<TraceShoutBusSpec> = if uses_mul {
+            vec![
+                TraceShoutBusSpec {
+                    table_id: neo_memory::riscv::mul_decomp::MUL8_TABLE_ID,
+                    ell_addr: neo_memory::riscv::mul_decomp::MUL8_ADDR_BITS,
+                    n_vals: 1,
+                    lanes: neo_memory::riscv::mul_decomp::MUL8_LANES,
+                },
+                TraceShoutBusSpec {
+                    table_id: neo_memory::riscv::mul_decomp::ADD8ACC_TABLE_ID,
+                    ell_addr: neo_memory::riscv::mul_decomp::ADD8ACC_ADDR_BITS,
+                    n_vals: 1,
+                    lanes: neo_memory::riscv::mul_decomp::ADD8ACC_LANES,
+                },
+            ]
+        } else {
+            Vec::new()
+        };
+
         let mut table_specs = rv32_trace_table_specs(&shout_ops);
         let mut base_shout_table_ids: Vec<u32> = table_specs.keys().copied().collect();
         base_shout_table_ids.sort_unstable();
@@ -1087,9 +1134,20 @@ impl Rv32TraceWiring {
             }
             table_specs.insert(table_id, spec.clone());
         }
+        if uses_mul {
+            table_specs.insert(
+                neo_memory::riscv::mul_decomp::MUL8_TABLE_ID,
+                LutTableSpec::Mul8,
+            );
+            table_specs.insert(
+                neo_memory::riscv::mul_decomp::ADD8ACC_TABLE_ID,
+                LutTableSpec::Add8Acc,
+            );
+        }
         let mut all_extra_shout_specs = self.extra_shout_bus_specs.clone();
         all_extra_shout_specs.extend(decode_lookup_bus_specs.clone());
         all_extra_shout_specs.extend(width_lookup_bus_specs.clone());
+        all_extra_shout_specs.extend(mul_bus_specs.clone());
         for spec in &all_extra_shout_specs {
             if !table_specs.contains_key(&spec.table_id)
                 && !decode_lookup_tables.contains_key(&spec.table_id)
@@ -1170,7 +1228,12 @@ impl Rv32TraceWiring {
 
             let mut lut_tables = decode_lookup_tables.clone();
             lut_tables.extend(width_lookup_tables.clone());
-            let lut_lanes: HashMap<u32, usize> = HashMap::new();
+            let mut lut_lanes: HashMap<u32, usize> = HashMap::new();
+            for spec in &all_extra_shout_specs {
+                if spec.lanes > 1 {
+                    lut_lanes.insert(spec.table_id, spec.lanes);
+                }
+            }
 
             let mut cpu = R1csCpu::new(
                 ccs.clone(),
@@ -1750,6 +1813,7 @@ impl Rv32TraceWiring {
                     table_id: rv32_decode_lookup_table_id_for_col(col_id),
                     ell_addr: prog_layout.d,
                     n_vals: 1usize,
+                    lanes: 1,
                 })
                 .collect()
         };
@@ -1765,15 +1829,47 @@ impl Rv32TraceWiring {
                     table_id: rv32_width_lookup_table_id_for_col(col_id),
                     ell_addr: width_lookup_addr_d,
                     n_vals: 1usize,
+                    lanes: 1,
                 })
                 .collect()
         } else {
             Vec::new()
         };
 
+        let uses_mul = program_uses_multiply(&program);
+        let mul_bus_specs: Vec<TraceShoutBusSpec> = if uses_mul {
+            vec![
+                TraceShoutBusSpec {
+                    table_id: neo_memory::riscv::mul_decomp::MUL8_TABLE_ID,
+                    ell_addr: neo_memory::riscv::mul_decomp::MUL8_ADDR_BITS,
+                    n_vals: 1,
+                    lanes: neo_memory::riscv::mul_decomp::MUL8_LANES,
+                },
+                TraceShoutBusSpec {
+                    table_id: neo_memory::riscv::mul_decomp::ADD8ACC_TABLE_ID,
+                    ell_addr: neo_memory::riscv::mul_decomp::ADD8ACC_ADDR_BITS,
+                    n_vals: 1,
+                    lanes: neo_memory::riscv::mul_decomp::ADD8ACC_LANES,
+                },
+            ]
+        } else {
+            Vec::new()
+        };
+        if uses_mul {
+            table_specs.insert(
+                neo_memory::riscv::mul_decomp::MUL8_TABLE_ID,
+                LutTableSpec::Mul8,
+            );
+            table_specs.insert(
+                neo_memory::riscv::mul_decomp::ADD8ACC_TABLE_ID,
+                LutTableSpec::Add8Acc,
+            );
+        }
+
         let mut all_extra_shout_specs = self.extra_shout_bus_specs.clone();
         all_extra_shout_specs.extend(decode_lookup_bus_specs);
         all_extra_shout_specs.extend(width_lookup_bus_specs);
+        all_extra_shout_specs.extend(mul_bus_specs);
 
         let mut layout = Rv32TraceCcsLayout::new(step_rows)
             .map_err(|e| PiCcsError::InvalidInput(format!("Rv32TraceCcsLayout::new failed: {e}")))?;

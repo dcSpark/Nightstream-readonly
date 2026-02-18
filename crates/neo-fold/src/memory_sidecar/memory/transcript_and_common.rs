@@ -55,6 +55,12 @@ pub(crate) fn bind_shout_table_spec(tr: &mut Poseidon2Transcript, spec: &Option<
         LutTableSpec::IdentityU32 => {
             tr.append_message(b"shout/table_spec/identity_u32/tag", &[1u8]);
         }
+        LutTableSpec::Mul8 => {
+            tr.append_message(b"shout/table_spec/mul8/tag", &[1u8]);
+        }
+        LutTableSpec::Add8Acc => {
+            tr.append_message(b"shout/table_spec/add8acc/tag", &[1u8]);
+        }
     }
 }
 
@@ -226,6 +232,12 @@ pub(crate) fn rv32_shout_table_id_from_spec(spec: &Option<LutTableSpec>) -> Resu
                 "trace linkage expects RISC-V shout table specs (IdentityU32 is unsupported)".into(),
             ));
         }
+        Some(LutTableSpec::Mul8) => {
+            return Ok(neo_memory::riscv::mul_decomp::MUL8_TABLE_ID);
+        }
+        Some(LutTableSpec::Add8Acc) => {
+            return Ok(neo_memory::riscv::mul_decomp::ADD8ACC_TABLE_ID);
+        }
         None => {
             return Err(PiCcsError::InvalidInput(
                 "trace linkage requires LutTableSpec on Shout instances".into(),
@@ -248,7 +260,10 @@ pub(crate) fn rv32_trace_link_table_id_from_spec(spec: &Option<LutTableSpec>) ->
         Some(LutTableSpec::RiscvOpcode { .. })
         | Some(LutTableSpec::RiscvOpcodePacked { .. })
         | Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. }) => Ok(Some(rv32_shout_table_id_from_spec(spec)?)),
-        Some(LutTableSpec::IdentityU32) | None => Ok(None),
+        Some(LutTableSpec::IdentityU32)
+        | Some(LutTableSpec::Mul8)
+        | Some(LutTableSpec::Add8Acc)
+        | None => Ok(None),
     }
 }
 
@@ -928,7 +943,7 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
     alu_imm_shift_rhs_delta: K,
     rs2_decode: K,
     imm_i: K,
-    imm_s: K,
+    _imm_s: K,
 ) -> [K; 42] {
     let op_lui = opcode_flags[0];
     let op_auipc = opcode_flags[1];
@@ -947,6 +962,11 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
     let op_alu_imm_write = op_write_flags[4];
     let op_alu_reg_write = op_write_flags[5];
 
+    // M-extension (MUL/DIV) uses funct7=0b0000001; standard R-type uses 0x00/0x20.
+    // funct7_bits[0] distinguishes them: 1 for M-ext, 0 for standard.
+    let is_mext = funct7_bits[0];
+    let op_alu_reg_std = op_alu_reg * (K::ONE - is_mext);
+
     let non_mem_ops =
         op_lui + op_auipc + op_jal + op_jalr + op_branch + op_alu_imm + op_alu_reg + op_misc_mem + op_system;
 
@@ -963,20 +983,20 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
 
     [
         op_alu_imm * (shout_has_lookup - K::ONE),
-        op_alu_reg * (shout_has_lookup - K::ONE),
+        op_alu_reg_std * (shout_has_lookup - K::ONE),
         op_branch * (shout_has_lookup - K::ONE),
         (K::ONE - shout_has_lookup) * shout_table_id,
-        (op_alu_imm + op_alu_reg + op_branch) * (shout_lhs - rs1_val),
+        (op_alu_imm + op_alu_reg_std + op_branch) * (shout_lhs - rs1_val),
         alu_imm_shift_rhs_delta - shift_selector * (rs2_decode - imm_i),
         op_alu_imm * (shout_rhs - imm_i - alu_imm_shift_rhs_delta),
-        op_alu_reg * (shout_rhs - rs2_val),
+        op_alu_reg_std * (shout_rhs - rs2_val),
         op_branch * (shout_rhs - rs2_val),
         op_alu_imm_write * (rd_val - shout_val),
-        op_alu_reg_write * (rd_val - shout_val),
-        op_alu_reg * (shout_table_id - alu_table_base - alu_reg_table_delta),
+        op_alu_reg_write * (K::ONE - is_mext) * (rd_val - shout_val),
+        op_alu_reg_std * (shout_table_id - alu_table_base - alu_reg_table_delta),
         op_alu_imm * (shout_table_id - alu_table_base - alu_imm_table_delta),
         op_branch * (shout_table_id - branch_table_expected),
-        op_alu_reg * funct7_bits[0],
+        K::ZERO,
         alu_reg_table_delta - funct7_bits[5] * (funct3_is[0] + funct3_is[5]),
         alu_imm_table_delta - funct7_bits[5] * funct3_is[5],
         op_lui * rd_has_write - op_lui_write,
@@ -1002,8 +1022,8 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
         non_mem_ops * ram_has_read,
         non_mem_ops * ram_has_write,
         non_mem_ops * ram_addr,
-        opcode_flags[5] * (ram_addr - rs1_val - imm_i),
-        opcode_flags[6] * (ram_addr - rs1_val - imm_s),
+        opcode_flags[5] * (ram_addr - shout_val),
+        opcode_flags[6] * (ram_addr - shout_val),
     ]
 }
 
@@ -1254,9 +1274,9 @@ pub(crate) fn control_next_pc_control_residuals(
     active: K,
     pc_before: K,
     pc_after: K,
-    rs1_val: K,
+    _rs1_val: K,
     jalr_drop_bit: K,
-    imm_i: K,
+    _imm_i: K,
     imm_b: K,
     imm_j: K,
     op_jal: K,
@@ -1266,13 +1286,14 @@ pub(crate) fn control_next_pc_control_residuals(
     funct3_bit0: K,
 ) -> [K; 5] {
     let four = K::from(F::from_u64(4));
+    let two_to_32 = K::from(F::from_u64(1u64 << 32));
     let taken = control_branch_taken_from_bits(shout_val, funct3_bit0);
     [
-        op_jal * (pc_after - pc_before - imm_j),
-        op_jalr * (pc_after - rs1_val - imm_i + jalr_drop_bit),
-        op_branch * (pc_after - pc_before - four - taken * (imm_b - four)),
-        op_jalr * jalr_drop_bit * (jalr_drop_bit - K::ONE),
-        (active - op_jalr) * jalr_drop_bit,
+        op_jal * (pc_after + jalr_drop_bit * two_to_32 - pc_before - imm_j),
+        op_jalr * (pc_after - shout_val + jalr_drop_bit),
+        op_branch * (pc_after + jalr_drop_bit * two_to_32 - pc_before - four - taken * (imm_b - four)),
+        jalr_drop_bit * (jalr_drop_bit - K::ONE),
+        (active - op_jalr - op_branch - op_jal) * jalr_drop_bit,
     ]
 }
 

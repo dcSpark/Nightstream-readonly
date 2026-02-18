@@ -81,6 +81,7 @@ fn decode_selector_specs(prog_d: usize) -> Vec<TraceShoutBusSpec> {
             table_id: rv32_decode_lookup_table_id_for_col(col),
             ell_addr: prog_d,
             n_vals: 1usize,
+            lanes: 1,
         })
         .collect()
 }
