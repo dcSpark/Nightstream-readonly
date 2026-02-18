@@ -154,28 +154,12 @@ where
             ],
         );
 
-        // Match `neo_ccs::r1cs_to_ccs` behavior: insert identity-first only when square.
-        let (matrices, f) = if n == m {
-            (
-                vec![
-                    CcsMatrix::Identity { n },
-                    CcsMatrix::Csc(CscMat::from_triplets(a_trips, n, m)),
-                    CcsMatrix::Csc(CscMat::from_triplets(b_trips, n, m)),
-                    CcsMatrix::Csc(CscMat::from_triplets(c_trips, n, m)),
-                ],
-                f_base.insert_var_at_front(),
-            )
-        } else {
-            (
-                vec![
-                    CcsMatrix::Csc(CscMat::from_triplets(a_trips, n, m)),
-                    CcsMatrix::Csc(CscMat::from_triplets(b_trips, n, m)),
-                    CcsMatrix::Csc(CscMat::from_triplets(c_trips, n, m)),
-                ],
-                f_base,
-            )
-        };
+        let matrices = vec![
+            CcsMatrix::Csc(CscMat::from_triplets(a_trips, n, m)),
+            CcsMatrix::Csc(CscMat::from_triplets(b_trips, n, m)),
+            CcsMatrix::Csc(CscMat::from_triplets(c_trips, n, m)),
+        ];
 
-        CcsStructure::new_sparse(matrices, f).map_err(|e| format!("CcsBuilder: invalid CCS: {e:?}"))
+        CcsStructure::new_sparse(matrices, f_base).map_err(|e| format!("CcsBuilder: invalid CCS: {e:?}"))
     }
 }

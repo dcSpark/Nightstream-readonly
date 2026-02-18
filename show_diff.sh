@@ -108,10 +108,14 @@ fi
     echo "Git Status Summary"
     echo "=============================================="
     if [ ${#paths[@]} -gt 0 ]; then
-        git status --short -- "${paths[@]}"
+        status_output=$(git status --short -- "${paths[@]}")
     else
-        git status --short
+        status_output=$(git status --short)
     fi
+    if [ "$no_tests" = true ] && [ -n "$status_output" ]; then
+        status_output=$(filter_test_files "$status_output")
+    fi
+    echo "$status_output"
     echo ""
 } >> "$output_file"
 

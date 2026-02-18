@@ -48,6 +48,7 @@ fn build_single_lane_explicit_lut_witness(
     }
 
     let inst = LutInstance::<(), F> {
+        table_id: 0,
         comms: Vec::new(),
         k: n_side,
         d: 1,
@@ -57,6 +58,8 @@ fn build_single_lane_explicit_lut_witness(
         ell,
         table_spec: None,
         table: table.clone(),
+        addr_group: None,
+        selector_group: None,
     };
 
     // Layout: [addr_bits(ell), has_lookup, val].

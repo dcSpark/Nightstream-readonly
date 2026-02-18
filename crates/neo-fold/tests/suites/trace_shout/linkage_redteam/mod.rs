@@ -1,0 +1,4 @@
+mod riscv_trace_shout_event_table_no_shared_cpu_bus_linkage_redteam;
+mod riscv_trace_shout_no_shared_cpu_bus_linkage_redteam;
+mod riscv_trace_shout_sub_no_shared_cpu_bus_linkage_redteam;
+mod riscv_trace_shout_xor_no_shared_cpu_bus_linkage_redteam;

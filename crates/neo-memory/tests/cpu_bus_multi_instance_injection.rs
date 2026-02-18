@@ -34,8 +34,9 @@ fn empty_identity_first_r1cs_ccs(n: usize) -> CcsStructure<F> {
     CcsStructure::new(vec![i_n, a, b, c], f).expect("CCS")
 }
 
-fn lut_inst() -> LutInstance<(), F> {
+fn lut_inst(table_id: u32) -> LutInstance<(), F> {
     LutInstance {
+        table_id,
         comms: Vec::new(),
         k: 2,
         d: 1,
@@ -45,11 +46,14 @@ fn lut_inst() -> LutInstance<(), F> {
         ell: 1,
         table_spec: None,
         table: vec![F::ZERO, F::ONE],
+        addr_group: None,
+        selector_group: None,
     }
 }
 
-fn mem_inst() -> MemInstance<(), F> {
+fn mem_inst(mem_id: u32) -> MemInstance<(), F> {
     MemInstance {
+        mem_id,
         comms: Vec::new(),
         k: 2,
         d: 1,
@@ -67,8 +71,10 @@ fn shared_cpu_bus_injection_supports_independent_instances() {
     let n = 64usize;
     let base_ccs = empty_identity_first_r1cs_ccs(n);
 
-    let lut_insts = vec![lut_inst(), lut_inst()];
-    let mem_insts = vec![mem_inst(), mem_inst()];
+    // Use table IDs outside RV32 shared-address groups so each instance has an independent
+    // `[addr_bits, has_lookup, val]` bus slice in this regression.
+    let lut_insts = vec![lut_inst(1000), lut_inst(1001)];
+    let mem_insts = vec![mem_inst(100), mem_inst(101)];
 
     // CPU columns (all < bus_base) are per-instance.
     let shout_cpu = vec![
@@ -124,11 +130,11 @@ fn shared_cpu_bus_injection_supports_independent_instances() {
     // CPU witness: make only shout0 and twist1 active.
     z[1] = F::ONE; // shout0.has_lookup
     z[2] = F::ONE; // shout0.addr (packed)
-    z[3] = F::from_u64(7); // shout0.val
+    z[3] = F::from_u64(7); // shout0.primary_val()
 
     z[4] = F::ZERO; // shout1.has_lookup
     z[5] = F::ZERO; // shout1.addr
-    z[6] = F::ZERO; // shout1.val
+    z[6] = F::ZERO; // shout1.primary_val()
 
     z[7] = F::ZERO; // twist0.has_read
     z[8] = F::ZERO; // twist0.has_write

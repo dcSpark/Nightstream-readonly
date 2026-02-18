@@ -30,6 +30,10 @@ impl RiscvMemoryEvent {
 pub struct RiscvMemory {
     /// Memory contents (sparse representation).
     data: HashMap<(TwistId, u64), u8>,
+    /// Architectural register file contents (x0..x31), word-addressed.
+    ///
+    /// This is stored separately from `data` because registers are not byte-addressed.
+    regs: [u64; 32],
     /// Word size in bits (32 or 64).
     pub xlen: usize,
 }
@@ -39,6 +43,7 @@ impl RiscvMemory {
     pub fn new(xlen: usize) -> Self {
         Self {
             data: HashMap::new(),
+            regs: [0u64; 32],
             xlen,
         }
     }
@@ -123,6 +128,15 @@ impl RiscvMemory {
 
 impl Twist<u64, u64> for RiscvMemory {
     fn load(&mut self, twist_id: TwistId, addr: u64) -> u64 {
+        if twist_id == super::REG_ID {
+            let idx = addr as usize;
+            debug_assert!(idx < 32, "REG_ID addr out of range: {}", idx);
+            if idx == 0 {
+                return 0;
+            }
+            return self.regs.get(idx).copied().unwrap_or(0);
+        }
+
         let width = if twist_id == super::PROG_ID {
             // Program ROM fetch: always 32-bit instruction word (MVP: no compressed).
             4
@@ -134,6 +148,19 @@ impl Twist<u64, u64> for RiscvMemory {
     }
 
     fn store(&mut self, twist_id: TwistId, addr: u64, value: u64) {
+        if twist_id == super::REG_ID {
+            let idx = addr as usize;
+            debug_assert!(idx < 32, "REG_ID addr out of range: {}", idx);
+            if idx == 0 {
+                return;
+            }
+            let masked = if self.xlen == 32 { value as u32 as u64 } else { value };
+            if let Some(dst) = self.regs.get_mut(idx) {
+                *dst = masked;
+            }
+            return;
+        }
+
         let width = if twist_id == super::PROG_ID { 4 } else { self.xlen / 8 };
         self.write(twist_id, addr, width, value);
     }

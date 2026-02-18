@@ -98,6 +98,7 @@ impl<C: NeoCircuit> SharedBusR1csPreprocessing<C> {
             &self.resources.lut_table_specs,
             chunk_to_witness,
         )
+        .map_err(|e| PiCcsError::InvalidInput(format!("R1csCpu::new failed: {e}")))?
         .with_shared_cpu_bus(
             SharedCpuBusConfig {
                 mem_layouts: self.resources.mem_layouts.clone(),
@@ -105,6 +106,8 @@ impl<C: NeoCircuit> SharedBusR1csPreprocessing<C> {
                 const_one_col: self.const_one_col,
                 shout_cpu: self.shout_cpu.clone(),
                 twist_cpu: self.twist_cpu.clone(),
+                shout_addr_groups: HashMap::new(),
+                shout_selector_groups: HashMap::new(),
             },
             self.chunk_size,
         )
@@ -200,8 +203,8 @@ where
 
     // Ensure Shout lane counts are consistent across resources + cpu bindings.
     //
-    // If lanes aren't set explicitly in resources, infer them from the binding vector length
-    // so witness building + bus layout inference remain consistent.
+    // Empty/missing shout_cpu bindings mean "padding-only" and imply one bus lane.
+    // If lanes aren't set explicitly in resources, infer them from binding len with this rule.
     {
         let mut table_ids: Vec<u32> = resources
             .lut_tables
@@ -213,26 +216,20 @@ where
         table_ids.dedup();
 
         for table_id in table_ids {
-            let bindings = shout_cpu.get(&table_id).ok_or_else(|| {
-                PiCcsError::InvalidInput(format!("missing shout_cpu binding for table_id={table_id}"))
-            })?;
-            if bindings.is_empty() {
-                return Err(PiCcsError::InvalidInput(format!(
-                    "shout_cpu bindings for table_id={table_id} must be non-empty"
-                )));
-            }
+            let bindings = shout_cpu.get(&table_id).map(Vec::as_slice).unwrap_or(&[]);
+            let inferred_lanes = bindings.len().max(1);
             match resources.lut_lanes.get(&table_id) {
                 Some(&lanes) => {
-                    if lanes.max(1) != bindings.len() {
+                    if lanes.max(1) != inferred_lanes {
                         return Err(PiCcsError::InvalidInput(format!(
-                            "shout lanes mismatch for table_id={table_id}: resources.lut_lanes={} but cpu_bindings provides {}",
+                            "shout lanes mismatch for table_id={table_id}: resources.lut_lanes={} but cpu_bindings implies {} lane(s) (empty/missing means 1 padding-only lane)",
                             lanes,
-                            bindings.len()
+                            inferred_lanes
                         )));
                     }
                 }
                 None => {
-                    resources.lut_lanes.insert(table_id, bindings.len());
+                    resources.lut_lanes.insert(table_id, inferred_lanes);
                 }
             }
         }
@@ -292,6 +289,12 @@ fn shout_meta_for_bus(
                     .ok_or_else(|| "2*xlen overflow for RISC-V shout table".to_string())?;
                 Ok((d, 2usize))
             }
+            LutTableSpec::RiscvOpcodePacked { .. } => {
+                Err("RiscvOpcodePacked is not supported in shared-bus circuits".into())
+            }
+            LutTableSpec::RiscvOpcodeEventTablePacked { .. } => {
+                Err("RiscvOpcodeEventTablePacked is not supported in shared-bus circuits".into())
+            }
             LutTableSpec::IdentityU32 => Ok((32usize, 2usize)),
         }
     } else {
@@ -332,20 +335,16 @@ fn shared_bus_buslen_and_constraints(
         let ell_addr = d
             .checked_mul(ell)
             .ok_or_else(|| format!("ell_addr overflow for shout table_id={table_id}"))?;
-        let lanes = resources
-            .lut_lanes
-            .get(table_id)
-            .copied()
-            .unwrap_or(1)
-            .max(1);
-        let bindings = shout_cpu
-            .get(table_id)
-            .ok_or_else(|| format!("missing shout_cpu binding for table_id={table_id}"))?;
-        if bindings.len() != lanes {
-            return Err(format!(
-                "shout_cpu bindings for table_id={table_id} has len={}, expected lanes={lanes}",
-                bindings.len()
-            ));
+        let bindings = shout_cpu.get(table_id).map(Vec::as_slice).unwrap_or(&[]);
+        let lanes = bindings.len().max(1);
+        if let Some(&declared_lanes) = resources.lut_lanes.get(table_id) {
+            if declared_lanes.max(1) != lanes {
+                return Err(format!(
+                    "shout lanes mismatch for table_id={table_id}: resources.lut_lanes={} but cpu_bindings implies {} lane(s) (empty/missing means 1 padding-only lane)",
+                    declared_lanes,
+                    lanes
+                ));
+            }
         }
         shout_ell_addrs_and_lanes.push((ell_addr, lanes));
     }
@@ -397,10 +396,14 @@ fn shared_bus_buslen_and_constraints(
 
     let mut builder = CpuConstraintBuilder::<super::F>::new(/*n=*/ 1, /*m=*/ m_min, const_one_col);
     for (i, table_id) in table_ids.iter().enumerate() {
-        let cpus = shout_cpu
-            .get(table_id)
-            .ok_or_else(|| format!("missing shout_cpu binding for table_id={table_id}"))?;
+        let cpus = shout_cpu.get(table_id).map(Vec::as_slice).unwrap_or(&[]);
         let inst_cols = &bus_layout.shout_cols[i];
+        if cpus.is_empty() {
+            for lane_cols in &inst_cols.lanes {
+                builder.add_shout_instance_padding(&bus_layout, lane_cols);
+            }
+            continue;
+        }
         if cpus.len() != inst_cols.lanes.len() {
             return Err(format!(
                 "shared-bus shout lanes mismatch for table_id={table_id}: shout_cpu has len={} but bus layout expects {}",

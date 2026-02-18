@@ -5,7 +5,6 @@ use super::decode::decode_instruction;
 use super::encode::encode_instruction;
 use super::isa::{BranchCondition, RiscvInstruction, RiscvMemOp, RiscvOpcode};
 use super::tables::RiscvShoutTables;
-use super::{JOLT_CYCLE_TRACK_ECALL_NUM, JOLT_PRINT_ECALL_NUM};
 
 /// A RISC-V CPU that can be traced using Neo's VmCpu trait.
 ///
@@ -85,10 +84,16 @@ impl RiscvCpu {
     }
 
     fn handle_ecall(&mut self) {
-        let call_id = self.get_reg(10) as u32; // a0
-        if call_id != JOLT_CYCLE_TRACK_ECALL_NUM && call_id != JOLT_PRINT_ECALL_NUM {
-            self.halted = true;
+        self.halted = true;
+    }
+
+    fn write_reg<T: Twist<u64, u64>>(&mut self, twist: &mut T, reg: u8, value: u64) {
+        if reg == 0 {
+            return;
         }
+        let masked = self.mask_value(value);
+        twist.store_lane(super::REG_ID, reg as u64, masked, /*lane=*/ 0);
+        self.regs[reg as usize] = masked;
     }
 }
 
@@ -152,17 +157,39 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
             )
         })?;
 
+        // --------------------------------------------------------------------
+        // Regfile-as-Twist (REG_ID): always emit two register reads per step.
+        //
+        // Lane assignment (RV32 trace convention):
+        // - lane 0: read rs1_field
+        // - lane 1: read rs2_field
+        // --------------------------------------------------------------------
+        let reg = super::REG_ID;
+        let rs1_field = ((instr_word_u32 >> 15) & 0x1f) as u64;
+        let rs2_field = ((instr_word_u32 >> 20) & 0x1f) as u64;
+        let rs2_addr = rs2_field;
+
+        let rs1_val = self.mask_value(twist.load_lane(reg, rs1_field, /*lane=*/ 0));
+        let rs2_val = self.mask_value(twist.load_lane(reg, rs2_addr, /*lane=*/ 1));
+
+        // Keep the CPU's register snapshot mirror consistent with Twist state.
+        self.regs[0] = 0;
+        if rs1_field != 0 {
+            self.regs[rs1_field as usize] = rs1_val;
+        }
+        if rs2_addr != 0 {
+            self.regs[rs2_addr as usize] = rs2_val;
+        }
+
         // Default: advance PC by 4
         let mut next_pc = self.pc.wrapping_add(4);
         let step_opcode: u32 = instr_word_u32;
 
         match instr {
-            RiscvInstruction::RAlu { op, rd, rs1, rs2 } => {
-                let rs1_val = self.get_reg(rs1);
-                let rs2_val = self.get_reg(rs2);
-
+            RiscvInstruction::RAlu { op, rd, rs1: _, rs2: _ } => {
                 match op {
-                    // For RV32 B1, prove all M ops in-circuit (avoid implicit Shout tables).
+                    // RV32 trace mode does not require Shout tables for RV32M semantics.
+                    // (They are checked by the RV32M sidecar CCS; Shout is only used for the remainder-bound SLTU check.)
                     RiscvOpcode::Mul
                     | RiscvOpcode::Mulh
                     | RiscvOpcode::Mulhu
@@ -181,22 +208,22 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                         match op {
                             RiscvOpcode::Mul => {
                                 let result = rs1_u32.wrapping_mul(rs2_u32) as u64;
-                                self.set_reg(rd, result);
+                                self.write_reg(twist, rd, result);
                             }
                             RiscvOpcode::Mulh => {
                                 let product = (rs1_i32 as i64) * (rs2_i32 as i64);
                                 let result = (product >> 32) as i32 as u32;
-                                self.set_reg(rd, result as u64);
+                                self.write_reg(twist, rd, result as u64);
                             }
                             RiscvOpcode::Mulhu => {
                                 let product = (rs1_u32 as u64) * (rs2_u32 as u64);
                                 let result = (product >> 32) as u32;
-                                self.set_reg(rd, result as u64);
+                                self.write_reg(twist, rd, result as u64);
                             }
                             RiscvOpcode::Mulhsu => {
                                 let product = (rs1_i32 as i64) * (rs2_u32 as i64);
                                 let result = (product >> 32) as i32 as u32;
-                                self.set_reg(rd, result as u64);
+                                self.write_reg(twist, rd, result as u64);
                             }
                             RiscvOpcode::Div | RiscvOpcode::Rem => {
                                 let divisor_is_zero = rs2_u32 == 0;
@@ -212,7 +239,7 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                                     RiscvOpcode::Rem => rem_i32 as u32,
                                     _ => unreachable!(),
                                 };
-                                self.set_reg(rd, result as u64);
+                                self.write_reg(twist, rd, result as u64);
 
                                 // Record a single Shout event for the remainder bound, only when divisor != 0.
                                 if !divisor_is_zero {
@@ -236,7 +263,7 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                                     RiscvOpcode::Remu => rem,
                                     _ => unreachable!(),
                                 };
-                                self.set_reg(rd, result);
+                                self.write_reg(twist, rd, result);
 
                                 // Record a single Shout event for the remainder bound, only when divisor != 0.
                                 if divisor != 0 {
@@ -253,13 +280,12 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                         let shout_id = shout_tables.opcode_to_id(op);
                         let index = interleave_bits(rs1_val, rs2_val) as u64;
                         let result = shout.lookup(shout_id, index);
-                        self.set_reg(rd, result);
+                        self.write_reg(twist, rd, result);
                     }
                 }
             }
 
-            RiscvInstruction::IAlu { op, rd, rs1, imm } => {
-                let rs1_val = self.get_reg(rs1);
+            RiscvInstruction::IAlu { op, rd, rs1: _, imm } => {
                 let imm_val = self.sign_extend_imm(imm);
 
                 // Use Shout for the ALU operation
@@ -267,16 +293,16 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 let index = interleave_bits(rs1_val, imm_val) as u64;
                 let result = shout.lookup(shout_id, index);
 
-                self.set_reg(rd, result);
+                self.write_reg(twist, rd, result);
             }
 
-            RiscvInstruction::Load { op, rd, rs1, imm } => {
-                let base = self.get_reg(rs1);
+            RiscvInstruction::Load { op, rd, rs1: _, imm } => {
+                let base = rs1_val;
                 let imm_val = self.sign_extend_imm(imm);
                 let index = interleave_bits(base, imm_val) as u64;
                 let addr = shout.lookup(add_shout_id, index);
 
-                // Twist RAM semantics (RV32 B1 / MVP):
+                // Twist RAM semantics (RV32 trace mode):
                 // - Memory is byte-addressed, and `addr` is a byte address.
                 // - Twist accesses are word-valued (XLEN bits), i.e. a `load/store` at `addr`
                 //   reads/writes the little-endian word window starting at `addr`.
@@ -308,15 +334,20 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                     value
                 };
 
-                self.set_reg(rd, self.mask_value(result));
+                self.write_reg(twist, rd, result);
             }
 
-            RiscvInstruction::Store { op, rs1, rs2, imm } => {
-                let base = self.get_reg(rs1);
+            RiscvInstruction::Store {
+                op,
+                rs1: _,
+                rs2: _,
+                imm,
+            } => {
+                let base = rs1_val;
                 let imm_val = self.sign_extend_imm(imm);
                 let index = interleave_bits(base, imm_val) as u64;
                 let addr = shout.lookup(add_shout_id, index);
-                let value = self.get_reg(rs2);
+                let value = rs2_val;
 
                 // Mask value to store width
                 let width = op.width_bytes();
@@ -340,10 +371,12 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 }
             }
 
-            RiscvInstruction::Branch { cond, rs1, rs2, imm } => {
-                let rs1_val = self.get_reg(rs1);
-                let rs2_val = self.get_reg(rs2);
-
+            RiscvInstruction::Branch {
+                cond,
+                rs1: _,
+                rs2: _,
+                imm,
+            } => {
                 // Use Shout for the comparison
                 let shout_id = shout_tables.opcode_to_id(cond.to_shout_opcode());
                 let index = interleave_bits(rs1_val, rs2_val) as u64;
@@ -355,8 +388,12 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 }
 
                 let taken = match cond {
-                    BranchCondition::Eq | BranchCondition::Ne | BranchCondition::Lt | BranchCondition::Ltu => cmp == 1,
-                    BranchCondition::Ge | BranchCondition::Geu => cmp == 0,
+                    // EQ/SLT/SLTU return 1 when the predicate holds.
+                    BranchCondition::Eq | BranchCondition::Lt | BranchCondition::Ltu => cmp == 1,
+                    // Inverted predicates:
+                    // - Ne uses Eq lookup: taken = !(rs1 == rs2)
+                    // - Ge/Geu use Slt/Sltu lookup: taken = !(rs1 < rs2)
+                    BranchCondition::Ne | BranchCondition::Ge | BranchCondition::Geu => cmp == 0,
                 };
                 if taken {
                     let imm_u = self.sign_extend_imm(imm);
@@ -366,14 +403,13 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
 
             RiscvInstruction::Jal { rd, imm } => {
                 // rd = pc + 4 (return address)
-                self.set_reg(rd, self.pc.wrapping_add(4));
+                self.write_reg(twist, rd, self.pc.wrapping_add(4));
                 // pc = pc + imm
                 let imm_u = self.sign_extend_imm(imm);
                 next_pc = self.pc.wrapping_add(imm_u);
             }
 
-            RiscvInstruction::Jalr { rd, rs1, imm } => {
-                let rs1_val = self.get_reg(rs1);
+            RiscvInstruction::Jalr { rd, rs1: _, imm } => {
                 let return_addr = self.pc.wrapping_add(4);
 
                 // pc = (rs1 + imm) & !3 (MVP: no compressed instructions)
@@ -384,13 +420,13 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 next_pc = sum & !3u64;
 
                 // rd = return address
-                self.set_reg(rd, return_addr);
+                self.write_reg(twist, rd, return_addr);
             }
 
             RiscvInstruction::Lui { rd, imm } => {
                 // rd = imm << 12 (upper 20 bits)
                 let value = (imm as i64 as u64) << 12;
-                self.set_reg(rd, self.mask_value(value));
+                self.write_reg(twist, rd, value);
             }
 
             RiscvInstruction::Auipc { rd, imm } => {
@@ -398,42 +434,38 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 let imm_u = self.mask_value((imm as i64 as u64) << 12);
                 let index = interleave_bits(self.pc, imm_u) as u64;
                 let value = shout.lookup(add_shout_id, index);
-                self.set_reg(rd, value);
+                self.write_reg(twist, rd, value);
             }
 
             RiscvInstruction::Halt => {
-                // ECALL trap semantics (Jolt-style): no architectural effects, halt unless it's a known marker/print call.
+                // ECALL trap semantics: halt.
                 self.handle_ecall();
             }
 
             RiscvInstruction::Nop => {}
 
             // === RV64 W-suffix Operations ===
-            RiscvInstruction::RAluw { op, rd, rs1, rs2 } => {
-                let rs1_val = self.get_reg(rs1);
-                let rs2_val = self.get_reg(rs2);
-
+            RiscvInstruction::RAluw { op, rd, rs1: _, rs2: _ } => {
                 let shout_id = shout_tables.opcode_to_id(op);
                 let index = interleave_bits(rs1_val, rs2_val) as u64;
                 let result = shout.lookup(shout_id, index);
 
-                self.set_reg(rd, result);
+                self.write_reg(twist, rd, result);
             }
 
-            RiscvInstruction::IAluw { op, rd, rs1, imm } => {
-                let rs1_val = self.get_reg(rs1);
+            RiscvInstruction::IAluw { op, rd, rs1: _, imm } => {
                 let imm_val = self.sign_extend_imm(imm);
 
                 let shout_id = shout_tables.opcode_to_id(op);
                 let index = interleave_bits(rs1_val, imm_val) as u64;
                 let result = shout.lookup(shout_id, index);
 
-                self.set_reg(rd, result);
+                self.write_reg(twist, rd, result);
             }
 
             // === A Extension: Atomics ===
-            RiscvInstruction::LoadReserved { op, rd, rs1 } => {
-                let addr = self.get_reg(rs1);
+            RiscvInstruction::LoadReserved { op, rd, rs1: _ } => {
+                let addr = rs1_val;
                 let value = twist.load(ram, addr);
 
                 // Apply width and sign extension
@@ -452,13 +484,13 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                     value & mask
                 };
 
-                self.set_reg(rd, self.mask_value(result));
+                self.write_reg(twist, rd, result);
                 // Note: In a real implementation, we'd reserve the address here
             }
 
-            RiscvInstruction::StoreConditional { op, rd, rs1, rs2 } => {
-                let addr = self.get_reg(rs1);
-                let value = self.get_reg(rs2);
+            RiscvInstruction::StoreConditional { op, rd, rs1: _, rs2: _ } => {
+                let addr = rs1_val;
+                let value = rs2_val;
 
                 // Mask value to store width
                 let width = op.width_bytes();
@@ -473,16 +505,16 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 twist.store(ram, addr, store_value);
 
                 // SC returns 0 on success (assuming reservation is valid in single-threaded mode)
-                self.set_reg(rd, 0);
+                self.write_reg(twist, rd, 0);
             }
 
-            RiscvInstruction::Amo { op, rd, rs1, rs2 } => {
-                let addr = self.get_reg(rs1);
-                let src = self.mask_value(self.get_reg(rs2));
+            RiscvInstruction::Amo { op, rd, rs1: _, rs2: _ } => {
+                let addr = rs1_val;
+                let src = rs2_val;
 
                 // Load original value
                 let original = self.mask_value(twist.load(ram, addr));
-                self.set_reg(rd, original);
+                self.write_reg(twist, rd, original);
 
                 // Compute new value based on AMO operation
                 let new_val = match op {

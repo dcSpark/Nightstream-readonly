@@ -72,18 +72,18 @@ fn fib_u32(n: u32) -> u32 {
     a
 }
 
-/// Prove+verify the RV32 Fibonacci program under the B1 shared-bus step circuit.
+/// Prove+verify the RV32 Fibonacci program under trace-wiring mode.
 ///
 /// Expected guest semantics:
 /// - reads `n` from RAM[0x104] (u32)
 /// - writes `fib(n)` to RAM[0x100] (u32)
 /// - halts via `ecall` (treated as `Halt` in this VM)
 #[wasm_bindgen]
-pub fn prove_verify_rv32_b1_fibonacci_asm(
+pub fn prove_verify_rv32_trace_fibonacci_asm(
     asm: &str,
     n: u32,
-    ram_bytes: usize,
-    chunk_size: usize,
+    _ram_bytes: usize,
+    chunk_rows: usize,
     max_steps: usize,
     do_spartan: bool,
 ) -> Result<JsValue, JsValue> {
@@ -96,11 +96,10 @@ pub fn prove_verify_rv32_b1_fibonacci_asm(
     let expected_f = F::from_u64(expected as u64);
 
     let mut run = {
-        let mut b = neo_fold::riscv_shard::Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+        let mut b = neo_fold::riscv_trace_shard::Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
             .xlen(32)
-            .ram_bytes(ram_bytes)
             .ram_init_u32(/*addr=*/ 0x104, n)
-            .chunk_size(chunk_size)
+            .chunk_rows(chunk_rows)
             .shout_auto_minimal()
             .output(/*output_addr=*/ 0x100, /*expected_output=*/ expected_f);
         if max_steps > 0 {
@@ -118,11 +117,11 @@ pub fn prove_verify_rv32_b1_fibonacci_asm(
         .map(|d| d.as_secs_f64() * 1000.0)
         .unwrap_or(0.0);
 
-    let trace_len = run.riscv_trace_len().ok();
+    let trace_len = Some(run.trace_len());
     let folds = run.fold_count();
     let ccs_constraints = run.ccs_num_constraints();
     let ccs_variables = run.ccs_num_variables();
-    let shout_lookups = run.shout_lookup_count().ok();
+    let shout_lookups = Some(run.exec_table().rows.iter().map(|r| r.shout_events.len()).sum());
 
     let spartan = if do_spartan {
         let acc_init = &[];

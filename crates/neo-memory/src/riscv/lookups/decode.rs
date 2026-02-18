@@ -181,7 +181,7 @@ pub fn decode_instruction(instr: u32) -> Result<RiscvInstruction, String> {
             Ok(RiscvInstruction::Auipc { rd, imm })
         }
 
-        // SYSTEM (1110011) - ECALL (Jolt-style trap; no EBREAK support)
+        // SYSTEM (1110011) - ECALL (trap/terminate in this VM)
         0b1110011 => {
             if instr == 0x0000_0073 {
                 Ok(RiscvInstruction::Halt) // ECALL (trap/terminate in this VM)
@@ -190,7 +190,7 @@ pub fn decode_instruction(instr: u32) -> Result<RiscvInstruction, String> {
             }
         }
 
-        // MISC-MEM (0001111) - FENCE (FENCE.I unsupported to match Jolt tracer)
+        // MISC-MEM (0001111) - FENCE (FENCE.I unsupported)
         0b0001111 => {
             if funct3 != 0b000 {
                 return Err(format!("Unsupported MISC-MEM instruction: funct3={:#x}", funct3));
