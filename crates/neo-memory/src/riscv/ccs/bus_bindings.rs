@@ -102,7 +102,17 @@ fn derive_trace_shout_shapes(
     let mut shape_by_table_id = HashMap::<u32, TraceShoutShape>::new();
 
     for &table_id in shout_table_ids {
-        validate_trace_shout_table_id(table_id)?;
+        if let Err(err) = validate_trace_shout_table_id(table_id) {
+            // Allow caller-provided lookup families when an explicit extra spec defines geometry.
+            // In that case, defer shape creation to the extra_shout_specs pass below.
+            if extra_shout_specs
+                .iter()
+                .any(|spec| spec.table_id == table_id)
+            {
+                continue;
+            }
+            return Err(err);
+        }
         shape_by_table_id.insert(
             table_id,
             TraceShoutShape {
