@@ -210,6 +210,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_sra_prove_verify() {
             xlen: 32,
         }),
         table: Vec::new(),
+    addr_group: None,
+    selector_group: None,
     };
     let sra_z = build_shout_only_bus_z(
         ccs.m,

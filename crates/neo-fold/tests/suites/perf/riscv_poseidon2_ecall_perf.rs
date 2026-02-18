@@ -2,7 +2,7 @@
 
 use std::time::Duration;
 
-use neo_fold::riscv_shard::Rv32B1;
+use neo_fold::riscv_trace_shard::{Rv32TraceWiring, Rv32TraceWiringRun};
 use neo_memory::riscv::lookups::{
     encode_program, RiscvInstruction, RiscvOpcode, POSEIDON2_ECALL_NUM, POSEIDON2_READ_ECALL_NUM,
 };
@@ -59,9 +59,9 @@ fn poseidon2_ecall_program(n_hashes: usize) -> Vec<RiscvInstruction> {
 fn run_once(
     program_bytes: &[u8],
     max_steps: usize,
-) -> Result<neo_fold::riscv_shard::Rv32B1Run, neo_fold::PiCcsError> {
-    Rv32B1::from_rom(0, program_bytes)
-        .chunk_size(max_steps)
+) -> Result<Rv32TraceWiringRun, neo_fold::PiCcsError> {
+    Rv32TraceWiring::from_rom(0, program_bytes)
+        .chunk_rows(max_steps)
         .max_steps(max_steps)
         .prove()
 }
@@ -107,8 +107,8 @@ fn env_usize(name: &str, default: usize) -> usize {
 }
 
 #[test]
-#[ignore = "perf-style test: run with `P2_HASHES=1 cargo test -p neo-fold --release --test perf -- --ignored --nocapture rv32_b1_poseidon2_ecall_perf`"]
-fn rv32_b1_poseidon2_ecall_perf() {
+#[ignore = "perf-style test: run with `P2_HASHES=1 cargo test -p neo-fold --release --test perf -- --ignored --nocapture rv32_trace_poseidon2_ecall_perf`"]
+fn rv32_trace_poseidon2_ecall_perf() {
     let n_hashes = env_usize("P2_HASHES", 1);
     let warmups = env_usize("P2_WARMUPS", 1);
     let samples = env_usize("P2_SAMPLES", 5);
@@ -143,7 +143,7 @@ fn rv32_b1_poseidon2_ecall_perf() {
         ccs_n = run.ccs_num_constraints();
         ccs_m = run.ccs_num_variables();
         fold_count = run.fold_count();
-        trace_len = run.riscv_trace_len().unwrap_or(0);
+        trace_len = run.trace_len();
     }
 
     let prove = summarize(&prove_times);
@@ -155,7 +155,7 @@ fn rv32_b1_poseidon2_ecall_perf() {
 
     println!();
     println!("{sep}");
-    println!("POSEIDON2 ECALL BENCHMARK (RV32 B1)");
+    println!("POSEIDON2 ECALL BENCHMARK (RV32 TRACE)");
     println!("{sep}");
     println!(
         "config: hashes={} instructions={} warmups={} samples={}",
@@ -218,8 +218,8 @@ fn rv32_b1_poseidon2_ecall_perf() {
 }
 
 #[test]
-#[ignore = "perf-style test: run with `cargo test -p neo-fold --release --test perf -- --ignored --nocapture rv32_b1_poseidon2_ecall_scaling`"]
-fn rv32_b1_poseidon2_ecall_scaling() {
+#[ignore = "perf-style test: run with `cargo test -p neo-fold --release --test perf -- --ignored --nocapture rv32_trace_poseidon2_ecall_scaling`"]
+fn rv32_trace_poseidon2_ecall_scaling() {
     let samples = env_usize("P2_SAMPLES", 3);
     let warmups = env_usize("P2_WARMUPS", 1);
     let hash_counts = [1, 2, 4, 8];
@@ -229,7 +229,10 @@ fn rv32_b1_poseidon2_ecall_scaling() {
 
     println!();
     println!("{sep}");
-    println!("POSEIDON2 ECALL SCALING (RV32 B1) — warmups={} samples={}", warmups, samples);
+    println!(
+        "POSEIDON2 ECALL SCALING (RV32 TRACE) — warmups={} samples={}",
+        warmups, samples
+    );
     println!("{sep}");
     println!(
         "{:>8} {:>8} {:>8} {:>8} {:>10} {:>10} {:>10} {:>10} {:>12}",

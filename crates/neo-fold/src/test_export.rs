@@ -591,17 +591,7 @@ pub fn estimate_proof(proof: &crate::shard::ShardProof) -> TestExportProofEstima
         fold_lane_commitments =
             fold_lane_commitments.saturating_add(step.fold.ccs_out.len() + step.fold.dec_children.len() + 1);
         mem_cpu_val_claim_commitments = mem_cpu_val_claim_commitments.saturating_add(step.mem.val_me_claims.len());
-        mem_cpu_val_claim_commitments =
-            mem_cpu_val_claim_commitments.saturating_add(step.mem.shout_me_claims_time.len());
-        mem_cpu_val_claim_commitments =
-            mem_cpu_val_claim_commitments.saturating_add(step.mem.twist_me_claims_time.len());
         for val in &step.val_fold {
-            val_lane_commitments = val_lane_commitments.saturating_add(val.dec_children.len() + 1);
-        }
-        for val in &step.twist_time_fold {
-            val_lane_commitments = val_lane_commitments.saturating_add(val.dec_children.len() + 1);
-        }
-        for val in &step.shout_time_fold {
             val_lane_commitments = val_lane_commitments.saturating_add(val.dec_children.len() + 1);
         }
         for val in &step.wb_fold {

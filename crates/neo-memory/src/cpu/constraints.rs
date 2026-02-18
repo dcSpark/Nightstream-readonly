@@ -44,7 +44,6 @@ use crate::cpu::bus_layout::{
     build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, BusLayout, ShoutCols, ShoutInstanceShape,
     TwistCols,
 };
-use crate::riscv::trace::{rv32_trace_lookup_addr_group_for_table_shape, rv32_trace_lookup_selector_group_for_table_id};
 use crate::witness::{LutInstance, MemInstance};
 
 /// CPU column layout for binding to the bus.
@@ -970,6 +969,7 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints<F: Field + PrimeCharacteristic
     mem_insts: &[MemInstance<Cmt, F>],
 ) -> Result<CcsStructure<F>, String> {
     let shout_cpu: Vec<Option<ShoutCpuBinding>> = shout_cpu.iter().cloned().map(Some).collect();
+    let empty_groups = std::collections::HashMap::new();
     extend_ccs_with_shared_cpu_bus_constraints_optional_shout(
         base_ccs,
         m_in,
@@ -978,6 +978,8 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints<F: Field + PrimeCharacteristic
         twist_cpu,
         lut_insts,
         mem_insts,
+        &empty_groups,
+        &empty_groups,
     )
 }
 
@@ -996,6 +998,8 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints_optional_shout<
     twist_cpu: &[TwistCpuBinding],
     lut_insts: &[LutInstance<Cmt, F>],
     mem_insts: &[MemInstance<Cmt, F>],
+    shout_addr_groups: &std::collections::HashMap<u32, u64>,
+    shout_selector_groups: &std::collections::HashMap<u32, u64>,
 ) -> Result<CcsStructure<F>, String> {
     let total_shout_lanes: usize = lut_insts.iter().map(|l| l.lanes.max(1)).sum();
     if shout_cpu.len() != total_shout_lanes {
@@ -1054,8 +1058,8 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints_optional_shout<
             ell_addr: inst.d * inst.ell,
             lanes: inst.lanes.max(1),
             n_vals: 1usize,
-            addr_group: rv32_trace_lookup_addr_group_for_table_shape(inst.table_id, inst.d * inst.ell).map(|v| v as u64),
-            selector_group: rv32_trace_lookup_selector_group_for_table_id(inst.table_id).map(|v| v as u64),
+            addr_group: shout_addr_groups.get(&inst.table_id).copied(),
+            selector_group: shout_selector_groups.get(&inst.table_id).copied(),
         }),
         mem_insts
             .iter()

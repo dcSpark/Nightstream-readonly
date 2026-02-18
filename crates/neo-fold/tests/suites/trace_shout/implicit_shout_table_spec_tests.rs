@@ -124,6 +124,8 @@ fn absorb_step_memory_binds_table_spec() {
             ell: 1,
             table_spec: Some(LutTableSpec::RiscvOpcode { opcode, xlen: 32 }),
             table: vec![],
+            addr_group: None,
+            selector_group: None,
         }],
         mem_insts: vec![],
         _phantom: PhantomData,
@@ -167,6 +169,8 @@ fn route_a_shout_implicit_table_spec_verifies() {
         ell: 1,
         table_spec: Some(LutTableSpec::RiscvOpcode { opcode, xlen }),
         table: vec![],
+        addr_group: None,
+        selector_group: None,
     };
     let wit = LutWitness { mats: Vec::new() };
 
@@ -258,6 +262,8 @@ fn route_a_shout_implicit_identity_u32_table_spec_verifies() {
         ell: 1,
         table_spec: Some(LutTableSpec::IdentityU32),
         table: vec![],
+        addr_group: None,
+        selector_group: None,
     };
     let wit = LutWitness { mats: Vec::new() };
 

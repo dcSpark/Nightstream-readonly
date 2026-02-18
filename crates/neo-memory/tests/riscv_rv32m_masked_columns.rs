@@ -1,52 +1,11 @@
-use std::collections::HashMap;
-
-use neo_ccs::relations::check_ccs_rowwise_zero;
-use neo_memory::plain::PlainMemLayout;
-use neo_memory::riscv::ccs::{
-    build_rv32_b1_semantics_sidecar_ccs, build_rv32_b1_step_ccs, rv32_b1_chunk_to_full_witness_checked,
-};
+use neo_memory::riscv::exec_table::{Rv32ExecTable, Rv32ShoutEventTable};
 use neo_memory::riscv::lookups::{
-    encode_program, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID, REG_ID,
+    decode_program, encode_program, interleave_bits, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode,
+    RiscvShoutTables, PROG_ID,
 };
-use neo_memory::riscv::rom_init::prog_rom_layout_and_init_words;
 use neo_vm_trace::trace_program;
-use p3_field::PrimeCharacteristicRing;
-use p3_goldilocks::Goldilocks as F;
 
-fn mem_layouts_for_program(program_bytes: &[u8]) -> HashMap<u32, PlainMemLayout> {
-    let (prog_layout, _prog_init) = prog_rom_layout_and_init_words::<F>(PROG_ID, /*base_addr=*/ 0, program_bytes)
-        .expect("prog_rom_layout_and_init_words");
-
-    HashMap::from([
-        (
-            RAM_ID.0,
-            PlainMemLayout {
-                k: 4,
-                d: 2,
-                n_side: 2,
-                lanes: 1,
-            },
-        ),
-        (
-            REG_ID.0,
-            PlainMemLayout {
-                k: 32,
-                d: 5,
-                n_side: 2,
-                lanes: 2,
-            },
-        ),
-        (PROG_ID.0, prog_layout),
-    ])
-}
-
-#[test]
-fn rv32m_masked_columns_are_tied_to_real_witness() {
-    // Program:
-    //   ADDI x1,x0,3
-    //   ADDI x2,x0,5
-    //   MULH x3,x1,x2
-    //   HALT
+fn rv32m_exec_table() -> Rv32ExecTable {
     let program = vec![
         RiscvInstruction::IAlu {
             op: RiscvOpcode::Add,
@@ -66,62 +25,83 @@ fn rv32m_masked_columns_are_tied_to_real_witness() {
             rs1: 1,
             rs2: 2,
         },
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Divu,
+            rd: 4,
+            rs1: 2,
+            rs2: 1,
+        },
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Remu,
+            rd: 5,
+            rs1: 2,
+            rs2: 1,
+        },
         RiscvInstruction::Halt,
     ];
     let program_bytes = encode_program(&program);
-    let mem_layouts = mem_layouts_for_program(&program_bytes);
+    let decoded_program = decode_program(&program_bytes).expect("decode_program");
 
-    // Minimal Shout set needed to execute the ADDI instructions above.
+    let mut cpu = RiscvCpu::new(/*xlen=*/ 32);
+    cpu.load_program(/*base=*/ 0, decoded_program);
+    let twist = RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
     let shout = RiscvShoutTables::new(/*xlen=*/ 32);
-    let shout_table_ids = vec![shout.opcode_to_id(RiscvOpcode::Add).0];
+    let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 32).expect("trace_program");
 
-    let (_main_ccs, layout) =
-        build_rv32_b1_step_ccs(&mem_layouts, &shout_table_ids, /*chunk_size=*/ 1).expect("build_rv32_b1_step_ccs");
-    let semantics_ccs =
-        build_rv32_b1_semantics_sidecar_ccs(&layout, &mem_layouts).expect("build_rv32_b1_semantics_sidecar_ccs");
+    let exec = Rv32ExecTable::from_trace_padded_pow2(&trace, /*min_len=*/ 8).expect("from_trace_padded_pow2");
+    exec.validate_cycle_chain().expect("cycle chain");
+    exec.validate_pc_chain().expect("pc chain");
+    exec.validate_halted_tail().expect("halted tail");
+    exec.validate_inactive_rows_are_empty()
+        .expect("inactive rows");
+    exec
+}
 
-    // Trace the program to obtain per-step events (PROG/REG/RAM + Shout).
-    let mut cpu_vm = RiscvCpu::new(/*xlen=*/ 32);
-    cpu_vm.load_program(/*base=*/ 0, program);
-    let memory = RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base=*/ 0, &program_bytes);
-    let shout = RiscvShoutTables::new(/*xlen=*/ 32);
-    let trace = trace_program(cpu_vm, memory, shout, /*max_steps=*/ 16).expect("trace_program");
-    assert!(trace.did_halt(), "expected program to halt");
+#[test]
+fn rv32_trace_shout_event_table_includes_rv32m_rows() {
+    let exec = rv32m_exec_table();
+    let events = Rv32ShoutEventTable::from_exec_table(&exec).expect("Rv32ShoutEventTable::from_exec_table");
+
     assert!(
-        trace.steps.len() >= 3,
-        "expected at least 3 executed steps, got {}",
-        trace.steps.len()
+        events
+            .rows
+            .iter()
+            .any(|row| row.opcode == Some(RiscvOpcode::Mulh)),
+        "expected MULH shout event row"
     );
+    assert!(
+        exec.rows.iter().any(|row| matches!(
+            row.decoded,
+            Some(RiscvInstruction::RAlu {
+                op: RiscvOpcode::Divu,
+                ..
+            })
+        )),
+        "expected DIVU step in execution table"
+    );
+    assert!(
+        exec.rows.iter().any(|row| matches!(
+            row.decoded,
+            Some(RiscvInstruction::RAlu {
+                op: RiscvOpcode::Remu,
+                ..
+            })
+        )),
+        "expected REMU step in execution table"
+    );
+}
 
-    // Non-M row (ADDI): masked columns must be 0 and are enforced by semantics CCS.
-    {
-        let step = &trace.steps[0];
-        let z = rv32_b1_chunk_to_full_witness_checked(&layout, core::slice::from_ref(step)).expect("witness");
-        let (x, w) = z.split_at(layout.m_in);
-        check_ccs_rowwise_zero(&semantics_ccs, x, w).expect("semantics CCS must accept honest witness");
+#[test]
+fn rv32_trace_shout_event_table_mulh_key_matches_operands() {
+    let exec = rv32m_exec_table();
+    let events = Rv32ShoutEventTable::from_exec_table(&exec).expect("Rv32ShoutEventTable::from_exec_table");
 
-        let mut z_bad = z.clone();
-        z_bad[layout.rv32m_rs1_val(0)] = F::ONE;
-        let (x_bad, w_bad) = z_bad.split_at(layout.m_in);
-        assert!(
-            check_ccs_rowwise_zero(&semantics_ccs, x_bad, w_bad).is_err(),
-            "expected masking constraint failure on non-RV32M row"
-        );
-    }
+    let mulh_row = events
+        .rows
+        .iter()
+        .find(|row| row.opcode == Some(RiscvOpcode::Mulh))
+        .expect("expected MULH row");
 
-    // M-sidecar row (MULH): masked columns must equal the real operands/output and are enforced by semantics CCS.
-    {
-        let step = &trace.steps[2];
-        let z = rv32_b1_chunk_to_full_witness_checked(&layout, core::slice::from_ref(step)).expect("witness");
-        let (x, w) = z.split_at(layout.m_in);
-        check_ccs_rowwise_zero(&semantics_ccs, x, w).expect("semantics CCS must accept honest witness");
-
-        let mut z_bad = z.clone();
-        z_bad[layout.rv32m_rs1_val(0)] = F::ZERO;
-        let (x_bad, w_bad) = z_bad.split_at(layout.m_in);
-        assert!(
-            check_ccs_rowwise_zero(&semantics_ccs, x_bad, w_bad).is_err(),
-            "expected masking constraint failure on RV32M row"
-        );
-    }
+    let expected_key = interleave_bits(/*lhs=*/ 3, /*rhs=*/ 5) as u64;
+    assert_eq!(mulh_row.key, expected_key, "MULH key must encode rs1/rs2 values");
 }

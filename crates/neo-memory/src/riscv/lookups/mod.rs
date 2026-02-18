@@ -7,7 +7,7 @@
 //!
 //! # Proving integration scope (today)
 //!
-//! The shared-bus RV32 B1 proving path assumes:
+//! The shared-bus RV32 trace-wiring proving path assumes:
 //! - `xlen == 32` (RV32)
 //! - no compressed (RVC) instructions
 //! - 4-byte aligned PC and control-flow targets
@@ -98,12 +98,12 @@ use neo_vm_trace::TwistId;
 /// Canonical Twist instance id for RISC-V data RAM.
 pub const RAM_ID: TwistId = TwistId(0);
 
-/// Canonical Twist instance id for the program ROM (B1 instruction fetch).
+/// Canonical Twist instance id for the program ROM instruction fetch.
 pub const PROG_ID: TwistId = TwistId(1);
 
 /// Canonical Twist instance id for the architectural register file (x0..x31).
 ///
-/// This is used by the RV32 B1 step circuit in "regfile-as-Twist" mode.
+/// This is used by the RV32 trace-wiring circuit in "regfile-as-Twist" mode.
 pub const REG_ID: TwistId = TwistId(2);
 
 /// Poseidon2-Goldilocks hash compute ECALL identifier.

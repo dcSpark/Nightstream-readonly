@@ -1,4 +1,4 @@
-use neo_fold::riscv_shard::Rv32B1;
+use neo_fold::riscv_trace_shard::Rv32TraceWiring;
 use neo_fold::PiCcsError;
 use neo_math::F;
 use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvOpcode};
@@ -36,31 +36,37 @@ fn assert_m_in_mismatch_rejected(err: PiCcsError) {
 }
 
 #[test]
-fn rv32_b1_build_verifier_binds_statement_memory_to_chunk0_mem_init() {
+fn rv32_trace_build_verifier_binds_statement_memory_to_chunk0_mem_init() {
     let program_a = program_bytes_with_seed(7);
     let program_b = program_bytes_with_seed(9);
 
-    let mut run_a = Rv32B1::from_rom(/*program_base=*/ 0, &program_a)
-        .chunk_size(1)
+    let mut run_a = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_a)
+        .chunk_rows(1)
+        .min_trace_len(1)
         .prove()
         .expect("prove statement A");
     run_a.verify().expect("self-verify statement A");
 
     let proof_a = run_a.proof().clone();
     let steps_public_a = run_a.steps_public();
+    let step_rows = run_a.step_rows();
+    let ram_d = run_a.ram_d();
+    let width_lookup_addr_d = run_a.width_lookup_addr_d();
 
-    let verifier_a = Rv32B1::from_rom(/*program_base=*/ 0, &program_a)
-        .chunk_size(1)
-        .build_verifier()
+    let verifier_a = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_a)
+        .chunk_rows(1)
+        .min_trace_len(1)
+        .build_verifier(step_rows, ram_d, width_lookup_addr_d)
         .expect("build verifier for statement A");
     let ok = verifier_a
         .verify(&proof_a, &steps_public_a)
         .expect("matching statement should verify");
     assert!(ok, "matching statement should verify");
 
-    let verifier_b = Rv32B1::from_rom(/*program_base=*/ 0, &program_b)
-        .chunk_size(1)
-        .build_verifier()
+    let verifier_b = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_b)
+        .chunk_rows(1)
+        .min_trace_len(1)
+        .build_verifier(step_rows, ram_d, width_lookup_addr_d)
         .expect("build verifier for statement B");
     let err = verifier_b
         .verify(&proof_a, &steps_public_a)
@@ -78,11 +84,12 @@ fn rv32_b1_build_verifier_binds_statement_memory_to_chunk0_mem_init() {
 }
 
 #[test]
-fn rv32_b1_build_verifier_rejects_external_steps_with_non_uniform_m_in() {
+fn rv32_trace_build_verifier_rejects_external_steps_with_non_uniform_m_in() {
     let program = program_bytes_with_seed(11);
 
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program)
-        .chunk_size(1)
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program)
+        .chunk_rows(1)
+        .min_trace_len(1)
         .prove()
         .expect("prove statement");
     run.verify().expect("self-verify statement");
@@ -95,9 +102,10 @@ fn rv32_b1_build_verifier_rejects_external_steps_with_non_uniform_m_in() {
     );
     steps_public[1].mcs_inst.m_in += 1;
 
-    let verifier = Rv32B1::from_rom(/*program_base=*/ 0, &program)
-        .chunk_size(1)
-        .build_verifier()
+    let verifier = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program)
+        .chunk_rows(1)
+        .min_trace_len(1)
+        .build_verifier(run.step_rows(), run.ram_d(), run.width_lookup_addr_d())
         .expect("build verifier");
     let err = verifier
         .verify(&proof, &steps_public)
@@ -106,11 +114,12 @@ fn rv32_b1_build_verifier_rejects_external_steps_with_non_uniform_m_in() {
 }
 
 #[test]
-fn rv32_b1_build_verifier_output_binding_rejects_external_steps_with_non_uniform_m_in() {
+fn rv32_trace_build_verifier_output_binding_rejects_external_steps_with_non_uniform_m_in() {
     let program = program_bytes_with_seed(13);
 
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program)
-        .chunk_size(1)
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program)
+        .chunk_rows(1)
+        .min_trace_len(1)
         .output(/*output_addr=*/ 0, /*expected_output=*/ F::ZERO)
         .prove()
         .expect("prove statement with output binding");
@@ -125,10 +134,11 @@ fn rv32_b1_build_verifier_output_binding_rejects_external_steps_with_non_uniform
     );
     steps_public[1].mcs_inst.m_in += 1;
 
-    let verifier = Rv32B1::from_rom(/*program_base=*/ 0, &program)
-        .chunk_size(1)
+    let verifier = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program)
+        .chunk_rows(1)
+        .min_trace_len(1)
         .output(/*output_addr=*/ 0, /*expected_output=*/ F::ZERO)
-        .build_verifier()
+        .build_verifier(run.step_rows(), run.ram_d(), run.width_lookup_addr_d())
         .expect("build verifier with output binding");
     let err = verifier
         .verify(&proof, &steps_public)

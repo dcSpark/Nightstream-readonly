@@ -6,19 +6,14 @@
 use crate::addr::write_addr_bits_dim_major_le_into_bus;
 use crate::builder::CpuArithmetization;
 use crate::cpu::bus_layout::{
-    build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes,
-    BusLayout, ShoutInstanceShape,
+    build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, BusLayout, ShoutInstanceShape,
 };
 use crate::cpu::constraints::{
-    extend_ccs_with_shared_cpu_bus_constraints_optional_shout, ShoutCpuBinding, TwistCpuBinding,
-    CPU_BUS_COL_DISABLED,
+    extend_ccs_with_shared_cpu_bus_constraints_optional_shout, ShoutCpuBinding, TwistCpuBinding, CPU_BUS_COL_DISABLED,
 };
 use crate::mem_init::MemInit;
 use crate::plain::LutTable;
 use crate::plain::PlainMemLayout;
-use crate::riscv::trace::{
-    rv32_trace_lookup_addr_group_for_table_shape, rv32_trace_lookup_selector_group_for_table_id,
-};
 use crate::witness::{LutInstance, LutTableSpec, MemInstance};
 use neo_ajtai::{decomp_b, DecompStyle};
 use neo_ccs::matrix::Mat;
@@ -61,6 +56,16 @@ pub struct SharedCpuBusConfig<F> {
     /// Each Twist instance may have multiple access lanes (`PlainMemLayout.lanes`); this map must
     /// provide one `TwistCpuBinding` per lane in lane-index order.
     pub twist_cpu: HashMap<u32, Vec<TwistCpuBinding>>,
+    /// Optional per-table address-sharing group ids (table_id -> group_id).
+    ///
+    /// Tables with the same group_id share `addr_bits` columns in the bus layout.
+    /// Leave empty when no families share address bits. Populated by trace mode for column efficiency.
+    pub shout_addr_groups: HashMap<u32, u64>,
+    /// Optional per-table selector-sharing group ids (table_id -> group_id).
+    ///
+    /// Tables with the same group_id share `has_lookup` columns in the bus layout.
+    /// Leave empty when no families share selectors. Populated by trace mode for column efficiency.
+    pub shout_selector_groups: HashMap<u32, u64>,
 }
 
 #[derive(Clone, Debug)]
@@ -197,8 +202,8 @@ where
                 ell_addr,
                 lanes,
                 n_vals: 1usize,
-                addr_group: rv32_trace_lookup_addr_group_for_table_shape(*table_id, ell_addr).map(|v| v as u64),
-                selector_group: rv32_trace_lookup_selector_group_for_table_id(*table_id).map(|v| v as u64),
+                addr_group: bus.shout_addr_groups.get(table_id).copied(),
+                selector_group: bus.shout_selector_groups.get(table_id).copied(),
             });
         }
 
@@ -290,7 +295,11 @@ where
             .sum();
         let mut shout_cpu: Vec<Option<ShoutCpuBinding>> = Vec::with_capacity(total_shout_lanes);
         for table_id in &table_ids {
-            let bindings = cfg.shout_cpu.get(table_id).map(Vec::as_slice).unwrap_or(&[]);
+            let bindings = cfg
+                .shout_cpu
+                .get(table_id)
+                .map(Vec::as_slice)
+                .unwrap_or(&[]);
             if bindings.is_empty() {
                 shout_cpu.push(None);
                 continue;
@@ -397,6 +406,8 @@ where
                 ell,
                 table_spec: None,
                 table: Vec::new(),
+                addr_group: cfg.shout_addr_groups.get(table_id).copied(),
+                selector_group: cfg.shout_selector_groups.get(table_id).copied(),
             });
         }
 
@@ -428,40 +439,10 @@ where
             &twist_cpu,
             &lut_insts,
             &mem_insts,
+            &cfg.shout_addr_groups,
+            &cfg.shout_selector_groups,
         )
         .map_err(|e| format!("shared_cpu_bus: failed to inject constraints: {e}"))?;
-
-        self.shared_cpu_bus = Some(SharedCpuBusState {
-            cfg,
-            table_ids,
-            mem_ids,
-            layout,
-        });
-        Ok(self)
-    }
-
-    /// Like [`with_shared_cpu_bus`], but assumes the CCS already contains bus constraints.
-    ///
-    /// Use this when the `ccs` passed to [`R1csCpu::new`] is a pre-wired CCS from a cache
-    /// (e.g. from a previous `with_shared_cpu_bus` call). This sets up the internal
-    /// `SharedCpuBusState` needed for witness generation in [`build_ccs_chunks`] without
-    /// re-injecting constraint matrices into the CCS.
-    pub fn with_shared_cpu_bus_witness_only(
-        mut self,
-        cfg: SharedCpuBusConfig<F>,
-        chunk_size: usize,
-    ) -> Result<Self, String> {
-        if chunk_size == 0 {
-            return Err("shared_cpu_bus: chunk_size must be >= 1".into());
-        }
-        if cfg.const_one_col >= self.m_in {
-            return Err(format!(
-                "shared_cpu_bus: const_one_col={} must be < m_in={}",
-                cfg.const_one_col, self.m_in
-            ));
-        }
-
-        let (table_ids, mem_ids, layout) = self.shared_bus_schema(&cfg, chunk_size)?;
 
         self.shared_cpu_bus = Some(SharedCpuBusState {
             cfg,
@@ -503,10 +484,6 @@ where
         }
 
         let mut mcss = Vec::with_capacity(trace.steps.len().div_ceil(chunk_size));
-        let mut t_witness_build = std::time::Duration::ZERO;
-        let mut t_bus_fill = std::time::Duration::ZERO;
-        let mut t_decomp_b = std::time::Duration::ZERO;
-        let mut t_commit = std::time::Duration::ZERO;
 
         // Track sparse memory state across the full trace to compute inc_at_write_addr.
         let mut mem_state: HashMap<u32, HashMap<u64, Goldilocks>> = HashMap::new();
@@ -536,7 +513,6 @@ where
             let chunk = &trace.steps[chunk_start..chunk_end];
 
             // 1) Build witness z for this chunk.
-            let t0 = std::time::Instant::now();
             let mut z_vec = (self.chunk_to_witness)(chunk);
 
             // Allow witness builders to omit trailing dummy variables (including the shared-bus tail).
@@ -569,10 +545,8 @@ where
                 }
                 z_vec[shared.cfg.const_one_col] = Goldilocks::ONE;
             }
-            t_witness_build += t0.elapsed();
 
             // 2) Overwrite the shared bus tail from the trace events.
-            let t0 = std::time::Instant::now();
             if let Some(shared) = shared {
                 let bus_base = shared.layout.bus_base;
                 let bus_region_len = shared.layout.bus_region_len();
@@ -837,10 +811,7 @@ where
                 }
             }
 
-            t_bus_fill += t0.elapsed();
-
             // 3) Decompose z -> Z matrix
-            let t0 = std::time::Instant::now();
             let d = self.params.d as usize;
             let m = z_vec.len(); // == ccs.m after padding
 
@@ -861,12 +832,9 @@ where
                 }
             }
             let z_mat = Mat::from_row_major(d, m, mat_data);
-            t_decomp_b += t0.elapsed();
 
             // 4) Commit to Z
-            let t0 = std::time::Instant::now();
             let c = self.committer.commit(&z_mat);
-            t_commit += t0.elapsed();
 
             // 5) Build Instance/Witness
             let x = z_vec[..m_in].to_vec();
@@ -877,15 +845,6 @@ where
             chunk_start = chunk_end;
         }
 
-        eprintln!(
-            "[build_ccs_chunks] witness_build={}ms, bus_fill={}ms, decomp_b={}ms, commit={}ms, total={}ms",
-            t_witness_build.as_millis(),
-            t_bus_fill.as_millis(),
-            t_decomp_b.as_millis(),
-            t_commit.as_millis(),
-            (t_witness_build + t_bus_fill + t_decomp_b + t_commit).as_millis(),
-        );
-
         Ok(mcss)
     }
 
@@ -895,5 +854,26 @@ where
     ) -> Result<Vec<(McsInstance<Cmt, Goldilocks>, McsWitness<Goldilocks>)>, Self::Error> {
         self.build_ccs_chunks(trace, 1)
     }
+
+    fn shout_addr_groups(&self) -> &HashMap<u32, u64> {
+        self.shared_cpu_bus
+            .as_ref()
+            .map(|s| &s.cfg.shout_addr_groups)
+            .unwrap_or_else(|| {
+                static EMPTY: std::sync::LazyLock<HashMap<u32, u64>> = std::sync::LazyLock::new(HashMap::new);
+                &EMPTY
+            })
+    }
+
+    fn shout_selector_groups(&self) -> &HashMap<u32, u64> {
+        self.shared_cpu_bus
+            .as_ref()
+            .map(|s| &s.cfg.shout_selector_groups)
+            .unwrap_or_else(|| {
+                static EMPTY: std::sync::LazyLock<HashMap<u32, u64>> = std::sync::LazyLock::new(HashMap::new);
+                &EMPTY
+            })
+    }
+
     type Error = String;
 }

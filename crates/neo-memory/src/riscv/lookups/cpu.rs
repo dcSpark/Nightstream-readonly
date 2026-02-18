@@ -219,7 +219,7 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
         // --------------------------------------------------------------------
         // Regfile-as-Twist (REG_ID): always emit two register reads per step.
         //
-        // Lane assignment (RV32 B1 convention):
+        // Lane assignment (RV32 trace convention):
         // - lane 0: read rs1_field
         // - lane 1: read rs2_field
         // --------------------------------------------------------------------
@@ -247,7 +247,7 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
         match instr {
             RiscvInstruction::RAlu { op, rd, rs1: _, rs2: _ } => {
                 match op {
-                    // RV32 B1 does not use Shout tables for RV32M semantics.
+                    // RV32 trace mode does not require Shout tables for RV32M semantics.
                     // (They are checked by the RV32M sidecar CCS; Shout is only used for the remainder-bound SLTU check.)
                     RiscvOpcode::Mul
                     | RiscvOpcode::Mulh
@@ -361,7 +361,7 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 let index = interleave_bits(base, imm_val) as u64;
                 let addr = shout.lookup(add_shout_id, index);
 
-                // Twist RAM semantics (RV32 B1 / MVP):
+                // Twist RAM semantics (RV32 trace mode):
                 // - Memory is byte-addressed, and `addr` is a byte address.
                 // - Twist accesses are word-valued (XLEN bits), i.e. a `load/store` at `addr`
                 //   reads/writes the little-endian word window starting at `addr`.

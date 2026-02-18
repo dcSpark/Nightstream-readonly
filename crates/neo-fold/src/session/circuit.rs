@@ -106,6 +106,8 @@ impl<C: NeoCircuit> SharedBusR1csPreprocessing<C> {
                 const_one_col: self.const_one_col,
                 shout_cpu: self.shout_cpu.clone(),
                 twist_cpu: self.twist_cpu.clone(),
+                shout_addr_groups: HashMap::new(),
+                shout_selector_groups: HashMap::new(),
             },
             self.chunk_size,
         )

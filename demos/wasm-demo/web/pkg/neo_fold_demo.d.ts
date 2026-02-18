@@ -89,14 +89,14 @@ export class SpartanCompressedProof {
 export function init_panic_hook(): void;
 
 /**
- * Prove+verify the RV32 Fibonacci program under the B1 shared-bus step circuit.
+ * Prove+verify the RV32 Fibonacci program under the trace-wiring shared-bus circuit.
  *
  * Expected guest semantics:
  * - reads `n` from RAM[0x104] (u32)
  * - writes `fib(n)` to RAM[0x100] (u32)
  * - halts via `ecall` (treated as `Halt` in this VM)
  */
-export function prove_verify_rv32_b1_fibonacci_asm(asm: string, n: number, ram_bytes: number, chunk_size: number, max_steps: number, do_spartan: boolean): any;
+export function prove_verify_rv32_trace_fibonacci_asm(asm: string, n: number, ram_bytes: number, chunk_size: number, max_steps: number, do_spartan: boolean): any;
 
 /**
  * Parse a `TestExport` JSON (same schema as `crates/neo-fold/poseidon2-tests/*.json`),
@@ -110,7 +110,7 @@ export interface InitOutput {
     readonly memory: WebAssembly.Memory;
     readonly init_panic_hook: () => void;
     readonly prove_verify_test_export_json: (a: number, b: number) => [number, number, number];
-    readonly prove_verify_rv32_b1_fibonacci_asm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
+    readonly prove_verify_rv32_trace_fibonacci_asm: (a: number, b: number, c: number, d: number, e: number, f: number, g: number) => [number, number, number];
     readonly __wbg_neofoldsession_free: (a: number, b: number) => void;
     readonly neofoldsession_new: (a: number, b: number) => [number, number, number];
     readonly neofoldsession_step_count: (a: number) => number;

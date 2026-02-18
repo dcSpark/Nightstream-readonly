@@ -198,6 +198,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_bitwise_packed_semantics_redte
             ell: 1,
             table_spec: Some(LutTableSpec::RiscvOpcodePacked { opcode, xlen: 32 }),
             table: Vec::new(),
+        addr_group: None,
+        selector_group: None,
         };
 
         let mut z =

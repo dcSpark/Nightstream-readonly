@@ -81,7 +81,7 @@ pub fn prove_route_a_batched_time(
         &mut claims,
     );
 
-    // Optional: event-table Shout linkage trace hash claim (no-shared-bus only).
+    // Optional: event-table Shout linkage trace hash claim.
     let shout_event_trace_hash_claim = mem_oracles.shout_event_trace_hash.as_ref().map(|o| o.claim);
     let mut shout_event_trace_hash_prefix = mem_oracles
         .shout_event_trace_hash
@@ -110,7 +110,9 @@ pub fn prove_route_a_batched_time(
         &mut claims,
     );
 
-    let wb_time_degree_bound = wb_time_claim.as_ref().map(|extra| extra.oracle.degree_bound());
+    let wb_time_degree_bound = wb_time_claim
+        .as_ref()
+        .map(|extra| extra.oracle.degree_bound());
     let mut wb_time_label: Option<&'static [u8]> = None;
     let mut wb_time_oracle: Option<Box<dyn RoundOracle>> = wb_time_claim.map(|extra| {
         wb_time_label = Some(extra.label);
@@ -131,7 +133,9 @@ pub fn prove_route_a_batched_time(
         });
     }
 
-    let wp_time_degree_bound = wp_time_claim.as_ref().map(|extra| extra.oracle.degree_bound());
+    let wp_time_degree_bound = wp_time_claim
+        .as_ref()
+        .map(|extra| extra.oracle.degree_bound());
     let mut wp_time_label: Option<&'static [u8]> = None;
     let mut wp_time_oracle: Option<Box<dyn RoundOracle>> = wp_time_claim.map(|extra| {
         wp_time_label = Some(extra.label);
@@ -197,7 +201,9 @@ pub fn prove_route_a_batched_time(
         });
     }
 
-    let width_bitness_degree_bound = width_bitness_claim.as_ref().map(|extra| extra.oracle.degree_bound());
+    let width_bitness_degree_bound = width_bitness_claim
+        .as_ref()
+        .map(|extra| extra.oracle.degree_bound());
     let mut width_bitness_label: Option<&'static [u8]> = None;
     let mut width_bitness_oracle: Option<Box<dyn RoundOracle>> = width_bitness_claim.map(|extra| {
         width_bitness_label = Some(extra.label);
@@ -217,7 +223,9 @@ pub fn prove_route_a_batched_time(
         });
     }
 
-    let width_quiescence_degree_bound = width_quiescence_claim.as_ref().map(|extra| extra.oracle.degree_bound());
+    let width_quiescence_degree_bound = width_quiescence_claim
+        .as_ref()
+        .map(|extra| extra.oracle.degree_bound());
     let mut width_quiescence_label: Option<&'static [u8]> = None;
     let mut width_quiescence_oracle: Option<Box<dyn RoundOracle>> = width_quiescence_claim.map(|extra| {
         width_quiescence_label = Some(extra.label);
@@ -351,10 +359,11 @@ pub fn prove_route_a_batched_time(
         .as_ref()
         .map(|extra| extra.oracle.degree_bound());
     let mut control_branch_semantics_label: Option<&'static [u8]> = None;
-    let mut control_branch_semantics_oracle: Option<Box<dyn RoundOracle>> = control_branch_semantics_claim.map(|extra| {
-        control_branch_semantics_label = Some(extra.label);
-        extra.oracle
-    });
+    let mut control_branch_semantics_oracle: Option<Box<dyn RoundOracle>> =
+        control_branch_semantics_claim.map(|extra| {
+            control_branch_semantics_label = Some(extra.label);
+            extra.oracle
+        });
     if let Some(oracle) = control_branch_semantics_oracle.as_deref_mut() {
         let claimed_sum = K::ZERO;
         let label = control_branch_semantics_label.expect("missing control_branch_semantics label");
@@ -373,10 +382,11 @@ pub fn prove_route_a_batched_time(
         .as_ref()
         .map(|extra| extra.oracle.degree_bound());
     let mut control_control_writeback_label: Option<&'static [u8]> = None;
-    let mut control_control_writeback_oracle: Option<Box<dyn RoundOracle>> = control_control_writeback_claim.map(|extra| {
-        control_control_writeback_label = Some(extra.label);
-        extra.oracle
-    });
+    let mut control_control_writeback_oracle: Option<Box<dyn RoundOracle>> =
+        control_control_writeback_claim.map(|extra| {
+            control_control_writeback_label = Some(extra.label);
+            extra.oracle
+        });
     if let Some(oracle) = control_control_writeback_oracle.as_deref_mut() {
         let claimed_sum = K::ZERO;
         let label = control_control_writeback_label.expect("missing control_writeback label");

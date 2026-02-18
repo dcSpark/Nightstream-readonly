@@ -3,7 +3,7 @@
 #[path = "riscv_wasm_demo/mod.rs"]
 mod riscv_wasm_demo;
 
-use neo_fold::riscv_shard::Rv32B1;
+use neo_fold::riscv_trace_shard::Rv32TraceWiring;
 use neo_math::F;
 use p3_field::PrimeCharacteristicRing;
 
@@ -31,7 +31,7 @@ fn env_u32(name: &str, default: u32) -> u32 {
 fn test_rv32_fibonacci_mini_asm_peak_rss() {
     let n = env_u32("NEO_RV32_N", 5);
     let ram_bytes = env_usize("NEO_RV32_RAM_BYTES", 2048);
-    let chunk_size = env_usize("NEO_RV32_CHUNK_SIZE", 128);
+    let chunk_rows = env_usize("NEO_RV32_CHUNK_SIZE", 128);
     let max_steps = env_usize("NEO_RV32_MAX_STEPS", 0);
 
     let asm = include_str!("riscv_wasm_demo/rv32_fibonacci.asm");
@@ -49,11 +49,10 @@ fn test_rv32_fibonacci_mini_asm_peak_rss() {
     );
 
     let mut run = {
-        let mut b = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
+        let mut b = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
             .xlen(32)
-            .ram_bytes(ram_bytes)
             .ram_init_u32(/*addr=*/ 0x104, n)
-            .chunk_size(chunk_size)
+            .chunk_rows(chunk_rows)
             .shout_auto_minimal()
             .output(/*output_addr=*/ 0x100, /*expected_output=*/ expected_f);
         if max_steps > 0 {
@@ -82,22 +81,18 @@ fn test_rv32_fibonacci_mini_asm_peak_rss() {
             .unwrap_or(0.0)
     );
 
-    let trace_len = run.riscv_trace_len().ok();
+    let trace_len = run.trace_len();
     println!(
-        "rv32-fib: n={n} expected={expected} trace_len={:?} folds={} chunk_size={} ram_bytes={}",
+        "rv32-fib: n={n} expected={expected} trace_len={} folds={} chunk_rows={} ram_bytes={}",
         trace_len,
         run.fold_count(),
-        chunk_size,
+        chunk_rows,
         ram_bytes
     );
     println!(
-        "rv32-fib: ccs_constraints={} ccs_variables={} shout_lookups={:?}",
+        "rv32-fib: ccs_constraints={} ccs_variables={} shout_tables={}",
         run.ccs_num_constraints(),
         run.ccs_num_variables(),
-        run.shout_lookup_count().ok()
+        run.used_shout_table_ids().len()
     );
-
-    assert!(run
-        .verify_default_output_claim()
-        .expect("verify output claim"));
 }

@@ -1,11 +1,10 @@
 use std::time::{Duration, Instant};
 
-use neo_fold::riscv_shard::Rv32B1;
+use neo_ccs::MeInstance;
 use neo_fold::riscv_trace_shard::Rv32TraceWiring;
 use neo_fold::shard::ShardProof;
-use neo_ccs::MeInstance;
-use neo_memory::riscv::lookups::{encode_program, BranchCondition, RiscvInstruction, RiscvOpcode};
 use neo_memory::riscv::ccs::{build_rv32_trace_wiring_ccs, Rv32TraceCcsLayout};
+use neo_memory::riscv::lookups::{encode_program, BranchCondition, RiscvInstruction, RiscvOpcode};
 
 #[test]
 #[ignore = "perf-style test: run with `cargo test -p neo-fold --release --test perf -- --ignored --nocapture compare_single_mixed_metrics_nightstream_only`"]
@@ -14,14 +13,12 @@ fn compare_single_mixed_metrics_nightstream_only() {
 
     let ns_program = mixed_instruction_sequence();
     let ns_program_bytes = encode_program(&ns_program);
-    let ns_chunk_size = ns_program.len();
+    let ns_chunk_rows = ns_program.len();
     let ns_max_steps = ns_program.len();
-    let ns_ram_bytes = 4usize;
 
     let ns_total_start = Instant::now();
-    let mut ns_run = Rv32B1::from_rom(/*program_base=*/ 0, &ns_program_bytes)
-        .chunk_size(ns_chunk_size)
-        .ram_bytes(ns_ram_bytes)
+    let mut ns_run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &ns_program_bytes)
+        .chunk_rows(ns_chunk_rows)
         .max_steps(ns_max_steps)
         .prove()
         .expect("Nightstream prove");
@@ -31,10 +28,8 @@ fn compare_single_mixed_metrics_nightstream_only() {
     let ns_constraints_padded_pow2 = ns_constraints.next_power_of_two();
     let ns_witness_cols_padded_pow2 = ns_witness_cols.next_power_of_two();
     let ns_fold_count = ns_run.fold_count();
-    let ns_trace_len = ns_run.riscv_trace_len().expect("Nightstream trace length");
-    let ns_shout_lookups = ns_run
-        .shout_lookup_count()
-        .expect("Nightstream shout lookup count");
+    let ns_trace_len = ns_run.trace_len();
+    let ns_shout_tables = ns_run.used_shout_table_ids().len();
     let ns_step0 = ns_run
         .steps_public()
         .first()
@@ -55,7 +50,7 @@ fn compare_single_mixed_metrics_nightstream_only() {
     println!();
     println!("Instruction under test: {instruction_label}");
     println!();
-    println!("**Nightstream (Neo RV32 B1)**");
+    println!("**Nightstream (RV32 Trace)**");
     println!(
         "- CCS: n={} constraints (padded_pow2_n={}), m={} cols (padded_pow2_m={}) (m_in={} public, w={} private)",
         ns_constraints,
@@ -66,12 +61,12 @@ fn compare_single_mixed_metrics_nightstream_only() {
         ns_witness_private
     );
     println!(
-        "- Trace: executed_steps={} (max_steps={}), fold_chunks={} (chunk_size={})",
-        ns_trace_len, ns_max_steps, ns_fold_count, ns_chunk_size
+        "- Trace: executed_steps={} (max_steps={}), fold_chunks={} (chunk_rows={})",
+        ns_trace_len, ns_max_steps, ns_fold_count, ns_chunk_rows
     );
     println!(
-        "- Sidecars: lut_instances={} mem_instances={} shout_lookups_used={}",
-        ns_lut_instances, ns_mem_instances, ns_shout_lookups
+        "- Sidecars: lut_instances={} mem_instances={} shout_tables_used={}",
+        ns_lut_instances, ns_mem_instances, ns_shout_tables
     );
     println!(
         "- Time: prove={} verify={} total_end_to_end={}",
@@ -83,7 +78,7 @@ fn compare_single_mixed_metrics_nightstream_only() {
 
     println!("{:-<80}", "");
     println!("{:<40} {:>18}", "Metric", "Nightstream");
-    println!("{:<40} {:>18}", "", "(RV32 B1)");
+    println!("{:<40} {:>18}", "", "(RV32 Trace)");
     println!("{:-<80}", "");
     println!("{:<40} {:>18}", "Rows per step (raw)", ns_constraints);
     println!(
@@ -112,7 +107,7 @@ fn compare_single_mixed_metrics_nightstream_only() {
         format!("{} steps", ns_trace_len)
     );
     println!("{:<40} {:>18}", "Lookup tables", format!("{} Shout", ns_lut_instances));
-    println!("{:<40} {:>18}", "Lookups used", ns_shout_lookups);
+    println!("{:<40} {:>18}", "Shout tables used", ns_shout_tables);
     println!("{:<40} {:>18}", "Prove time", fmt_duration(ns_prove_time));
     println!("{:<40} {:>18}", "Verify time", fmt_duration(ns_verify_time));
     println!("{:-<80}", "");
@@ -149,8 +144,6 @@ fn opening_surface_from_shard_proof(proof: &ShardProof) -> OpeningSurfaceBuckets
     for step in &proof.steps {
         buckets.core_ccs += sum_y_scalars(&step.fold.ccs_out);
 
-        buckets.sidecars += sum_y_scalars(&step.mem.shout_me_claims_time);
-        buckets.sidecars += sum_y_scalars(&step.mem.twist_me_claims_time);
         buckets.sidecars += sum_y_scalars(&step.mem.val_me_claims);
 
         buckets.claim_reduction_linkage += sum_y_scalars(&step.mem.wb_me_claims);
@@ -158,35 +151,22 @@ fn opening_surface_from_shard_proof(proof: &ShardProof) -> OpeningSurfaceBuckets
         buckets.claim_reduction_linkage += step.batched_time.claimed_sums.len();
 
         buckets.pcs_open += step.fold.dec_children.len();
-        buckets.pcs_open += step.val_fold.iter().map(|p| p.dec_children.len()).sum::<usize>();
         buckets.pcs_open += step
-            .twist_time_fold
+            .val_fold
             .iter()
             .map(|p| p.dec_children.len())
             .sum::<usize>();
         buckets.pcs_open += step
-            .shout_time_fold
+            .wb_fold
             .iter()
             .map(|p| p.dec_children.len())
             .sum::<usize>();
-        buckets.pcs_open += step.wb_fold.iter().map(|p| p.dec_children.len()).sum::<usize>();
-        buckets.pcs_open += step.wp_fold.iter().map(|p| p.dec_children.len()).sum::<usize>();
+        buckets.pcs_open += step
+            .wp_fold
+            .iter()
+            .map(|p| p.dec_children.len())
+            .sum::<usize>();
     }
-    buckets
-}
-
-fn opening_surface_from_rv32_b1_run(run: &neo_fold::riscv_shard::Rv32B1Run) -> OpeningSurfaceBuckets {
-    let mut buckets = opening_surface_from_shard_proof(run.proof());
-    buckets.sidecars += sum_y_scalars(&run.proof_bundle().decode_plumbing.me_out);
-    buckets.sidecars += sum_y_scalars(&run.proof_bundle().semantics.me_out);
-    if let Some(rv32m) = &run.proof_bundle().rv32m {
-        for chunk in rv32m {
-            buckets.sidecars += sum_y_scalars(&chunk.me_out);
-            buckets.pcs_open += chunk.me_out.len();
-        }
-    }
-    buckets.pcs_open += run.proof_bundle().decode_plumbing.me_out.len();
-    buckets.pcs_open += run.proof_bundle().semantics.me_out.len();
     buckets
 }
 
@@ -330,21 +310,23 @@ fn debug_chunked_single_n_mixed_ops() {
     let steps = n + 1;
 
     let total_start = Instant::now();
-    let mut run = Rv32B1::from_rom(0, &program_bytes)
-        .chunk_size(steps)
-        .ram_bytes(4)
+    let mut run = Rv32TraceWiring::from_rom(0, &program_bytes)
+        .min_trace_len(steps)
+        .chunk_rows(steps)
         .max_steps(steps)
         .prove()
-        .expect("chunked prove");
+        .expect("trace single-chunk prove");
     let prove_time = run.prove_duration();
-    run.verify().expect("chunked verify");
-    let verify_time = run.verify_duration().expect("chunked verify duration");
+    run.verify().expect("trace single-chunk verify");
+    let verify_time = run
+        .verify_duration()
+        .expect("trace single-chunk verify duration");
     let total_time = total_start.elapsed();
-    let trace_len = run.riscv_trace_len().expect("trace len");
+    let trace_len = run.trace_len();
     let phases = run.prove_phase_durations();
 
     println!(
-        "CHUNKED n={} ccs_n={} ccs_m={} n_p2={} m_p2={} trace_len={} folds={} prove={} verify={} total={} phases(setup={}, build_commit={}, fold={})",
+        "TRACE_SINGLE_CHUNK n={} ccs_n={} ccs_m={} n_p2={} m_p2={} trace_len={} folds={} prove={} verify={} total={} phases(setup={}, chunk_commit={}, fold={})",
         n,
         run.ccs_num_constraints(),
         run.ccs_num_variables(),
@@ -356,12 +338,12 @@ fn debug_chunked_single_n_mixed_ops() {
         fmt_duration(verify_time),
         fmt_duration(total_time),
         fmt_duration(phases.setup),
-        fmt_duration(phases.build_commit),
+        fmt_duration(phases.chunk_build_commit),
         fmt_duration(phases.fold_and_prove),
     );
-    let openings = opening_surface_from_rv32_b1_run(&run);
+    let openings = opening_surface_from_shard_proof(run.proof());
     println!(
-        "CHUNKED_OPENINGS core_ccs={} sidecars={} claim_reduction_linkage={} pcs_open={} total={}",
+        "TRACE_SINGLE_CHUNK_OPENINGS core_ccs={} sidecars={} claim_reduction_linkage={} pcs_open={} total={}",
         openings.core_ccs,
         openings.sidecars,
         openings.claim_reduction_linkage,
@@ -433,10 +415,27 @@ fn report_track_a_w0_w1_snapshot() {
     println!();
 
     let col_names = [
-        "one", "active", "halted", "cycle", "pc_before", "pc_after", "instr_word",
-        "rs1_addr", "rs1_val", "rs2_addr", "rs2_val", "rd_addr", "rd_val",
-        "ram_addr", "ram_rv", "ram_wv",
-        "shout_has_lookup", "shout_val", "shout_lhs", "shout_rhs", "jalr_drop_bit",
+        "one",
+        "active",
+        "halted",
+        "cycle",
+        "pc_before",
+        "pc_after",
+        "instr_word",
+        "rs1_addr",
+        "rs1_val",
+        "rs2_addr",
+        "rs2_val",
+        "rd_addr",
+        "rd_val",
+        "ram_addr",
+        "ram_rv",
+        "ram_wv",
+        "shout_has_lookup",
+        "shout_val",
+        "shout_lhs",
+        "shout_rhs",
+        "jalr_drop_bit",
     ];
     println!("  Trace columns ({}):", col_names.len());
     for (i, name) in col_names.iter().enumerate() {
@@ -453,13 +452,23 @@ fn report_track_a_w0_w1_snapshot() {
     let bus_tail_cols = total_ccs_m.saturating_sub(trace_base_m);
     println!("  Total CCS m (with bus):  {total_ccs_m}");
     println!("  Total CCS n (with bus):  {total_ccs_n}");
-    println!("  Trace base m:            {trace_base_m} (m_in={} + {}*{})", layout.m_in, layout.trace.cols, steps);
+    println!(
+        "  Trace base m:            {trace_base_m} (m_in={} + {}*{})",
+        layout.m_in, layout.trace.cols, steps
+    );
     println!("  Bus-tail columns:        {bus_tail_cols}");
     let bus_reserved_rows = total_ccs_n.saturating_sub(core_ccs.n);
-    println!("  Bus reserved rows:       {bus_reserved_rows} (total_n={total_ccs_n} - core_n={})", core_ccs.n);
+    println!(
+        "  Bus reserved rows:       {bus_reserved_rows} (total_n={total_ccs_n} - core_n={})",
+        core_ccs.n
+    );
     println!();
 
-    let step0 = run.steps_public().into_iter().next().expect("at least one step");
+    let step0 = run
+        .steps_public()
+        .into_iter()
+        .next()
+        .expect("at least one step");
     let n_lut = step0.lut_insts.len();
     let n_mem = step0.mem_insts.len();
     println!("  Shout instances (LUT):   {n_lut}");
@@ -468,7 +477,12 @@ fn report_track_a_w0_w1_snapshot() {
         let bus_cols_per_lane = ell_addr + 2;
         println!(
             "    - table_id={:<10} d={} n_side={} ell={} lanes={} bus_cols={}",
-            inst.table_id, inst.d, inst.n_side, inst.ell, inst.lanes, bus_cols_per_lane * inst.lanes
+            inst.table_id,
+            inst.d,
+            inst.n_side,
+            inst.ell,
+            inst.lanes,
+            bus_cols_per_lane * inst.lanes
         );
     }
     println!("  Twist instances (MEM):   {n_mem}");
@@ -477,7 +491,12 @@ fn report_track_a_w0_w1_snapshot() {
         let bus_cols_per_lane = 2 * ell_addr + 5;
         println!(
             "    - mem_id={:<10} d={} n_side={} ell={} lanes={} bus_cols={}",
-            inst.mem_id, inst.d, inst.n_side, inst.ell, inst.lanes, bus_cols_per_lane * inst.lanes
+            inst.mem_id,
+            inst.d,
+            inst.n_side,
+            inst.ell,
+            inst.lanes,
+            bus_cols_per_lane * inst.lanes
         );
     }
     println!();
@@ -525,7 +544,9 @@ fn report_track_a_w0_w1_snapshot() {
     }
 
     let print_group = |name: &str, claims: &[(String, usize)], aggregate: bool| {
-        if claims.is_empty() { return; }
+        if claims.is_empty() {
+            return;
+        }
         println!("  {name} ({} claims):", claims.len());
         if aggregate {
             // Aggregate by label, show count and degree range.
@@ -577,21 +598,46 @@ fn report_track_a_w0_w1_snapshot() {
     println!("5. FOLD LANES");
     println!("{thin_sep}");
     println!("  Main fold (ccs_out):     {} ME claims", step_proof.fold.ccs_out.len());
-    println!("  Main fold (dec children):{} DEC children", step_proof.fold.dec_children.len());
-    let val_count: usize = step_proof.val_fold.iter().map(|v| v.dec_children.len()).sum();
-    println!("  Val fold lanes:          {} (dec children={})", step_proof.val_fold.len(), val_count);
-    let wb_count: usize = step_proof.wb_fold.iter().map(|w| w.dec_children.len()).sum();
-    println!("  WB fold lanes:           {} (dec children={})", step_proof.wb_fold.len(), wb_count);
-    let wp_count: usize = step_proof.wp_fold.iter().map(|w| w.dec_children.len()).sum();
-    println!("  WP fold lanes:           {} (dec children={})", step_proof.wp_fold.len(), wp_count);
+    println!(
+        "  Main fold (dec children):{} DEC children",
+        step_proof.fold.dec_children.len()
+    );
+    let val_count: usize = step_proof
+        .val_fold
+        .iter()
+        .map(|v| v.dec_children.len())
+        .sum();
+    println!(
+        "  Val fold lanes:          {} (dec children={})",
+        step_proof.val_fold.len(),
+        val_count
+    );
+    let wb_count: usize = step_proof
+        .wb_fold
+        .iter()
+        .map(|w| w.dec_children.len())
+        .sum();
+    println!(
+        "  WB fold lanes:           {} (dec children={})",
+        step_proof.wb_fold.len(),
+        wb_count
+    );
+    let wp_count: usize = step_proof
+        .wp_fold
+        .iter()
+        .map(|w| w.dec_children.len())
+        .sum();
+    println!(
+        "  WP fold lanes:           {} (dec children={})",
+        step_proof.wp_fold.len(),
+        wp_count
+    );
     println!();
 
     // ── 6. ME Claims (Sidecar Proofs) ──
     println!("6. MEMORY SIDECAR ME CLAIMS");
     println!("{thin_sep}");
     let mem = &step_proof.mem;
-    println!("  Shout ME @ r_time:       {} claims", mem.shout_me_claims_time.len());
-    println!("  Twist ME @ r_time:       {} claims", mem.twist_me_claims_time.len());
     println!("  Val ME @ r_val:          {} claims", mem.val_me_claims.len());
     println!("  WB ME claims:            {} claims", mem.wb_me_claims.len());
     println!("  WP ME claims:            {} claims", mem.wp_me_claims.len());
@@ -654,18 +700,20 @@ fn debug_trace_vs_chunked_single_n_mixed_ops() {
     let steps = n + 1;
 
     let chunk_total_start = Instant::now();
-    let mut chunk_run = Rv32B1::from_rom(0, &program_bytes)
-        .chunk_size(steps)
-        .ram_bytes(4)
+    let mut chunk_run = Rv32TraceWiring::from_rom(0, &program_bytes)
+        .min_trace_len(steps)
+        .chunk_rows(steps)
         .max_steps(steps)
         .prove()
-        .expect("chunked prove (mixed)");
+        .expect("trace single-chunk prove (mixed)");
     let chunk_prove = chunk_run.prove_duration();
     let chunk_phases = chunk_run.prove_phase_durations();
-    chunk_run.verify().expect("chunked verify (mixed)");
+    chunk_run
+        .verify()
+        .expect("trace single-chunk verify (mixed)");
     let chunk_verify = chunk_run
         .verify_duration()
-        .expect("chunked verify duration");
+        .expect("trace single-chunk verify duration");
     let chunk_total = chunk_total_start.elapsed();
 
     let trace_total_start = Instant::now();
@@ -682,7 +730,7 @@ fn debug_trace_vs_chunked_single_n_mixed_ops() {
             let trace_total = trace_total_start.elapsed();
             let trace_phases = trace_run.prove_phase_durations();
             println!(
-                "MIXED n={} TRACE(prove={}, verify={}, total={}, n_p2={}, m_p2={}, phases: setup={}, chunk_commit={}, fold={}) CHUNKED(prove={}, verify={}, total={}, n_p2={}, m_p2={}, phases: setup={}, build_commit={}, fold={}) ratio_prove={:.2}x",
+                "MIXED n={} TRACE(prove={}, verify={}, total={}, n_p2={}, m_p2={}, phases: setup={}, chunk_commit={}, fold={}) TRACE_SINGLE_CHUNK(prove={}, verify={}, total={}, n_p2={}, m_p2={}, phases: setup={}, chunk_commit={}, fold={}) ratio_prove={:.2}x",
                 n,
                 fmt_duration(trace_prove),
                 fmt_duration(trace_verify),
@@ -698,14 +746,14 @@ fn debug_trace_vs_chunked_single_n_mixed_ops() {
                 chunk_run.ccs_num_constraints().next_power_of_two(),
                 chunk_run.ccs_num_variables().next_power_of_two(),
                 fmt_duration(chunk_phases.setup),
-                fmt_duration(chunk_phases.build_commit),
+                fmt_duration(chunk_phases.chunk_build_commit),
                 fmt_duration(chunk_phases.fold_and_prove),
                 trace_prove.as_secs_f64() / chunk_prove.as_secs_f64(),
             );
         }
         Err(e) => {
             println!(
-                "MIXED n={} TRACE(prove=ERROR:{}) CHUNKED(prove={}, verify={}, total={}, n_p2={}, m_p2={})",
+                "MIXED n={} TRACE(prove=ERROR:{}) TRACE_SINGLE_CHUNK(prove={}, verify={}, total={}, n_p2={}, m_p2={})",
                 n,
                 e,
                 fmt_duration(chunk_prove),
@@ -777,26 +825,28 @@ fn run_trace_sample(program: &[RiscvInstruction]) -> PerfSample {
     }
 }
 
-fn run_chunked_sample(program: &[RiscvInstruction]) -> PerfSample {
+fn run_single_chunk_trace_sample(program: &[RiscvInstruction]) -> PerfSample {
     let steps = program.len();
     let program_bytes = encode_program(program);
     let total_start = Instant::now();
-    let mut run = Rv32B1::from_rom(0, &program_bytes)
-        .chunk_size(steps)
-        .ram_bytes(4)
+    let mut run = Rv32TraceWiring::from_rom(0, &program_bytes)
+        .min_trace_len(steps)
+        .chunk_rows(steps)
         .max_steps(steps)
         .prove()
-        .expect("chunked prove");
+        .expect("trace single-chunk prove");
     let prove = run.prove_duration();
     let phases = run.prove_phase_durations();
-    run.verify().expect("chunked verify");
-    let verify = run.verify_duration().expect("chunked verify duration");
+    run.verify().expect("trace single-chunk verify");
+    let verify = run
+        .verify_duration()
+        .expect("trace single-chunk verify duration");
     PerfSample {
         end_to_end: total_start.elapsed(),
         prove,
         verify,
         setup: phases.setup,
-        build_commit: phases.build_commit,
+        build_commit: phases.chunk_build_commit,
         fold: phases.fold_and_prove,
     }
 }
@@ -851,10 +901,10 @@ fn report_trace_vs_chunked_medians() {
         let mut chunked_samples = Vec::with_capacity(RUNS);
         for _ in 0..RUNS {
             trace_samples.push(run_trace_sample(&program));
-            chunked_samples.push(run_chunked_sample(&program));
+            chunked_samples.push(run_single_chunk_trace_sample(&program));
         }
         println!("CASE kind={} n={} runs={}", kind, n, RUNS);
         report_samples("TRACE", &trace_samples);
-        report_samples("CHUNKED", &chunked_samples);
+        report_samples("TRACE_SINGLE_CHUNK", &chunked_samples);
     }
 }

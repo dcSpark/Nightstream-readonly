@@ -1,16 +1,9 @@
-use neo_ajtai::Commitment as Cmt;
-use neo_fold::riscv_shard::{Rv32B1, Rv32B1Run};
-use neo_fold::{pi_ccs_prove_simple, pi_ccs_verify};
-use neo_memory::riscv::ccs::build_rv32_b1_decode_plumbing_sidecar_ccs;
+use neo_fold::riscv_trace_shard::{Rv32TraceWiring, Rv32TraceWiringRun};
+use neo_math::K;
 use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvOpcode};
-use neo_transcript::Poseidon2Transcript;
-use neo_transcript::Transcript;
 use p3_field::PrimeCharacteristicRing;
-use p3_goldilocks::Goldilocks as F;
 
-use super::helpers::{assert_prove_or_verify_fails, collect_mcs, mcs_recommit_step_after_private_tamper};
-
-fn prove_run_addi_halt(imm: i32) -> Rv32B1Run {
+fn prove_run_addi_halt(imm: i32) -> Rv32TraceWiringRun {
     let program = vec![
         RiscvInstruction::IAlu {
             op: RiscvOpcode::Add,
@@ -21,68 +14,47 @@ fn prove_run_addi_halt(imm: i32) -> Rv32B1Run {
         RiscvInstruction::Halt,
     ];
     let program_bytes = encode_program(&program);
-    let mut run = Rv32B1::from_rom(/*program_base=*/ 0, &program_bytes)
-        .chunk_size(1)
-        .max_steps(2)
-        .ram_bytes(0x200)
+    let steps = 2usize;
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .chunk_rows(steps)
+        .min_trace_len(steps)
+        .max_steps(steps)
         .prove()
         .expect("prove");
     run.verify().expect("baseline verify");
     run
 }
 
-fn prove_decode_plumbing_or_verify_fails(
-    run: &Rv32B1Run,
-    mcs_insts: &[neo_ccs::McsInstance<Cmt, F>],
-    mcs_wits: &[neo_ccs::McsWitness<F>],
-) {
-    let decode_ccs = build_rv32_b1_decode_plumbing_sidecar_ccs(run.layout()).expect("decode plumbing sidecar ccs");
-
-    let num_steps = mcs_insts.len();
-    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_plumbing_sidecar_batch");
-    tr.append_message(b"decode_plumbing_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
-    let Ok((me_out, proof)) =
-        pi_ccs_prove_simple(&mut tr, run.params(), &decode_ccs, mcs_insts, mcs_wits, run.committer())
-    else {
-        return;
-    };
-
-    let mut tr = Poseidon2Transcript::new(b"neo.fold/rv32_b1/decode_plumbing_sidecar_batch");
-    tr.append_message(b"decode_plumbing_sidecar/num_steps", &(num_steps as u64).to_le_bytes());
-    let res = pi_ccs_verify(&mut tr, run.params(), &decode_ccs, mcs_insts, &[], &me_out, &proof);
-    assert_prove_or_verify_fails(res, "decode plumbing sidecar (malicious witness)");
+fn tamper_wp_scalar(run: &Rv32TraceWiringRun) {
+    let mut bad_proof = run.proof().clone();
+    let mut tampered = false;
+    for step in &mut bad_proof.steps {
+        for claim in &mut step.mem.wp_me_claims {
+            if let Some(first) = claim.y_scalars.first_mut() {
+                *first += K::ONE;
+                tampered = true;
+                break;
+            }
+        }
+        if tampered {
+            break;
+        }
+    }
+    assert!(tampered, "expected at least one wp claim scalar to tamper");
+    assert!(
+        run.verify_proof(&bad_proof).is_err(),
+        "decode-related malicious tamper must not verify"
+    );
 }
 
 #[test]
-fn rv32_b1_decode_plumbing_malicious_imm_i_must_fail() {
+fn rv32_trace_decode_malicious_imm_i_must_fail() {
     let run = prove_run_addi_halt(/*imm=*/ 1);
-
-    let (mut mcs_insts, mut mcs_wits) = collect_mcs(run.steps_witness());
-    let idx = run.layout().imm_i(0);
-    mcs_recommit_step_after_private_tamper(
-        run.params(),
-        run.committer(),
-        &mut mcs_insts[0],
-        &mut mcs_wits[0],
-        idx,
-        F::ONE,
-    );
-    prove_decode_plumbing_or_verify_fails(&run, &mcs_insts, &mcs_wits);
+    tamper_wp_scalar(&run);
 }
 
 #[test]
-fn rv32_b1_decode_plumbing_malicious_rd_field_must_fail() {
-    let run = prove_run_addi_halt(/*imm=*/ 1);
-
-    let (mut mcs_insts, mut mcs_wits) = collect_mcs(run.steps_witness());
-    let idx = run.layout().rd_field(0);
-    mcs_recommit_step_after_private_tamper(
-        run.params(),
-        run.committer(),
-        &mut mcs_insts[0],
-        &mut mcs_wits[0],
-        idx,
-        F::ONE,
-    );
-    prove_decode_plumbing_or_verify_fails(&run, &mcs_insts, &mcs_wits);
+fn rv32_trace_decode_malicious_rd_field_must_fail() {
+    let run = prove_run_addi_halt(/*imm=*/ 2);
+    tamper_wp_scalar(&run);
 }

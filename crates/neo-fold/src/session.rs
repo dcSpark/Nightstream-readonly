@@ -794,7 +794,7 @@ where
 
     /// Access the collected *public* per-step bundles (MCS + optional Twist/Shout instances).
     ///
-    /// This is useful for specialized verifiers (e.g. RV32 B1 statement checks) that need access
+    /// This is useful for specialized verifiers that need access
     /// to memory/lookup instances, not just the MCS list.
     pub fn steps_public(&self) -> Vec<StepInstanceBundle<Cmt, F, K>> {
         self.steps.iter().map(StepInstanceBundle::from).collect()
@@ -1165,20 +1165,20 @@ where
             return Ok(s);
         }
 
-        // No-shared-bus mode carries Twist/Shout witnesses in separately committed mats and keeps
-        // the main CPU CCS in pure trace shape. In that mode we must *not* inject shared-bus
-        // copyout columns into the accumulator-prepared CCS.
+        // Shared CPU bus is the only supported Route-A witness format.
         let step0 = &self.steps[0];
-        let using_no_shared_bus = step0
+        let is_shared_bus = step0
             .mem_instances
             .iter()
-            .all(|(inst, wit)| !inst.comms.is_empty() && !wit.mats.is_empty())
+            .all(|(inst, wit)| inst.comms.is_empty() && wit.mats.is_empty())
             && step0
                 .lut_instances
                 .iter()
-                .all(|(inst, wit)| !inst.comms.is_empty() && !wit.mats.is_empty());
-        if using_no_shared_bus {
-            return Ok(s);
+                .all(|(inst, wit)| inst.comms.is_empty() && wit.mats.is_empty());
+        if !is_shared_bus {
+            return Err(PiCcsError::InvalidInput(
+                "legacy no-shared CPU bus witness format was removed; use shared-bus witness bundles".into(),
+            ));
         }
 
         let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> =

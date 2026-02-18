@@ -230,7 +230,7 @@ fn rv32_trace_wiring_runner_rejects_extra_shout_spec_without_table_spec() {
             table_id: 1000,
             ell_addr: 13,
             n_vals: 1usize,
-}])
+        }])
         .prove()
     {
         Ok(_) => panic!("extra shout geometry without table spec must fail"),
@@ -262,7 +262,7 @@ fn rv32_trace_wiring_runner_accepts_extra_shout_spec_with_matching_table_spec() 
             table_id: 1000,
             ell_addr: 32,
             n_vals: 1usize,
-}])
+        }])
         .prove()
         .expect("trace wiring prove with extra table/spec");
     run.verify()
@@ -643,7 +643,9 @@ fn rv32_trace_wiring_runner_control_claims_are_emitted_and_required() {
     );
 
     let mut proof_tampered_control_round = proof.clone();
-    let coeff = proof_tampered_control_round.steps[0].batched_time.round_polys[control_control_idx]
+    let coeff = proof_tampered_control_round.steps[0]
+        .batched_time
+        .round_polys[control_control_idx]
         .get_mut(0)
         .and_then(|round| round.get_mut(0))
         .expect("control/next_pc_control first-round coeff must exist");

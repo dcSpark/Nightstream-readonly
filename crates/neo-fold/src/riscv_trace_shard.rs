@@ -43,7 +43,7 @@ use neo_memory::riscv::trace::{
     rv32_width_sidecar_witness_from_exec_table, Rv32DecodeSidecarLayout, Rv32WidthSidecarLayout, TwistLaneOverTime,
 };
 use neo_memory::witness::{LutInstance, LutWitness, MemInstance, MemWitness, StepWitnessBundle};
-use neo_memory::{LutTableSpec, MemInit, R1csCpu};
+use neo_memory::{mem_init_from_initial_mem, LutTableSpec, MemInit, R1csCpu};
 use neo_params::NeoParams;
 use neo_vm_trace::{ShoutEvent, ShoutId, StepTrace, Twist as _, TwistOpKind, VmTrace};
 use p3_field::PrimeCharacteristicRing;
@@ -855,7 +855,7 @@ impl Rv32TraceWiring {
         }
         if self.min_trace_len > DEFAULT_RV32_TRACE_MAX_STEPS {
             return Err(PiCcsError::InvalidInput(format!(
-                "min_trace_len={} exceeds trace-mode hard cap {}. Use the chunked RV32B1 runner for longer executions.",
+                "min_trace_len={} exceeds trace-mode hard cap {}. Increase chunk_rows and prove in chunks for longer executions.",
                 self.min_trace_len, DEFAULT_RV32_TRACE_MAX_STEPS
             )));
         }
@@ -883,7 +883,7 @@ impl Rv32TraceWiring {
                 }
                 if n > DEFAULT_RV32_TRACE_MAX_STEPS {
                     return Err(PiCcsError::InvalidInput(format!(
-                        "max_steps={} exceeds trace-mode hard cap {}. Use the chunked RV32B1 runner for longer executions.",
+                        "max_steps={} exceeds trace-mode hard cap {}. Increase chunk_rows and prove in chunks for longer executions.",
                         n, DEFAULT_RV32_TRACE_MAX_STEPS
                     )));
                 }
@@ -940,7 +940,7 @@ impl Rv32TraceWiring {
         let target_len = trace.steps.len().max(self.min_trace_len);
         if target_len > DEFAULT_RV32_TRACE_MAX_STEPS {
             return Err(PiCcsError::InvalidInput(format!(
-                "trace length {} exceeds trace-mode hard cap {}. Use the chunked RV32B1 runner for longer executions.",
+                "trace length {} exceeds trace-mode hard cap {}. Increase chunk_rows and prove in chunks for longer executions.",
                 target_len, DEFAULT_RV32_TRACE_MAX_STEPS
             )));
         }
@@ -1560,6 +1560,43 @@ impl Rv32TraceWiringRun {
     }
 }
 
+/// Enforce that the public statement initial memory matches chunk 0's `MemInstance.init`.
+fn enforce_chunk0_mem_init_matches_statement<Cmt2, K2>(
+    mem_layouts: &HashMap<u32, PlainMemLayout>,
+    statement_initial_mem: &HashMap<(u32, u64), F>,
+    steps: &[neo_memory::witness::StepInstanceBundle<Cmt2, F, K2>],
+) -> Result<(), PiCcsError> {
+    let chunk0 = steps
+        .first()
+        .ok_or_else(|| PiCcsError::InvalidInput("no steps provided".into()))?;
+
+    let mut mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
+    mem_ids.sort_unstable();
+
+    if chunk0.mem_insts.len() != mem_ids.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "mem instance count mismatch: chunk0 has {}, but mem_layouts has {}",
+            chunk0.mem_insts.len(),
+            mem_ids.len()
+        )));
+    }
+
+    for (idx, mem_id) in mem_ids.into_iter().enumerate() {
+        let layout = mem_layouts
+            .get(&mem_id)
+            .ok_or_else(|| PiCcsError::InvalidInput(format!("missing PlainMemLayout for mem_id={mem_id}")))?;
+        let expected = mem_init_from_initial_mem(mem_id, layout.k, statement_initial_mem)?;
+        let got = &chunk0.mem_insts[idx].init;
+        if *got != expected {
+            return Err(PiCcsError::InvalidInput(format!(
+                "chunk0 MemInstance.init mismatch for mem_id={mem_id}"
+            )));
+        }
+    }
+
+    Ok(())
+}
+
 /// Verification context for RV32 trace-wiring proofs.
 ///
 /// Created by [`Rv32TraceWiring::build_verifier`].  Contains the CCS and session
@@ -1580,11 +1617,7 @@ impl Rv32TraceWiringVerifier {
         proof: &ShardProof,
         steps_public: &[neo_memory::witness::StepInstanceBundle<Cmt, F, K>],
     ) -> Result<bool, PiCcsError> {
-        crate::riscv_shard::rv32_b1_enforce_chunk0_mem_init_matches_statement(
-            &self.mem_layouts,
-            &self.statement_initial_mem,
-            steps_public,
-        )?;
+        enforce_chunk0_mem_init_matches_statement(&self.mem_layouts, &self.statement_initial_mem, steps_public)?;
 
         if let Some(ob_cfg) = &self.output_binding_cfg {
             self.session

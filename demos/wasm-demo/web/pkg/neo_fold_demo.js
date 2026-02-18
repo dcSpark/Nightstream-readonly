@@ -295,7 +295,7 @@ export function init_panic_hook() {
 }
 
 /**
- * Prove+verify the RV32 Fibonacci program under the B1 shared-bus step circuit.
+ * Prove+verify the RV32 Fibonacci program under the trace-wiring shared-bus circuit.
  *
  * Expected guest semantics:
  * - reads `n` from RAM[0x104] (u32)
@@ -309,10 +309,10 @@ export function init_panic_hook() {
  * @param {boolean} do_spartan
  * @returns {any}
  */
-export function prove_verify_rv32_b1_fibonacci_asm(asm, n, ram_bytes, chunk_size, max_steps, do_spartan) {
+export function prove_verify_rv32_trace_fibonacci_asm(asm, n, ram_bytes, chunk_size, max_steps, do_spartan) {
     const ptr0 = passStringToWasm0(asm, wasm.__wbindgen_malloc, wasm.__wbindgen_realloc);
     const len0 = WASM_VECTOR_LEN;
-    const ret = wasm.prove_verify_rv32_b1_fibonacci_asm(ptr0, len0, n, ram_bytes, chunk_size, max_steps, do_spartan);
+    const ret = wasm.prove_verify_rv32_trace_fibonacci_asm(ptr0, len0, n, ram_bytes, chunk_size, max_steps, do_spartan);
     if (ret[2]) {
         throw takeFromExternrefTable0(ret[1]);
     }

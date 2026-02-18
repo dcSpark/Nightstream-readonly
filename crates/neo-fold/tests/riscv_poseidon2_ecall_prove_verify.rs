@@ -1,4 +1,4 @@
-use neo_fold::riscv_shard::Rv32B1;
+use neo_fold::riscv_trace_shard::Rv32TraceWiring;
 use neo_memory::riscv::lookups::{
     encode_program, RiscvInstruction, RiscvOpcode, POSEIDON2_ECALL_NUM, POSEIDON2_READ_ECALL_NUM,
 };
@@ -51,12 +51,12 @@ fn poseidon2_ecall_program() -> Vec<RiscvInstruction> {
 }
 
 #[test]
-fn rv32_b1_prove_verify_poseidon2_ecall_chunk1() {
+fn rv32_trace_prove_verify_poseidon2_ecall_chunk1() {
     let program = poseidon2_ecall_program();
     let program_bytes = encode_program(&program);
 
-    let mut run = Rv32B1::from_rom(0, &program_bytes)
-        .chunk_size(1)
+    let mut run = Rv32TraceWiring::from_rom(0, &program_bytes)
+        .chunk_rows(1)
         .max_steps(program.len() + 64)
         .prove()
         .expect("prove should succeed");
@@ -65,12 +65,12 @@ fn rv32_b1_prove_verify_poseidon2_ecall_chunk1() {
 }
 
 #[test]
-fn rv32_b1_prove_verify_poseidon2_ecall_chunk4() {
+fn rv32_trace_prove_verify_poseidon2_ecall_chunk4() {
     let program = poseidon2_ecall_program();
     let program_bytes = encode_program(&program);
 
-    let mut run = Rv32B1::from_rom(0, &program_bytes)
-        .chunk_size(4)
+    let mut run = Rv32TraceWiring::from_rom(0, &program_bytes)
+        .chunk_rows(4)
         .max_steps(program.len() + 64)
         .prove()
         .expect("prove should succeed");
@@ -79,12 +79,12 @@ fn rv32_b1_prove_verify_poseidon2_ecall_chunk4() {
 }
 
 #[test]
-fn rv32_b1_prove_verify_poseidon2_ecall_chunk32() {
+fn rv32_trace_prove_verify_poseidon2_ecall_chunk32() {
     let program = poseidon2_ecall_program();
     let program_bytes = encode_program(&program);
 
-    let mut run = Rv32B1::from_rom(0, &program_bytes)
-        .chunk_size(32)
+    let mut run = Rv32TraceWiring::from_rom(0, &program_bytes)
+        .chunk_rows(32)
         .max_steps(program.len() + 64)
         .prove()
         .expect("prove should succeed");

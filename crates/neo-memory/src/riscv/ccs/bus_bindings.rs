@@ -1,9 +1,13 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use p3_goldilocks::Goldilocks as F;
 
-use crate::cpu::bus_layout::{build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, ShoutInstanceShape};
-use crate::cpu::constraints::{CpuConstraintBuilder, ShoutCpuBinding, TwistCpuBinding, CPU_BUS_COL_DISABLED};
+use crate::cpu::bus_layout::{
+    build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, BusLayout, ShoutInstanceShape,
+};
+use crate::cpu::constraints::{
+    CpuConstraint, CpuConstraintBuilder, ShoutCpuBinding, TwistCpuBinding, CPU_BUS_COL_DISABLED,
+};
 use crate::cpu::r1cs_adapter::SharedCpuBusConfig;
 use crate::plain::PlainMemLayout;
 use crate::riscv::lookups::{PROG_ID, RAM_ID, REG_ID};
@@ -13,153 +17,22 @@ use crate::riscv::trace::{
     Rv32DecodeSidecarLayout,
 };
 
-use super::config::{derive_mem_ids_and_ell_addrs, derive_shout_ids_and_ell_addrs};
 use super::constants::{
     ADD_TABLE_ID, AND_TABLE_ID, DIVU_TABLE_ID, DIV_TABLE_ID, EQ_TABLE_ID, MULHSU_TABLE_ID, MULHU_TABLE_ID,
     MULH_TABLE_ID, MUL_TABLE_ID, NEQ_TABLE_ID, OR_TABLE_ID, REMU_TABLE_ID, REM_TABLE_ID, RV32_XLEN, SLL_TABLE_ID,
     SLTU_TABLE_ID, SLT_TABLE_ID, SRA_TABLE_ID, SRL_TABLE_ID, SUB_TABLE_ID, XOR_TABLE_ID,
 };
-use super::{Rv32B1Layout, Rv32TraceCcsLayout};
+use super::trace::Rv32TraceCcsLayout;
 
 /// Additional trace-mode Shout lookup family specification.
 ///
-/// This lets trace shared-bus mode instantiate lookup families beyond the fixed RV32 opcode tables,
-/// with table-specific address widths (`ell_addr`) while still using padding-only CPU bindings.
+/// This allows callers to provision lookup families beyond the fixed RV32 opcode
+/// tables, with table-specific address widths (`ell_addr`) and value count.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct TraceShoutBusSpec {
     pub table_id: u32,
     pub ell_addr: usize,
     pub n_vals: usize,
-}
-
-fn shout_cpu_binding(layout: &Rv32B1Layout, table_id: u32) -> ShoutCpuBinding {
-    // NOTE: We intentionally do *not* bind Shout addr_bits to a packed CPU scalar here.
-    //
-    // In Neo, Ajtai encodes witness scalars using `params.d=54` balanced base-`b` digits. A full
-    // 64-bit packed Shout key can exceed that representable range, which breaks the MCS/DEC plumbing.
-    //
-    // Shout key correctness is enforced by the RV32 B1 decode/semantics sidecar CCS instead.
-    let addr = None;
-    match table_id {
-        AND_TABLE_ID => ShoutCpuBinding {
-            has_lookup: layout.and_has_lookup,
-            addr,
-            val: layout.alu_out,
-        },
-        XOR_TABLE_ID => ShoutCpuBinding {
-            has_lookup: layout.xor_has_lookup,
-            addr,
-            val: layout.alu_out,
-        },
-        OR_TABLE_ID => ShoutCpuBinding {
-            has_lookup: layout.or_has_lookup,
-            addr,
-            val: layout.alu_out,
-        },
-        ADD_TABLE_ID => ShoutCpuBinding {
-            has_lookup: layout.add_has_lookup,
-            addr,
-            val: layout.alu_out,
-        },
-        SUB_TABLE_ID => ShoutCpuBinding {
-            has_lookup: layout.sub_has_lookup,
-            addr,
-            val: layout.alu_out,
-        },
-        SLT_TABLE_ID => ShoutCpuBinding {
-            has_lookup: layout.slt_has_lookup,
-            addr,
-            val: layout.alu_out,
-        },
-        SLTU_TABLE_ID => ShoutCpuBinding {
-            has_lookup: layout.sltu_has_lookup,
-            addr,
-            val: layout.alu_out,
-        },
-        SLL_TABLE_ID => ShoutCpuBinding {
-            has_lookup: layout.sll_has_lookup,
-            addr,
-            val: layout.alu_out,
-        },
-        SRL_TABLE_ID => ShoutCpuBinding {
-            has_lookup: layout.srl_has_lookup,
-            addr,
-            val: layout.alu_out,
-        },
-        SRA_TABLE_ID => ShoutCpuBinding {
-            has_lookup: layout.sra_has_lookup,
-            addr,
-            val: layout.alu_out,
-        },
-        EQ_TABLE_ID => ShoutCpuBinding {
-            has_lookup: layout.eq_has_lookup,
-            addr,
-            val: layout.alu_out,
-        },
-        NEQ_TABLE_ID => ShoutCpuBinding {
-            // Nightstream encodes BNE as EQ + invert, so NEQ is unused.
-            has_lookup: layout.zero,
-            addr,
-            val: layout.zero,
-        },
-        _ => {
-            // Bind unused tables to fixed-zero CPU columns so they are provably inactive.
-            let zero = layout.zero;
-            ShoutCpuBinding {
-                has_lookup: zero,
-                addr,
-                val: zero,
-            }
-        }
-    }
-}
-
-fn twist_cpu_binding(layout: &Rv32B1Layout, mem_id: u32) -> TwistCpuBinding {
-    if mem_id == RAM_ID.0 {
-        TwistCpuBinding {
-            has_read: layout.ram_has_read,
-            has_write: layout.ram_has_write,
-            read_addr: layout.eff_addr,
-            write_addr: layout.eff_addr,
-            rv: layout.mem_rv,
-            wv: layout.ram_wv,
-            inc: None,
-        }
-    } else if mem_id == PROG_ID.0 {
-        let zero = layout.zero;
-        TwistCpuBinding {
-            has_read: layout.is_active,
-            has_write: zero,
-            read_addr: layout.pc_in,
-            write_addr: zero,
-            rv: layout.instr_word,
-            wv: zero,
-            inc: None,
-        }
-    } else if mem_id == REG_ID.0 {
-        // Regfile lane0 binding (read rs1, write rd).
-        TwistCpuBinding {
-            has_read: layout.is_active,
-            has_write: layout.reg_has_write,
-            read_addr: layout.rs1_field,
-            write_addr: layout.rd_field,
-            rv: layout.rs1_val,
-            wv: layout.rd_write_val,
-            inc: None,
-        }
-    } else {
-        // Disable any additional Twist instances by binding to fixed-zero CPU columns.
-        let zero = layout.zero;
-        TwistCpuBinding {
-            has_read: zero,
-            has_write: zero,
-            read_addr: zero,
-            write_addr: zero,
-            rv: zero,
-            wv: zero,
-            inc: None,
-        }
-    }
 }
 
 #[inline]
@@ -423,7 +296,7 @@ fn trace_decode_selector_cols_from_bus(
         let inst_cols = bus.shout_cols.get(shout_idx).ok_or_else(|| {
             format!("RV32 trace shared bus: missing shout cols for decode lookup table_id={table_id}")
         })?;
-        let lane0 = inst_cols.lanes.get(0).ok_or_else(|| {
+        let lane0 = inst_cols.lanes.first().ok_or_else(|| {
             format!("RV32 trace shared bus: expected one shout lane for decode lookup table_id={table_id}")
         })?;
         bus.bus_base
@@ -502,9 +375,7 @@ pub fn rv32_trace_shared_cpu_bus_config_with_specs(
 
     let mut shout_cpu = HashMap::new();
     for shape in &shout_shapes {
-        // Keep opcode Shout families on reduction-time linkage ownership.
-        // Decode/width lookup families also get row-level key-binding constraints
-        // to tie bus addr_bits to committed CPU trace columns.
+        // Opcode lookup families remain reduction-owned; decode/width families bind key columns.
         let binding = trace_shout_binding(layout, shape.table_id);
         shout_cpu.insert(shape.table_id, binding.into_iter().collect());
     }
@@ -517,6 +388,7 @@ pub fn rv32_trace_shared_cpu_bus_config_with_specs(
             .get(&mem_id)
             .map(|l| l.lanes.max(1))
             .ok_or_else(|| format!("RV32 trace shared bus: missing mem layout for mem_id={mem_id}"))?;
+
         if mem_id == REG_ID.0 {
             if lanes < 2 {
                 return Err(format!(
@@ -551,12 +423,25 @@ pub fn rv32_trace_shared_cpu_bus_config_with_specs(
         }
     }
 
+    let mut shout_addr_groups = HashMap::new();
+    let mut shout_selector_groups = HashMap::new();
+    for shape in &shout_shapes {
+        if let Some(g) = shape.addr_group {
+            shout_addr_groups.insert(shape.table_id, g as u64);
+        }
+        if let Some(g) = shape.selector_group {
+            shout_selector_groups.insert(shape.table_id, g as u64);
+        }
+    }
+
     Ok(SharedCpuBusConfig {
         mem_layouts,
         initial_mem,
         const_one_col: layout.const_one,
         shout_cpu,
         twist_cpu,
+        shout_addr_groups,
+        shout_selector_groups,
     })
 }
 
@@ -576,6 +461,38 @@ pub fn rv32_trace_shared_bus_requirements_with_specs(
     extra_shout_specs: &[TraceShoutBusSpec],
     mem_layouts: &HashMap<u32, PlainMemLayout>,
 ) -> Result<(usize, usize), String> {
+    let snapshot =
+        rv32_trace_shared_bus_extraction_with_specs(layout, shout_table_ids, extra_shout_specs, mem_layouts)?;
+    Ok((snapshot.bus.bus_region_len(), snapshot.constraints.len()))
+}
+
+/// Debug/extractor snapshot for trace shared-bus planning.
+///
+/// This exposes the exact bus layout and injected CPU-bus constraints that would be
+/// synthesized for the given configuration. It is intended for tooling (e.g. Lean
+/// extraction), not for proving/verification hot paths.
+#[derive(Clone, Debug)]
+pub struct TraceSharedBusExtraction {
+    pub bus: BusLayout,
+    pub constraints: Vec<CpuConstraint<F>>,
+}
+
+/// Return the shared-bus layout and constraint list required by trace mode.
+pub fn rv32_trace_shared_bus_extraction(
+    layout: &Rv32TraceCcsLayout,
+    shout_table_ids: &[u32],
+    mem_layouts: &HashMap<u32, PlainMemLayout>,
+) -> Result<TraceSharedBusExtraction, String> {
+    rv32_trace_shared_bus_extraction_with_specs(layout, shout_table_ids, &[], mem_layouts)
+}
+
+/// Return the shared-bus layout and constraint list required by trace mode with extra lookup-family specs.
+pub fn rv32_trace_shared_bus_extraction_with_specs(
+    layout: &Rv32TraceCcsLayout,
+    shout_table_ids: &[u32],
+    extra_shout_specs: &[TraceShoutBusSpec],
+    mem_layouts: &HashMap<u32, PlainMemLayout>,
+) -> Result<TraceSharedBusExtraction, String> {
     let shout_shapes = derive_trace_shout_shapes(shout_table_ids, extra_shout_specs)?;
 
     let mut mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
@@ -583,7 +500,7 @@ pub fn rv32_trace_shared_bus_requirements_with_specs(
 
     let mut shout_cols = 0usize;
     let mut seen_addr_groups = HashMap::<u32, usize>::new();
-    let mut seen_selector_groups = std::collections::HashSet::<u32>::new();
+    let mut seen_selector_groups = HashSet::<u32>::new();
     for shape in &shout_shapes {
         if let Some(group) = shape.addr_group {
             if let Some(prev_ell) = seen_addr_groups.insert(group, shape.ell_addr) {
@@ -618,6 +535,7 @@ pub fn rv32_trace_shared_bus_requirements_with_specs(
             .checked_add(shape.n_vals)
             .ok_or_else(|| "RV32 trace shared bus: shout value width overflow".to_string())?;
     }
+
     let mut twist_cols = 0usize;
     let mut twist_shapes = Vec::with_capacity(mem_ids.len());
     for mem_id in &mem_ids {
@@ -643,6 +561,7 @@ pub fn rv32_trace_shared_bus_requirements_with_specs(
             .ok_or_else(|| "RV32 trace shared bus: twist bus column overflow".to_string())?;
         twist_shapes.push((ell_addr, lanes));
     }
+
     let bus_cols = shout_cols
         .checked_add(twist_cols)
         .ok_or_else(|| "RV32 trace shared bus: bus column overflow".to_string())?;
@@ -654,7 +573,7 @@ pub fn rv32_trace_shared_bus_requirements_with_specs(
         .checked_add(bus_region_len)
         .ok_or_else(|| "RV32 trace shared bus: total m overflow".to_string())?;
 
-    let bus = crate::cpu::bus_layout::build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes(
+    let bus = build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes(
         m_total,
         layout.m_in,
         layout.t,
@@ -672,18 +591,19 @@ pub fn rv32_trace_shared_bus_requirements_with_specs(
     let mut builder = CpuConstraintBuilder::<F>::new(m_total, m_total, layout.const_one);
 
     let mut addr_range_counts = HashMap::<(usize, usize), usize>::new();
-    for inst_cols in bus.shout_cols.iter() {
-        for lane_cols in inst_cols.lanes.iter() {
+    for inst_cols in &bus.shout_cols {
+        for lane_cols in &inst_cols.lanes {
             let key = (lane_cols.addr_bits.start, lane_cols.addr_bits.end);
             *addr_range_counts.entry(key).or_insert(0) += 1;
         }
     }
-    let mut addr_range_bitness_added = std::collections::HashSet::<(usize, usize)>::new();
-    let mut selector_bitness_added = std::collections::HashSet::<usize>::new();
-    let mut shout_key_binding_added = std::collections::HashSet::<(bool, usize, usize, usize, usize)>::new();
-    for (i, _) in shout_shapes.iter().enumerate() {
+
+    let mut addr_range_bitness_added = HashSet::<(usize, usize)>::new();
+    let mut selector_bitness_added = HashSet::<usize>::new();
+    let mut shout_key_binding_added = HashSet::<(bool, usize, usize, usize, usize)>::new();
+    for (i, shape) in shout_shapes.iter().enumerate() {
         let lane0 = &bus.shout_cols[i].lanes[0];
-        if let Some(binding) = trace_shout_binding(layout, shout_shapes[i].table_id) {
+        if let Some(binding) = trace_shout_binding(layout, shape.table_id) {
             let mut dedup_binding = binding.clone();
             if let Some(addr_base) = dedup_binding.addr {
                 let (is_bus_gate, gate_base) = if dedup_binding.has_lookup == CPU_BUS_COL_DISABLED {
@@ -704,6 +624,7 @@ pub fn rv32_trace_shared_bus_requirements_with_specs(
             }
             builder.add_shout_instance_linkage_bound(&bus, lane0, &dedup_binding);
         }
+
         let key = (lane0.addr_bits.start, lane0.addr_bits.end);
         let shared_addr_group = addr_range_counts.get(&key).copied().unwrap_or(0) > 1;
         let selector_first = selector_bitness_added.insert(lane0.has_lookup);
@@ -716,19 +637,19 @@ pub fn rv32_trace_shared_bus_requirements_with_specs(
             if addr_range_bitness_added.insert(key) {
                 builder.add_shout_instance_addr_bit_bitness(&bus, lane0);
             }
+        } else if selector_first {
+            builder.add_shout_instance_padding(&bus, lane0);
         } else {
-            if selector_first {
-                builder.add_shout_instance_padding(&bus, lane0);
-            } else {
-                builder.add_shout_instance_padding_without_selector_bitness(&bus, lane0);
-            }
+            builder.add_shout_instance_padding_without_selector_bitness(&bus, lane0);
         }
     }
+
     for (i, &mem_id) in mem_ids.iter().enumerate() {
         let inst = &bus.twist_cols[i];
         if inst.lanes.is_empty() {
             continue;
         }
+
         if mem_id == REG_ID.0 {
             let lane0 = trace_twist_primary_binding(layout, mem_id, decode_selectors);
             builder.add_twist_instance_bound(&bus, &inst.lanes[0], &lane0);
@@ -764,134 +685,8 @@ pub fn rv32_trace_shared_bus_requirements_with_specs(
 
     audit_bus_tail_constraint_coverage(&builder, &bus)?;
 
-    Ok((bus_region_len, builder.constraints().len()))
-}
-
-pub(super) fn injected_bus_constraints_len(layout: &Rv32B1Layout, table_ids: &[u32], mem_ids: &[u32]) -> usize {
-    let shout_cpu: Vec<ShoutCpuBinding> = table_ids
-        .iter()
-        .map(|&id| shout_cpu_binding(layout, id))
-        .collect();
-    let mut builder = CpuConstraintBuilder::<F>::new(layout.m, layout.m, layout.const_one);
-    for (i, cpu) in shout_cpu.iter().enumerate() {
-        builder.add_shout_instance_bound(&layout.bus, &layout.bus.shout_cols[i].lanes[0], cpu);
-    }
-    for (i, &mem_id) in mem_ids.iter().enumerate() {
-        let inst = &layout.bus.twist_cols[i];
-        if inst.lanes.is_empty() {
-            continue;
-        }
-        if mem_id == REG_ID.0 {
-            // Regfile uses two lanes:
-            // - lane0: read rs1, write rd
-            // - lane1: read rs2, no write
-            let lane0 = twist_cpu_binding(layout, mem_id);
-            builder.add_twist_instance_bound(&layout.bus, &inst.lanes[0], &lane0);
-
-            let zero = layout.zero;
-            let lane1 = TwistCpuBinding {
-                has_read: layout.is_active,
-                has_write: zero,
-                read_addr: layout.rs2_field,
-                write_addr: zero,
-                rv: layout.rs2_val,
-                wv: zero,
-                inc: None,
-            };
-            if inst.lanes.len() >= 2 {
-                builder.add_twist_instance_bound(&layout.bus, &inst.lanes[1], &lane1);
-            }
-            // Any remaining lanes are disabled.
-            if inst.lanes.len() > 2 {
-                let disabled = twist_cpu_binding(layout, u32::MAX);
-                for lane_cols in &inst.lanes[2..] {
-                    builder.add_twist_instance_bound(&layout.bus, lane_cols, &disabled);
-                }
-            }
-        } else {
-            // Default: lane0 bound, remaining lanes disabled.
-            let lane0 = twist_cpu_binding(layout, mem_id);
-            builder.add_twist_instance_bound(&layout.bus, &inst.lanes[0], &lane0);
-            if inst.lanes.len() > 1 {
-                let disabled = twist_cpu_binding(layout, u32::MAX);
-                for lane_cols in &inst.lanes[1..] {
-                    builder.add_twist_instance_bound(&layout.bus, lane_cols, &disabled);
-                }
-            }
-        }
-    }
-    builder.constraints().len()
-}
-
-/// Shared CPU-bus bindings for the RV32 B1 step circuit.
-///
-/// This config:
-/// - binds `PROG_ID` reads to `pc_in` / `instr_word`, forces no ROM writes,
-/// - binds `RAM_ID` reads/writes to `eff_addr` / `mem_rv` / `ram_wv` (with selectors derived from instruction flags),
-/// - binds RV32IM Shout opcode tables (ids 0..=19) to `alu_out` (addr_bits are constrained directly by the step CCS).
-pub fn rv32_b1_shared_cpu_bus_config(
-    layout: &Rv32B1Layout,
-    shout_table_ids: &[u32],
-    mem_layouts: HashMap<u32, PlainMemLayout>,
-    initial_mem: HashMap<(u32, u64), F>,
-) -> Result<SharedCpuBusConfig<F>, String> {
-    let (table_ids, _ell_addrs) = derive_shout_ids_and_ell_addrs(shout_table_ids)?;
-
-    let mut shout_cpu = HashMap::new();
-    for table_id in table_ids {
-        shout_cpu.insert(table_id, vec![shout_cpu_binding(layout, table_id)]);
-    }
-
-    let (mem_ids, _ell_addrs) = derive_mem_ids_and_ell_addrs(&mem_layouts)?;
-    let mut twist_cpu = HashMap::new();
-    for mem_id in mem_ids {
-        let lanes = mem_layouts
-            .get(&mem_id)
-            .map(|l| l.lanes.max(1))
-            .unwrap_or(1);
-
-        if mem_id == REG_ID.0 {
-            if lanes < 2 {
-                return Err(format!(
-                    "RV32 B1 shared bus: REG_ID requires lanes>=2 (got lanes={lanes})"
-                ));
-            }
-            let lane0 = twist_cpu_binding(layout, mem_id);
-            let zero = layout.zero;
-            let lane1 = TwistCpuBinding {
-                has_read: layout.is_active,
-                has_write: zero,
-                read_addr: layout.rs2_field,
-                write_addr: zero,
-                rv: layout.rs2_val,
-                wv: zero,
-                inc: None,
-            };
-            let disabled = twist_cpu_binding(layout, u32::MAX);
-            let mut bindings = Vec::with_capacity(lanes);
-            bindings.push(lane0);
-            bindings.push(lane1);
-            for _ in 2..lanes {
-                bindings.push(disabled.clone());
-            }
-            twist_cpu.insert(mem_id, bindings);
-        } else {
-            let primary = twist_cpu_binding(layout, mem_id);
-            let disabled = twist_cpu_binding(layout, u32::MAX);
-            let mut bindings = Vec::with_capacity(lanes);
-            bindings.push(primary);
-            for _ in 1..lanes {
-                bindings.push(disabled.clone());
-            }
-            twist_cpu.insert(mem_id, bindings);
-        }
-    }
-
-    Ok(SharedCpuBusConfig {
-        mem_layouts,
-        initial_mem,
-        const_one_col: layout.const_one,
-        shout_cpu,
-        twist_cpu,
+    Ok(TraceSharedBusExtraction {
+        bus,
+        constraints: builder.constraints().to_vec(),
     })
 }

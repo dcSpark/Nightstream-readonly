@@ -317,6 +317,8 @@ fn build_twist_shout_2step_fixture_inner(seed: u64, bad_lookup_step1: bool) -> S
         ell: lut_ell,
         table_spec: None,
         table: lut_table.content.clone(),
+        addr_group: None,
+        selector_group: None,
     };
     let lut_wit0 = neo_memory::witness::LutWitness { mats: Vec::new() };
 
@@ -343,6 +345,8 @@ fn build_twist_shout_2step_fixture_inner(seed: u64, bad_lookup_step1: bool) -> S
         ell: lut_ell,
         table_spec: None,
         table: lut_table.content.clone(),
+        addr_group: None,
+        selector_group: None,
     };
     let lut_wit1 = neo_memory::witness::LutWitness { mats: Vec::new() };
 

@@ -204,6 +204,12 @@ pub struct LutInstance<C, F> {
     #[serde(default)]
     pub table_spec: Option<LutTableSpec>,
     pub table: Vec<F>,
+    /// Optional address-sharing group id for shared-bus column layout.
+    #[serde(default)]
+    pub addr_group: Option<u64>,
+    /// Optional selector-sharing group id for shared-bus column layout.
+    #[serde(default)]
+    pub selector_group: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

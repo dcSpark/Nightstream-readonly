@@ -164,6 +164,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_event_table_packed_prove_verif
                 time_bits: ell_n,
             }),
             table: Vec::new(),
+        addr_group: None,
+        selector_group: None,
         };
         let wit = LutWitness { mats: vec![Z] };
         lut_instances.push((inst, wit));

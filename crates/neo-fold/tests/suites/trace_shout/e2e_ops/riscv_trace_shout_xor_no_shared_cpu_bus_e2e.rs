@@ -240,6 +240,8 @@ fn riscv_trace_wiring_ccs_no_shared_cpu_bus_shout_xor_paged_prove_verify() {
             xlen: 32,
         }),
         table: Vec::new(),
+    addr_group: None,
+    selector_group: None,
     };
     let xor_lut_wit = LutWitness { mats };
 

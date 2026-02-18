@@ -145,6 +145,8 @@ fn with_shared_cpu_bus_injects_constraints_and_forces_const_one() {
                 inc: None,
             }],
         )]),
+        shout_addr_groups: HashMap::new(),
+        shout_selector_groups: HashMap::new(),
     };
 
     let cpu = cpu
@@ -208,6 +210,8 @@ fn with_shared_cpu_bus_accepts_empty_shout_bindings_for_padding_only_mode() {
         // Empty binding vector => padding/bitness-only shout lane constraints.
         shout_cpu: HashMap::from([(1, Vec::<ShoutCpuBinding>::new())]),
         twist_cpu: HashMap::new(),
+        shout_addr_groups: HashMap::new(),
+        shout_selector_groups: HashMap::new(),
     };
 
     let cpu = cpu
@@ -325,6 +329,8 @@ fn shared_bus_shout_lane_assignment_is_in_order_and_resets_per_step() {
         const_one_col: 0,
         shout_cpu: HashMap::from([(1, vec![shout_lane0_cfg, shout_lane1_cfg])]),
         twist_cpu: HashMap::new(),
+        shout_addr_groups: HashMap::new(),
+        shout_selector_groups: HashMap::new(),
     };
 
     let cpu = cpu
@@ -465,6 +471,8 @@ fn shared_bus_rejects_shout_lane_overflow_in_one_step() {
             }],
         )]),
         twist_cpu: HashMap::new(),
+        shout_addr_groups: HashMap::new(),
+        shout_selector_groups: HashMap::new(),
     };
 
     let cpu = cpu
@@ -524,6 +532,8 @@ fn with_shared_cpu_bus_rejects_non_public_const_one() {
         const_one_col: 1, // not < m_in
         shout_cpu: HashMap::new(),
         twist_cpu: HashMap::new(),
+        shout_addr_groups: HashMap::new(),
+        shout_selector_groups: HashMap::new(),
     };
 
     assert!(
@@ -597,6 +607,8 @@ fn with_shared_cpu_bus_rejects_bindings_in_bus_tail() {
                 inc: None,
             }],
         )]),
+        shout_addr_groups: HashMap::new(),
+        shout_selector_groups: HashMap::new(),
     };
 
     assert!(

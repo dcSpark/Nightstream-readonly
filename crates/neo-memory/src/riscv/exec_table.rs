@@ -340,7 +340,7 @@ impl Rv32ExecTable {
 
     /// Validate RAM twist semantics by replaying the RAM state from an initial state.
     ///
-    /// - `init_ram` maps `byte_addr` → word value (u32 stored in u64) under the RV32 B1 convention.
+    /// - `init_ram` maps `byte_addr` → word value (u32 stored in u64) under the RV32 trace convention.
     /// - Unspecified addresses default to 0.
     /// - Multiple RAM events in a cycle are applied in trace order (e.g. SB/SH read-modify-write).
     pub fn validate_ram_semantics(&self, init_ram: &HashMap<u64, u64>) -> Result<(), String> {
@@ -612,7 +612,7 @@ impl Rv32ExecRow {
             }
         }
 
-        // Light sanity check: make sure the trace's lane policy matches Rv32 B1's convention.
+        // Light sanity check: make sure the trace's lane policy matches RV32 trace conventions.
         //
         // - lane0 reads rs1_field always
         // - lane1 reads rs2_field

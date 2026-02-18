@@ -1,5 +1,3 @@
-mod helpers;
-
 mod riscv_bus_binding_redteam;
 mod riscv_decode_malicious_witness_redteam;
 mod riscv_decode_plumbing_linkage;

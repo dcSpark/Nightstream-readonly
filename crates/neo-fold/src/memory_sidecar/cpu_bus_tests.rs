@@ -196,6 +196,8 @@ fn minimal_bus_steps(
         ell: shout_ell,
         table_spec: None,
         table: Vec::new(),
+        addr_group: None,
+        selector_group: None,
     };
 
     let mem = MemInstance::<Commitment, F> {
