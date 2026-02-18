@@ -6,6 +6,8 @@ use neo_math::K;
 use neo_reductions::sumcheck::RoundOracle;
 use p3_field::Field;
 use p3_field::PrimeCharacteristicRing;
+use std::borrow::Cow;
+use std::sync::OnceLock;
 
 macro_rules! impl_round_oracle_via_core {
     ($ty:ty) => {
@@ -36,9 +38,9 @@ pub struct ProductRoundOracle {
 impl ProductRoundOracle {
     pub fn new(factors: Vec<Vec<K>>, degree_bound: usize) -> Self {
         let len = factors.first().map(|f| f.len()).unwrap_or(1);
-        assert!(len.is_power_of_two(), "factor length must be a power of two");
+        debug_assert!(len.is_power_of_two(), "factor length must be a power of two");
         for f in factors.iter() {
-            assert_eq!(f.len(), len, "all factors must have the same length");
+            debug_assert_eq!(f.len(), len, "all factors must have the same length");
         }
         let total_rounds = log2_pow2(len);
         Self {
@@ -165,6 +167,16 @@ macro_rules! for_each_sparse_parent_pair {
             $body
         }
     }};
+}
+
+fn pow2_weights_32() -> &'static [K] {
+    static W: OnceLock<[K; 32]> = OnceLock::new();
+    W.get_or_init(|| std::array::from_fn(|i| K::from_u64(1u64 << i)))
+}
+
+fn pow2_weights_5() -> &'static [K] {
+    static W: OnceLock<[K; 5]> = OnceLock::new();
+    W.get_or_init(|| std::array::from_fn(|i| K::from_u64(1u64 << i)))
 }
 
 fn expr_id1(cols: &[K; 1]) -> K {
@@ -413,253 +425,6 @@ fn expr_rv32_packed_mulhu(cols: &[K; 3], limb_sum: K) -> K {
     lhs * rhs - limb_sum - val * K::from_u64(1u64 << 32)
 }
 
-type SparseWeightedBitsExprFn<const N: usize> = fn(&[K; N], K) -> K;
-
-struct SparseWeightedBitsExprOracle<const N: usize> {
-    bit_idx: usize,
-    r_cycle: Vec<K>,
-    prefix_eq: K,
-    has_lookup: SparseIdxVec<K>,
-    cols: [SparseIdxVec<K>; N],
-    bits: Vec<SparseIdxVec<K>>,
-    weights: Vec<K>,
-    degree_bound: usize,
-    expr_fn: SparseWeightedBitsExprFn<N>,
-}
-
-impl<const N: usize> SparseWeightedBitsExprOracle<N> {
-    fn new(
-        r_cycle: &[K],
-        has_lookup: SparseIdxVec<K>,
-        cols: [SparseIdxVec<K>; N],
-        bits: Vec<SparseIdxVec<K>>,
-        weights: Vec<K>,
-        degree_bound: usize,
-        expr_fn: SparseWeightedBitsExprFn<N>,
-    ) -> Self {
-        let ell_n = r_cycle.len();
-        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
-        assert_cols_match_time(&cols, 1usize << ell_n);
-        debug_assert_eq!(bits.len(), weights.len());
-        assert_cols_match_time(&bits, 1usize << ell_n);
-
-        Self {
-            bit_idx: 0,
-            r_cycle: r_cycle.to_vec(),
-            prefix_eq: K::ONE,
-            has_lookup,
-            cols,
-            bits,
-            weights,
-            degree_bound,
-            expr_fn,
-        }
-    }
-}
-
-impl<const N: usize> RoundOracle for SparseWeightedBitsExprOracle<N> {
-    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
-        if self.has_lookup.len() == 1 {
-            let gate = self.has_lookup.singleton_value();
-            let cols = std::array::from_fn(|i| self.cols[i].singleton_value());
-            let mut sum = K::ZERO;
-            for (b, w) in self.bits.iter().zip(self.weights.iter()) {
-                sum += b.singleton_value() * *w;
-            }
-            let expr = (self.expr_fn)(&cols, sum);
-            let v = self.prefix_eq * gate * expr;
-            return vec![v; points.len()];
-        }
-
-        let mut ys = vec![K::ZERO; points.len()];
-        for_each_sparse_parent_pair!(self.has_lookup.entries(), pair, {
-            let child0 = 2 * pair;
-            let child1 = child0 + 1;
-
-            let gate0 = self.has_lookup.get(child0);
-            let gate1 = self.has_lookup.get(child1);
-            if gate0 == K::ZERO && gate1 == K::ZERO {
-                continue;
-            }
-
-            let cols0: [K; N] = std::array::from_fn(|i| self.cols[i].get(child0));
-            let cols1: [K; N] = std::array::from_fn(|i| self.cols[i].get(child1));
-            let mut sum0 = K::ZERO;
-            let mut sum1 = K::ZERO;
-            for (b, w) in self.bits.iter().zip(self.weights.iter()) {
-                sum0 += b.get(child0) * *w;
-                sum1 += b.get(child1) * *w;
-            }
-
-            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
-
-            for (i, &x) in points.iter().enumerate() {
-                let chi_x = interp(chi0, chi1, x);
-                if chi_x == K::ZERO {
-                    continue;
-                }
-                let gate_x = interp(gate0, gate1, x);
-                if gate_x == K::ZERO {
-                    continue;
-                }
-                let cols_x: [K; N] = std::array::from_fn(|j| interp(cols0[j], cols1[j], x));
-                let sum_x = interp(sum0, sum1, x);
-                let expr_x = (self.expr_fn)(&cols_x, sum_x);
-                if expr_x == K::ZERO {
-                    continue;
-                }
-                ys[i] += chi_x * gate_x * expr_x;
-            }
-        });
-        ys
-    }
-
-    fn num_rounds(&self) -> usize {
-        self.r_cycle.len().saturating_sub(self.bit_idx)
-    }
-
-    fn degree_bound(&self) -> usize {
-        self.degree_bound
-    }
-
-    fn fold(&mut self, r: K) {
-        if self.num_rounds() == 0 {
-            return;
-        }
-        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
-        self.has_lookup.fold_round_in_place(r);
-        for col in self.cols.iter_mut() {
-            col.fold_round_in_place(r);
-        }
-        for b in self.bits.iter_mut() {
-            b.fold_round_in_place(r);
-        }
-        self.bit_idx += 1;
-    }
-}
-
-type SparseValProdExprFn = fn(K, K) -> K;
-
-struct SparseValProdBitsOracle {
-    bit_idx: usize,
-    r_cycle: Vec<K>,
-    prefix_eq: K,
-    has_lookup: SparseIdxVec<K>,
-    val: SparseIdxVec<K>,
-    bits: Vec<SparseIdxVec<K>>,
-    degree_bound: usize,
-    expr_fn: SparseValProdExprFn,
-}
-
-impl SparseValProdBitsOracle {
-    fn new(
-        r_cycle: &[K],
-        has_lookup: SparseIdxVec<K>,
-        val: SparseIdxVec<K>,
-        bits: Vec<SparseIdxVec<K>>,
-        degree_bound: usize,
-        expr_fn: SparseValProdExprFn,
-    ) -> Self {
-        let ell_n = r_cycle.len();
-        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
-        debug_assert_eq!(val.len(), 1usize << ell_n);
-        assert_cols_match_time(&bits, 1usize << ell_n);
-
-        Self {
-            bit_idx: 0,
-            r_cycle: r_cycle.to_vec(),
-            prefix_eq: K::ONE,
-            has_lookup,
-            val,
-            bits,
-            degree_bound,
-            expr_fn,
-        }
-    }
-}
-
-impl RoundOracle for SparseValProdBitsOracle {
-    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
-        if self.has_lookup.len() == 1 {
-            let gate = self.has_lookup.singleton_value();
-            let val = self.val.singleton_value();
-            let mut prod = K::ONE;
-            for b in self.bits.iter() {
-                prod *= K::ONE - b.singleton_value();
-            }
-            let expr = (self.expr_fn)(val, prod);
-            let v = self.prefix_eq * gate * expr;
-            return vec![v; points.len()];
-        }
-
-        let mut ys = vec![K::ZERO; points.len()];
-        for_each_sparse_parent_pair!(self.has_lookup.entries(), pair, {
-            let child0 = 2 * pair;
-            let child1 = child0 + 1;
-
-            let gate0 = self.has_lookup.get(child0);
-            let gate1 = self.has_lookup.get(child1);
-            if gate0 == K::ZERO && gate1 == K::ZERO {
-                continue;
-            }
-
-            let val0 = self.val.get(child0);
-            let val1 = self.val.get(child1);
-            let bit_pairs: Vec<(K, K)> = self
-                .bits
-                .iter()
-                .map(|b| (b.get(child0), b.get(child1)))
-                .collect();
-
-            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
-
-            for (i, &x) in points.iter().enumerate() {
-                let chi_x = interp(chi0, chi1, x);
-                if chi_x == K::ZERO {
-                    continue;
-                }
-                let gate_x = interp(gate0, gate1, x);
-                if gate_x == K::ZERO {
-                    continue;
-                }
-                let val_x = interp(val0, val1, x);
-                let mut prod_x = K::ONE;
-                for &(b0, b1) in bit_pairs.iter() {
-                    let bit_x = interp(b0, b1, x);
-                    prod_x *= K::ONE - bit_x;
-                }
-                let expr_x = (self.expr_fn)(val_x, prod_x);
-                if expr_x == K::ZERO {
-                    continue;
-                }
-                ys[i] += chi_x * gate_x * expr_x;
-            }
-        });
-        ys
-    }
-
-    fn num_rounds(&self) -> usize {
-        self.r_cycle.len().saturating_sub(self.bit_idx)
-    }
-
-    fn degree_bound(&self) -> usize {
-        self.degree_bound
-    }
-
-    fn fold(&mut self, r: K) {
-        if self.num_rounds() == 0 {
-            return;
-        }
-        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
-        self.has_lookup.fold_round_in_place(r);
-        self.val.fold_round_in_place(r);
-        for b in self.bits.iter_mut() {
-            b.fold_round_in_place(r);
-        }
-        self.bit_idx += 1;
-    }
-}
-
 struct SparseShiftRemBoundOracle {
     bit_idx: usize,
     r_cycle: Vec<K>,
@@ -775,12 +540,6 @@ impl RoundOracle for SparseShiftRemBoundOracle {
             }
 
             let (b0s, b1s) = shamt_values_pair(&self.shamt_bits, child0, child1);
-            let mut r0s = Vec::with_capacity(self.rem_bits.len());
-            let mut r1s = Vec::with_capacity(self.rem_bits.len());
-            for b in self.rem_bits.iter() {
-                r0s.push(b.get(child0));
-                r1s.push(b.get(child1));
-            }
 
             let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
 
@@ -795,7 +554,9 @@ impl RoundOracle for SparseShiftRemBoundOracle {
                 }
 
                 let shamt = shamt_values_interp(&b0s, &b1s, x);
-                let expr_x = shift_rem_bound_expr(shamt, self.rem_bits.len(), |j| interp(r0s[j], r1s[j], x));
+                let expr_x = shift_rem_bound_expr(shamt, self.rem_bits.len(), |j| {
+                    interp(self.rem_bits[j].get(child0), self.rem_bits[j].get(child1), x)
+                });
 
                 if expr_x == K::ZERO {
                     continue;
@@ -929,12 +690,6 @@ impl RoundOracle for SparseShiftExprOracle {
             let sign1 = self.sign.as_ref().map(|s| s.get(child1)).unwrap_or(K::ZERO);
 
             let (b0s, b1s) = shamt_values_pair(&self.shamt_bits, child0, child1);
-            let mut l0s = Vec::with_capacity(self.bits.len());
-            let mut l1s = Vec::with_capacity(self.bits.len());
-            for b in self.bits.iter() {
-                l0s.push(b.get(child0));
-                l1s.push(b.get(child1));
-            }
 
             let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
 
@@ -956,8 +711,8 @@ impl RoundOracle for SparseShiftExprOracle {
                 let pow2_x = pow2_from_shamt(&shamt_x);
 
                 let mut limb_sum_x = K::ZERO;
-                for j in 0..self.bits.len() {
-                    let bit_x = interp(l0s[j], l1s[j], x);
+                for (j, b) in self.bits.iter().enumerate() {
+                    let bit_x = interp(b.get(child0), b.get(child1), x);
                     limb_sum_x += bit_x * K::from_u64(1u64 << j);
                 }
 
@@ -1012,135 +767,7 @@ fn expr_rv32_packed_sra(lhs: K, val: K, pow2: K, rem: K, sign: K) -> K {
     lhs - val * pow2 - rem - sign * K::from_u64(1u64 << 32) * (K::ONE - pow2)
 }
 
-type SparseBitsAndWeightsExprFn<const N: usize, const W: usize> = fn(&[K; N], K, &[K; W]) -> K;
-
-struct SparseBitsAndWeightsExprOracle<const N: usize, const W: usize> {
-    bit_idx: usize,
-    r_cycle: Vec<K>,
-    prefix_eq: K,
-    has_lookup: SparseIdxVec<K>,
-    cols: [SparseIdxVec<K>; N],
-    bits: Vec<SparseIdxVec<K>>,
-    bit_weights: Vec<K>,
-    expr_weights: [K; W],
-    degree_bound: usize,
-    expr_fn: SparseBitsAndWeightsExprFn<N, W>,
-}
-
-impl<const N: usize, const W: usize> SparseBitsAndWeightsExprOracle<N, W> {
-    fn new(
-        r_cycle: &[K],
-        has_lookup: SparseIdxVec<K>,
-        cols: [SparseIdxVec<K>; N],
-        bits: Vec<SparseIdxVec<K>>,
-        bit_weights: Vec<K>,
-        expr_weights: [K; W],
-        degree_bound: usize,
-        expr_fn: SparseBitsAndWeightsExprFn<N, W>,
-    ) -> Self {
-        let ell_n = r_cycle.len();
-        debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
-        assert_cols_match_time(&cols, 1usize << ell_n);
-        debug_assert_eq!(bits.len(), bit_weights.len());
-        assert_cols_match_time(&bits, 1usize << ell_n);
-
-        Self {
-            bit_idx: 0,
-            r_cycle: r_cycle.to_vec(),
-            prefix_eq: K::ONE,
-            has_lookup,
-            cols,
-            bits,
-            bit_weights,
-            expr_weights,
-            degree_bound,
-            expr_fn,
-        }
-    }
-}
-
-impl<const N: usize, const W: usize> RoundOracle for SparseBitsAndWeightsExprOracle<N, W> {
-    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
-        if self.has_lookup.len() == 1 {
-            let gate = self.has_lookup.singleton_value();
-            let cols: [K; N] = std::array::from_fn(|i| self.cols[i].singleton_value());
-            let mut bit_sum = K::ZERO;
-            for (b, w) in self.bits.iter().zip(self.bit_weights.iter()) {
-                bit_sum += b.singleton_value() * *w;
-            }
-            let expr = (self.expr_fn)(&cols, bit_sum, &self.expr_weights);
-            let v = self.prefix_eq * gate * expr;
-            return vec![v; points.len()];
-        }
-
-        let mut ys = vec![K::ZERO; points.len()];
-        for_each_sparse_parent_pair!(self.has_lookup.entries(), pair, {
-            let child0 = 2 * pair;
-            let child1 = child0 + 1;
-
-            let gate0 = self.has_lookup.get(child0);
-            let gate1 = self.has_lookup.get(child1);
-            if gate0 == K::ZERO && gate1 == K::ZERO {
-                continue;
-            }
-
-            let cols0: [K; N] = std::array::from_fn(|i| self.cols[i].get(child0));
-            let cols1: [K; N] = std::array::from_fn(|i| self.cols[i].get(child1));
-            let mut bit_sum0 = K::ZERO;
-            let mut bit_sum1 = K::ZERO;
-            for (b, w) in self.bits.iter().zip(self.bit_weights.iter()) {
-                bit_sum0 += b.get(child0) * *w;
-                bit_sum1 += b.get(child1) * *w;
-            }
-
-            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
-
-            for (i, &x) in points.iter().enumerate() {
-                let chi_x = interp(chi0, chi1, x);
-                if chi_x == K::ZERO {
-                    continue;
-                }
-                let gate_x = interp(gate0, gate1, x);
-                if gate_x == K::ZERO {
-                    continue;
-                }
-                let cols_x: [K; N] = std::array::from_fn(|j| interp(cols0[j], cols1[j], x));
-                let bit_sum_x = interp(bit_sum0, bit_sum1, x);
-                let expr_x = (self.expr_fn)(&cols_x, bit_sum_x, &self.expr_weights);
-                if expr_x == K::ZERO {
-                    continue;
-                }
-                ys[i] += chi_x * gate_x * expr_x;
-            }
-        });
-        ys
-    }
-
-    fn num_rounds(&self) -> usize {
-        self.r_cycle.len().saturating_sub(self.bit_idx)
-    }
-
-    fn degree_bound(&self) -> usize {
-        self.degree_bound
-    }
-
-    fn fold(&mut self, r: K) {
-        if self.num_rounds() == 0 {
-            return;
-        }
-        self.prefix_eq *= eq_single(r, self.r_cycle[self.bit_idx]);
-        self.has_lookup.fold_round_in_place(r);
-        for col in self.cols.iter_mut() {
-            col.fold_round_in_place(r);
-        }
-        for b in self.bits.iter_mut() {
-            b.fold_round_in_place(r);
-        }
-        self.bit_idx += 1;
-    }
-}
-
-type SparseColsBitsExprFn<const N: usize, const W: usize> = fn(&[K; N], &[K], &[K; W]) -> K;
+type SparseColsBitsExprFn<const N: usize, const W: usize> = fn(&[K; N], &[K], K, &[K; W]) -> K;
 
 struct SparseColsBitsExprOracle<const N: usize, const W: usize> {
     bit_idx: usize,
@@ -1149,6 +776,8 @@ struct SparseColsBitsExprOracle<const N: usize, const W: usize> {
     has_lookup: SparseIdxVec<K>,
     cols: [SparseIdxVec<K>; N],
     bits: Vec<SparseIdxVec<K>>,
+    bit_weights: Cow<'static, [K]>,
+    bits_x_scratch: Vec<K>,
     expr_weights: [K; W],
     degree_bound: usize,
     expr_fn: SparseColsBitsExprFn<N, W>,
@@ -1160,6 +789,7 @@ impl<const N: usize, const W: usize> SparseColsBitsExprOracle<N, W> {
         has_lookup: SparseIdxVec<K>,
         cols: [SparseIdxVec<K>; N],
         bits: Vec<SparseIdxVec<K>>,
+        bit_weights: Cow<'static, [K]>,
         expr_weights: [K; W],
         degree_bound: usize,
         expr_fn: SparseColsBitsExprFn<N, W>,
@@ -1168,6 +798,7 @@ impl<const N: usize, const W: usize> SparseColsBitsExprOracle<N, W> {
         debug_assert_eq!(has_lookup.len(), 1usize << ell_n);
         assert_cols_match_time(&cols, 1usize << ell_n);
         assert_cols_match_time(&bits, 1usize << ell_n);
+        debug_assert!(bit_weights.is_empty() || bit_weights.len() == bits.len());
 
         Self {
             bit_idx: 0,
@@ -1175,7 +806,9 @@ impl<const N: usize, const W: usize> SparseColsBitsExprOracle<N, W> {
             prefix_eq: K::ONE,
             has_lookup,
             cols,
+            bits_x_scratch: vec![K::ZERO; bits.len()],
             bits,
+            bit_weights,
             expr_weights,
             degree_bound,
             expr_fn,
@@ -1193,12 +826,23 @@ impl<const N: usize, const W: usize> RoundOracle for SparseColsBitsExprOracle<N,
                 .iter()
                 .map(SparseIdxVec::singleton_value)
                 .collect();
-            let expr = (self.expr_fn)(&cols, &bits, &self.expr_weights);
+            let bit_sum = if self.bit_weights.is_empty() {
+                K::ZERO
+            } else {
+                bits.iter()
+                    .zip(self.bit_weights.iter())
+                    .fold(K::ZERO, |acc, (b, w)| acc + *b * *w)
+            };
+            let expr = (self.expr_fn)(&cols, &bits, bit_sum, &self.expr_weights);
             let v = self.prefix_eq * gate * expr;
             return vec![v; points.len()];
         }
 
         let mut ys = vec![K::ZERO; points.len()];
+        let mut bits_x = std::mem::take(&mut self.bits_x_scratch);
+        if bits_x.len() != self.bits.len() {
+            bits_x.resize(self.bits.len(), K::ZERO);
+        }
         for_each_sparse_parent_pair!(self.has_lookup.entries(), pair, {
             let child0 = 2 * pair;
             let child1 = child0 + 1;
@@ -1211,14 +855,6 @@ impl<const N: usize, const W: usize> RoundOracle for SparseColsBitsExprOracle<N,
 
             let cols0: [K; N] = std::array::from_fn(|i| self.cols[i].get(child0));
             let cols1: [K; N] = std::array::from_fn(|i| self.cols[i].get(child1));
-
-            let mut bits0 = Vec::with_capacity(self.bits.len());
-            let mut bits1 = Vec::with_capacity(self.bits.len());
-            for b in self.bits.iter() {
-                bits0.push(b.get(child0));
-                bits1.push(b.get(child1));
-            }
-            let mut bits_x = vec![K::ZERO; self.bits.len()];
 
             let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
 
@@ -1233,17 +869,25 @@ impl<const N: usize, const W: usize> RoundOracle for SparseColsBitsExprOracle<N,
                 }
 
                 let cols_x: [K; N] = std::array::from_fn(|j| interp(cols0[j], cols1[j], x));
-                for j in 0..bits_x.len() {
-                    bits_x[j] = interp(bits0[j], bits1[j], x);
+                for (j, b) in self.bits.iter().enumerate() {
+                    bits_x[j] = interp(b.get(child0), b.get(child1), x);
                 }
-
-                let expr_x = (self.expr_fn)(&cols_x, &bits_x, &self.expr_weights);
+                let bit_sum_x = if self.bit_weights.is_empty() {
+                    K::ZERO
+                } else {
+                    bits_x
+                        .iter()
+                        .zip(self.bit_weights.iter())
+                        .fold(K::ZERO, |acc, (b, w)| acc + *b * *w)
+                };
+                let expr_x = (self.expr_fn)(&cols_x, &bits_x, bit_sum_x, &self.expr_weights);
                 if expr_x == K::ZERO {
                     continue;
                 }
                 ys[i] += chi_x * gate_x * expr_x;
             }
         });
+        self.bits_x_scratch = bits_x;
         ys
     }
 
@@ -1271,7 +915,7 @@ impl<const N: usize, const W: usize> RoundOracle for SparseColsBitsExprOracle<N,
     }
 }
 
-fn expr_rv32_packed_mulh_adapter(cols: &[K; 7], _bit_sum: K, w: &[K; 2]) -> K {
+fn expr_rv32_packed_mulh_adapter(cols: &[K; 7], _bits: &[K], _bit_sum: K, w: &[K; 2]) -> K {
     let lhs = cols[0];
     let rhs = cols[1];
     let lhs_sign = cols[2];
@@ -1284,7 +928,7 @@ fn expr_rv32_packed_mulh_adapter(cols: &[K; 7], _bit_sum: K, w: &[K; 2]) -> K {
     w[0] * eq_expr + w[1] * range
 }
 
-fn expr_rv32_packed_divremu_adapter(cols: &[K; 4], bit_sum: K, w: &[K; 4]) -> K {
+fn expr_rv32_packed_divremu_adapter(cols: &[K; 4], _bits: &[K], bit_sum: K, w: &[K; 4]) -> K {
     let rhs = cols[0];
     let z = cols[1];
     let rem = cols[2];
@@ -1296,7 +940,7 @@ fn expr_rv32_packed_divremu_adapter(cols: &[K; 4], bit_sum: K, w: &[K; 4]) -> K 
     w[0] * c0 + w[1] * c1 + w[2] * c2 + w[3] * c3
 }
 
-fn expr_rv32_packed_divrem_adapter(cols: &[K; 10], bit_sum: K, w: &[K; 7]) -> K {
+fn expr_rv32_packed_divrem_adapter(cols: &[K; 10], _bits: &[K], bit_sum: K, w: &[K; 7]) -> K {
     let lhs = cols[0];
     let rhs = cols[1];
     let z = cols[2];
@@ -1332,12 +976,44 @@ fn expr_u_decomp(cols: &[K; 1], sum: K) -> K {
     cols[0] - sum
 }
 
+fn expr_rv32_packed_mul_bw0(cols: &[K; 3], _bits: &[K], bit_sum: K, _w: &[K; 0]) -> K {
+    expr_rv32_packed_mul(cols, bit_sum)
+}
+
+fn expr_rv32_packed_mulhu_bw0(cols: &[K; 3], _bits: &[K], bit_sum: K, _w: &[K; 0]) -> K {
+    expr_rv32_packed_mulhu(cols, bit_sum)
+}
+
+fn expr_rv32_packed_eq_adapter_bw0(cols: &[K; 3], _bits: &[K], bit_sum: K, _w: &[K; 0]) -> K {
+    expr_rv32_packed_eq_adapter(cols, bit_sum)
+}
+
+fn expr_u_decomp_bw0(cols: &[K; 1], _bits: &[K], bit_sum: K, _w: &[K; 0]) -> K {
+    expr_u_decomp(cols, bit_sum)
+}
+
 fn expr_eq_from_prod(val: K, prod: K) -> K {
     val - prod
 }
 
 fn expr_neq_from_prod(val: K, prod: K) -> K {
     val + prod - K::ONE
+}
+
+fn expr_eq_from_prod_bits(cols: &[K; 1], bits: &[K], _bit_sum: K, _w: &[K; 0]) -> K {
+    let mut prod = K::ONE;
+    for &b in bits {
+        prod *= K::ONE - b;
+    }
+    expr_eq_from_prod(cols[0], prod)
+}
+
+fn expr_neq_from_prod_bits(cols: &[K; 1], bits: &[K], _bit_sum: K, _w: &[K; 0]) -> K {
+    let mut prod = K::ONE;
+    for &b in bits {
+        prod *= K::ONE - b;
+    }
+    expr_neq_from_prod(cols[0], prod)
 }
 
 macro_rules! define_sparse_time_expr_oracle {
@@ -1387,7 +1063,7 @@ define_sparse_time_expr_oracle!(
 macro_rules! define_weighted_bits32_oracle3 {
     ($name:ident, [$c0:ident, $c1:ident, $c2:ident], $expr:expr, $degree:expr) => {
         pub struct $name {
-            core: SparseWeightedBitsExprOracle<3>,
+            core: SparseColsBitsExprOracle<3, 0>,
         }
 
         impl $name {
@@ -1400,14 +1076,14 @@ macro_rules! define_weighted_bits32_oracle3 {
                 bits: Vec<SparseIdxVec<K>>,
             ) -> Self {
                 debug_assert_eq!(bits.len(), 32);
-                let weights: Vec<K> = (0..32).map(|i| K::from_u64(1u64 << i)).collect();
                 Self {
-                    core: SparseWeightedBitsExprOracle::new(
+                    core: SparseColsBitsExprOracle::new(
                         r_cycle,
                         has_lookup,
                         [$c0, $c1, $c2],
                         bits,
-                        weights,
+                        Cow::Borrowed(pow2_weights_32()),
+                        [],
                         $degree,
                         $expr,
                     ),
@@ -1421,7 +1097,7 @@ macro_rules! define_weighted_bits32_oracle3 {
 macro_rules! define_weighted_bits32_oracle3_bits_before_last {
     ($name:ident, [$c0:ident, $c1:ident], $bits:ident, $c2:ident, $expr:expr, $degree:expr) => {
         pub struct $name {
-            core: SparseWeightedBitsExprOracle<3>,
+            core: SparseColsBitsExprOracle<3, 0>,
         }
 
         impl $name {
@@ -1434,14 +1110,14 @@ macro_rules! define_weighted_bits32_oracle3_bits_before_last {
                 $c2: SparseIdxVec<K>,
             ) -> Self {
                 debug_assert_eq!($bits.len(), 32);
-                let weights: Vec<K> = (0..32).map(|i| K::from_u64(1u64 << i)).collect();
                 Self {
-                    core: SparseWeightedBitsExprOracle::new(
+                    core: SparseColsBitsExprOracle::new(
                         r_cycle,
                         has_lookup,
                         [$c0, $c1, $c2],
                         $bits,
-                        weights,
+                        Cow::Borrowed(pow2_weights_32()),
+                        [],
                         $degree,
                         $expr,
                     ),
@@ -1457,7 +1133,7 @@ define_weighted_bits32_oracle3_bits_before_last!(
     [lhs, rhs],
     carry_bits,
     val,
-    expr_rv32_packed_mul,
+    expr_rv32_packed_mul_bw0,
     4
 );
 
@@ -1466,7 +1142,7 @@ define_weighted_bits32_oracle3_bits_before_last!(
     [lhs, rhs],
     lo_bits,
     val,
-    expr_rv32_packed_mulhu,
+    expr_rv32_packed_mulhu_bw0,
     4
 );
 
@@ -1475,12 +1151,12 @@ define_weighted_bits32_oracle3_bits_before_last!(
     [lhs, rhs],
     lo_bits,
     hi,
-    expr_rv32_packed_mulhu,
+    expr_rv32_packed_mulhu_bw0,
     4
 );
 
 pub struct Rv32PackedMulhAdapterOracleSparseTime {
-    core: SparseBitsAndWeightsExprOracle<7, 2>,
+    core: SparseColsBitsExprOracle<7, 2>,
 }
 
 impl Rv32PackedMulhAdapterOracleSparseTime {
@@ -1497,12 +1173,12 @@ impl Rv32PackedMulhAdapterOracleSparseTime {
         weights: [K; 2],
     ) -> Self {
         Self {
-            core: SparseBitsAndWeightsExprOracle::new(
+            core: SparseColsBitsExprOracle::new(
                 r_cycle,
                 has_lookup,
                 [lhs, rhs, lhs_sign, rhs_sign, hi, k, val],
                 Vec::new(),
-                Vec::new(),
+                Cow::Borrowed(&[]),
                 weights,
                 5,
                 expr_rv32_packed_mulh_adapter,
@@ -1523,7 +1199,7 @@ define_sparse_time_expr_oracle!(
 macro_rules! define_val_prod_bits_oracle {
     ($name:ident, $expr:expr) => {
         pub struct $name {
-            core: SparseValProdBitsOracle,
+            core: SparseColsBitsExprOracle<1, 0>,
         }
 
         impl $name {
@@ -1535,7 +1211,16 @@ macro_rules! define_val_prod_bits_oracle {
             ) -> Self {
                 debug_assert_eq!(diff_bits.len(), 32);
                 Self {
-                    core: SparseValProdBitsOracle::new(r_cycle, has_lookup, val, diff_bits, 34, $expr),
+                    core: SparseColsBitsExprOracle::new(
+                        r_cycle,
+                        has_lookup,
+                        [val],
+                        diff_bits,
+                        Cow::Borrowed(&[]),
+                        [],
+                        34,
+                        $expr,
+                    ),
                 }
             }
         }
@@ -1543,21 +1228,21 @@ macro_rules! define_val_prod_bits_oracle {
     };
 }
 
-define_val_prod_bits_oracle!(Rv32PackedEqOracleSparseTime, expr_eq_from_prod);
+define_val_prod_bits_oracle!(Rv32PackedEqOracleSparseTime, expr_eq_from_prod_bits);
 
 define_weighted_bits32_oracle3!(
     Rv32PackedEqAdapterOracleSparseTime,
     [lhs, rhs, borrow],
-    expr_rv32_packed_eq_adapter,
+    expr_rv32_packed_eq_adapter_bw0,
     3
 );
 
-define_val_prod_bits_oracle!(Rv32PackedNeqOracleSparseTime, expr_neq_from_prod);
+define_val_prod_bits_oracle!(Rv32PackedNeqOracleSparseTime, expr_neq_from_prod_bits);
 
 define_weighted_bits32_oracle3!(
     Rv32PackedNeqAdapterOracleSparseTime,
     [lhs, rhs, borrow],
-    expr_rv32_packed_eq_adapter,
+    expr_rv32_packed_eq_adapter_bw0,
     3
 );
 
@@ -1692,7 +1377,7 @@ define_sparse_time_expr_oracle!(
 macro_rules! define_bits_and_weights32_oracle {
     ($name:ident, $n:expr, $m:expr, [$($col:ident),+ $(,)?], $degree:expr, $expr:expr) => {
         pub struct $name {
-            core: SparseBitsAndWeightsExprOracle<$n, $m>,
+            core: SparseColsBitsExprOracle<$n, $m>,
         }
 
         impl $name {
@@ -1704,14 +1389,13 @@ macro_rules! define_bits_and_weights32_oracle {
                 weights: [K; $m],
             ) -> Self {
                 debug_assert_eq!(diff_bits.len(), 32);
-                let bit_weights: Vec<K> = (0..32).map(|i| K::from_u64(1u64 << i)).collect();
                 Self {
-                    core: SparseBitsAndWeightsExprOracle::new(
+                    core: SparseColsBitsExprOracle::new(
                         r_cycle,
                         has_lookup,
                         [$($col),+],
                         diff_bits,
-                        bit_weights,
+                        Cow::Borrowed(pow2_weights_32()),
                         weights,
                         $degree,
                         $expr,
@@ -1824,7 +1508,7 @@ fn rv32_digit4_range_poly(x: K) -> K {
     x * (x - K::ONE) * (x - K::from_u64(2)) * (x - K::from_u64(3))
 }
 
-fn expr_rv32_packed_bitwise_adapter(cols: &[K; 2], bits: &[K], w: &[K; 34]) -> K {
+fn expr_rv32_packed_bitwise_adapter(cols: &[K; 2], bits: &[K], _bit_sum: K, w: &[K; 34]) -> K {
     let lhs = cols[0];
     let rhs = cols[1];
     debug_assert_eq!(bits.len(), 32);
@@ -1873,6 +1557,7 @@ impl Rv32PackedBitwiseAdapterOracleSparseTime {
                 has_lookup,
                 [lhs, rhs],
                 digits,
+                Cow::Borrowed(&[]),
                 expr_weights,
                 6,
                 expr_rv32_packed_bitwise_adapter,
@@ -1882,7 +1567,7 @@ impl Rv32PackedBitwiseAdapterOracleSparseTime {
 }
 impl_round_oracle_via_core!(Rv32PackedBitwiseAdapterOracleSparseTime);
 
-fn expr_rv32_packed_bitwise(cols: &[K; 1], bits: &[K], w: &[K; 2], op: Rv32PackedBitwiseOp2) -> K {
+fn expr_rv32_packed_bitwise(cols: &[K; 1], bits: &[K], _bit_sum: K, w: &[K; 2], op: Rv32PackedBitwiseOp2) -> K {
     let val = cols[0];
     debug_assert_eq!(bits.len(), 32);
     let mut out = K::ZERO;
@@ -1895,20 +1580,20 @@ fn expr_rv32_packed_bitwise(cols: &[K; 1], bits: &[K], w: &[K; 2], op: Rv32Packe
     out - val
 }
 
-fn expr_rv32_packed_and(cols: &[K; 1], bits: &[K], w: &[K; 2]) -> K {
-    expr_rv32_packed_bitwise(cols, bits, w, Rv32PackedBitwiseOp2::And)
+fn expr_rv32_packed_and(cols: &[K; 1], bits: &[K], bit_sum: K, w: &[K; 2]) -> K {
+    expr_rv32_packed_bitwise(cols, bits, bit_sum, w, Rv32PackedBitwiseOp2::And)
 }
 
-fn expr_rv32_packed_andn(cols: &[K; 1], bits: &[K], w: &[K; 2]) -> K {
-    expr_rv32_packed_bitwise(cols, bits, w, Rv32PackedBitwiseOp2::Andn)
+fn expr_rv32_packed_andn(cols: &[K; 1], bits: &[K], bit_sum: K, w: &[K; 2]) -> K {
+    expr_rv32_packed_bitwise(cols, bits, bit_sum, w, Rv32PackedBitwiseOp2::Andn)
 }
 
-fn expr_rv32_packed_or(cols: &[K; 1], bits: &[K], w: &[K; 2]) -> K {
-    expr_rv32_packed_bitwise(cols, bits, w, Rv32PackedBitwiseOp2::Or)
+fn expr_rv32_packed_or(cols: &[K; 1], bits: &[K], bit_sum: K, w: &[K; 2]) -> K {
+    expr_rv32_packed_bitwise(cols, bits, bit_sum, w, Rv32PackedBitwiseOp2::Or)
 }
 
-fn expr_rv32_packed_xor(cols: &[K; 1], bits: &[K], w: &[K; 2]) -> K {
-    expr_rv32_packed_bitwise(cols, bits, w, Rv32PackedBitwiseOp2::Xor)
+fn expr_rv32_packed_xor(cols: &[K; 1], bits: &[K], bit_sum: K, w: &[K; 2]) -> K {
+    expr_rv32_packed_bitwise(cols, bits, bit_sum, w, Rv32PackedBitwiseOp2::Xor)
 }
 
 macro_rules! define_rv32_packed_bitwise_oracle {
@@ -1931,7 +1616,16 @@ macro_rules! define_rv32_packed_bitwise_oracle {
                 let inv2 = K::from_u64(2).inverse();
                 let inv6 = K::from_u64(6).inverse();
                 Self {
-                    core: SparseColsBitsExprOracle::new(r_cycle, has_lookup, [val], digits, [inv2, inv6], 8, $expr),
+                    core: SparseColsBitsExprOracle::new(
+                        r_cycle,
+                        has_lookup,
+                        [val],
+                        digits,
+                        Cow::Borrowed(&[]),
+                        [inv2, inv6],
+                        8,
+                        $expr,
+                    ),
                 }
             }
         }
@@ -1947,7 +1641,7 @@ define_rv32_packed_bitwise_oracle!(Rv32PackedXorOracleSparseTime, expr_rv32_pack
 macro_rules! define_u_decomp_oracle {
     ($name:ident, $num_bits:expr) => {
         pub struct $name {
-            core: SparseWeightedBitsExprOracle<1>,
+            core: SparseColsBitsExprOracle<1, 0>,
         }
 
         impl $name {
@@ -1958,9 +1652,22 @@ macro_rules! define_u_decomp_oracle {
                 bits: Vec<SparseIdxVec<K>>,
             ) -> Self {
                 debug_assert_eq!(bits.len(), $num_bits);
-                let weights: Vec<K> = (0..$num_bits).map(|i| K::from_u64(1u64 << i)).collect();
+                let weights: Cow<'static, [K]> = match $num_bits {
+                    32 => Cow::Borrowed(pow2_weights_32()),
+                    5 => Cow::Borrowed(pow2_weights_5()),
+                    _ => Cow::Owned((0..$num_bits).map(|i| K::from_u64(1u64 << i)).collect()),
+                };
                 Self {
-                    core: SparseWeightedBitsExprOracle::new(r_cycle, has_lookup, [x], bits, weights, 3, expr_u_decomp),
+                    core: SparseColsBitsExprOracle::new(
+                        r_cycle,
+                        has_lookup,
+                        [x],
+                        bits,
+                        weights,
+                        [],
+                        3,
+                        expr_u_decomp_bw0,
+                    ),
                 }
             }
         }
@@ -2095,22 +1802,26 @@ fn accumulate_pair_with_eq_addr_over_points<F>(
     r_addr: &[K],
     child0: usize,
     child1: usize,
+    eq0s_scratch: &mut Vec<K>,
+    d_eqs_scratch: &mut Vec<K>,
     mut coeff_at: F,
 )
 where
     F: FnMut(K) -> K,
 {
     debug_assert_eq!(bit_cols.len(), r_addr.len());
-    let mut eq0s = Vec::with_capacity(bit_cols.len());
-    let mut d_eqs = Vec::with_capacity(bit_cols.len());
+    eq0s_scratch.clear();
+    d_eqs_scratch.clear();
+    eq0s_scratch.reserve(bit_cols.len());
+    d_eqs_scratch.reserve(bit_cols.len());
     for (b, col) in bit_cols.iter().enumerate() {
         let e0 = eq_bit_affine(col.get(child0), r_addr[b]);
-        eq0s.push(e0);
-        d_eqs.push(eq_bit_affine(col.get(child1), r_addr[b]) - e0);
+        eq0s_scratch.push(e0);
+        d_eqs_scratch.push(eq_bit_affine(col.get(child1), r_addr[b]) - e0);
     }
     for (i, &x) in points.iter().enumerate() {
         let mut eq_addr = K::ONE;
-        for (e0, de) in eq0s.iter().zip(d_eqs.iter()) {
+        for (e0, de) in eq0s_scratch.iter().zip(d_eqs_scratch.iter()) {
             eq_addr *= *e0 + *de * x;
         }
         ys[i] += coeff_at(x) * eq_addr;
@@ -2179,6 +1890,8 @@ impl RoundOracle for IndexAdapterOracleSparseTime {
         }
 
         let mut ys = vec![K::ZERO; points.len()];
+        let mut eq0s_scratch = Vec::with_capacity(self.addr_bits.len());
+        let mut d_eqs_scratch = Vec::with_capacity(self.addr_bits.len());
         for_each_sparse_parent_pair!(self.has_lookup.entries(), pair, {
             let child0 = 2 * pair;
             let child1 = child0 + 1;
@@ -2190,9 +1903,17 @@ impl RoundOracle for IndexAdapterOracleSparseTime {
             }
 
             let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
-            accumulate_pair_with_eq_addr_over_points(&mut ys, points, &self.addr_bits, &self.r_addr, child0, child1, |x| {
-                interp(chi0, chi1, x) * interp(gate0, gate1, x)
-            });
+            accumulate_pair_with_eq_addr_over_points(
+                &mut ys,
+                points,
+                &self.addr_bits,
+                &self.r_addr,
+                child0,
+                child1,
+                &mut eq0s_scratch,
+                &mut d_eqs_scratch,
+                |x| interp(chi0, chi1, x) * interp(gate0, gate1, x),
+            );
         });
         ys
     }
@@ -2409,6 +2130,8 @@ impl RoundOracle for TwistTimeCheckOracleSparseTimeCore {
         }
 
         let mut ys = vec![K::ZERO; points.len()];
+        let mut eq0s_scratch = Vec::with_capacity(self.addr_bits.len());
+        let mut d_eqs_scratch = Vec::with_capacity(self.addr_bits.len());
         for_each_sparse_parent_pair!(self.gate.entries(), pair, {
             let child0 = 2 * pair;
             let child1 = child0 + 1;
@@ -2448,9 +2171,17 @@ impl RoundOracle for TwistTimeCheckOracleSparseTimeCore {
             };
 
             let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
-            accumulate_pair_with_eq_addr_over_points(&mut ys, points, &self.addr_bits, &self.r_addr, child0, child1, |x| {
-                interp(chi0, chi1, x) * interp(gate0, gate1, x) * interp(term0, term1, x)
-            });
+            accumulate_pair_with_eq_addr_over_points(
+                &mut ys,
+                points,
+                &self.addr_bits,
+                &self.r_addr,
+                child0,
+                child1,
+                &mut eq0s_scratch,
+                &mut d_eqs_scratch,
+                |x| interp(chi0, chi1, x) * interp(gate0, gate1, x) * interp(term0, term1, x),
+            );
         });
         ys
     }
@@ -2718,6 +2449,8 @@ impl RoundOracle for TwistWriteEqAddrOracleSparseTimeCore {
         }
 
         let mut ys = vec![K::ZERO; points.len()];
+        let mut eq0s_scratch = Vec::with_capacity(self.wa_bits.len());
+        let mut d_eqs_scratch = Vec::with_capacity(self.wa_bits.len());
         for_each_sparse_parent_pair!(self.has_write.entries(), pair, {
             let child0 = 2 * pair;
             let child1 = child0 + 1;
@@ -2744,9 +2477,17 @@ impl RoundOracle for TwistWriteEqAddrOracleSparseTimeCore {
                 }
             };
 
-            accumulate_pair_with_eq_addr_over_points(&mut ys, points, &self.wa_bits, &self.r_addr, child0, child1, |x| {
-                interp(gate0, gate1, x) * interp(inc0, inc1, x) * interp(lt0, lt1, x)
-            });
+            accumulate_pair_with_eq_addr_over_points(
+                &mut ys,
+                points,
+                &self.wa_bits,
+                &self.r_addr,
+                child0,
+                child1,
+                &mut eq0s_scratch,
+                &mut d_eqs_scratch,
+                |x| interp(gate0, gate1, x) * interp(inc0, inc1, x) * interp(lt0, lt1, x),
+            );
         });
         ys
     }
@@ -3104,7 +2845,7 @@ fn push_write_events(
 fn assert_init_sparse_in_range(init_sparse: &[(usize, K)], ell_addr: usize) {
     let pow2_addr = 1usize << ell_addr;
     for (addr, _) in init_sparse.iter() {
-        assert!(*addr < pow2_addr);
+        debug_assert!(*addr < pow2_addr);
     }
 }
 
@@ -3166,7 +2907,7 @@ fn collect_multilane_addr_events(
     lanes: &[TwistLaneSparseCols],
     mode: AddrCheckMode,
 ) -> (usize, Vec<AddrEvent>) {
-    assert!(!lanes.is_empty());
+    debug_assert!(!lanes.is_empty());
     let pow2_time = 1usize << r_cycle.len();
     let ell_addr = match mode {
         AddrCheckMode::Read => lanes[0].ra_bits.len(),
@@ -3320,11 +3061,11 @@ impl AddressLookupOracle {
         let pow2_cycle = 1usize << r_cycle.len();
         let pow2_addr = 1usize << ell_addr;
 
-        assert_eq!(addr_bits.len(), ell_addr);
+        debug_assert_eq!(addr_bits.len(), ell_addr);
         for col in addr_bits.iter() {
-            assert_eq!(col.len(), pow2_cycle);
+            debug_assert_eq!(col.len(), pow2_cycle);
         }
-        assert_eq!(has_lookup.len(), pow2_cycle);
+        debug_assert_eq!(has_lookup.len(), pow2_cycle);
 
         let mut claimed_sum = K::ZERO;
         let mut weight_table = vec![K::ZERO; pow2_addr];
