@@ -38,7 +38,9 @@ pub(super) fn build_r1cs_ccs(
         return Err("RV32 trace CCS: n must be >= 1".into());
     }
     if const_one_col >= m {
-        return Err(format!("RV32 trace CCS: const_one_col({const_one_col}) must be < m({m})"));
+        return Err(format!(
+            "RV32 trace CCS: const_one_col({const_one_col}) must be < m({m})"
+        ));
     }
     if constraints.len() > n {
         return Err(format!(

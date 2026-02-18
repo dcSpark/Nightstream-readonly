@@ -2,8 +2,12 @@ use std::collections::{HashMap, HashSet};
 
 use p3_goldilocks::Goldilocks as F;
 
-use crate::cpu::bus_layout::{build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, ShoutInstanceShape};
-use crate::cpu::constraints::{CpuConstraintBuilder, ShoutCpuBinding, TwistCpuBinding, CPU_BUS_COL_DISABLED};
+use crate::cpu::bus_layout::{
+    build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, BusLayout, ShoutInstanceShape,
+};
+use crate::cpu::constraints::{
+    CpuConstraint, CpuConstraintBuilder, ShoutCpuBinding, TwistCpuBinding, CPU_BUS_COL_DISABLED,
+};
 use crate::cpu::r1cs_adapter::SharedCpuBusConfig;
 use crate::plain::PlainMemLayout;
 use crate::riscv::lookups::{PROG_ID, RAM_ID, REG_ID};
@@ -456,6 +460,38 @@ pub fn rv32_trace_shared_bus_requirements_with_specs(
     extra_shout_specs: &[TraceShoutBusSpec],
     mem_layouts: &HashMap<u32, PlainMemLayout>,
 ) -> Result<(usize, usize), String> {
+    let snapshot =
+        rv32_trace_shared_bus_extraction_with_specs(layout, shout_table_ids, extra_shout_specs, mem_layouts)?;
+    Ok((snapshot.bus.bus_region_len(), snapshot.constraints.len()))
+}
+
+/// Debug/extractor snapshot for trace shared-bus planning.
+///
+/// This exposes the exact bus layout and injected CPU-bus constraints that would be
+/// synthesized for the given configuration. It is intended for tooling (e.g. Lean
+/// extraction), not for proving/verification hot paths.
+#[derive(Clone, Debug)]
+pub struct TraceSharedBusExtraction {
+    pub bus: BusLayout,
+    pub constraints: Vec<CpuConstraint<F>>,
+}
+
+/// Return the shared-bus layout and constraint list required by trace mode.
+pub fn rv32_trace_shared_bus_extraction(
+    layout: &Rv32TraceCcsLayout,
+    shout_table_ids: &[u32],
+    mem_layouts: &HashMap<u32, PlainMemLayout>,
+) -> Result<TraceSharedBusExtraction, String> {
+    rv32_trace_shared_bus_extraction_with_specs(layout, shout_table_ids, &[], mem_layouts)
+}
+
+/// Return the shared-bus layout and constraint list required by trace mode with extra lookup-family specs.
+pub fn rv32_trace_shared_bus_extraction_with_specs(
+    layout: &Rv32TraceCcsLayout,
+    shout_table_ids: &[u32],
+    extra_shout_specs: &[TraceShoutBusSpec],
+    mem_layouts: &HashMap<u32, PlainMemLayout>,
+) -> Result<TraceSharedBusExtraction, String> {
     let shout_shapes = derive_trace_shout_shapes(shout_table_ids, extra_shout_specs)?;
 
     let mut mem_ids: Vec<u32> = mem_layouts.keys().copied().collect();
@@ -648,5 +684,8 @@ pub fn rv32_trace_shared_bus_requirements_with_specs(
 
     audit_bus_tail_constraint_coverage(&builder, &bus)?;
 
-    Ok((bus_region_len, builder.constraints().len()))
+    Ok(TraceSharedBusExtraction {
+        bus,
+        constraints: builder.constraints().to_vec(),
+    })
 }
