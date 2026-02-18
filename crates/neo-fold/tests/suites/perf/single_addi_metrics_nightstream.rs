@@ -318,7 +318,9 @@ fn debug_chunked_single_n_mixed_ops() {
         .expect("trace single-chunk prove");
     let prove_time = run.prove_duration();
     run.verify().expect("trace single-chunk verify");
-    let verify_time = run.verify_duration().expect("trace single-chunk verify duration");
+    let verify_time = run
+        .verify_duration()
+        .expect("trace single-chunk verify duration");
     let total_time = total_start.elapsed();
     let trace_len = run.trace_len();
     let phases = run.prove_phase_durations();
@@ -706,7 +708,9 @@ fn debug_trace_vs_chunked_single_n_mixed_ops() {
         .expect("trace single-chunk prove (mixed)");
     let chunk_prove = chunk_run.prove_duration();
     let chunk_phases = chunk_run.prove_phase_durations();
-    chunk_run.verify().expect("trace single-chunk verify (mixed)");
+    chunk_run
+        .verify()
+        .expect("trace single-chunk verify (mixed)");
     let chunk_verify = chunk_run
         .verify_duration()
         .expect("trace single-chunk verify duration");
@@ -834,7 +838,9 @@ fn run_single_chunk_trace_sample(program: &[RiscvInstruction]) -> PerfSample {
     let prove = run.prove_duration();
     let phases = run.prove_phase_durations();
     run.verify().expect("trace single-chunk verify");
-    let verify = run.verify_duration().expect("trace single-chunk verify duration");
+    let verify = run
+        .verify_duration()
+        .expect("trace single-chunk verify duration");
     PerfSample {
         end_to_end: total_start.elapsed(),
         prove,

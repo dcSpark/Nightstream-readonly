@@ -132,10 +132,7 @@ fn test_riscv_wrong_output_claim_fails_verify() {
         .output_claim(0x100, F::from_u64(8))
         .prove()
     {
-        Ok(mut run) => assert!(
-            run.verify().is_err(),
-            "wrong output claim must fail verification"
-        ),
+        Ok(mut run) => assert!(run.verify().is_err(), "wrong output claim must fail verification"),
         Err(_) => {}
     }
 }

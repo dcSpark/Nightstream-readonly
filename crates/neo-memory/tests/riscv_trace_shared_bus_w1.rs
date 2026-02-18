@@ -105,13 +105,9 @@ fn rv32_trace_shared_bus_config_uses_padding_only_shout_bindings_for_all_tables(
     let mem_layouts = sample_mem_layouts();
     let decode_specs = decode_selector_specs(mem_layouts[&PROG_ID.0].d);
     let table_ids = full_table_ids();
-    let (bus_region_len, _) = rv32_trace_shared_bus_requirements_with_specs(
-        &layout,
-        &table_ids,
-        &decode_specs,
-        &mem_layouts,
-    )
-    .expect("trace shared bus requirements");
+    let (bus_region_len, _) =
+        rv32_trace_shared_bus_requirements_with_specs(&layout, &table_ids, &decode_specs, &mem_layouts)
+            .expect("trace shared bus requirements");
     layout.m += bus_region_len;
     let cfg = rv32_trace_shared_cpu_bus_config_with_specs(
         &layout,
@@ -140,13 +136,9 @@ fn rv32_trace_shared_bus_requirements_accept_rv32m_table_ids() {
     let mem_layouts = sample_mem_layouts();
     let decode_specs = decode_selector_specs(mem_layouts[&PROG_ID.0].d);
     let table_ids = full_table_ids();
-    let (bus_region_len, reserved_rows) = rv32_trace_shared_bus_requirements_with_specs(
-        &layout,
-        &table_ids,
-        &decode_specs,
-        &mem_layouts,
-    )
-    .expect("trace shared bus requirements");
+    let (bus_region_len, reserved_rows) =
+        rv32_trace_shared_bus_requirements_with_specs(&layout, &table_ids, &decode_specs, &mem_layouts)
+            .expect("trace shared bus requirements");
     assert!(
         bus_region_len > 0,
         "expected non-zero bus region for full table profile"
@@ -247,13 +239,9 @@ fn rv32_trace_shared_cpu_bus_config_with_specs_binds_decode_lookup_key_to_pc_bef
     let mem_layouts = sample_mem_layouts();
     let decode_specs = decode_selector_specs(mem_layouts[&PROG_ID.0].d);
     let table_ids = full_table_ids();
-    let (bus_region_len, _) = rv32_trace_shared_bus_requirements_with_specs(
-        &layout,
-        &table_ids,
-        &decode_specs,
-        &mem_layouts,
-    )
-    .expect("trace shared bus requirements");
+    let (bus_region_len, _) =
+        rv32_trace_shared_bus_requirements_with_specs(&layout, &table_ids, &decode_specs, &mem_layouts)
+            .expect("trace shared bus requirements");
     layout.m += bus_region_len;
     let cfg = rv32_trace_shared_cpu_bus_config_with_specs(
         &layout,
@@ -294,9 +282,8 @@ fn rv32_trace_shared_cpu_bus_config_with_specs_binds_width_lookup_key_to_cycle()
     let mut specs = decode_selector_specs(mem_layouts[&PROG_ID.0].d);
     specs.extend(width_selector_specs(/*cycle_d=*/ 8));
     let table_ids = full_table_ids();
-    let (bus_region_len, _) =
-        rv32_trace_shared_bus_requirements_with_specs(&layout, &table_ids, &specs, &mem_layouts)
-            .expect("trace shared bus requirements");
+    let (bus_region_len, _) = rv32_trace_shared_bus_requirements_with_specs(&layout, &table_ids, &specs, &mem_layouts)
+        .expect("trace shared bus requirements");
     layout.m += bus_region_len;
     let cfg = rv32_trace_shared_cpu_bus_config_with_specs(
         &layout,

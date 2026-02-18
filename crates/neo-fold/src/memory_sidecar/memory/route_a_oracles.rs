@@ -1258,10 +1258,7 @@ pub(crate) fn build_route_a_memory_oracles(
             vec![Box::new(bitness_oracle)]
         };
 
-        shout_oracles.push(RouteAShoutTimeOracles {
-            lanes,
-            bitness,
-        });
+        shout_oracles.push(RouteAShoutTimeOracles { lanes, bitness });
     }
 
     let mut shout_gamma_groups = Vec::with_capacity(shout_gamma_specs.len());
@@ -1298,9 +1295,7 @@ pub(crate) fn build_route_a_memory_oracles(
             }
             let ell_addr = lut_inst.d * lut_inst.ell;
             if ell_addr != g.ell_addr {
-                return Err(PiCcsError::ProtocolError(
-                    "shout gamma group ell_addr mismatch".into(),
-                ));
+                return Err(PiCcsError::ProtocolError("shout gamma group ell_addr mismatch".into()));
             }
             let ell_addr_u32 = u32::try_from(ell_addr)
                 .map_err(|_| PiCcsError::InvalidInput("shout gamma ell_addr overflows u32".into()))?;
@@ -1371,8 +1366,7 @@ pub(crate) fn build_route_a_memory_oracles(
         );
 
         let adapter_coeffs = weighted_table.clone();
-        let adapter_r_addr =
-            group_r_addr.ok_or_else(|| PiCcsError::ProtocolError("empty shout gamma group".into()))?;
+        let adapter_r_addr = group_r_addr.ok_or_else(|| PiCcsError::ProtocolError("empty shout gamma group".into()))?;
         let ell_addr = g.ell_addr;
         let adapter_oracle = FormulaOracleSparseTime::new(
             adapter_cols,

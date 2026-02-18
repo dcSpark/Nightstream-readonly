@@ -467,9 +467,7 @@ pub fn verify_route_a_memory_step(
             ));
         }
         if value_final != expected_value_final {
-            return Err(PiCcsError::ProtocolError(
-                "shout gamma value terminal mismatch".into(),
-            ));
+            return Err(PiCcsError::ProtocolError("shout gamma value terminal mismatch".into()));
         }
         if adapter_claim != expected_adapter_claim {
             return Err(PiCcsError::ProtocolError(

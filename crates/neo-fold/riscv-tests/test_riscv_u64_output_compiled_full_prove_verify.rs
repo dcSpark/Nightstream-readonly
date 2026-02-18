@@ -42,10 +42,7 @@ fn test_riscv_u64_output_compiled_full_prove_verify() {
         .output_claim(/*addr=*/ 0x104, /*value=*/ F::from_u64(0))
         .prove()
     {
-        Ok(mut bad_run) => assert!(
-            bad_run.verify().is_err(),
-            "wrong output claims must fail verification"
-        ),
+        Ok(mut bad_run) => assert!(bad_run.verify().is_err(), "wrong output claims must fail verification"),
         Err(_) => {}
     }
 }

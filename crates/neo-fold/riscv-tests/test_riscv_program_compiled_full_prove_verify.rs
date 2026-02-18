@@ -41,10 +41,7 @@ fn test_riscv_program_compiled_full_prove_verify() {
         )
         .prove()
     {
-        Ok(mut bad_run) => assert!(
-            bad_run.verify().is_err(),
-            "wrong output claim must fail verification"
-        ),
+        Ok(mut bad_run) => assert!(bad_run.verify().is_err(), "wrong output claim must fail verification"),
         Err(_) => {}
     }
 }

@@ -360,9 +360,9 @@ pub(crate) fn has_trace_lookup_families_instance(step: &StepInstanceBundle<Cmt, 
 
 #[inline]
 pub(crate) fn has_trace_lookup_families_witness(step: &StepWitnessBundle<Cmt, F, K>) -> bool {
-    step.lut_instances.iter().any(|(inst, _)| {
-        rv32_is_decode_lookup_table_id(inst.table_id) || rv32_is_width_lookup_table_id(inst.table_id)
-    })
+    step.lut_instances
+        .iter()
+        .any(|(inst, _)| rv32_is_decode_lookup_table_id(inst.table_id) || rv32_is_width_lookup_table_id(inst.table_id))
 }
 
 #[inline]

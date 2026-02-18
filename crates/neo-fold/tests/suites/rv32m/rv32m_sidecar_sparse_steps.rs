@@ -102,8 +102,13 @@ fn trace_rows_select_only_expected_opcodes() {
         .filter_map(|(idx, row)| {
             matches!(
                 row.decoded,
-                Some(RiscvInstruction::IAlu { op: RiscvOpcode::Or, .. })
-                    | Some(RiscvInstruction::RAlu { op: RiscvOpcode::Sub, .. })
+                Some(RiscvInstruction::IAlu {
+                    op: RiscvOpcode::Or,
+                    ..
+                }) | Some(RiscvInstruction::RAlu {
+                    op: RiscvOpcode::Sub,
+                    ..
+                })
             )
             .then_some(idx)
         })

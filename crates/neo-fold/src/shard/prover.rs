@@ -285,13 +285,7 @@ where
         };
 
         let shout_pre = crate::memory_sidecar::memory::prove_shout_addr_pre_time(
-            tr,
-            params,
-            step,
-            &cpu_bus,
-            ell_n,
-            &r_cycle,
-            step_idx,
+            tr, params, step, &cpu_bus, ell_n, &r_cycle, step_idx,
         )?;
 
         let twist_pre =
@@ -600,9 +594,7 @@ where
                 &mut ccs_out[0],
             )?;
             for (out, Z) in ccs_out.iter_mut().skip(1).zip(accumulator_wit.iter()) {
-                crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
-                    params, &cpu_bus, core_t, Z, out,
-                )?;
+                crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(params, &cpu_bus, core_t, Z, out)?;
             }
         }
 
@@ -637,9 +629,7 @@ where
                 })
                 .ok_or_else(|| PiCcsError::InvalidInput("missing mem/lut instances".into()))?;
             if t_len == 0 {
-                return Err(PiCcsError::InvalidInput(
-                    "trace linkage requires steps>=1".into(),
-                ));
+                return Err(PiCcsError::InvalidInput("trace linkage requires steps>=1".into()));
             }
             for (i, (inst, _wit)) in step.mem_instances.iter().enumerate() {
                 if inst.steps != t_len {
@@ -680,8 +670,12 @@ where
                 trace.ram_rv,
                 trace.ram_wv,
             ];
-            let trace_cols_to_open_shout: Vec<usize> =
-                vec![trace.shout_has_lookup, trace.shout_val, trace.shout_lhs, trace.shout_rhs];
+            let trace_cols_to_open_shout: Vec<usize> = vec![
+                trace.shout_has_lookup,
+                trace.shout_val,
+                trace.shout_lhs,
+                trace.shout_rhs,
+            ];
             let trace_cols_to_open_all: Vec<usize> = trace_cols_to_open_dense
                 .iter()
                 .chain(trace_cols_to_open_shout.iter())
@@ -954,11 +948,7 @@ where
                             )?;
                             for (child, zi) in dec_children.iter_mut().zip(Z_split.iter()) {
                                 crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
-                                    params,
-                                    &cpu_bus,
-                                    core_t,
-                                    zi,
-                                    child,
+                                    params, &cpu_bus, core_t, zi, child,
                                 )?;
                             }
                         }

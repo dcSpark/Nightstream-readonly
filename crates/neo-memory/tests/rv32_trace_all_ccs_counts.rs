@@ -81,7 +81,8 @@ fn trace_addi_halt_exec_table(min_len: usize) -> Rv32ExecTable {
     exec.validate_cycle_chain().expect("cycle chain");
     exec.validate_pc_chain().expect("pc chain");
     exec.validate_halted_tail().expect("halted tail");
-    exec.validate_inactive_rows_are_empty().expect("inactive rows");
+    exec.validate_inactive_rows_are_empty()
+        .expect("inactive rows");
     exec
 }
 

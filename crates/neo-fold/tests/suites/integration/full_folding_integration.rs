@@ -412,8 +412,8 @@ fn build_single_chunk_inputs() -> (
         ell: lut_table.n_side.trailing_zeros() as usize,
         table_spec: None,
         table: lut_table.content.clone(),
-    addr_group: None,
-    selector_group: None,
+        addr_group: None,
+        selector_group: None,
     };
     let lut_wit = neo_memory::witness::LutWitness { mats: Vec::new() };
 
@@ -583,8 +583,8 @@ fn full_folding_integration_multi_step_chunk() {
         ell: lut_table.n_side.trailing_zeros() as usize,
         table_spec: None,
         table: lut_table.content.clone(),
-    addr_group: None,
-    selector_group: None,
+        addr_group: None,
+        selector_group: None,
     };
     let lut_wit = neo_memory::witness::LutWitness { mats: Vec::new() };
 

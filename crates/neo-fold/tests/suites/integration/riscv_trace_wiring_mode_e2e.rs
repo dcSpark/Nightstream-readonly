@@ -165,8 +165,7 @@ fn rv32_trace_wiring_mode_chunked_ivc() {
         .prove()
         .expect("trace wiring prove with chunked ivc");
 
-    run.verify()
-        .expect("trace wiring verify with chunked ivc");
+    run.verify().expect("trace wiring verify with chunked ivc");
     assert_eq!(run.fold_count(), 2, "expected two fold steps with trace_chunk_rows=2");
 }
 

@@ -1,6 +1,10 @@
 use super::*;
 
-pub(crate) fn sparse_trace_col_from_values(m_in: usize, ell_n: usize, values: &[K]) -> Result<SparseIdxVec<K>, PiCcsError> {
+pub(crate) fn sparse_trace_col_from_values(
+    m_in: usize,
+    ell_n: usize,
+    values: &[K],
+) -> Result<SparseIdxVec<K>, PiCcsError> {
     let pow2_cycle = 1usize
         .checked_shl(ell_n as u32)
         .ok_or_else(|| PiCcsError::InvalidInput("WB/WP: 2^ell_n overflow".into()))?;
@@ -331,9 +335,7 @@ pub(crate) fn extract_trace_cpu_link_openings(
         })
         .ok_or_else(|| PiCcsError::InvalidInput("missing mem/lut instances".into()))?;
     if t_len == 0 {
-        return Err(PiCcsError::InvalidInput(
-            "trace linkage requires steps>=1".into(),
-        ));
+        return Err(PiCcsError::InvalidInput("trace linkage requires steps>=1".into()));
     }
     for (i, inst) in step.mem_insts.iter().enumerate() {
         if inst.steps != t_len {
@@ -457,7 +459,6 @@ pub(crate) fn expected_trace_shout_table_id_from_openings(
 
     Ok(decode_open_col(decode_layout.shout_table_id)?)
 }
-
 
 pub(crate) fn prove_twist_addr_pre_time(
     tr: &mut Poseidon2Transcript,

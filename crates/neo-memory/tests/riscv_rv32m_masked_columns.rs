@@ -52,7 +52,8 @@ fn rv32m_exec_table() -> Rv32ExecTable {
     exec.validate_cycle_chain().expect("cycle chain");
     exec.validate_pc_chain().expect("pc chain");
     exec.validate_halted_tail().expect("halted tail");
-    exec.validate_inactive_rows_are_empty().expect("inactive rows");
+    exec.validate_inactive_rows_are_empty()
+        .expect("inactive rows");
     exec
 }
 
@@ -62,15 +63,30 @@ fn rv32_trace_shout_event_table_includes_rv32m_rows() {
     let events = Rv32ShoutEventTable::from_exec_table(&exec).expect("Rv32ShoutEventTable::from_exec_table");
 
     assert!(
-        events.rows.iter().any(|row| row.opcode == Some(RiscvOpcode::Mulh)),
+        events
+            .rows
+            .iter()
+            .any(|row| row.opcode == Some(RiscvOpcode::Mulh)),
         "expected MULH shout event row"
     );
     assert!(
-        exec.rows.iter().any(|row| matches!(row.decoded, Some(RiscvInstruction::RAlu { op: RiscvOpcode::Divu, .. }))),
+        exec.rows.iter().any(|row| matches!(
+            row.decoded,
+            Some(RiscvInstruction::RAlu {
+                op: RiscvOpcode::Divu,
+                ..
+            })
+        )),
         "expected DIVU step in execution table"
     );
     assert!(
-        exec.rows.iter().any(|row| matches!(row.decoded, Some(RiscvInstruction::RAlu { op: RiscvOpcode::Remu, .. }))),
+        exec.rows.iter().any(|row| matches!(
+            row.decoded,
+            Some(RiscvInstruction::RAlu {
+                op: RiscvOpcode::Remu,
+                ..
+            })
+        )),
         "expected REMU step in execution table"
     );
 }

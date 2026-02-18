@@ -66,10 +66,7 @@ fn test_riscv_fibonacci_compiled_full_prove_verify() {
         .output(/*output_addr=*/ 0x100, /*expected_output=*/ F::from_u64(56))
         .prove()
     {
-        Ok(mut bad_run) => assert!(
-            bad_run.verify().is_err(),
-            "wrong output claim must fail verification"
-        ),
+        Ok(mut bad_run) => assert!(bad_run.verify().is_err(), "wrong output claim must fail verification"),
         Err(_) => {}
     }
 }

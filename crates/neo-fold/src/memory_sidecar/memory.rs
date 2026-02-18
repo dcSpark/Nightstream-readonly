@@ -11,17 +11,15 @@ use neo_ccs::{CcsStructure, MeInstance};
 use neo_math::{KExtensions, F, K};
 use neo_memory::bit_ops::{eq_bit_affine, eq_bits_prod};
 use neo_memory::cpu::{
-    build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes,
-    BusLayout, ShoutInstanceShape,
+    build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, BusLayout, ShoutInstanceShape,
 };
 use neo_memory::identity::shout_oracle::IdentityAddressLookupOracleSparse;
 use neo_memory::mle::{eq_points, lt_eval};
 use neo_memory::riscv::shout_oracle::RiscvAddressLookupOracleSparse;
 use neo_memory::riscv::trace::{
     rv32_decode_lookup_backed_cols, rv32_decode_lookup_backed_row_from_instr_word, rv32_decode_lookup_table_id_for_col,
-    rv32_is_decode_lookup_table_id, rv32_is_width_lookup_table_id,
-    rv32_width_lookup_backed_cols, rv32_width_lookup_table_id_for_col, Rv32DecodeSidecarLayout, Rv32TraceLayout,
-    Rv32WidthSidecarLayout,
+    rv32_is_decode_lookup_table_id, rv32_is_width_lookup_table_id, rv32_width_lookup_backed_cols,
+    rv32_width_lookup_table_id_for_col, Rv32DecodeSidecarLayout, Rv32TraceLayout, Rv32WidthSidecarLayout,
 };
 use neo_memory::sparse_time::SparseIdxVec;
 use neo_memory::ts_common as ts;
@@ -51,37 +49,37 @@ use p3_field::PrimeCharacteristicRing;
 use p3_field::PrimeField64;
 use std::collections::{BTreeMap, BTreeSet};
 
-#[path = "memory/transcript_and_common.rs"]
-mod transcript_and_common;
-#[path = "memory/sparse_oracles_and_twist_pre.rs"]
-mod sparse_oracles_and_twist_pre;
 #[path = "memory/addr_pre_proofs.rs"]
 mod addr_pre_proofs;
 #[path = "memory/event_table_context.rs"]
 mod event_table_context;
-#[path = "memory/route_a_oracles.rs"]
-mod route_a_oracles;
-#[path = "memory/route_a_claims.rs"]
-mod route_a_claims;
 #[path = "memory/route_a_claim_builders.rs"]
 mod route_a_claim_builders;
-#[path = "memory/route_a_terminal_checks.rs"]
-mod route_a_terminal_checks;
+#[path = "memory/route_a_claims.rs"]
+mod route_a_claims;
 #[path = "memory/route_a_finalize.rs"]
 mod route_a_finalize;
+#[path = "memory/route_a_oracles.rs"]
+mod route_a_oracles;
+#[path = "memory/route_a_terminal_checks.rs"]
+mod route_a_terminal_checks;
 #[path = "memory/route_a_verify.rs"]
 mod route_a_verify;
+#[path = "memory/sparse_oracles_and_twist_pre.rs"]
+mod sparse_oracles_and_twist_pre;
+#[path = "memory/transcript_and_common.rs"]
+mod transcript_and_common;
 
-pub use transcript_and_common::{absorb_step_memory, TwistTimeLaneOpenings};
 pub use addr_pre_proofs::{verify_shout_addr_pre_time, verify_twist_addr_pre_time};
 pub use route_a_verify::verify_route_a_memory_step;
+pub use transcript_and_common::{absorb_step_memory, TwistTimeLaneOpenings};
 
-pub(crate) use transcript_and_common::*;
-pub(crate) use sparse_oracles_and_twist_pre::*;
 pub(crate) use addr_pre_proofs::*;
 pub(crate) use event_table_context::*;
-pub(crate) use route_a_oracles::*;
-pub(crate) use route_a_claims::*;
 pub(crate) use route_a_claim_builders::*;
-pub(crate) use route_a_terminal_checks::*;
+pub(crate) use route_a_claims::*;
 pub(crate) use route_a_finalize::*;
+pub(crate) use route_a_oracles::*;
+pub(crate) use route_a_terminal_checks::*;
+pub(crate) use sparse_oracles_and_twist_pre::*;
+pub(crate) use transcript_and_common::*;

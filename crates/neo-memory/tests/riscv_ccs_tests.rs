@@ -4,9 +4,8 @@ use neo_ccs::relations::check_ccs_rowwise_zero;
 use neo_memory::cpu::CPU_BUS_COL_DISABLED;
 use neo_memory::plain::PlainMemLayout;
 use neo_memory::riscv::ccs::{
-    build_rv32_trace_wiring_ccs, rv32_trace_ccs_witness_from_exec_table,
-    rv32_trace_shared_bus_requirements_with_specs, rv32_trace_shared_cpu_bus_config_with_specs, Rv32TraceCcsLayout,
-    TraceShoutBusSpec,
+    build_rv32_trace_wiring_ccs, rv32_trace_ccs_witness_from_exec_table, rv32_trace_shared_bus_requirements_with_specs,
+    rv32_trace_shared_cpu_bus_config_with_specs, Rv32TraceCcsLayout, TraceShoutBusSpec,
 };
 use neo_memory::riscv::exec_table::Rv32ExecTable;
 use neo_memory::riscv::lookups::{
@@ -97,7 +96,8 @@ fn exec_table_for(program: Vec<RiscvInstruction>, min_len: usize, max_steps: usi
     exec.validate_cycle_chain().expect("cycle chain");
     exec.validate_pc_chain().expect("pc chain");
     exec.validate_halted_tail().expect("halted tail");
-    exec.validate_inactive_rows_are_empty().expect("inactive rows");
+    exec.validate_inactive_rows_are_empty()
+        .expect("inactive rows");
     exec
 }
 

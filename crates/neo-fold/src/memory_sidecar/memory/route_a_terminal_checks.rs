@@ -837,4 +837,3 @@ pub(crate) fn verify_route_a_control_terminals(
 
     Ok(())
 }
-

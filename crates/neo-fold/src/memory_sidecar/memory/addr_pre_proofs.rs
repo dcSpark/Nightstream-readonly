@@ -44,223 +44,217 @@ pub(crate) fn prove_shout_addr_pre_time(
             "shared_cpu_bus layout mismatch for step (instance counts)".into(),
         ));
     }
-        let mut addr_range_counts = std::collections::HashMap::<(usize, usize), usize>::new();
-        for inst_cols in bus.shout_cols.iter() {
-            for lane_cols in inst_cols.lanes.iter() {
-                let key = (lane_cols.addr_bits.start, lane_cols.addr_bits.end);
-                *addr_range_counts.entry(key).or_insert(0) += 1;
-            }
+    let mut addr_range_counts = std::collections::HashMap::<(usize, usize), usize>::new();
+    for inst_cols in bus.shout_cols.iter() {
+        for lane_cols in inst_cols.lanes.iter() {
+            let key = (lane_cols.addr_bits.start, lane_cols.addr_bits.end);
+            *addr_range_counts.entry(key).or_insert(0) += 1;
         }
-        // Shared-bus trace mode can have many lookup families reusing the same bus columns
-        // (e.g. decode/width selector+addr groups and opcode addr groups). Cache sparse
-        // decodes by (col_id, steps) to avoid rebuilding identical SparseIdxVec values.
-        let mut full_col_sparse_cache: std::collections::HashMap<(usize, usize), SparseIdxVec<K>> =
-            std::collections::HashMap::new();
-        let mut has_lookup_cache: std::collections::HashMap<(usize, usize), (SparseIdxVec<K>, Vec<usize>, bool)> =
-            std::collections::HashMap::new();
+    }
+    // Shared-bus trace mode can have many lookup families reusing the same bus columns
+    // (e.g. decode/width selector+addr groups and opcode addr groups). Cache sparse
+    // decodes by (col_id, steps) to avoid rebuilding identical SparseIdxVec values.
+    let mut full_col_sparse_cache: std::collections::HashMap<(usize, usize), SparseIdxVec<K>> =
+        std::collections::HashMap::new();
+    let mut has_lookup_cache: std::collections::HashMap<(usize, usize), (SparseIdxVec<K>, Vec<usize>, bool)> =
+        std::collections::HashMap::new();
 
-        let mut decode_full_col = |col_id: usize, steps: usize| -> Result<SparseIdxVec<K>, PiCcsError> {
-            if let Some(cached) = full_col_sparse_cache.get(&(col_id, steps)) {
-                return Ok(cached.clone());
-            }
-            let decoded = crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
-                &cpu_z_k,
-                bus,
-                col_id,
-                steps,
-                pow2_cycle,
-            )?;
-            full_col_sparse_cache.insert((col_id, steps), decoded.clone());
-            Ok(decoded)
-        };
+    let mut decode_full_col = |col_id: usize, steps: usize| -> Result<SparseIdxVec<K>, PiCcsError> {
+        if let Some(cached) = full_col_sparse_cache.get(&(col_id, steps)) {
+            return Ok(cached.clone());
+        }
+        let decoded =
+            crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(&cpu_z_k, bus, col_id, steps, pow2_cycle)?;
+        full_col_sparse_cache.insert((col_id, steps), decoded.clone());
+        Ok(decoded)
+    };
 
-        for (idx, (lut_inst, _lut_wit)) in step.lut_instances.iter().enumerate() {
-            neo_memory::addr::validate_shout_bit_addressing(lut_inst)?;
-            if lut_inst.steps > pow2_cycle {
+    for (idx, (lut_inst, _lut_wit)) in step.lut_instances.iter().enumerate() {
+        neo_memory::addr::validate_shout_bit_addressing(lut_inst)?;
+        if lut_inst.steps > pow2_cycle {
+            return Err(PiCcsError::InvalidInput(format!(
+                "Shout(Route A): steps={} exceeds 2^ell_cycle={pow2_cycle}",
+                lut_inst.steps
+            )));
+        }
+
+        let z = &cpu_z_k;
+        let inst_ell_addr = lut_inst.d * lut_inst.ell;
+        if matches!(
+            lut_inst.table_spec,
+            Some(LutTableSpec::RiscvOpcodePacked { .. } | LutTableSpec::RiscvOpcodeEventTablePacked { .. })
+        ) {
+            return Err(PiCcsError::InvalidInput(
+                "packed RISC-V Shout table specs are not supported on the shared CPU bus".into(),
+            ));
+        }
+        let inst_ell_addr_u32 = u32::try_from(inst_ell_addr)
+            .map_err(|_| PiCcsError::InvalidInput("Shout(Route A): ell_addr overflows u32".into()))?;
+        groups
+            .entry(inst_ell_addr_u32)
+            .or_insert_with(|| AddrPreGroupBuilder {
+                active_lanes: Vec::new(),
+                active_claimed_sums: Vec::new(),
+                addr_oracles: Vec::new(),
+            });
+        let inst_cols = bus.shout_cols.get(idx).ok_or_else(|| {
+            PiCcsError::InvalidInput(format!(
+                "shared_cpu_bus layout mismatch: missing shout_cols for lut_idx={idx}"
+            ))
+        })?;
+        let expected_lanes = lut_inst.lanes.max(1);
+        if inst_cols.lanes.len() != expected_lanes {
+            return Err(PiCcsError::InvalidInput(format!(
+                "shared_cpu_bus layout mismatch at lut_idx={idx}: shout lanes={} but instance expects {}",
+                inst_cols.lanes.len(),
+                expected_lanes
+            )));
+        }
+
+        let mut lanes: Vec<ShoutLaneSparseCols> = Vec::with_capacity(expected_lanes);
+
+        for (lane_idx, shout_cols) in inst_cols.lanes.iter().enumerate() {
+            if shout_cols.addr_bits.end - shout_cols.addr_bits.start != inst_ell_addr {
                 return Err(PiCcsError::InvalidInput(format!(
-                    "Shout(Route A): steps={} exceeds 2^ell_cycle={pow2_cycle}",
-                    lut_inst.steps
-                )));
-            }
-
-            let z = &cpu_z_k;
-            let inst_ell_addr = lut_inst.d * lut_inst.ell;
-            if matches!(
-                lut_inst.table_spec,
-                Some(LutTableSpec::RiscvOpcodePacked { .. } | LutTableSpec::RiscvOpcodeEventTablePacked { .. })
-            ) {
-                return Err(PiCcsError::InvalidInput(
-                    "packed RISC-V Shout table specs are not supported on the shared CPU bus".into(),
-                ));
-            }
-            let inst_ell_addr_u32 = u32::try_from(inst_ell_addr)
-                .map_err(|_| PiCcsError::InvalidInput("Shout(Route A): ell_addr overflows u32".into()))?;
-            groups
-                .entry(inst_ell_addr_u32)
-                .or_insert_with(|| AddrPreGroupBuilder {
-                    active_lanes: Vec::new(),
-                    active_claimed_sums: Vec::new(),
-                    addr_oracles: Vec::new(),
-                });
-            let inst_cols = bus.shout_cols.get(idx).ok_or_else(|| {
-                PiCcsError::InvalidInput(format!(
-                    "shared_cpu_bus layout mismatch: missing shout_cols for lut_idx={idx}"
-                ))
-            })?;
-            let expected_lanes = lut_inst.lanes.max(1);
-            if inst_cols.lanes.len() != expected_lanes {
-                return Err(PiCcsError::InvalidInput(format!(
-                    "shared_cpu_bus layout mismatch at lut_idx={idx}: shout lanes={} but instance expects {}",
-                    inst_cols.lanes.len(),
-                    expected_lanes
-                )));
-            }
-
-            let mut lanes: Vec<ShoutLaneSparseCols> = Vec::with_capacity(expected_lanes);
-
-            for (lane_idx, shout_cols) in inst_cols.lanes.iter().enumerate() {
-                if shout_cols.addr_bits.end - shout_cols.addr_bits.start != inst_ell_addr {
-                    return Err(PiCcsError::InvalidInput(format!(
                         "shared_cpu_bus layout mismatch at lut_idx={idx}, lane_idx={lane_idx}: expected ell_addr={inst_ell_addr}"
                     )));
-                }
-                let addr_key = (shout_cols.addr_bits.start, shout_cols.addr_bits.end);
-                let shared_addr_group = addr_range_counts.get(&addr_key).copied().unwrap_or(0) > 1;
+            }
+            let addr_key = (shout_cols.addr_bits.start, shout_cols.addr_bits.end);
+            let shared_addr_group = addr_range_counts.get(&addr_key).copied().unwrap_or(0) > 1;
 
-                let (has_lookup, active_js, has_any_lookup) =
-                    if let Some((cached_has, cached_js, cached_any)) =
-                        has_lookup_cache.get(&(shout_cols.has_lookup, lut_inst.steps))
-                    {
-                        (cached_has.clone(), cached_js.clone(), *cached_any)
-                    } else {
-                        let has_lookup = decode_full_col(shout_cols.has_lookup, lut_inst.steps)?;
-                        let has_any_lookup = has_lookup
-                            .entries()
-                            .iter()
-                            .any(|&(_t, gate)| gate != K::ZERO);
-                        let active_js: Vec<usize> = if has_any_lookup {
-                            let m_in = bus.m_in;
-                            let mut out: Vec<usize> = Vec::with_capacity(has_lookup.entries().len());
-                            for &(t, gate) in has_lookup.entries() {
-                                if gate == K::ZERO {
-                                    continue;
-                                }
-                                let j = t.checked_sub(m_in).ok_or_else(|| {
-                                    PiCcsError::InvalidInput(format!(
-                                        "Shout(Route A): has_lookup time index underflow: t={t} < m_in={m_in}"
-                                    ))
-                                })?;
-                                if j >= lut_inst.steps {
-                                    return Err(PiCcsError::ProtocolError(format!(
-                                        "Shout(Route A): has_lookup time index out of range: j={j} >= steps={}",
-                                        lut_inst.steps
-                                    )));
-                                }
-                                out.push(j);
-                            }
-                            out
-                        } else {
-                            Vec::new()
-                        };
-                        has_lookup_cache.insert(
-                            (shout_cols.has_lookup, lut_inst.steps),
-                            (has_lookup.clone(), active_js.clone(), has_any_lookup),
-                        );
-                        (has_lookup, active_js, has_any_lookup)
-                    };
-
-                let addr_bits: Vec<SparseIdxVec<K>> = if shared_addr_group {
-                    let mut out = Vec::with_capacity(inst_ell_addr);
-                    for col_id in shout_cols.addr_bits.clone() {
-                        out.push(decode_full_col(col_id, lut_inst.steps)?);
-                    }
-                    out
-                } else if has_any_lookup {
-                    let mut out = Vec::with_capacity(inst_ell_addr);
-                    for col_id in shout_cols.addr_bits.clone() {
-                        out.push(crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col_at_js(
-                            z, bus, col_id, &active_js, pow2_cycle,
-                        )?);
+            let (has_lookup, active_js, has_any_lookup) = if let Some((cached_has, cached_js, cached_any)) =
+                has_lookup_cache.get(&(shout_cols.has_lookup, lut_inst.steps))
+            {
+                (cached_has.clone(), cached_js.clone(), *cached_any)
+            } else {
+                let has_lookup = decode_full_col(shout_cols.has_lookup, lut_inst.steps)?;
+                let has_any_lookup = has_lookup
+                    .entries()
+                    .iter()
+                    .any(|&(_t, gate)| gate != K::ZERO);
+                let active_js: Vec<usize> = if has_any_lookup {
+                    let m_in = bus.m_in;
+                    let mut out: Vec<usize> = Vec::with_capacity(has_lookup.entries().len());
+                    for &(t, gate) in has_lookup.entries() {
+                        if gate == K::ZERO {
+                            continue;
+                        }
+                        let j = t.checked_sub(m_in).ok_or_else(|| {
+                            PiCcsError::InvalidInput(format!(
+                                "Shout(Route A): has_lookup time index underflow: t={t} < m_in={m_in}"
+                            ))
+                        })?;
+                        if j >= lut_inst.steps {
+                            return Err(PiCcsError::ProtocolError(format!(
+                                "Shout(Route A): has_lookup time index out of range: j={j} >= steps={}",
+                                lut_inst.steps
+                            )));
+                        }
+                        out.push(j);
                     }
                     out
                 } else {
-                    vec![SparseIdxVec::new(pow2_cycle); inst_ell_addr]
+                    Vec::new()
                 };
+                has_lookup_cache.insert(
+                    (shout_cols.has_lookup, lut_inst.steps),
+                    (has_lookup.clone(), active_js.clone(), has_any_lookup),
+                );
+                (has_lookup, active_js, has_any_lookup)
+            };
 
-                let val = if has_any_lookup {
-                    crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col_at_js(
-                        z,
-                        bus,
-                        shout_cols.primary_val(),
-                        &active_js,
-                        pow2_cycle,
-                    )?
-                } else {
-                    SparseIdxVec::new(pow2_cycle)
-                };
-
-                if has_any_lookup {
-                    let (addr_oracle, lane_sum): (Box<dyn RoundOracle>, K) = match &lut_inst.table_spec {
-                        None => {
-                            let table_k: Vec<K> = lut_inst.table.iter().map(|&v| v.into()).collect();
-                            let (o, sum) =
-                                AddressLookupOracle::new(&addr_bits, &has_lookup, &table_k, r_cycle, inst_ell_addr);
-                            (Box::new(o), sum)
-                        }
-                        Some(LutTableSpec::RiscvOpcode { opcode, xlen }) => {
-                            let (o, sum) = RiscvAddressLookupOracleSparse::new_sparse_time(
-                                *opcode,
-                                *xlen,
-                                &addr_bits,
-                                &has_lookup,
-                                r_cycle,
-                            )?;
-                            (Box::new(o), sum)
-                        }
-                        Some(LutTableSpec::RiscvOpcodePacked { .. }) => {
-                            return Err(PiCcsError::InvalidInput(
-                                "packed RISC-V Shout table specs are not supported on the shared CPU bus".into(),
-                            ));
-                        }
-                        Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. }) => {
-                            return Err(PiCcsError::InvalidInput(
-                                "packed RISC-V Shout table specs are not supported on the shared CPU bus".into(),
-                            ));
-                        }
-                        Some(LutTableSpec::IdentityU32) => {
-                            let (o, sum) = IdentityAddressLookupOracleSparse::new_sparse_time(
-                                inst_ell_addr,
-                                &addr_bits,
-                                &has_lookup,
-                                r_cycle,
-                            )?;
-                            (Box::new(o), sum)
-                        }
-                    };
-
-                    claimed_sums[flat_lane_idx] = lane_sum;
-                    let lane_idx_u32 = u32::try_from(flat_lane_idx)
-                        .map_err(|_| PiCcsError::InvalidInput("Shout(Route A): lane index overflow".into()))?;
-                    let group = groups
-                        .get_mut(&inst_ell_addr_u32)
-                        .ok_or_else(|| PiCcsError::ProtocolError("Shout(Route A): missing ell_addr group".into()))?;
-                    group.active_lanes.push(lane_idx_u32);
-                    group.active_claimed_sums.push(lane_sum);
-                    group.addr_oracles.push(addr_oracle);
+            let addr_bits: Vec<SparseIdxVec<K>> = if shared_addr_group {
+                let mut out = Vec::with_capacity(inst_ell_addr);
+                for col_id in shout_cols.addr_bits.clone() {
+                    out.push(decode_full_col(col_id, lut_inst.steps)?);
                 }
+                out
+            } else if has_any_lookup {
+                let mut out = Vec::with_capacity(inst_ell_addr);
+                for col_id in shout_cols.addr_bits.clone() {
+                    out.push(crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col_at_js(
+                        z, bus, col_id, &active_js, pow2_cycle,
+                    )?);
+                }
+                out
+            } else {
+                vec![SparseIdxVec::new(pow2_cycle); inst_ell_addr]
+            };
 
-                lanes.push(ShoutLaneSparseCols {
-                    addr_bits,
-                    has_lookup,
-                    val,
-                });
-                flat_lane_idx += 1;
+            let val = if has_any_lookup {
+                crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col_at_js(
+                    z,
+                    bus,
+                    shout_cols.primary_val(),
+                    &active_js,
+                    pow2_cycle,
+                )?
+            } else {
+                SparseIdxVec::new(pow2_cycle)
+            };
+
+            if has_any_lookup {
+                let (addr_oracle, lane_sum): (Box<dyn RoundOracle>, K) = match &lut_inst.table_spec {
+                    None => {
+                        let table_k: Vec<K> = lut_inst.table.iter().map(|&v| v.into()).collect();
+                        let (o, sum) =
+                            AddressLookupOracle::new(&addr_bits, &has_lookup, &table_k, r_cycle, inst_ell_addr);
+                        (Box::new(o), sum)
+                    }
+                    Some(LutTableSpec::RiscvOpcode { opcode, xlen }) => {
+                        let (o, sum) = RiscvAddressLookupOracleSparse::new_sparse_time(
+                            *opcode,
+                            *xlen,
+                            &addr_bits,
+                            &has_lookup,
+                            r_cycle,
+                        )?;
+                        (Box::new(o), sum)
+                    }
+                    Some(LutTableSpec::RiscvOpcodePacked { .. }) => {
+                        return Err(PiCcsError::InvalidInput(
+                            "packed RISC-V Shout table specs are not supported on the shared CPU bus".into(),
+                        ));
+                    }
+                    Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. }) => {
+                        return Err(PiCcsError::InvalidInput(
+                            "packed RISC-V Shout table specs are not supported on the shared CPU bus".into(),
+                        ));
+                    }
+                    Some(LutTableSpec::IdentityU32) => {
+                        let (o, sum) = IdentityAddressLookupOracleSparse::new_sparse_time(
+                            inst_ell_addr,
+                            &addr_bits,
+                            &has_lookup,
+                            r_cycle,
+                        )?;
+                        (Box::new(o), sum)
+                    }
+                };
+
+                claimed_sums[flat_lane_idx] = lane_sum;
+                let lane_idx_u32 = u32::try_from(flat_lane_idx)
+                    .map_err(|_| PiCcsError::InvalidInput("Shout(Route A): lane index overflow".into()))?;
+                let group = groups
+                    .get_mut(&inst_ell_addr_u32)
+                    .ok_or_else(|| PiCcsError::ProtocolError("Shout(Route A): missing ell_addr group".into()))?;
+                group.active_lanes.push(lane_idx_u32);
+                group.active_claimed_sums.push(lane_sum);
+                group.addr_oracles.push(addr_oracle);
             }
 
-            let decoded = ShoutDecodedColsSparse { lanes };
-
-            decoded_cols.push(decoded);
+            lanes.push(ShoutLaneSparseCols {
+                addr_bits,
+                has_lookup,
+                val,
+            });
+            flat_lane_idx += 1;
         }
+
+        let decoded = ShoutDecodedColsSparse { lanes };
+
+        decoded_cols.push(decoded);
+    }
     if flat_lane_idx != total_lanes {
         return Err(PiCcsError::ProtocolError(format!(
             "Shout(Route A): flat lane indexing drift (got {flat_lane_idx}, expected {total_lanes})"
@@ -686,4 +680,3 @@ pub fn verify_twist_addr_pre_time(
 
     Ok(out)
 }
-

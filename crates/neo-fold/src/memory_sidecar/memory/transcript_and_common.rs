@@ -157,7 +157,9 @@ pub(crate) enum Rv32PackedShoutOp {
     Remu,
 }
 
-pub(crate) fn rv32_packed_shout_layout(spec: &Option<LutTableSpec>) -> Result<Option<(Rv32PackedShoutOp, usize)>, PiCcsError> {
+pub(crate) fn rv32_packed_shout_layout(
+    spec: &Option<LutTableSpec>,
+) -> Result<Option<(Rv32PackedShoutOp, usize)>, PiCcsError> {
     let (opcode, xlen, time_bits) = match spec {
         Some(LutTableSpec::RiscvOpcodePacked { opcode, xlen }) => (*opcode, *xlen, 0usize),
         Some(LutTableSpec::RiscvOpcodeEventTablePacked {
@@ -1198,7 +1200,12 @@ pub(crate) fn control_branch_taken_from_bits(shout_val: K, funct3_bit0: K) -> K 
 }
 
 #[inline]
-pub(crate) fn control_imm_u_from_bits(funct3_bits: [K; 3], rs1_bits: [K; 5], rs2_bits: [K; 5], funct7_bits: [K; 7]) -> K {
+pub(crate) fn control_imm_u_from_bits(
+    funct3_bits: [K; 3],
+    rs1_bits: [K; 5],
+    rs2_bits: [K; 5],
+    funct7_bits: [K; 7],
+) -> K {
     let pow2 = |k: u64| K::from(F::from_u64(1u64 << k));
     let mut out = K::ZERO;
     out += pow2(12) * funct3_bits[0];

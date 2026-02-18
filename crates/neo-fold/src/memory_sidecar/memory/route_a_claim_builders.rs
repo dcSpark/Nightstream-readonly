@@ -596,19 +596,8 @@ pub(crate) fn build_route_a_control_time_claims(
         r_cycle,
         Box::new(move |vals: &[K]| {
             let residuals = control_next_pc_control_residuals(
-                vals[0],
-                vals[1],
-                vals[2],
-                vals[3],
-                vals[4],
-                vals[10],
-                vals[11],
-                vals[12],
-                vals[7],
-                vals[8],
-                vals[9],
-                vals[5],
-                vals[6],
+                vals[0], vals[1], vals[2], vals[3], vals[4], vals[10], vals[11], vals[12], vals[7], vals[8], vals[9],
+                vals[5], vals[6],
             );
             let mut weighted = K::ZERO;
             for (r, w) in residuals.iter().zip(control_weights.iter()) {
@@ -954,4 +943,3 @@ pub(crate) fn verify_route_a_wb_wp_terminals(
 
     Ok(())
 }
-

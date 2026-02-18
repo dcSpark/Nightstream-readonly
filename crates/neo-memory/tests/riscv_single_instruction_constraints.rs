@@ -36,7 +36,8 @@ fn addi_halt_exec_table() -> Rv32ExecTable {
     exec.validate_cycle_chain().expect("cycle chain");
     exec.validate_pc_chain().expect("pc chain");
     exec.validate_halted_tail().expect("halted tail");
-    exec.validate_inactive_rows_are_empty().expect("inactive rows");
+    exec.validate_inactive_rows_are_empty()
+        .expect("inactive rows");
     exec
 }
 
@@ -116,11 +117,17 @@ fn trace_single_addi_reserved_rows_affect_constraints_only() {
     let ccs_reserved =
         build_rv32_trace_wiring_ccs_with_reserved_rows(&layout, reserved_rows).expect("trace CCS with reserved rows");
 
-    assert!(reserved_rows > 0, "expected non-zero reserved rows for shared bus padding");
+    assert!(
+        reserved_rows > 0,
+        "expected non-zero reserved rows for shared bus padding"
+    );
     assert_eq!(
         ccs_reserved.n,
         ccs_base.n + reserved_rows,
         "reserved rows should only increase row count"
     );
-    assert_eq!(ccs_reserved.m, ccs_base.m, "reserved rows should not change witness width");
+    assert_eq!(
+        ccs_reserved.m, ccs_base.m,
+        "reserved rows should not change witness width"
+    );
 }

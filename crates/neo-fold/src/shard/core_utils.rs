@@ -1337,4 +1337,3 @@ pub(crate) fn bind_rlc_inputs(
 
     Ok(())
 }
-

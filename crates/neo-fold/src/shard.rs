@@ -82,10 +82,10 @@ fn elapsed_ms(start: TimePoint) -> f64 {
 
 #[path = "shard/core_utils.rs"]
 mod core_utils;
-#[path = "shard/rlc_dec.rs"]
-mod rlc_dec;
 #[path = "shard/prover.rs"]
 mod prover;
+#[path = "shard/rlc_dec.rs"]
+mod rlc_dec;
 #[path = "shard/verifier_and_api.rs"]
 mod verifier_and_api;
 
@@ -93,5 +93,5 @@ pub use core_utils::{absorb_step_memory, check_step_linking, CommitMixers, StepL
 pub use verifier_and_api::*;
 
 pub(crate) use core_utils::*;
-pub(crate) use rlc_dec::*;
 pub(crate) use prover::*;
+pub(crate) use rlc_dec::*;
