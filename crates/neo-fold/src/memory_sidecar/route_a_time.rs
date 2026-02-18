@@ -25,6 +25,45 @@ pub struct ExtraBatchedTimeClaim {
     pub label: &'static [u8],
 }
 
+fn split_extra_claim(
+    claim: Option<ExtraBatchedTimeClaim>,
+) -> (Option<Box<dyn RoundOracle>>, Option<&'static [u8]>, Option<K>) {
+    match claim {
+        Some(extra) => (Some(extra.oracle), Some(extra.label), Some(extra.claimed_sum)),
+        None => (None, None, None),
+    }
+}
+
+fn append_optional_claim<'a>(
+    oracle: &'a mut Option<Box<dyn RoundOracle>>,
+    label: Option<&'static [u8]>,
+    claimed_sum: Option<K>,
+    is_dynamic: bool,
+    claimed_sums: &mut Vec<K>,
+    degree_bounds: &mut Vec<usize>,
+    labels: &mut Vec<&'static [u8]>,
+    claim_is_dynamic: &mut Vec<bool>,
+    claims: &mut Vec<BatchedClaim<'a>>,
+    missing_label_msg: &'static str,
+    missing_claimed_sum_msg: &'static str,
+) {
+    if let Some(oracle) = oracle.as_deref_mut() {
+        let label = label.expect(missing_label_msg);
+        let claimed_sum = claimed_sum.expect(missing_claimed_sum_msg);
+        claimed_sums.push(claimed_sum);
+        degree_bounds.push(oracle.degree_bound());
+        labels.push(label);
+        claim_is_dynamic.push(is_dynamic);
+        claims.push(BatchedClaim {
+            oracle,
+            claimed_sum,
+            label,
+        });
+    } else {
+        debug_assert!(label.is_none(), "label present without oracle");
+    }
+}
+
 pub fn prove_route_a_batched_time(
     tr: &mut Poseidon2Transcript,
     step_idx: usize,
@@ -109,321 +148,159 @@ pub fn prove_route_a_batched_time(
         &mut claim_is_dynamic,
         &mut claims,
     );
-
-    let wb_time_degree_bound = wb_time_claim
-        .as_ref()
-        .map(|extra| extra.oracle.degree_bound());
-    let mut wb_time_label: Option<&'static [u8]> = None;
-    let mut wb_time_oracle: Option<Box<dyn RoundOracle>> = wb_time_claim.map(|extra| {
-        wb_time_label = Some(extra.label);
-        extra.oracle
-    });
-    if let Some(oracle) = wb_time_oracle.as_deref_mut() {
-        // WB is a zero-identity stage: claimed sum is verifier-known and fixed to zero.
-        let claimed_sum = K::ZERO;
-        let label = wb_time_label.expect("missing wb_time label");
-        claimed_sums.push(claimed_sum);
-        degree_bounds.push(oracle.degree_bound());
-        labels.push(label);
-        claim_is_dynamic.push(false);
-        claims.push(BatchedClaim {
-            oracle,
-            claimed_sum,
-            label,
-        });
+    macro_rules! append_zero_optional_claim {
+        ($claim_opt:ident, $degree_bound:ident, $oracle:ident, $label:ident, $missing_label_msg:literal, $missing_claimed_sum_msg:literal) => {
+            let $degree_bound = $claim_opt.as_ref().map(|extra| extra.oracle.degree_bound());
+            let (mut $oracle, $label, _claimed_sum) = split_extra_claim($claim_opt);
+            append_optional_claim(
+                &mut $oracle,
+                $label,
+                Some(K::ZERO),
+                false,
+                &mut claimed_sums,
+                &mut degree_bounds,
+                &mut labels,
+                &mut claim_is_dynamic,
+                &mut claims,
+                $missing_label_msg,
+                $missing_claimed_sum_msg,
+            );
+        };
     }
 
-    let wp_time_degree_bound = wp_time_claim
-        .as_ref()
-        .map(|extra| extra.oracle.degree_bound());
-    let mut wp_time_label: Option<&'static [u8]> = None;
-    let mut wp_time_oracle: Option<Box<dyn RoundOracle>> = wp_time_claim.map(|extra| {
-        wp_time_label = Some(extra.label);
-        extra.oracle
-    });
-    if let Some(oracle) = wp_time_oracle.as_deref_mut() {
-        // WP is a zero-identity stage: claimed sum is verifier-known and fixed to zero.
-        let claimed_sum = K::ZERO;
-        let label = wp_time_label.expect("missing wp_time label");
-        claimed_sums.push(claimed_sum);
-        degree_bounds.push(oracle.degree_bound());
-        labels.push(label);
-        claim_is_dynamic.push(false);
-        claims.push(BatchedClaim {
-            oracle,
-            claimed_sum,
-            label,
-        });
+    macro_rules! append_dynamic_optional_claim {
+        ($claim_opt:ident, $degree_bound:ident, $oracle:ident, $label:ident, $claimed_sum:ident, $missing_label_msg:literal, $missing_claimed_sum_msg:literal) => {
+            let $degree_bound = $claim_opt.as_ref().map(|extra| extra.oracle.degree_bound());
+            let (mut $oracle, $label, $claimed_sum) = split_extra_claim($claim_opt);
+            append_optional_claim(
+                &mut $oracle,
+                $label,
+                $claimed_sum,
+                true,
+                &mut claimed_sums,
+                &mut degree_bounds,
+                &mut labels,
+                &mut claim_is_dynamic,
+                &mut claims,
+                $missing_label_msg,
+                $missing_claimed_sum_msg,
+            );
+        };
     }
 
-    let decode_decode_fields_degree_bound = decode_decode_fields_claim
-        .as_ref()
-        .map(|extra| extra.oracle.degree_bound());
-    let mut decode_decode_fields_label: Option<&'static [u8]> = None;
-    let mut decode_decode_fields_oracle: Option<Box<dyn RoundOracle>> = decode_decode_fields_claim.map(|extra| {
-        decode_decode_fields_label = Some(extra.label);
-        extra.oracle
-    });
-    if let Some(oracle) = decode_decode_fields_oracle.as_deref_mut() {
-        let claimed_sum = K::ZERO;
-        let label = decode_decode_fields_label.expect("missing decode_fields label");
-        claimed_sums.push(claimed_sum);
-        degree_bounds.push(oracle.degree_bound());
-        labels.push(label);
-        claim_is_dynamic.push(false);
-        claims.push(BatchedClaim {
-            oracle,
-            claimed_sum,
-            label,
-        });
-    }
-
-    let decode_decode_immediates_degree_bound = decode_decode_immediates_claim
-        .as_ref()
-        .map(|extra| extra.oracle.degree_bound());
-    let mut decode_decode_immediates_label: Option<&'static [u8]> = None;
-    let mut decode_decode_immediates_oracle: Option<Box<dyn RoundOracle>> =
-        decode_decode_immediates_claim.map(|extra| {
-            decode_decode_immediates_label = Some(extra.label);
-            extra.oracle
-        });
-    if let Some(oracle) = decode_decode_immediates_oracle.as_deref_mut() {
-        let claimed_sum = K::ZERO;
-        let label = decode_decode_immediates_label.expect("missing decode_immediates label");
-        claimed_sums.push(claimed_sum);
-        degree_bounds.push(oracle.degree_bound());
-        labels.push(label);
-        claim_is_dynamic.push(false);
-        claims.push(BatchedClaim {
-            oracle,
-            claimed_sum,
-            label,
-        });
-    }
-
-    let width_bitness_degree_bound = width_bitness_claim
-        .as_ref()
-        .map(|extra| extra.oracle.degree_bound());
-    let mut width_bitness_label: Option<&'static [u8]> = None;
-    let mut width_bitness_oracle: Option<Box<dyn RoundOracle>> = width_bitness_claim.map(|extra| {
-        width_bitness_label = Some(extra.label);
-        extra.oracle
-    });
-    if let Some(oracle) = width_bitness_oracle.as_deref_mut() {
-        let claimed_sum = K::ZERO;
-        let label = width_bitness_label.expect("missing width_bitness label");
-        claimed_sums.push(claimed_sum);
-        degree_bounds.push(oracle.degree_bound());
-        labels.push(label);
-        claim_is_dynamic.push(false);
-        claims.push(BatchedClaim {
-            oracle,
-            claimed_sum,
-            label,
-        });
-    }
-
-    let width_quiescence_degree_bound = width_quiescence_claim
-        .as_ref()
-        .map(|extra| extra.oracle.degree_bound());
-    let mut width_quiescence_label: Option<&'static [u8]> = None;
-    let mut width_quiescence_oracle: Option<Box<dyn RoundOracle>> = width_quiescence_claim.map(|extra| {
-        width_quiescence_label = Some(extra.label);
-        extra.oracle
-    });
-    if let Some(oracle) = width_quiescence_oracle.as_deref_mut() {
-        let claimed_sum = K::ZERO;
-        let label = width_quiescence_label.expect("missing width_quiescence label");
-        claimed_sums.push(claimed_sum);
-        degree_bounds.push(oracle.degree_bound());
-        labels.push(label);
-        claim_is_dynamic.push(false);
-        claims.push(BatchedClaim {
-            oracle,
-            claimed_sum,
-            label,
-        });
-    }
-
-    let width_selector_linkage_degree_bound = width_selector_linkage_claim
-        .as_ref()
-        .map(|extra| extra.oracle.degree_bound());
-    let mut width_selector_linkage_label: Option<&'static [u8]> = None;
-    let mut width_selector_linkage_oracle: Option<Box<dyn RoundOracle>> = width_selector_linkage_claim.map(|extra| {
-        width_selector_linkage_label = Some(extra.label);
-        extra.oracle
-    });
-    if let Some(oracle) = width_selector_linkage_oracle.as_deref_mut() {
-        let claimed_sum = K::ZERO;
-        let label = width_selector_linkage_label.expect("missing width_selector_linkage label");
-        claimed_sums.push(claimed_sum);
-        degree_bounds.push(oracle.degree_bound());
-        labels.push(label);
-        claim_is_dynamic.push(false);
-        claims.push(BatchedClaim {
-            oracle,
-            claimed_sum,
-            label,
-        });
-    }
-
-    let width_load_semantics_degree_bound = width_load_semantics_claim
-        .as_ref()
-        .map(|extra| extra.oracle.degree_bound());
-    let mut width_load_semantics_label: Option<&'static [u8]> = None;
-    let mut width_load_semantics_oracle: Option<Box<dyn RoundOracle>> = width_load_semantics_claim.map(|extra| {
-        width_load_semantics_label = Some(extra.label);
-        extra.oracle
-    });
-    if let Some(oracle) = width_load_semantics_oracle.as_deref_mut() {
-        let claimed_sum = K::ZERO;
-        let label = width_load_semantics_label.expect("missing width_load_semantics label");
-        claimed_sums.push(claimed_sum);
-        degree_bounds.push(oracle.degree_bound());
-        labels.push(label);
-        claim_is_dynamic.push(false);
-        claims.push(BatchedClaim {
-            oracle,
-            claimed_sum,
-            label,
-        });
-    }
-
-    let width_store_semantics_degree_bound = width_store_semantics_claim
-        .as_ref()
-        .map(|extra| extra.oracle.degree_bound());
-    let mut width_store_semantics_label: Option<&'static [u8]> = None;
-    let mut width_store_semantics_oracle: Option<Box<dyn RoundOracle>> = width_store_semantics_claim.map(|extra| {
-        width_store_semantics_label = Some(extra.label);
-        extra.oracle
-    });
-    if let Some(oracle) = width_store_semantics_oracle.as_deref_mut() {
-        let claimed_sum = K::ZERO;
-        let label = width_store_semantics_label.expect("missing width_store_semantics label");
-        claimed_sums.push(claimed_sum);
-        degree_bounds.push(oracle.degree_bound());
-        labels.push(label);
-        claim_is_dynamic.push(false);
-        claims.push(BatchedClaim {
-            oracle,
-            claimed_sum,
-            label,
-        });
-    }
-
-    let control_next_pc_linear_degree_bound = control_next_pc_linear_claim
-        .as_ref()
-        .map(|extra| extra.oracle.degree_bound());
-    let mut control_next_pc_linear_label: Option<&'static [u8]> = None;
-    let mut control_next_pc_linear_oracle: Option<Box<dyn RoundOracle>> = control_next_pc_linear_claim.map(|extra| {
-        control_next_pc_linear_label = Some(extra.label);
-        extra.oracle
-    });
-    if let Some(oracle) = control_next_pc_linear_oracle.as_deref_mut() {
-        let claimed_sum = K::ZERO;
-        let label = control_next_pc_linear_label.expect("missing control_next_pc_linear label");
-        claimed_sums.push(claimed_sum);
-        degree_bounds.push(oracle.degree_bound());
-        labels.push(label);
-        claim_is_dynamic.push(false);
-        claims.push(BatchedClaim {
-            oracle,
-            claimed_sum,
-            label,
-        });
-    }
-
-    let control_next_pc_control_degree_bound = control_next_pc_control_claim
-        .as_ref()
-        .map(|extra| extra.oracle.degree_bound());
-    let mut control_next_pc_control_label: Option<&'static [u8]> = None;
-    let mut control_next_pc_control_oracle: Option<Box<dyn RoundOracle>> = control_next_pc_control_claim.map(|extra| {
-        control_next_pc_control_label = Some(extra.label);
-        extra.oracle
-    });
-    if let Some(oracle) = control_next_pc_control_oracle.as_deref_mut() {
-        let claimed_sum = K::ZERO;
-        let label = control_next_pc_control_label.expect("missing control_next_pc_control label");
-        claimed_sums.push(claimed_sum);
-        degree_bounds.push(oracle.degree_bound());
-        labels.push(label);
-        claim_is_dynamic.push(false);
-        claims.push(BatchedClaim {
-            oracle,
-            claimed_sum,
-            label,
-        });
-    }
-
-    let control_branch_semantics_degree_bound = control_branch_semantics_claim
-        .as_ref()
-        .map(|extra| extra.oracle.degree_bound());
-    let mut control_branch_semantics_label: Option<&'static [u8]> = None;
-    let mut control_branch_semantics_oracle: Option<Box<dyn RoundOracle>> =
-        control_branch_semantics_claim.map(|extra| {
-            control_branch_semantics_label = Some(extra.label);
-            extra.oracle
-        });
-    if let Some(oracle) = control_branch_semantics_oracle.as_deref_mut() {
-        let claimed_sum = K::ZERO;
-        let label = control_branch_semantics_label.expect("missing control_branch_semantics label");
-        claimed_sums.push(claimed_sum);
-        degree_bounds.push(oracle.degree_bound());
-        labels.push(label);
-        claim_is_dynamic.push(false);
-        claims.push(BatchedClaim {
-            oracle,
-            claimed_sum,
-            label,
-        });
-    }
-
-    let control_control_writeback_degree_bound = control_control_writeback_claim
-        .as_ref()
-        .map(|extra| extra.oracle.degree_bound());
-    let mut control_control_writeback_label: Option<&'static [u8]> = None;
-    let mut control_control_writeback_oracle: Option<Box<dyn RoundOracle>> =
-        control_control_writeback_claim.map(|extra| {
-            control_control_writeback_label = Some(extra.label);
-            extra.oracle
-        });
-    if let Some(oracle) = control_control_writeback_oracle.as_deref_mut() {
-        let claimed_sum = K::ZERO;
-        let label = control_control_writeback_label.expect("missing control_writeback label");
-        claimed_sums.push(claimed_sum);
-        degree_bounds.push(oracle.degree_bound());
-        labels.push(label);
-        claim_is_dynamic.push(false);
-        claims.push(BatchedClaim {
-            oracle,
-            claimed_sum,
-            label,
-        });
-    }
-
-    let ob_inc_total_degree_bound = ob_inc_total
-        .as_ref()
-        .map(|extra| extra.oracle.degree_bound());
-    let mut ob_inc_total_claimed_sum: Option<K> = None;
-    let mut ob_inc_total_label: Option<&'static [u8]> = None;
-    let mut ob_inc_total_oracle: Option<Box<dyn RoundOracle>> = ob_inc_total.map(|extra| {
-        ob_inc_total_claimed_sum = Some(extra.claimed_sum);
-        ob_inc_total_label = Some(extra.label);
-        extra.oracle
-    });
-    if let Some(oracle) = ob_inc_total_oracle.as_deref_mut() {
-        let claimed_sum = ob_inc_total_claimed_sum.expect("missing ob_inc_total claimed_sum");
-        let label = ob_inc_total_label.expect("missing ob_inc_total label");
-        claimed_sums.push(claimed_sum);
-        degree_bounds.push(oracle.degree_bound());
-        labels.push(label);
-        claim_is_dynamic.push(true);
-        claims.push(BatchedClaim {
-            oracle,
-            claimed_sum,
-            label,
-        });
-    }
+    append_zero_optional_claim!(
+        wb_time_claim,
+        wb_time_degree_bound,
+        wb_time_oracle,
+        wb_time_label,
+        "missing wb_time label",
+        "missing wb_time claimed_sum"
+    );
+    append_zero_optional_claim!(
+        wp_time_claim,
+        wp_time_degree_bound,
+        wp_time_oracle,
+        wp_time_label,
+        "missing wp_time label",
+        "missing wp_time claimed_sum"
+    );
+    append_zero_optional_claim!(
+        decode_decode_fields_claim,
+        decode_decode_fields_degree_bound,
+        decode_decode_fields_oracle,
+        decode_decode_fields_label,
+        "missing decode_fields label",
+        "missing decode_fields claimed_sum"
+    );
+    append_zero_optional_claim!(
+        decode_decode_immediates_claim,
+        decode_decode_immediates_degree_bound,
+        decode_decode_immediates_oracle,
+        decode_decode_immediates_label,
+        "missing decode_immediates label",
+        "missing decode_immediates claimed_sum"
+    );
+    append_zero_optional_claim!(
+        width_bitness_claim,
+        width_bitness_degree_bound,
+        width_bitness_oracle,
+        width_bitness_label,
+        "missing width_bitness label",
+        "missing width_bitness claimed_sum"
+    );
+    append_zero_optional_claim!(
+        width_quiescence_claim,
+        width_quiescence_degree_bound,
+        width_quiescence_oracle,
+        width_quiescence_label,
+        "missing width_quiescence label",
+        "missing width_quiescence claimed_sum"
+    );
+    append_zero_optional_claim!(
+        width_selector_linkage_claim,
+        width_selector_linkage_degree_bound,
+        width_selector_linkage_oracle,
+        width_selector_linkage_label,
+        "missing width_selector_linkage label",
+        "missing width_selector_linkage claimed_sum"
+    );
+    append_zero_optional_claim!(
+        width_load_semantics_claim,
+        width_load_semantics_degree_bound,
+        width_load_semantics_oracle,
+        width_load_semantics_label,
+        "missing width_load_semantics label",
+        "missing width_load_semantics claimed_sum"
+    );
+    append_zero_optional_claim!(
+        width_store_semantics_claim,
+        width_store_semantics_degree_bound,
+        width_store_semantics_oracle,
+        width_store_semantics_label,
+        "missing width_store_semantics label",
+        "missing width_store_semantics claimed_sum"
+    );
+    append_zero_optional_claim!(
+        control_next_pc_linear_claim,
+        control_next_pc_linear_degree_bound,
+        control_next_pc_linear_oracle,
+        control_next_pc_linear_label,
+        "missing control_next_pc_linear label",
+        "missing control_next_pc_linear claimed_sum"
+    );
+    append_zero_optional_claim!(
+        control_next_pc_control_claim,
+        control_next_pc_control_degree_bound,
+        control_next_pc_control_oracle,
+        control_next_pc_control_label,
+        "missing control_next_pc_control label",
+        "missing control_next_pc_control claimed_sum"
+    );
+    append_zero_optional_claim!(
+        control_branch_semantics_claim,
+        control_branch_semantics_degree_bound,
+        control_branch_semantics_oracle,
+        control_branch_semantics_label,
+        "missing control_branch_semantics label",
+        "missing control_branch_semantics claimed_sum"
+    );
+    append_zero_optional_claim!(
+        control_control_writeback_claim,
+        control_control_writeback_degree_bound,
+        control_control_writeback_oracle,
+        control_control_writeback_label,
+        "missing control_writeback label",
+        "missing control_writeback claimed_sum"
+    );
+    append_dynamic_optional_claim!(
+        ob_inc_total,
+        ob_inc_total_degree_bound,
+        ob_inc_total_oracle,
+        ob_inc_total_label,
+        ob_inc_total_claimed_sum,
+        "missing ob_inc_total label",
+        "missing ob_inc_total claimed_sum"
+    );
 
     let metas = RouteATimeClaimPlan::time_claim_metas_for_instances(
         step.lut_instances.iter().map(|(inst, _)| inst),
