@@ -18,6 +18,26 @@ fn imm_i_from_word(instr_word: u32) -> u32 {
     sign_extend_to_u32((instr_word >> 20) & 0x0fff, 12)
 }
 
+#[inline]
+fn imm_j_from_word(instr_word: u32) -> u32 {
+    let imm20 = (instr_word >> 31) & 1;
+    let imm10_1 = (instr_word >> 21) & 0x3FF;
+    let imm11 = (instr_word >> 20) & 1;
+    let imm19_12 = (instr_word >> 12) & 0xFF;
+    let raw = (imm20 << 20) | (imm19_12 << 12) | (imm11 << 11) | (imm10_1 << 1);
+    sign_extend_to_u32(raw, 21)
+}
+
+#[inline]
+fn imm_b_from_word(instr_word: u32) -> u32 {
+    let imm12 = (instr_word >> 31) & 1;
+    let imm10_5 = (instr_word >> 25) & 0x3F;
+    let imm4_1 = (instr_word >> 8) & 0xF;
+    let imm11 = (instr_word >> 7) & 1;
+    let raw = (imm12 << 12) | (imm11 << 11) | (imm10_5 << 5) | (imm4_1 << 1);
+    sign_extend_to_u32(raw, 13)
+}
+
 #[derive(Clone, Debug)]
 pub struct Rv32TraceWitness {
     pub t: usize,
@@ -63,11 +83,28 @@ impl Rv32TraceWitness {
             // this address is don't-care for bus semantics.
             wit.cols[layout.rd_addr][i] = F::from_u64(cols.rd[i] as u64);
             wit.cols[layout.rd_val][i] = F::from_u64(cols.rd_val[i]);
-            if cols.opcode[i] == 0x67 {
+            let opcode = cols.opcode[i];
+            if opcode == 0x67 {
+                // JALR: pc = (rs1 + imm_i) & ~1
                 let rs1 = cols.rs1_val[i] as u32;
                 let imm_i = imm_i_from_word(cols.instr_word[i]);
                 let drop = rs1.wrapping_add(imm_i) & 1;
                 wit.cols[layout.jalr_drop_bit][i] = F::from_u64(drop as u64);
+                let sum = (cols.rs1_val[i]) + (imm_i as u64);
+                wit.cols[layout.pc_carry][i] = F::from_u64(sum >> 32);
+            } else if opcode == 0x6F {
+                // JAL: pc = pc + imm_j
+                let imm_j = imm_j_from_word(cols.instr_word[i]);
+                let sum = (cols.pc_before[i]) + (imm_j as u64);
+                wit.cols[layout.pc_carry][i] = F::from_u64(sum >> 32);
+            } else if opcode == 0x63 {
+                // BRANCH: pc = taken ? pc + imm_b : pc + 4
+                let taken = cols.pc_after[i] != cols.pc_before[i].wrapping_add(4);
+                if taken {
+                    let imm_b = imm_b_from_word(cols.instr_word[i]);
+                    let sum = (cols.pc_before[i]) + (imm_b as u64);
+                    wit.cols[layout.pc_carry][i] = F::from_u64(sum >> 32);
+                }
             }
         }
 

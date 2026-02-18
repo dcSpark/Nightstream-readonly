@@ -824,7 +824,7 @@ pub(crate) fn rv32_trace_wb_columns(layout: &Rv32TraceLayout) -> Vec<usize> {
     vec![layout.active, layout.halted, layout.shout_has_lookup]
 }
 
-pub(crate) const W2_FIELDS_RESIDUAL_COUNT: usize = 70;
+pub(crate) const W2_FIELDS_RESIDUAL_COUNT: usize = 76;
 pub(crate) const W2_IMM_RESIDUAL_COUNT: usize = 4;
 
 #[inline]
@@ -929,12 +929,14 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
     rs2_decode: K,
     imm_i: K,
     imm_s: K,
-) -> [K; 42] {
+) -> [K; 48] {
     let op_lui = opcode_flags[0];
     let op_auipc = opcode_flags[1];
     let op_jal = opcode_flags[2];
     let op_jalr = opcode_flags[3];
     let op_branch = opcode_flags[4];
+    let op_load = opcode_flags[5];
+    let op_store = opcode_flags[6];
     let op_alu_imm = opcode_flags[7];
     let op_alu_reg = opcode_flags[8];
     let op_misc_mem = opcode_flags[9];
@@ -966,7 +968,7 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
         op_alu_reg * (shout_has_lookup - K::ONE),
         op_branch * (shout_has_lookup - K::ONE),
         (K::ONE - shout_has_lookup) * shout_table_id,
-        (op_alu_imm + op_alu_reg + op_branch) * (shout_lhs - rs1_val),
+        (op_alu_imm + op_alu_reg + op_branch + op_load + op_store) * (shout_lhs - rs1_val),
         alu_imm_shift_rhs_delta - shift_selector * (rs2_decode - imm_i),
         op_alu_imm * (shout_rhs - imm_i - alu_imm_shift_rhs_delta),
         op_alu_reg * (shout_rhs - rs2_val),
@@ -1002,8 +1004,14 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
         non_mem_ops * ram_has_read,
         non_mem_ops * ram_has_write,
         non_mem_ops * ram_addr,
-        opcode_flags[5] * (ram_addr - rs1_val - imm_i),
-        opcode_flags[6] * (ram_addr - rs1_val - imm_s),
+        op_load * (ram_addr - shout_val),
+        op_store * (ram_addr - shout_val),
+        op_load * (shout_has_lookup - K::ONE),
+        op_store * (shout_has_lookup - K::ONE),
+        op_load * (shout_rhs - imm_i),
+        op_store * (shout_rhs - imm_s),
+        op_load * (shout_table_id - K::from(F::from_u64(3))),
+        op_store * (shout_table_id - K::from(F::from_u64(3))),
     ]
 }
 
@@ -1256,6 +1264,7 @@ pub(crate) fn control_next_pc_control_residuals(
     pc_after: K,
     rs1_val: K,
     jalr_drop_bit: K,
+    pc_carry: K,
     imm_i: K,
     imm_b: K,
     imm_j: K,
@@ -1264,15 +1273,18 @@ pub(crate) fn control_next_pc_control_residuals(
     op_branch: K,
     shout_val: K,
     funct3_bit0: K,
-) -> [K; 5] {
+) -> [K; 7] {
     let four = K::from(F::from_u64(4));
+    let two32 = K::from(F::from_u64(1u64 << 32));
     let taken = control_branch_taken_from_bits(shout_val, funct3_bit0);
     [
-        op_jal * (pc_after - pc_before - imm_j),
-        op_jalr * (pc_after - rs1_val - imm_i + jalr_drop_bit),
-        op_branch * (pc_after - pc_before - four - taken * (imm_b - four)),
+        op_jal * (pc_after + pc_carry * two32 - pc_before - imm_j),
+        op_jalr * (pc_after + pc_carry * two32 - rs1_val - imm_i + jalr_drop_bit),
+        op_branch * (pc_after + pc_carry * two32 - pc_before - four - taken * (imm_b - four)),
         op_jalr * jalr_drop_bit * (jalr_drop_bit - K::ONE),
         (active - op_jalr) * jalr_drop_bit,
+        pc_carry * (pc_carry - K::ONE),
+        (active - op_jal - op_jalr - op_branch) * pc_carry,
     ]
 }
 
@@ -1328,6 +1340,7 @@ pub(crate) fn rv32_trace_wp_columns(layout: &Rv32TraceLayout) -> Vec<usize> {
         layout.shout_lhs,
         layout.shout_rhs,
         layout.jalr_drop_bit,
+        layout.pc_carry,
     ]
 }
 

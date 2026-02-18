@@ -30,6 +30,7 @@ pub struct Rv32TraceLayout {
     pub shout_lhs: usize,
     pub shout_rhs: usize,
     pub jalr_drop_bit: usize,
+    pub pc_carry: usize,
 }
 
 impl Rv32TraceLayout {
@@ -65,8 +66,9 @@ impl Rv32TraceLayout {
         let shout_lhs = take();
         let shout_rhs = take();
         let jalr_drop_bit = take();
+        let pc_carry = take();
 
-        debug_assert_eq!(next, 21, "RV32 trace width drift after decode-helper offload");
+        debug_assert_eq!(next, 22, "RV32 trace width drift after decode-helper offload");
 
         Self {
             cols: next,
@@ -91,6 +93,7 @@ impl Rv32TraceLayout {
             shout_lhs,
             shout_rhs,
             jalr_drop_bit,
+            pc_carry,
         }
     }
 }

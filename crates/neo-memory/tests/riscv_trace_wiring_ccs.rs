@@ -15,12 +15,12 @@ fn rv32_trace_layout_removes_fixed_shout_table_selector_lanes() {
     let layout = Rv32TraceCcsLayout::new(/*t=*/ 4).expect("trace CCS layout");
 
     assert_eq!(
-        layout.trace.cols, 21,
-        "trace width regression: expected 21 columns after shout_lhs/jalr_drop_bit hardening"
+        layout.trace.cols, 22,
+        "trace width regression: expected 22 columns after pc_carry addition"
     );
     assert_eq!(
         layout.trace.cols,
-        layout.trace.jalr_drop_bit + 1,
+        layout.trace.pc_carry + 1,
         "trace layout should remain densely packed"
     );
 }
