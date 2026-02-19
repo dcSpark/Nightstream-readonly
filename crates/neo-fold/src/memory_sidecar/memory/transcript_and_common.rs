@@ -907,11 +907,11 @@ pub(crate) fn w2_alu_reg_table_delta_from_bits(funct7_bits: [K; 7], funct3_is: [
 
     let base_delta = funct7_bits[5] * (funct3_is[0] + funct3_is[5]);
     let rv32m_delta = K::from(F::from_u64(9)) * funct3_is[0]
-        + K::from(F::from_u64(9)) * funct3_is[1]
+        + K::from(F::from_u64(6)) * funct3_is[1]
         + K::from(F::from_u64(10)) * funct3_is[2]
         + K::from(F::from_u64(8)) * funct3_is[3]
         + K::from(F::from_u64(15)) * funct3_is[4]
-        + K::from(F::from_u64(10)) * funct3_is[5]
+        + K::from(F::from_u64(9)) * funct3_is[5]
         + K::from(F::from_u64(16)) * funct3_is[6]
         + K::from(F::from_u64(19)) * funct3_is[7];
 

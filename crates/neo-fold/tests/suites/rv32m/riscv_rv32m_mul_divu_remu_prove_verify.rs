@@ -320,3 +320,79 @@ fn rv32_trace_prove_verify_rem_only() {
         .expect("prove");
     run.verify().expect("verify");
 }
+
+#[test]
+fn rv32_trace_prove_verify_mulh_divu_paths() {
+    let program = vec![
+        // x1 = -2
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: -2,
+        },
+        // x2 = 3
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 0,
+            imm: 3,
+        },
+        // x3 = MULH(x1, x2) = high32(signed(-2) * signed(3)) = 0xffffffff
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Mulh,
+            rd: 3,
+            rs1: 1,
+            rs2: 2,
+        },
+        // x4 = 13
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 4,
+            rs1: 0,
+            imm: 13,
+        },
+        // x5 = 5
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 5,
+            rs1: 0,
+            imm: 5,
+        },
+        // x6 = DIVU(x4, x5) = 2
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Divu,
+            rd: 6,
+            rs1: 4,
+            rs2: 5,
+        },
+        // x7 = 0
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 7,
+            rs1: 0,
+            imm: 0,
+        },
+        // x8 = DIVU(x4, x7) = 0xffffffff (RISC-V div-by-zero behavior)
+        RiscvInstruction::RAlu {
+            op: RiscvOpcode::Divu,
+            rd: 8,
+            rs1: 4,
+            rs2: 7,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .mode(FoldingMode::Optimized)
+        .chunk_rows(program.len())
+        .min_trace_len(program.len())
+        .max_steps(program.len())
+        .reg_output_claim(/*reg=*/ 3, /*expected=*/ F::from_u64(0xFFFF_FFFFu64))
+        .reg_output_claim(/*reg=*/ 6, /*expected=*/ F::from_u64(2))
+        .reg_output_claim(/*reg=*/ 8, /*expected=*/ F::from_u64(0xFFFF_FFFFu64))
+        .prove()
+        .expect("prove");
+    run.verify().expect("verify");
+}
