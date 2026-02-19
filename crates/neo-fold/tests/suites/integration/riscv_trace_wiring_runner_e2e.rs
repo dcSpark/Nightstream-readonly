@@ -713,6 +713,114 @@ fn prove_verify_trace_program(program: Vec<RiscvInstruction>) {
 }
 
 #[test]
+fn rv32_trace_wiring_runner_accepts_wrapped_load_store_addressing() {
+    // Build base near 2^32 so effective address wraps:
+    // rs1 = 0xffff_ff10, imm = 0x140 => addr = 0x50 (mod 2^32).
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 0,
+            imm: -240,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 13,
+            rs1: 0,
+            imm: 42,
+        },
+        RiscvInstruction::Store {
+            op: RiscvMemOp::Sw,
+            rs1: 2,
+            rs2: 13,
+            imm: 320,
+        },
+        RiscvInstruction::Load {
+            op: RiscvMemOp::Lw,
+            rd: 14,
+            rs1: 2,
+            imm: 320,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .reg_output_claim(/*reg=*/ 14, /*expected=*/ neo_math::F::from_u64(42))
+        .min_trace_len(program.len())
+        .max_steps(program.len())
+        .prove()
+        .expect("trace wiring prove with wrapped load/store address");
+    run.verify()
+        .expect("trace wiring verify with wrapped load/store address");
+}
+
+#[test]
+fn rv32_trace_wiring_runner_accepts_load_to_x0_without_writeback() {
+    // Regression for W3 load-semantics gating: loads to x0 are legal and must not
+    // require rd writeback while still enforcing RAM-read semantics.
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 0x100,
+        },
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 2,
+            rs1: 0,
+            imm: 0x7f,
+        },
+        RiscvInstruction::Store {
+            op: RiscvMemOp::Sb,
+            rs1: 1,
+            rs2: 2,
+            imm: 0,
+        },
+        RiscvInstruction::Load {
+            op: RiscvMemOp::Lbu,
+            rd: 0,
+            rs1: 1,
+            imm: 0,
+        },
+        RiscvInstruction::Load {
+            op: RiscvMemOp::Lbu,
+            rd: 3,
+            rs1: 1,
+            imm: 0,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .reg_output_claim(/*reg=*/ 3, /*expected=*/ neo_math::F::from_u64(0x7f))
+        .min_trace_len(program.len())
+        .max_steps(program.len())
+        .prove()
+        .expect("trace wiring prove with load-to-x0");
+    run.verify().expect("trace wiring verify with load-to-x0");
+}
+
+#[test]
+fn rv32_trace_wiring_runner_accepts_auipc_wraparound_writeback() {
+    // Regression for RV32 modular writeback semantics:
+    // place AUIPC at pc=0x1000, use imm_u=0xffff_f000 (-1 << 12), so
+    // rd = (0x1000 + 0xffff_f000) mod 2^32 = 0.
+    let mut program = vec![RiscvInstruction::Nop; 1024];
+    program.push(RiscvInstruction::Auipc { rd: 1, imm: -1 });
+    program.push(RiscvInstruction::Halt);
+    let program_bytes = encode_program(&program);
+    let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .reg_output_claim(/*reg=*/ 1, /*expected=*/ neo_math::F::from_u64(0))
+        .min_trace_len(program.len())
+        .max_steps(program.len())
+        .prove()
+        .expect("trace wiring prove with AUIPC wraparound");
+    run.verify()
+        .expect("trace wiring verify with AUIPC wraparound");
+}
+
+#[test]
 fn rv32_trace_wiring_runner_accepts_mixed_addi_andi_halt() {
     let program = vec![
         RiscvInstruction::IAlu {

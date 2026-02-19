@@ -137,6 +137,15 @@ impl Twist<u64, u64> for RiscvMemory {
             return self.regs.get(idx).copied().unwrap_or(0);
         }
 
+        if twist_id == super::RAM_ID {
+            // RAM sidecar/proofs model one XLEN-wide cell per logical address.
+            // Map logical address `addr` to a disjoint byte range in backing storage
+            // so adjacent logical addresses do not overlap.
+            let width = self.xlen / 8;
+            let phys = addr.wrapping_mul(width as u64);
+            return self.read(twist_id, phys, width);
+        }
+
         let width = if twist_id == super::PROG_ID {
             // Program ROM fetch: always 32-bit instruction word (MVP: no compressed).
             4
@@ -158,6 +167,13 @@ impl Twist<u64, u64> for RiscvMemory {
             if let Some(dst) = self.regs.get_mut(idx) {
                 *dst = masked;
             }
+            return;
+        }
+
+        if twist_id == super::RAM_ID {
+            let width = self.xlen / 8;
+            let phys = addr.wrapping_mul(width as u64);
+            self.write(twist_id, phys, width, value);
             return;
         }
 

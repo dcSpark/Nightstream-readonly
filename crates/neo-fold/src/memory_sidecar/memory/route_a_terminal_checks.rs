@@ -759,6 +759,7 @@ pub(crate) fn verify_route_a_control_terminals(
             imm_i,
             imm_b,
             imm_j,
+            funct7_bits[6],
             op_jal,
             op_jalr,
             op_branch,

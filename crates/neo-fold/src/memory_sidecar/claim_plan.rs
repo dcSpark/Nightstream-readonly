@@ -325,7 +325,7 @@ impl RouteATimeClaimPlan {
             });
             out.push(TimeClaimMeta {
                 label: b"width/load_semantics",
-                degree_bound: 4,
+                degree_bound: 5,
                 is_dynamic: false,
             });
             out.push(TimeClaimMeta {
@@ -353,7 +353,7 @@ impl RouteATimeClaimPlan {
             });
             out.push(TimeClaimMeta {
                 label: b"control/writeback",
-                degree_bound: 4,
+                degree_bound: 5,
                 is_dynamic: false,
             });
         }

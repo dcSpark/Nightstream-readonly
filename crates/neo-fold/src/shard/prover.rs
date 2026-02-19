@@ -288,8 +288,14 @@ where
             tr, params, step, &cpu_bus, ell_n, &r_cycle, step_idx,
         )?;
 
-        let twist_pre =
-            crate::memory_sidecar::memory::prove_twist_addr_pre_time(tr, params, step, &cpu_bus, ell_n, &r_cycle)?;
+        let twist_pre = crate::memory_sidecar::memory::prove_twist_addr_pre_time(
+            tr, params, step, &cpu_bus, ell_n, &r_cycle,
+        )
+        .map_err(|e| {
+            PiCcsError::ProtocolError(format!(
+                "twist addr-pre failed at step_idx={step_idx}: {e}"
+            ))
+        })?;
         let twist_read_claims: Vec<K> = twist_pre.iter().map(|p| p.read_check_claim_sum).collect();
         let twist_write_claims: Vec<K> = twist_pre.iter().map(|p| p.write_check_claim_sum).collect();
         let mut mem_oracles = crate::memory_sidecar::memory::build_route_a_memory_oracles(
