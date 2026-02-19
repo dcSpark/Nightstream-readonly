@@ -84,6 +84,19 @@ fn ell_from_pow2_n_side(n_side: usize) -> Result<usize, ShardBuildError> {
     Ok(n_side.trailing_zeros() as usize)
 }
 
+fn validate_chunk_size(chunk_size: usize) -> Result<(), ShardBuildError> {
+    if chunk_size == 0 {
+        return Err(ShardBuildError::InvalidChunkSize("chunk_size must be >= 1".into()));
+    }
+    Ok(())
+}
+
+fn bundles_only<Cmt, K>(
+    out: Result<(Vec<StepWitnessBundle<Cmt, Goldilocks, K>>, ShardWitnessAux), ShardBuildError>,
+) -> Result<Vec<StepWitnessBundle<Cmt, Goldilocks, K>>, ShardBuildError> {
+    out.map(|(bundles, _aux)| bundles)
+}
+
 /// Build shard witness bundles for **shared CPU bus** mode.
 ///
 /// In this mode Twist/Shout access-row columns are expected to live in the CPU witness `z`
@@ -112,7 +125,7 @@ where
     Sh: neo_vm_trace::Shout<u64>,
     A: CpuArithmetization<Goldilocks, Cmt>,
 {
-    let (bundles, _aux) = build_shard_witness_shared_cpu_bus_with_aux(
+    bundles_only(build_shard_witness_shared_cpu_bus_with_aux(
         vm,
         twist,
         shout,
@@ -124,8 +137,7 @@ where
         lut_lanes,
         initial_mem,
         cpu_arith,
-    )?;
-    Ok(bundles)
+    ))
 }
 
 /// Build shard witness bundles for **shared CPU bus** mode from an already-executed VM trace.
@@ -146,7 +158,7 @@ pub fn build_shard_witness_shared_cpu_bus_from_trace<Cmt, K, A>(
 where
     A: CpuArithmetization<Goldilocks, Cmt>,
 {
-    let (bundles, _aux) = build_shard_witness_shared_cpu_bus_from_trace_with_aux(
+    bundles_only(build_shard_witness_shared_cpu_bus_from_trace_with_aux(
         trace,
         max_steps,
         chunk_size,
@@ -156,8 +168,7 @@ where
         lut_lanes,
         initial_mem,
         cpu_arith,
-    )?;
-    Ok(bundles)
+    ))
 }
 
 /// Like `build_shard_witness_shared_cpu_bus_from_trace`, but also returns auxiliary outputs useful
@@ -176,9 +187,7 @@ pub fn build_shard_witness_shared_cpu_bus_from_trace_with_aux<Cmt, K, A>(
 where
     A: CpuArithmetization<Goldilocks, Cmt>,
 {
-    if chunk_size == 0 {
-        return Err(ShardBuildError::InvalidChunkSize("chunk_size must be >= 1".into()));
-    }
+    validate_chunk_size(chunk_size)?;
     if trace.steps.len() > max_steps {
         return Err(ShardBuildError::InvalidChunkSize(format!(
             "trace length {} exceeds max_steps {}",
@@ -451,9 +460,7 @@ where
     Sh: neo_vm_trace::Shout<u64>,
     A: CpuArithmetization<Goldilocks, Cmt>,
 {
-    if chunk_size == 0 {
-        return Err(ShardBuildError::InvalidChunkSize("chunk_size must be >= 1".into()));
-    }
+    validate_chunk_size(chunk_size)?;
 
     // 1) Run VM and collect the executed trace for this shard (up to `max_steps`).
     //
