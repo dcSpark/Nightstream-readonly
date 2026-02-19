@@ -181,7 +181,10 @@ fn test_riscv_circuit_l2_transfer_compiled_trace_prove_verify_with_metrics() {
         run.ccs_num_constraints(),
         run.ccs_num_variables()
     );
-    println!("layout_t={} layout_m_in={} layout_m={}", layout.t, layout.m_in, layout.m);
+    println!(
+        "layout_t={} layout_m_in={} layout_m={}",
+        layout.t, layout.m_in, layout.m
+    );
     println!("used_memory_ids={:?}", run.used_memory_ids());
     println!("used_shout_table_ids={:?}", run.used_shout_table_ids());
     println!("setup_time={:?}", phase.setup);

@@ -998,8 +998,10 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
         op_branch * (shout_rhs - rs2_val),
         op_alu_imm_write * (rd_val - shout_val),
         op_alu_reg_write * (rd_val - shout_val),
-        op_alu_reg * (shout_table_id - alu_table_base - alu_reg_table_delta) + op_store * (shout_table_id - add_table_id),
-        op_alu_imm * (shout_table_id - alu_table_base - alu_imm_table_delta) + add_lookup_ops * (shout_table_id - add_table_id),
+        op_alu_reg * (shout_table_id - alu_table_base - alu_reg_table_delta)
+            + op_store * (shout_table_id - add_table_id),
+        op_alu_imm * (shout_table_id - alu_table_base - alu_imm_table_delta)
+            + add_lookup_ops * (shout_table_id - add_table_id),
         op_branch * (shout_table_id - branch_table_expected),
         op_alu_reg * funct7_bits[0] * funct7_m_tail,
         alu_reg_table_delta - alu_reg_table_delta_expected,

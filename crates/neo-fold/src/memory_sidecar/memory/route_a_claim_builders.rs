@@ -212,7 +212,9 @@ pub(crate) fn build_route_a_width_time_claims(
         let ram_has_write = *decode_decoded
             .get(&decode.ram_has_write)
             .and_then(|v| v.get(j))
-            .ok_or_else(|| PiCcsError::ProtocolError("W3(shared): missing ram_has_write row while validating".into()))?;
+            .ok_or_else(|| {
+                PiCcsError::ProtocolError("W3(shared): missing ram_has_write row while validating".into())
+            })?;
         let op_load = *decode_decoded
             .get(&decode.op_load)
             .and_then(|v| v.get(j))
@@ -225,35 +227,51 @@ pub(crate) fn build_route_a_width_time_claims(
             *decode_decoded
                 .get(&decode.funct3_is[0])
                 .and_then(|v| v.get(j))
-                .ok_or_else(|| PiCcsError::ProtocolError("W3(shared): missing funct3_is[0] row while validating".into()))?,
+                .ok_or_else(|| {
+                    PiCcsError::ProtocolError("W3(shared): missing funct3_is[0] row while validating".into())
+                })?,
             *decode_decoded
                 .get(&decode.funct3_is[1])
                 .and_then(|v| v.get(j))
-                .ok_or_else(|| PiCcsError::ProtocolError("W3(shared): missing funct3_is[1] row while validating".into()))?,
+                .ok_or_else(|| {
+                    PiCcsError::ProtocolError("W3(shared): missing funct3_is[1] row while validating".into())
+                })?,
             *decode_decoded
                 .get(&decode.funct3_is[2])
                 .and_then(|v| v.get(j))
-                .ok_or_else(|| PiCcsError::ProtocolError("W3(shared): missing funct3_is[2] row while validating".into()))?,
+                .ok_or_else(|| {
+                    PiCcsError::ProtocolError("W3(shared): missing funct3_is[2] row while validating".into())
+                })?,
             *decode_decoded
                 .get(&decode.funct3_is[3])
                 .and_then(|v| v.get(j))
-                .ok_or_else(|| PiCcsError::ProtocolError("W3(shared): missing funct3_is[3] row while validating".into()))?,
+                .ok_or_else(|| {
+                    PiCcsError::ProtocolError("W3(shared): missing funct3_is[3] row while validating".into())
+                })?,
             *decode_decoded
                 .get(&decode.funct3_is[4])
                 .and_then(|v| v.get(j))
-                .ok_or_else(|| PiCcsError::ProtocolError("W3(shared): missing funct3_is[4] row while validating".into()))?,
+                .ok_or_else(|| {
+                    PiCcsError::ProtocolError("W3(shared): missing funct3_is[4] row while validating".into())
+                })?,
             *decode_decoded
                 .get(&decode.funct3_is[5])
                 .and_then(|v| v.get(j))
-                .ok_or_else(|| PiCcsError::ProtocolError("W3(shared): missing funct3_is[5] row while validating".into()))?,
+                .ok_or_else(|| {
+                    PiCcsError::ProtocolError("W3(shared): missing funct3_is[5] row while validating".into())
+                })?,
             *decode_decoded
                 .get(&decode.funct3_is[6])
                 .and_then(|v| v.get(j))
-                .ok_or_else(|| PiCcsError::ProtocolError("W3(shared): missing funct3_is[6] row while validating".into()))?,
+                .ok_or_else(|| {
+                    PiCcsError::ProtocolError("W3(shared): missing funct3_is[6] row while validating".into())
+                })?,
             *decode_decoded
                 .get(&decode.funct3_is[7])
                 .and_then(|v| v.get(j))
-                .ok_or_else(|| PiCcsError::ProtocolError("W3(shared): missing funct3_is[7] row while validating".into()))?,
+                .ok_or_else(|| {
+                    PiCcsError::ProtocolError("W3(shared): missing funct3_is[7] row while validating".into())
+                })?,
         ];
         let ram_rv_q16 = *width_decoded
             .get(&width.ram_rv_q16)
@@ -278,9 +296,7 @@ pub(crate) fn build_route_a_width_time_claims(
                 .get(&width.rs2_low_bit[bit])
                 .and_then(|v| v.get(j))
                 .ok_or_else(|| {
-                    PiCcsError::ProtocolError(format!(
-                        "W3(shared): missing rs2_low_bit[{bit}] row while validating"
-                    ))
+                    PiCcsError::ProtocolError(format!("W3(shared): missing rs2_low_bit[{bit}] row while validating"))
                 })?;
         }
 
@@ -300,14 +316,22 @@ pub(crate) fn build_route_a_width_time_claims(
             ram_rv_q16,
             ram_rv_low_bits,
         );
-        if let Some((idx, _)) = load_residuals.iter().enumerate().find(|(_, r)| **r != K::ZERO) {
+        if let Some((idx, _)) = load_residuals
+            .iter()
+            .enumerate()
+            .find(|(_, r)| **r != K::ZERO)
+        {
             return Err(PiCcsError::ProtocolError(format!(
                 "w3/load_semantics residual non-zero at row={j}, idx={idx}, active={active}, op_load={op_load}, funct3_is={:?}, rd_has_write={rd_has_write}, ram_has_read={ram_has_read}",
                 funct3_is
             )));
         }
 
-        let store_flags = [op_store * funct3_is[0], op_store * funct3_is[1], op_store * funct3_is[2]];
+        let store_flags = [
+            op_store * funct3_is[0],
+            op_store * funct3_is[1],
+            op_store * funct3_is[2],
+        ];
         let store_residuals = w3_store_semantics_residuals(
             ram_wv,
             ram_rv,
@@ -320,7 +344,11 @@ pub(crate) fn build_route_a_width_time_claims(
             ram_rv_low_bits,
             rs2_low_bits,
         );
-        if let Some((idx, _)) = store_residuals.iter().enumerate().find(|(_, r)| **r != K::ZERO) {
+        if let Some((idx, _)) = store_residuals
+            .iter()
+            .enumerate()
+            .find(|(_, r)| **r != K::ZERO)
+        {
             return Err(PiCcsError::ProtocolError(format!(
                 "w3/store_semantics residual non-zero at row={j}, idx={idx}, active={active}, op_store={op_store}, funct3_is={:?}, ram_has_read={ram_has_read}, ram_has_write={ram_has_write}",
                 funct3_is
@@ -679,11 +707,15 @@ pub(crate) fn build_route_a_control_time_claims(
         let pc_before = *main_decoded
             .get(&trace.pc_before)
             .and_then(|v| v.get(j))
-            .ok_or_else(|| PiCcsError::ProtocolError("control(shared): missing pc_before row while validating".into()))?;
+            .ok_or_else(|| {
+                PiCcsError::ProtocolError("control(shared): missing pc_before row while validating".into())
+            })?;
         let pc_after = *main_decoded
             .get(&trace.pc_after)
             .and_then(|v| v.get(j))
-            .ok_or_else(|| PiCcsError::ProtocolError("control(shared): missing pc_after row while validating".into()))?;
+            .ok_or_else(|| {
+                PiCcsError::ProtocolError("control(shared): missing pc_after row while validating".into())
+            })?;
         let rs1_val = *main_decoded
             .get(&trace.rs1_val)
             .and_then(|v| v.get(j))
@@ -697,7 +729,9 @@ pub(crate) fn build_route_a_control_time_claims(
         let shout_val = *main_decoded
             .get(&trace.shout_val)
             .and_then(|v| v.get(j))
-            .ok_or_else(|| PiCcsError::ProtocolError("control(shared): missing shout_val row while validating".into()))?;
+            .ok_or_else(|| {
+                PiCcsError::ProtocolError("control(shared): missing shout_val row while validating".into())
+            })?;
         let imm_i = *decode_decoded
             .get(&decode.imm_i)
             .and_then(|v| v.get(j))
@@ -727,11 +761,15 @@ pub(crate) fn build_route_a_control_time_claims(
         let op_branch = *decode_decoded
             .get(&decode.op_branch)
             .and_then(|v| v.get(j))
-            .ok_or_else(|| PiCcsError::ProtocolError("control(shared): missing op_branch row while validating".into()))?;
+            .ok_or_else(|| {
+                PiCcsError::ProtocolError("control(shared): missing op_branch row while validating".into())
+            })?;
         let funct3_bit0 = *decode_decoded
             .get(&decode.funct3_bit[0])
             .and_then(|v| v.get(j))
-            .ok_or_else(|| PiCcsError::ProtocolError("control(shared): missing funct3_bit[0] row while validating".into()))?;
+            .ok_or_else(|| {
+                PiCcsError::ProtocolError("control(shared): missing funct3_bit[0] row while validating".into())
+            })?;
         let residuals = control_next_pc_control_residuals(
             active,
             pc_before,
@@ -763,7 +801,9 @@ pub(crate) fn build_route_a_control_time_claims(
         let pc_before = *main_decoded
             .get(&trace.pc_before)
             .and_then(|v| v.get(j))
-            .ok_or_else(|| PiCcsError::ProtocolError("control(shared): missing pc_before row while validating".into()))?;
+            .ok_or_else(|| {
+                PiCcsError::ProtocolError("control(shared): missing pc_before row while validating".into())
+            })?;
         let op_lui = *decode_decoded
             .get(&decode.op_lui)
             .and_then(|v| v.get(j))
@@ -771,7 +811,9 @@ pub(crate) fn build_route_a_control_time_claims(
         let op_auipc = *decode_decoded
             .get(&decode.op_auipc)
             .and_then(|v| v.get(j))
-            .ok_or_else(|| PiCcsError::ProtocolError("control(shared): missing op_auipc row while validating".into()))?;
+            .ok_or_else(|| {
+                PiCcsError::ProtocolError("control(shared): missing op_auipc row while validating".into())
+            })?;
         let op_jal = *decode_decoded
             .get(&decode.op_jal)
             .and_then(|v| v.get(j))
@@ -783,7 +825,9 @@ pub(crate) fn build_route_a_control_time_claims(
         let rd_is_zero = *decode_decoded
             .get(&decode.rd_is_zero)
             .and_then(|v| v.get(j))
-            .ok_or_else(|| PiCcsError::ProtocolError("control(shared): missing rd_is_zero row while validating".into()))?;
+            .ok_or_else(|| {
+                PiCcsError::ProtocolError("control(shared): missing rd_is_zero row while validating".into())
+            })?;
         let funct3_bits = [
             *decode_decoded
                 .get(&decode.funct3_bit[0])
