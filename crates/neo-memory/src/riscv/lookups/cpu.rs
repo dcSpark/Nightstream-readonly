@@ -200,80 +200,11 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                     | RiscvOpcode::Remu
                         if self.xlen == 32 =>
                     {
-                        let rs1_u32 = rs1_val as u32;
-                        let rs2_u32 = rs2_val as u32;
-                        let rs1_i32 = rs1_u32 as i32;
-                        let rs2_i32 = rs2_u32 as i32;
-
-                        match op {
-                            RiscvOpcode::Mul => {
-                                let result = rs1_u32.wrapping_mul(rs2_u32) as u64;
-                                self.write_reg(twist, rd, result);
-                            }
-                            RiscvOpcode::Mulh => {
-                                let product = (rs1_i32 as i64) * (rs2_i32 as i64);
-                                let result = (product >> 32) as i32 as u32;
-                                self.write_reg(twist, rd, result as u64);
-                            }
-                            RiscvOpcode::Mulhu => {
-                                let product = (rs1_u32 as u64) * (rs2_u32 as u64);
-                                let result = (product >> 32) as u32;
-                                self.write_reg(twist, rd, result as u64);
-                            }
-                            RiscvOpcode::Mulhsu => {
-                                let product = (rs1_i32 as i64) * (rs2_u32 as i64);
-                                let result = (product >> 32) as i32 as u32;
-                                self.write_reg(twist, rd, result as u64);
-                            }
-                            RiscvOpcode::Div | RiscvOpcode::Rem => {
-                                let divisor_is_zero = rs2_u32 == 0;
-                                let (quot_i32, rem_i32) = if divisor_is_zero {
-                                    (-1i32, rs1_i32)
-                                } else if rs1_i32 == i32::MIN && rs2_i32 == -1 {
-                                    (rs1_i32, 0)
-                                } else {
-                                    (rs1_i32 / rs2_i32, rs1_i32 % rs2_i32)
-                                };
-                                let result = match op {
-                                    RiscvOpcode::Div => quot_i32 as u32,
-                                    RiscvOpcode::Rem => rem_i32 as u32,
-                                    _ => unreachable!(),
-                                };
-                                self.write_reg(twist, rd, result as u64);
-
-                                // Record a single Shout event for the remainder bound, only when divisor != 0.
-                                if !divisor_is_zero {
-                                    let rem_abs = (rem_i32 as i64).abs() as u64;
-                                    let divisor_abs = (rs2_i32 as i64).abs() as u64;
-                                    let sltu_id = shout_tables.opcode_to_id(RiscvOpcode::Sltu);
-                                    let index = interleave_bits(rem_abs, divisor_abs) as u64;
-                                    let _ = shout.lookup(sltu_id, index);
-                                }
-                            }
-                            RiscvOpcode::Divu | RiscvOpcode::Remu => {
-                                let dividend = rs1_u32 as u64;
-                                let divisor = rs2_u32 as u64;
-                                let (quot, rem) = if divisor == 0 {
-                                    (u32::MAX as u64, dividend)
-                                } else {
-                                    (dividend / divisor, dividend % divisor)
-                                };
-                                let result = match op {
-                                    RiscvOpcode::Divu => quot,
-                                    RiscvOpcode::Remu => rem,
-                                    _ => unreachable!(),
-                                };
-                                self.write_reg(twist, rd, result);
-
-                                // Record a single Shout event for the remainder bound, only when divisor != 0.
-                                if divisor != 0 {
-                                    let sltu_id = shout_tables.opcode_to_id(RiscvOpcode::Sltu);
-                                    let index = interleave_bits(rem, divisor) as u64;
-                                    let _ = shout.lookup(sltu_id, index);
-                                }
-                            }
-                            _ => {}
-                        }
+                        // Use Shout so RV32M rows emit canonical ShoutEvent metadata for trace-side linkage.
+                        let shout_id = shout_tables.opcode_to_id(op);
+                        let index = interleave_bits(rs1_val, rs2_val) as u64;
+                        let result = shout.lookup(shout_id, index);
+                        self.write_reg(twist, rd, result);
                     }
                     _ => {
                         // Use Shout for the ALU operation

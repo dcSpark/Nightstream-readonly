@@ -190,15 +190,29 @@ pub fn decode_instruction(instr: u32) -> Result<RiscvInstruction, String> {
             }
         }
 
-        // MISC-MEM (0001111) - FENCE (FENCE.I unsupported)
-        0b0001111 => {
-            if funct3 != 0b000 {
-                return Err(format!("Unsupported MISC-MEM instruction: funct3={:#x}", funct3));
+        // MISC-MEM (0001111) - FENCE / FENCE.I
+        0b0001111 => match funct3 {
+            // FENCE: rd/rs1 are reserved and must be x0.
+            0b000 => {
+                if rd != 0 || rs1 != 0 {
+                    return Err(format!(
+                        "Invalid FENCE encoding: rd/rs1 must be x0 (rd={}, rs1={}, instr={:#x})",
+                        rd, rs1, instr
+                    ));
+                }
+                let pred = ((instr >> 24) & 0xF) as u8;
+                let succ = ((instr >> 20) & 0xF) as u8;
+                Ok(RiscvInstruction::Fence { pred, succ })
             }
-            let pred = ((instr >> 24) & 0xF) as u8;
-            let succ = ((instr >> 20) & 0xF) as u8;
-            Ok(RiscvInstruction::Fence { pred, succ })
-        }
+            // FENCE.I: imm[11:0], rd and rs1 are reserved and must be zero.
+            0b001 => {
+                if rd != 0 || rs1 != 0 || (instr >> 20) != 0 {
+                    return Err(format!("Invalid FENCE.I encoding: instr={:#x}", instr));
+                }
+                Ok(RiscvInstruction::FenceI)
+            }
+            _ => Err(format!("Unsupported MISC-MEM instruction: funct3={:#x}", funct3)),
+        },
 
         // OP-32 (0111011) - RV64 W-suffix R-type operations
         0b0111011 => {

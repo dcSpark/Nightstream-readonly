@@ -14,6 +14,8 @@ use crate::cpu::constraints::{
 use crate::mem_init::MemInit;
 use crate::plain::LutTable;
 use crate::plain::PlainMemLayout;
+use crate::riscv::lookups::uninterleave_bits;
+use crate::riscv::packed::{build_rv32_packed_cols, rv32_packed_d};
 use crate::witness::{LutInstance, LutTableSpec, MemInstance};
 use neo_ajtai::{decomp_b, DecompStyle};
 use neo_ccs::matrix::Mat;
@@ -97,6 +99,8 @@ where
 
     /// Shout table metadata needed to write the shared CPU bus (d, n_side).
     pub shout_meta: HashMap<u32, (usize, usize)>,
+    /// Optional virtual table specs by table_id, used for packed bus witness filling.
+    pub shout_specs: HashMap<u32, LutTableSpec>,
 
     /// Optional shared CPU-bus configuration.
     /// When present, we overwrite a reserved tail segment of `z_vec` with Twist/Shout access rows
@@ -125,20 +129,30 @@ where
         chunk_to_witness: Box<dyn Fn(&[StepTrace<u64, u64>]) -> Vec<F> + Send + Sync>,
     ) -> Result<Self, String> {
         let mut shout_meta = HashMap::new();
+        let mut shout_specs = HashMap::new();
         for (id, table) in tables {
             shout_meta.insert(*id, (table.d, table.n_side));
         }
         for (id, spec) in table_specs {
             let (d, n_side) = match spec {
                 LutTableSpec::RiscvOpcode { xlen, .. } => (xlen.saturating_mul(2), 2usize),
-                LutTableSpec::RiscvOpcodePacked { .. } => {
-                    return Err("RiscvOpcodePacked is not supported in the shared-bus R1csCpu path".into());
+                LutTableSpec::RiscvOpcodePacked { opcode, xlen } => {
+                    if *xlen != 32 {
+                        return Err(format!(
+                            "RiscvOpcodePacked requires xlen=32 in shared-bus R1csCpu path (got xlen={xlen})"
+                        ));
+                    }
+                    (
+                        rv32_packed_d(*opcode).map_err(|e| format!("invalid packed opcode spec: {e}"))?,
+                        2usize,
+                    )
                 }
                 LutTableSpec::RiscvOpcodeEventTablePacked { .. } => {
                     return Err("RiscvOpcodeEventTablePacked is not supported in the shared-bus R1csCpu path".into());
                 }
                 LutTableSpec::IdentityU32 => (32usize, 2usize),
             };
+            shout_specs.insert(*id, spec.clone());
             match shout_meta.entry(*id) {
                 Entry::Vacant(v) => {
                     v.insert((d, n_side));
@@ -162,6 +176,7 @@ where
             committer,
             m_in,
             shout_meta,
+            shout_specs,
             shared_cpu_bus: None,
             chunk_to_witness,
             _phantom: PhantomData,
@@ -404,7 +419,7 @@ where
                 steps: chunk_size,
                 lanes,
                 ell,
-                table_spec: None,
+                table_spec: self.shout_specs.get(table_id).cloned(),
                 table: Vec::new(),
                 addr_group: cfg.shout_addr_groups.get(table_id).copied(),
                 selector_group: cfg.shout_selector_groups.get(table_id).copied(),
@@ -707,16 +722,58 @@ where
 
                         for (lane_idx, shout_cols) in inst_cols.lanes.iter().enumerate() {
                             if let Some((key, val)) = shout_events[i][lane_idx] {
-                                write_addr_bits_dim_major_le_into_bus(
-                                    &mut z_vec,
-                                    &shared.layout,
-                                    shout_cols.addr_bits.clone(),
-                                    j,
-                                    key,
-                                    d,
-                                    n_side,
-                                    ell,
-                                );
+                                match self.shout_specs.get(table_id) {
+                                    Some(LutTableSpec::RiscvOpcodePacked { opcode, xlen }) => {
+                                        if *xlen != 32 {
+                                            return Err(format!(
+                                                "packed shout table_id={table_id} requires xlen=32 (got xlen={xlen})"
+                                            ));
+                                        }
+                                        let (lhs_raw, rhs_raw) = uninterleave_bits(key as u128);
+                                        let lhs = lhs_raw as u32;
+                                        let rhs = rhs_raw as u32;
+                                        let val_u64 = val.as_canonical_u64();
+                                        if val_u64 > u32::MAX as u64 {
+                                            return Err(format!(
+                                                "packed shout value out of u32 range for table_id={table_id} at step j={j}: val={val_u64}"
+                                            ));
+                                        }
+                                        let packed_cols = build_rv32_packed_cols::<Goldilocks>(*opcode, lhs, rhs, val_u64 as u32)
+                                            .map_err(|e| {
+                                                format!(
+                                                    "packed shout column synthesis failed for table_id={table_id}, opcode={opcode:?}, step_j={j}: {e}"
+                                                )
+                                            })?;
+                                        if packed_cols.len() != (shout_cols.addr_bits.end - shout_cols.addr_bits.start)
+                                        {
+                                            return Err(format!(
+                                                "packed shout column width mismatch for table_id={table_id}: cols_len={} bus_ell_addr={}",
+                                                packed_cols.len(),
+                                                shout_cols.addr_bits.end - shout_cols.addr_bits.start
+                                            ));
+                                        }
+                                        for (packed_idx, col_id) in shout_cols.addr_bits.clone().enumerate() {
+                                            z_vec[shared.layout.bus_cell(col_id, j)] = packed_cols[packed_idx];
+                                        }
+                                    }
+                                    Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. }) => {
+                                        return Err(format!(
+                                            "RiscvOpcodeEventTablePacked is not supported in shared-bus R1csCpu path (table_id={table_id})"
+                                        ));
+                                    }
+                                    _ => {
+                                        write_addr_bits_dim_major_le_into_bus(
+                                            &mut z_vec,
+                                            &shared.layout,
+                                            shout_cols.addr_bits.clone(),
+                                            j,
+                                            key,
+                                            d,
+                                            n_side,
+                                            ell,
+                                        );
+                                    }
+                                }
                                 z_vec[shared.layout.bus_cell(shout_cols.has_lookup, j)] = Goldilocks::ONE;
                                 z_vec[shared.layout.bus_cell(shout_cols.primary_val(), j)] = val;
                             }

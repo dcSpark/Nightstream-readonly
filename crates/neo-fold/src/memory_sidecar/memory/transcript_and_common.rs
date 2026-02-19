@@ -902,6 +902,23 @@ pub(crate) fn w2_decode_bitness_residuals(opcode_flags: [K; 12], funct3_is: [K; 
 }
 
 #[inline]
+pub(crate) fn w2_alu_reg_table_delta_from_bits(funct7_bits: [K; 7], funct3_is: [K; 8]) -> K {
+    let is_rv32m = funct7_bits[0];
+
+    let base_delta = funct7_bits[5] * (funct3_is[0] + funct3_is[5]);
+    let rv32m_delta = K::from(F::from_u64(9)) * funct3_is[0]
+        + K::from(F::from_u64(6)) * funct3_is[1]
+        + K::from(F::from_u64(10)) * funct3_is[2]
+        + K::from(F::from_u64(8)) * funct3_is[3]
+        + K::from(F::from_u64(15)) * funct3_is[4]
+        + K::from(F::from_u64(9)) * funct3_is[5]
+        + K::from(F::from_u64(16)) * funct3_is[6]
+        + K::from(F::from_u64(19)) * funct3_is[7];
+
+    (K::ONE - is_rv32m) * base_delta + is_rv32m * rv32m_delta
+}
+
+#[inline]
 pub(crate) fn w2_alu_branch_lookup_residuals(
     active: K,
     halted: K,
@@ -935,6 +952,8 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
     let op_jal = opcode_flags[2];
     let op_jalr = opcode_flags[3];
     let op_branch = opcode_flags[4];
+    let op_load = opcode_flags[5];
+    let op_store = opcode_flags[6];
     let op_alu_imm = opcode_flags[7];
     let op_alu_reg = opcode_flags[8];
     let op_misc_mem = opcode_flags[9];
@@ -949,6 +968,9 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
 
     let non_mem_ops =
         op_lui + op_auipc + op_jal + op_jalr + op_branch + op_alu_imm + op_alu_reg + op_misc_mem + op_system;
+    let mem_lookup_ops = op_load + op_store;
+    let add_lookup_ops = op_load + op_store + op_jalr;
+    let add_table_id = K::from(F::from_u64(3));
 
     let alu_table_base = K::from(F::from_u64(3)) * funct3_is[0]
         + K::from(F::from_u64(7)) * funct3_is[1]
@@ -960,24 +982,29 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
     let branch_table_expected =
         K::from(F::from_u64(10)) - K::from(F::from_u64(5)) * funct3_bits[2] + (funct3_bits[1] * funct3_bits[2]);
     let shift_selector = funct3_is[1] + funct3_is[5];
+    let funct7_m_tail =
+        funct7_bits[1] + funct7_bits[2] + funct7_bits[3] + funct7_bits[4] + funct7_bits[5] + funct7_bits[6];
+    let alu_reg_table_delta_expected = w2_alu_reg_table_delta_from_bits(funct7_bits, funct3_is);
 
     [
-        op_alu_imm * (shout_has_lookup - K::ONE),
-        op_alu_reg * (shout_has_lookup - K::ONE),
+        (op_alu_imm + op_load + op_jalr) * (shout_has_lookup - K::ONE),
+        (op_alu_reg + op_store) * (shout_has_lookup - K::ONE),
         op_branch * (shout_has_lookup - K::ONE),
         (K::ONE - shout_has_lookup) * shout_table_id,
-        (op_alu_imm + op_alu_reg + op_branch) * (shout_lhs - rs1_val),
+        (op_alu_imm + op_alu_reg + op_branch + mem_lookup_ops + op_jalr) * (shout_lhs - rs1_val),
         alu_imm_shift_rhs_delta - shift_selector * (rs2_decode - imm_i),
-        op_alu_imm * (shout_rhs - imm_i - alu_imm_shift_rhs_delta),
-        op_alu_reg * (shout_rhs - rs2_val),
+        op_alu_imm * (shout_rhs - imm_i - alu_imm_shift_rhs_delta) + (op_load + op_jalr) * (shout_rhs - imm_i),
+        op_alu_reg * (shout_rhs - rs2_val) + op_store * (shout_rhs - imm_s),
         op_branch * (shout_rhs - rs2_val),
         op_alu_imm_write * (rd_val - shout_val),
         op_alu_reg_write * (rd_val - shout_val),
-        op_alu_reg * (shout_table_id - alu_table_base - alu_reg_table_delta),
-        op_alu_imm * (shout_table_id - alu_table_base - alu_imm_table_delta),
+        op_alu_reg * (shout_table_id - alu_table_base - alu_reg_table_delta)
+            + op_store * (shout_table_id - add_table_id),
+        op_alu_imm * (shout_table_id - alu_table_base - alu_imm_table_delta)
+            + add_lookup_ops * (shout_table_id - add_table_id),
         op_branch * (shout_table_id - branch_table_expected),
-        op_alu_reg * funct7_bits[0],
-        alu_reg_table_delta - funct7_bits[5] * (funct3_is[0] + funct3_is[5]),
+        op_alu_reg * funct7_bits[0] * funct7_m_tail,
+        alu_reg_table_delta - alu_reg_table_delta_expected,
         alu_imm_table_delta - funct7_bits[5] * funct3_is[5],
         op_lui * rd_has_write - op_lui_write,
         op_auipc * rd_has_write - op_auipc_write,
@@ -1002,8 +1029,10 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
         non_mem_ops * ram_has_read,
         non_mem_ops * ram_has_write,
         non_mem_ops * ram_addr,
-        opcode_flags[5] * (ram_addr - rs1_val - imm_i),
-        opcode_flags[6] * (ram_addr - rs1_val - imm_s),
+        // RV32 effective addresses are modular (u32 wraparound). We therefore bind RAM addr to
+        // ADD lookup output (`shout_val`) instead of raw field addition `rs1 + imm`.
+        op_load * (ram_addr - shout_val),
+        op_store * (ram_addr - shout_val),
     ]
 }
 
@@ -1131,18 +1160,19 @@ pub(crate) fn w3_load_semantics_residuals(
         }
         acc
     };
+    let rd_write_gate = rd_has_write;
 
     [
-        load_flags[4] * (rd_val - ram_rv),
-        load_flags[0] * (rd_val - lb_val),
-        load_flags[1] * (rd_val - ram_rv_low8),
-        load_flags[2] * (rd_val - lh_val),
-        load_flags[3] * (rd_val - ram_rv_low16),
-        load_flags[0] * (rd_has_write - K::ONE),
-        load_flags[1] * (rd_has_write - K::ONE),
-        load_flags[2] * (rd_has_write - K::ONE),
-        load_flags[3] * (rd_has_write - K::ONE),
-        load_flags[4] * (rd_has_write - K::ONE),
+        load_flags[4] * rd_write_gate * (rd_val - ram_rv),
+        load_flags[0] * rd_write_gate * (rd_val - lb_val),
+        load_flags[1] * rd_write_gate * (rd_val - ram_rv_low8),
+        load_flags[2] * rd_write_gate * (rd_val - lh_val),
+        load_flags[3] * rd_write_gate * (rd_val - ram_rv_low16),
+        load_flags[0] * rd_has_write * (rd_has_write - K::ONE),
+        load_flags[1] * rd_has_write * (rd_has_write - K::ONE),
+        load_flags[2] * rd_has_write * (rd_has_write - K::ONE),
+        load_flags[3] * rd_has_write * (rd_has_write - K::ONE),
+        load_flags[4] * rd_has_write * (rd_has_write - K::ONE),
         load_flags[0] * (ram_has_read - K::ONE),
         load_flags[1] * (ram_has_read - K::ONE),
         load_flags[2] * (ram_has_read - K::ONE),
@@ -1254,11 +1284,12 @@ pub(crate) fn control_next_pc_control_residuals(
     active: K,
     pc_before: K,
     pc_after: K,
-    rs1_val: K,
+    _rs1_val: K,
     jalr_drop_bit: K,
-    imm_i: K,
+    _imm_i: K,
     imm_b: K,
     imm_j: K,
+    imm_sign_bit: K,
     op_jal: K,
     op_jalr: K,
     op_branch: K,
@@ -1266,11 +1297,15 @@ pub(crate) fn control_next_pc_control_residuals(
     funct3_bit0: K,
 ) -> [K; 5] {
     let four = K::from(F::from_u64(4));
+    let two32 = K::from(F::from_u64(1u64 << 32));
+    let imm_b_signed = imm_b - two32 * imm_sign_bit;
+    let imm_j_signed = imm_j - two32 * imm_sign_bit;
     let taken = control_branch_taken_from_bits(shout_val, funct3_bit0);
     [
-        op_jal * (pc_after - pc_before - imm_j),
-        op_jalr * (pc_after - rs1_val - imm_i + jalr_drop_bit),
-        op_branch * (pc_after - pc_before - four - taken * (imm_b - four)),
+        op_jal * (pc_after - pc_before - imm_j_signed),
+        // JALR target uses modular ADD lookup output (`shout_val`) plus alignment drop.
+        op_jalr * (pc_after - shout_val + jalr_drop_bit),
+        op_branch * (pc_after - pc_before - four - taken * (imm_b_signed - four)),
         op_jalr * jalr_drop_bit * (jalr_drop_bit - K::ONE),
         (active - op_jalr) * jalr_drop_bit,
     ]
@@ -1303,11 +1338,16 @@ pub(crate) fn control_writeback_residuals(
     op_jalr_write: K,
 ) -> [K; 4] {
     let four = K::from(F::from_u64(4));
+    let two32 = K::from(F::from_u64(1u64 << 32));
+    let auipc_delta = rd_val - pc_before - imm_u;
+    let jal_delta = rd_val - pc_before - four;
     [
         op_lui_write * (rd_val - imm_u),
-        op_auipc_write * (rd_val - pc_before - imm_u),
-        op_jal_write * (rd_val - pc_before - four),
-        op_jalr_write * (rd_val - pc_before - four),
+        // RV32 writeback values are modular u32; allow either exact sum (delta=0)
+        // or wrapped sum (delta=-2^32).
+        op_auipc_write * auipc_delta * (auipc_delta + two32),
+        op_jal_write * jal_delta * (jal_delta + two32),
+        op_jalr_write * jal_delta * (jal_delta + two32),
     ]
 }
 

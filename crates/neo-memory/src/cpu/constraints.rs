@@ -44,7 +44,7 @@ use crate::cpu::bus_layout::{
     build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, BusLayout, ShoutCols, ShoutInstanceShape,
     TwistCols,
 };
-use crate::witness::{LutInstance, MemInstance};
+use crate::witness::{LutInstance, LutTableSpec, MemInstance};
 
 /// CPU column layout for binding to the bus.
 ///
@@ -329,6 +329,7 @@ enum ShoutPaddingMode {
     WithoutSelectorBitness,
     ValueOnly,
     ValuePaddingOnly,
+    AddrPaddingOnly,
     AddrBitBitnessOnly,
 }
 
@@ -627,6 +628,11 @@ impl<F: Field> CpuConstraintBuilder<F> {
         self.add_shout_instance_padding_mode(layout, shout, ShoutPaddingMode::ValuePaddingOnly);
     }
 
+    /// Add Shout addr zero-padding only: `(1 - has_lookup) * addr_bits[i] = 0`.
+    pub fn add_shout_instance_addr_padding_only(&mut self, layout: &BusLayout, shout: &ShoutCols) {
+        self.add_shout_instance_padding_mode(layout, shout, ShoutPaddingMode::AddrPaddingOnly);
+    }
+
     /// Add unconditional addr-bit booleanity constraints for one shared-address Shout group.
     pub fn add_shout_instance_addr_bit_bitness(&mut self, layout: &BusLayout, shout: &ShoutCols) {
         self.add_shout_instance_padding_mode(layout, shout, ShoutPaddingMode::AddrBitBitnessOnly);
@@ -643,6 +649,7 @@ impl<F: Field> CpuConstraintBuilder<F> {
         );
         let add_gated_addr_bitness = matches!(mode, ShoutPaddingMode::Full | ShoutPaddingMode::WithoutSelectorBitness);
         let add_unconditional_addr_bitness = matches!(mode, ShoutPaddingMode::AddrBitBitnessOnly);
+        let add_addr_zero_padding = matches!(mode, ShoutPaddingMode::AddrPaddingOnly);
 
         for j in 0..layout.chunk_size {
             let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
@@ -673,6 +680,17 @@ impl<F: Field> CpuConstraintBuilder<F> {
                 for col_id in shout.addr_bits.clone() {
                     let bit = layout.bus_cell(col_id, j);
                     self.add_boolean_constraint(CpuConstraintLabel::ShoutAddrBitBitness, bit);
+                }
+            }
+
+            if add_addr_zero_padding {
+                for col_id in shout.addr_bits.clone() {
+                    let bit = layout.bus_cell(col_id, j);
+                    self.constraints.push(CpuConstraint::new_zero_negated(
+                        CpuConstraintLabel::LookupAddressBitsZeroPadding,
+                        bus_has_lookup,
+                        bit,
+                    ));
                 }
             }
         }
@@ -1076,7 +1094,13 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints_optional_shout<
     let mut selector_bitness_added = std::collections::HashSet::<usize>::new();
     let mut shout_key_binding_added = std::collections::HashSet::<(bool, usize, usize, usize, usize)>::new();
     let mut shout_lane_idx = 0usize;
-    for inst_cols in layout.shout_cols.iter() {
+    for (inst_idx, inst_cols) in layout.shout_cols.iter().enumerate() {
+        let is_packed_opcode_lane = matches!(
+            lut_insts
+                .get(inst_idx)
+                .and_then(|inst| inst.table_spec.as_ref()),
+            Some(LutTableSpec::RiscvOpcodePacked { .. } | LutTableSpec::RiscvOpcodeEventTablePacked { .. })
+        );
         for lane_cols in inst_cols.lanes.iter() {
             let key = (lane_cols.addr_bits.start, lane_cols.addr_bits.end);
             let shared_addr_group = addr_range_counts.get(&key).copied().unwrap_or(0) > 1;
@@ -1107,7 +1131,14 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints_optional_shout<
                 // no linkage
             }
             let selector_first = selector_bitness_added.insert(lane_cols.has_lookup);
-            if shared_addr_group {
+            if is_packed_opcode_lane {
+                if selector_first {
+                    builder.add_shout_instance_padding_value_only(&layout, lane_cols);
+                } else {
+                    builder.add_shout_instance_value_padding_only(&layout, lane_cols);
+                }
+                builder.add_shout_instance_addr_padding_only(&layout, lane_cols);
+            } else if shared_addr_group {
                 // Shared address bits across multiple table instances cannot use per-instance
                 // `(1-has_lookup)*addr_bit=0` gating: inactive instances would overconstrain
                 // active ones. Enforce has/value padding per-instance and addr-bit booleanity

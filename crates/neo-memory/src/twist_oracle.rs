@@ -1,4 +1,3 @@
-
 use crate::bit_ops::eq_bit_affine;
 use crate::mle::{eq_single, lt_eval};
 use crate::sparse_time::SparseIdxVec;
@@ -1805,8 +1804,7 @@ fn accumulate_pair_with_eq_addr_over_points<F>(
     eq0s_scratch: &mut Vec<K>,
     d_eqs_scratch: &mut Vec<K>,
     mut coeff_at: F,
-)
-where
+) where
     F: FnMut(K) -> K,
 {
     debug_assert_eq!(bit_cols.len(), r_addr.len());
@@ -2235,7 +2233,15 @@ impl TwistReadCheckOracleSparseTime {
 
         let inc_terms_at_r_addr = build_inc_terms_at_r_addr(&wa_bits, &has_write, &inc_at_write_addr, r_addr);
 
-        Self::new_with_inc_terms(r_cycle, has_read, rv, ra_bits, r_addr, init_at_r_addr, inc_terms_at_r_addr)
+        Self::new_with_inc_terms(
+            r_cycle,
+            has_read,
+            rv,
+            ra_bits,
+            r_addr,
+            init_at_r_addr,
+            inc_terms_at_r_addr,
+        )
     }
 
     pub fn new_with_inc_terms(
@@ -2998,13 +3004,8 @@ impl TwistWriteCheckAddrOracleSparseTime {
         wa_bits: &[SparseIdxVec<K>],
         inc_at_write_addr: SparseIdxVec<K>,
     ) -> Self {
-        let (ell_addr, events) = collect_singlelane_write_addr_events(
-            r_cycle,
-            &has_write,
-            &wv,
-            wa_bits,
-            &inc_at_write_addr,
-        );
+        let (ell_addr, events) =
+            collect_singlelane_write_addr_events(r_cycle, &has_write, &wv, wa_bits, &inc_at_write_addr);
         assert_init_sparse_in_range(&init_sparse, ell_addr);
 
         Self {

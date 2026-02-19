@@ -36,6 +36,7 @@ use neo_memory::riscv::exec_table::{Rv32ExecRow, Rv32ExecTable};
 use neo_memory::riscv::lookups::{
     decode_program, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID, REG_ID,
 };
+use neo_memory::riscv::packed::{rv32_packed_d, rv32_packed_rollout_opcode};
 use neo_memory::riscv::rom_init::prog_rom_layout_and_init_words;
 use neo_memory::riscv::trace::{
     extract_twist_lanes_over_time, rv32_decode_lookup_backed_cols, rv32_decode_lookup_backed_row_from_instr_word,
@@ -460,7 +461,10 @@ fn infer_required_trace_shout_opcodes(program: &[RiscvInstruction]) -> HashSet<R
     ops.insert(RiscvOpcode::Add);
     for instr in program {
         match instr {
-            RiscvInstruction::RAlu { op, .. } | RiscvInstruction::IAlu { op, .. } => {
+            RiscvInstruction::RAlu { op, .. } => {
+                ops.insert(*op);
+            }
+            RiscvInstruction::IAlu { op, .. } => {
                 ops.insert(*op);
             }
             RiscvInstruction::Branch { cond, .. } => {
@@ -498,14 +502,18 @@ fn program_requires_width_lookup(program: &[RiscvInstruction]) -> bool {
         .any(|instr| matches!(instr, RiscvInstruction::Load { .. } | RiscvInstruction::Store { .. }))
 }
 
-fn rv32_trace_table_specs(shout_ops: &HashSet<RiscvOpcode>) -> HashMap<u32, LutTableSpec> {
+fn rv32_trace_table_specs(shout_ops: &HashSet<RiscvOpcode>) -> Result<HashMap<u32, LutTableSpec>, PiCcsError> {
     let shout = RiscvShoutTables::new(32);
     let mut table_specs = HashMap::new();
     for &op in shout_ops {
         let table_id = shout.opcode_to_id(op).0;
-        table_specs.insert(table_id, LutTableSpec::RiscvOpcode { opcode: op, xlen: 32 });
+        if rv32_packed_rollout_opcode(op) {
+            table_specs.insert(table_id, LutTableSpec::RiscvOpcodePacked { opcode: op, xlen: 32 });
+        } else {
+            table_specs.insert(table_id, LutTableSpec::RiscvOpcode { opcode: op, xlen: 32 });
+        }
     }
-    table_specs
+    Ok(table_specs)
 }
 
 fn build_rv32_decode_lookup_tables(
@@ -1076,9 +1084,7 @@ impl Rv32TraceWiring {
         } else {
             Vec::new()
         };
-        let mut table_specs = rv32_trace_table_specs(&shout_ops);
-        let mut base_shout_table_ids: Vec<u32> = table_specs.keys().copied().collect();
-        base_shout_table_ids.sort_unstable();
+        let mut table_specs = rv32_trace_table_specs(&shout_ops)?;
         for (&table_id, spec) in &self.extra_lut_table_specs {
             if table_specs.contains_key(&table_id) {
                 return Err(PiCcsError::InvalidInput(format!(
@@ -1087,7 +1093,37 @@ impl Rv32TraceWiring {
             }
             table_specs.insert(table_id, spec.clone());
         }
+        let mut base_shout_table_ids: Vec<u32> = table_specs
+            .iter()
+            .filter_map(|(&table_id, spec)| match spec {
+                LutTableSpec::RiscvOpcodePacked { .. } | LutTableSpec::RiscvOpcodeEventTablePacked { .. } => None,
+                _ => Some(table_id),
+            })
+            .collect();
+        base_shout_table_ids.sort_unstable();
         let mut all_extra_shout_specs = self.extra_shout_bus_specs.clone();
+        for (&table_id, spec) in &table_specs {
+            match spec {
+                LutTableSpec::RiscvOpcodePacked { opcode, xlen } => {
+                    if *xlen != 32 {
+                        return Err(PiCcsError::InvalidInput(format!(
+                            "RiscvOpcodePacked requires xlen=32 in RV32 trace mode (table_id={table_id}, xlen={xlen})"
+                        )));
+                    }
+                    all_extra_shout_specs.push(TraceShoutBusSpec {
+                        table_id,
+                        ell_addr: rv32_packed_d(*opcode)?,
+                        n_vals: 1usize,
+                    });
+                }
+                LutTableSpec::RiscvOpcodeEventTablePacked { .. } => {
+                    return Err(PiCcsError::InvalidInput(
+                        "RiscvOpcodeEventTablePacked is not supported in RV32 trace shared-bus mode".into(),
+                    ));
+                }
+                _ => {}
+            }
+        }
         all_extra_shout_specs.extend(decode_lookup_bus_specs.clone());
         all_extra_shout_specs.extend(width_lookup_bus_specs.clone());
         for spec in &all_extra_shout_specs {
