@@ -7,7 +7,10 @@ use super::decode::decode_instruction;
 use super::encode::encode_instruction;
 use super::isa::{BranchCondition, RiscvInstruction, RiscvMemOp, RiscvOpcode};
 use super::tables::RiscvShoutTables;
-use super::{POSEIDON2_ECALL_NUM, POSEIDON2_READ_ECALL_NUM};
+use super::{
+    GL_ADD_ECALL_NUM, GL_MUL_ECALL_NUM, GL_READ_ECALL_NUM, GL_SUB_ECALL_NUM,
+    POSEIDON2_ECALL_NUM, POSEIDON2_READ_ECALL_NUM,
+};
 
 /// A RISC-V CPU that can be traced using Neo's VmCpu trait.
 ///
@@ -31,6 +34,10 @@ pub struct RiscvCpu {
     poseidon2_pending: Option<[u32; 8]>,
     /// Index into `poseidon2_pending` for the next read ECALL.
     poseidon2_read_idx: usize,
+    /// Pending Goldilocks field operation result (2 × u32: lo, hi).
+    gl_pending: Option<[u32; 2]>,
+    /// Index into `gl_pending` for the next GL read ECALL.
+    gl_read_idx: usize,
 }
 
 impl RiscvCpu {
@@ -46,6 +53,8 @@ impl RiscvCpu {
             program_base: 0,
             poseidon2_pending: None,
             poseidon2_read_idx: 0,
+            gl_pending: None,
+            gl_read_idx: 0,
         }
     }
 
@@ -144,15 +153,69 @@ impl RiscvCpu {
     ///
     /// Called 8 times by the guest to retrieve the full 4-element digest.
     /// Each call returns the next word and advances the internal read index.
-    fn handle_poseidon2_read_ecall(&mut self) {
+    /// Uses `store_untraced` so the next instruction sees the updated a0
+    /// without generating a CCS-visible register write event.
+    fn handle_poseidon2_read_ecall<T: Twist<u64, u64>>(&mut self, twist: &mut T) {
         let words = self
             .poseidon2_pending
             .expect("poseidon2 read ECALL called without a pending digest");
         let idx = self.poseidon2_read_idx;
         assert!(idx < 8, "poseidon2 read ECALL: all 8 words already consumed");
-        let word = words[idx] as u64;
-        self.set_reg(10, word); // a0
+        let word = self.mask_value(words[idx] as u64);
+        self.regs[10] = word;
+        twist.store_untraced(super::REG_ID, 10, word);
         self.poseidon2_read_idx = idx + 1;
+    }
+
+    /// Goldilocks field multiply ECALL handler.
+    fn handle_gl_mul_ecall(&mut self) {
+        let (a, b) = self.read_gl_operands();
+        let result = Goldilocks::from_u64(a) * Goldilocks::from_u64(b);
+        self.store_gl_result(result.as_canonical_u64());
+    }
+
+    /// Goldilocks field add ECALL handler.
+    fn handle_gl_add_ecall(&mut self) {
+        let (a, b) = self.read_gl_operands();
+        let result = Goldilocks::from_u64(a) + Goldilocks::from_u64(b);
+        self.store_gl_result(result.as_canonical_u64());
+    }
+
+    /// Goldilocks field subtract ECALL handler.
+    fn handle_gl_sub_ecall(&mut self) {
+        let (a, b) = self.read_gl_operands();
+        let result = Goldilocks::from_u64(a) - Goldilocks::from_u64(b);
+        self.store_gl_result(result.as_canonical_u64());
+    }
+
+    /// Read two 64-bit Goldilocks operands from registers a1..a4.
+    fn read_gl_operands(&self) -> (u64, u64) {
+        let a_lo = self.get_reg(11) as u32; // a1
+        let a_hi = self.get_reg(12) as u32; // a2
+        let b_lo = self.get_reg(13) as u32; // a3
+        let b_hi = self.get_reg(14) as u32; // a4
+        let a = (a_lo as u64) | ((a_hi as u64) << 32);
+        let b = (b_lo as u64) | ((b_hi as u64) << 32);
+        (a, b)
+    }
+
+    /// Store a 64-bit GL result as two u32 words in CPU internal state.
+    fn store_gl_result(&mut self, val: u64) {
+        self.gl_pending = Some([val as u32, (val >> 32) as u32]);
+        self.gl_read_idx = 0;
+    }
+
+    /// GL read ECALL handler: return next u32 word of the pending result in a0.
+    fn handle_gl_read_ecall<T: Twist<u64, u64>>(&mut self, twist: &mut T) {
+        let words = self
+            .gl_pending
+            .expect("GL read ECALL called without a pending result");
+        let idx = self.gl_read_idx;
+        assert!(idx < 2, "GL read ECALL: both words already consumed");
+        let word = self.mask_value(words[idx] as u64);
+        self.regs[10] = word;
+        twist.store_untraced(super::REG_ID, 10, word);
+        self.gl_read_idx = idx + 1;
     }
 }
 
@@ -653,9 +716,18 @@ impl neo_vm_trace::VmCpu<u64, u64> for RiscvCpu {
                 if call_id == POSEIDON2_ECALL_NUM {
                     self.handle_poseidon2_ecall(twist);
                 } else if call_id == POSEIDON2_READ_ECALL_NUM {
-                    self.handle_poseidon2_read_ecall();
+                    self.handle_poseidon2_read_ecall(twist);
+                } else if call_id == GL_MUL_ECALL_NUM {
+                    self.handle_gl_mul_ecall();
+                } else if call_id == GL_ADD_ECALL_NUM {
+                    self.handle_gl_add_ecall();
+                } else if call_id == GL_SUB_ECALL_NUM {
+                    self.handle_gl_sub_ecall();
+                } else if call_id == GL_READ_ECALL_NUM {
+                    self.handle_gl_read_ecall(twist);
+                } else {
+                    self.handle_ecall();
                 }
-                self.handle_ecall();
             }
 
             RiscvInstruction::Ebreak => {

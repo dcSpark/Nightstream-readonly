@@ -350,6 +350,17 @@ pub trait Twist<Addr, Word> {
     fn load_untraced(&mut self, twist_id: TwistId, addr: Addr) -> Word {
         self.load(twist_id, addr)
     }
+
+    /// Store a value to memory without recording a Twist event.
+    ///
+    /// Used by ECALL precompiles that write results back to the register file
+    /// without generating per-step Twist bus entries. The CCS treats the ECALL
+    /// row as having no `rd` write; subsequent instructions see the updated
+    /// value through normal Twist reads.
+    #[inline]
+    fn store_untraced(&mut self, twist_id: TwistId, addr: Addr, value: Word) {
+        self.store(twist_id, addr, value);
+    }
 }
 
 /// A tracing wrapper around any `Twist` implementation.
@@ -444,6 +455,10 @@ where
 
     fn load_untraced(&mut self, twist_id: TwistId, addr: Addr) -> Word {
         self.inner.load(twist_id, addr)
+    }
+
+    fn store_untraced(&mut self, twist_id: TwistId, addr: Addr, value: Word) {
+        self.inner.store(twist_id, addr, value);
     }
 }
 

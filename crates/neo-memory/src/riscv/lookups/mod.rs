@@ -122,6 +122,31 @@ pub const POSEIDON2_ECALL_NUM: u32 = 0x504F53;
 /// to retrieve the full digest.
 pub const POSEIDON2_READ_ECALL_NUM: u32 = 0x80504F53;
 
+/// Goldilocks field multiply ECALL identifier ("GLM").
+///
+/// ABI: a0 = GL_MUL_ECALL_NUM, a1 = a_lo, a2 = a_hi, a3 = b_lo, a4 = b_hi.
+/// Computes (a * b) mod p and stores the 64-bit result in CPU state.
+/// Retrieve via GL_READ_ECALL_NUM (2 calls for lo/hi words).
+pub const GL_MUL_ECALL_NUM: u32 = 0x474C4D;
+
+/// Goldilocks field add ECALL identifier ("GLA").
+///
+/// ABI: a0 = GL_ADD_ECALL_NUM, a1 = a_lo, a2 = a_hi, a3 = b_lo, a4 = b_hi.
+/// Computes (a + b) mod p and stores the 64-bit result in CPU state.
+pub const GL_ADD_ECALL_NUM: u32 = 0x474C41;
+
+/// Goldilocks field subtract ECALL identifier ("GLS").
+///
+/// ABI: a0 = GL_SUB_ECALL_NUM, a1 = a_lo, a2 = a_hi, a3 = b_lo, a4 = b_hi.
+/// Computes (a - b) mod p and stores the 64-bit result in CPU state.
+pub const GL_SUB_ECALL_NUM: u32 = 0x474C53;
+
+/// Goldilocks field operation read ECALL identifier (bit 31 set on "GLR").
+///
+/// ABI: a0 = GL_READ_ECALL_NUM. Returns the next u32 word of the
+/// pending field operation result in register a0. Call 2 times (lo/hi).
+pub const GL_READ_ECALL_NUM: u32 = 0x80474C52;
+
 pub use alu::{compute_op, lookup_entry};
 pub use bits::{interleave_bits, uninterleave_bits};
 pub use cpu::RiscvCpu;

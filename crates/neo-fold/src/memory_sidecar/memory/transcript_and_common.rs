@@ -998,7 +998,7 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
         opcode_flags[6] * rd_has_write,
         op_misc_mem * rd_has_write,
         op_system * rd_has_write,
-        active * (halted - op_system),
+        active * halted * (K::ONE - op_system),
         opcode_flags[5] * (ram_has_read - K::ONE),
         opcode_flags[6] * (ram_has_write - K::ONE),
         non_mem_ops * ram_has_read,
