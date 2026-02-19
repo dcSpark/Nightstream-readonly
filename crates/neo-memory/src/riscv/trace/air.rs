@@ -91,6 +91,7 @@ impl Rv32TraceAir {
                 ("shout_lhs", l.shout_lhs),
                 ("shout_rhs", l.shout_rhs),
                 ("jalr_drop_bit", l.jalr_drop_bit),
+                ("pc_carry", l.pc_carry),
             ] {
                 let e = Self::gated_zero(inv_active, col(c, i));
                 if !Self::is_zero(e) {

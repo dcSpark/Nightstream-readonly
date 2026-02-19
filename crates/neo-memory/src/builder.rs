@@ -69,6 +69,10 @@ pub struct ShardWitnessAux {
     pub mem_ids: Vec<u32>,
     /// Final sparse memory states at the end of the shard: mem_id -> (addr -> value), with zero cells omitted.
     pub final_mem_states: HashMap<u32, HashMap<u64, Goldilocks>>,
+    /// Wall-clock time for VM trace collection (`trace_program`).
+    pub vm_trace_duration: std::time::Duration,
+    /// Wall-clock time for CPU witness building (`build_ccs_chunks`), includes decomp + commit.
+    pub cpu_witness_duration: std::time::Duration,
 }
 
 fn ell_from_pow2_n_side(n_side: usize) -> Result<usize, ShardBuildError> {
@@ -238,9 +242,11 @@ where
     table_ids.dedup();
 
     // 3) CPU arithmetization chunks.
+    let t_witness_start = std::time::Instant::now();
     let mcss = cpu_arith
         .build_ccs_chunks(trace, chunk_size)
         .map_err(|e| ShardBuildError::CcsError(e.to_string()))?;
+    let cpu_witness_duration = t_witness_start.elapsed();
     if mcss.len() != chunks_len {
         return Err(ShardBuildError::CcsError(format!(
             "cpu arithmetization returned {} chunks, expected {} (steps={}, chunk_size={})",
@@ -427,6 +433,8 @@ where
         chunk_size,
         mem_ids,
         final_mem_states: mem_states,
+        vm_trace_duration: std::time::Duration::ZERO,
+        cpu_witness_duration,
     };
     Ok((step_bundles, aux))
 }

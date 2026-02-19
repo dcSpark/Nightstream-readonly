@@ -422,6 +422,7 @@ pub(crate) fn build_route_a_control_time_claims(
         trace.rd_val,
         trace.shout_val,
         trace.jalr_drop_bit,
+        trace.pc_carry,
     ];
     let decode_col_ids = vec![
         decode.op_lui,
@@ -575,29 +576,42 @@ pub(crate) fn build_route_a_control_time_claims(
     );
 
     let control_sparse = vec![
-        main_col(trace.active)?,
-        main_col(trace.pc_before)?,
-        main_col(trace.pc_after)?,
-        main_col(trace.rs1_val)?,
-        main_col(trace.jalr_drop_bit)?,
-        main_col(trace.shout_val)?,
-        decode_col(decode.funct3_bit[0])?,
-        decode_col(decode.op_jal)?,
-        decode_col(decode.op_jalr)?,
-        decode_col(decode.op_branch)?,
-        decode_col(decode.imm_i)?,
-        decode_col(decode.imm_b)?,
-        decode_col(decode.imm_j)?,
+        main_col(trace.active)?,          // 0
+        main_col(trace.pc_before)?,       // 1
+        main_col(trace.pc_after)?,        // 2
+        main_col(trace.rs1_val)?,         // 3
+        main_col(trace.jalr_drop_bit)?,   // 4
+        main_col(trace.pc_carry)?,        // 5
+        main_col(trace.shout_val)?,       // 6
+        decode_col(decode.funct3_bit[0])?,// 7
+        decode_col(decode.op_jal)?,       // 8
+        decode_col(decode.op_jalr)?,      // 9
+        decode_col(decode.op_branch)?,    // 10
+        decode_col(decode.imm_i)?,        // 11
+        decode_col(decode.imm_b)?,        // 12
+        decode_col(decode.imm_j)?,        // 13
     ];
-    let control_weights = control_next_pc_control_weight_vector(r_cycle, 5);
+    let control_weights = control_next_pc_control_weight_vector(r_cycle, 7);
     let control_oracle = FormulaOracleSparseTime::new(
         control_sparse,
         5,
         r_cycle,
         Box::new(move |vals: &[K]| {
             let residuals = control_next_pc_control_residuals(
-                vals[0], vals[1], vals[2], vals[3], vals[4], vals[10], vals[11], vals[12], vals[7], vals[8], vals[9],
-                vals[5], vals[6],
+                vals[0],  // active
+                vals[1],  // pc_before
+                vals[2],  // pc_after
+                vals[3],  // rs1_val
+                vals[4],  // jalr_drop_bit
+                vals[5],  // pc_carry
+                vals[11], // imm_i
+                vals[12], // imm_b
+                vals[13], // imm_j
+                vals[8],  // op_jal
+                vals[9],  // op_jalr
+                vals[10], // op_branch
+                vals[6],  // shout_val
+                vals[7],  // funct3_bit0
             );
             let mut weighted = K::ZERO;
             for (r, w) in residuals.iter().zip(control_weights.iter()) {

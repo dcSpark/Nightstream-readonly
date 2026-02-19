@@ -349,7 +349,7 @@ pub fn prove_route_a_batched_time(
     let proof = BatchedTimeProof {
         claimed_sums: claimed_sums.clone(),
         degree_bounds: degree_bounds.clone(),
-        labels: labels.clone(),
+        labels: labels.iter().map(|label| label.to_vec()).collect(),
         round_polys: per_claim_results
             .iter()
             .map(|r| r.round_polys.clone())
@@ -449,7 +449,7 @@ pub fn verify_route_a_batched_time(
         )));
     }
     for (i, (got, exp)) in proof.labels.iter().zip(expected_labels.iter()).enumerate() {
-        if (*got as &[u8]) != *exp {
+        if got.as_slice() != *exp {
             return Err(PiCcsError::ProtocolError(format!(
                 "step {}: batched_time label mismatch at claim {}",
                 step_idx, i

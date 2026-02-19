@@ -663,6 +663,7 @@ pub(crate) fn verify_route_a_control_terminals(
     let rs1_val = wp_open_col(trace.rs1_val)?;
     let rd_val = wp_open_col(trace.rd_val)?;
     let jalr_drop_bit = wp_open_col(trace.jalr_drop_bit)?;
+    let pc_carry = wp_open_col(trace.pc_carry)?;
     let shout_val = wp_open_col(trace.shout_val)?;
     let funct3_bits = [
         decode_open_col(decode.funct3_bit[0])?,
@@ -756,6 +757,7 @@ pub(crate) fn verify_route_a_control_terminals(
             pc_after,
             rs1_val,
             jalr_drop_bit,
+            pc_carry,
             imm_i,
             imm_b,
             imm_j,
