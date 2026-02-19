@@ -417,6 +417,7 @@ pub fn rv32_decode_lookup_backed_row_from_instr_word(
     }
 
     let funct7_b5 = (funct7_u64 >> 5) & 1;
+    let is_rv32m = (funct7_u64 & 1) == 1;
     let f3_is_0 = if active && funct3_u64 == 0 { 1 } else { 0 };
     let f3_is_5 = if active && funct3_u64 == 5 { 1 } else { 0 };
     let alu_table_base: u64 = match funct3_u64 {
@@ -429,10 +430,26 @@ pub fn rv32_decode_lookup_backed_row_from_instr_word(
         6 => 2,
         _ => 0,
     };
+    let alu_rv32m_table: u64 = match funct3_u64 {
+        0 => 12, // MUL
+        1 => 13, // MULH
+        2 => 15, // MULHSU
+        3 => 14, // MULHU
+        4 => 16, // DIV
+        5 => 17, // DIVU
+        6 => 18, // REM
+        7 => 19, // REMU
+        _ => 0,
+    };
+    let alu_reg_table_id = if is_rv32m {
+        alu_rv32m_table
+    } else {
+        alu_table_base + (funct7_b5 * (f3_is_0 + f3_is_5))
+    };
     let branch_table_expected: u64 =
         10 - 5 * ((funct3_u64 >> 2) & 1) + (((funct3_u64 >> 1) & 1) * ((funct3_u64 >> 2) & 1));
     row[layout.shout_table_id] = if opcode_u64 == 0x33 {
-        F::from_u64(alu_table_base + (funct7_b5 * (f3_is_0 + f3_is_5)))
+        F::from_u64(alu_reg_table_id)
     } else if opcode_u64 == 0x13 {
         F::from_u64(alu_table_base + (funct7_b5 * f3_is_5))
     } else if opcode_u64 == 0x63 {
@@ -443,7 +460,7 @@ pub fn rv32_decode_lookup_backed_row_from_instr_word(
     } else {
         F::ZERO
     };
-    row[layout.alu_reg_table_delta] = F::from_u64(funct7_b5 * (f3_is_0 + f3_is_5));
+    row[layout.alu_reg_table_delta] = F::from_u64(alu_reg_table_id.wrapping_sub(alu_table_base));
     row[layout.alu_imm_table_delta] = F::from_u64(funct7_b5 * f3_is_5);
 
     let shift_f3_sel = row[layout.funct3_is[1]] + row[layout.funct3_is[5]];

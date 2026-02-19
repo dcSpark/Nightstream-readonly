@@ -22,6 +22,25 @@ SECTIONS
     *(.text*)
   }
 
+  .rodata : ALIGN(4)
+  {
+    *(.rodata*)
+    *(.srodata*)
+  }
+
+  .data : ALIGN(4)
+  {
+    *(.data*)
+    *(.sdata*)
+  }
+
+  .bss (NOLOAD) : ALIGN(4)
+  {
+    *(.bss*)
+    *(.sbss*)
+    *(COMMON)
+  }
+
   /DISCARD/ :
   {
     *(.eh_frame*)

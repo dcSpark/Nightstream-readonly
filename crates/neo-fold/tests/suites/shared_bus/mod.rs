@@ -7,6 +7,7 @@ mod shared_cpu_bus_control_attacks;
 mod shared_cpu_bus_decode_attacks;
 mod shared_cpu_bus_layout_consistency;
 mod shared_cpu_bus_linkage;
+mod shared_cpu_bus_packed_attacks;
 mod shared_cpu_bus_padding_attacks;
 mod shared_cpu_bus_width_attacks;
 mod ts_route_a_negative;

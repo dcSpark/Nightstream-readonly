@@ -80,14 +80,10 @@ pub(crate) fn prove_shout_addr_pre_time(
 
         let z = &cpu_z_k;
         let inst_ell_addr = lut_inst.d * lut_inst.ell;
-        if matches!(
+        let is_packed_spec = matches!(
             lut_inst.table_spec,
             Some(LutTableSpec::RiscvOpcodePacked { .. } | LutTableSpec::RiscvOpcodeEventTablePacked { .. })
-        ) {
-            return Err(PiCcsError::InvalidInput(
-                "packed RISC-V Shout table specs are not supported on the shared CPU bus".into(),
-            ));
-        }
+        );
         let inst_ell_addr_u32 = u32::try_from(inst_ell_addr)
             .map_err(|_| PiCcsError::InvalidInput("Shout(Route A): ell_addr overflows u32".into()))?;
         groups
@@ -193,7 +189,7 @@ pub(crate) fn prove_shout_addr_pre_time(
                 SparseIdxVec::new(pow2_cycle)
             };
 
-            if has_any_lookup {
+            if has_any_lookup && !is_packed_spec {
                 let (addr_oracle, lane_sum): (Box<dyn RoundOracle>, K) = match &lut_inst.table_spec {
                     None => {
                         let table_k: Vec<K> = lut_inst.table.iter().map(|&v| v.into()).collect();
@@ -211,14 +207,10 @@ pub(crate) fn prove_shout_addr_pre_time(
                         )?;
                         (Box::new(o), sum)
                     }
-                    Some(LutTableSpec::RiscvOpcodePacked { .. }) => {
-                        return Err(PiCcsError::InvalidInput(
-                            "packed RISC-V Shout table specs are not supported on the shared CPU bus".into(),
-                        ));
-                    }
-                    Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. }) => {
-                        return Err(PiCcsError::InvalidInput(
-                            "packed RISC-V Shout table specs are not supported on the shared CPU bus".into(),
+                    Some(LutTableSpec::RiscvOpcodePacked { .. })
+                    | Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. }) => {
+                        return Err(PiCcsError::ProtocolError(
+                            "packed shout lane unexpectedly reached implicit addr-pre oracle path".into(),
                         ));
                     }
                     Some(LutTableSpec::IdentityU32) => {
