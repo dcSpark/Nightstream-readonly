@@ -20,7 +20,7 @@ use std::sync::Arc;
 
 use neo_ajtai::{set_global_pp, setup as ajtai_setup, AjtaiSModule, Commitment as Cmt};
 use neo_ccs::poly::SparsePoly;
-use neo_ccs::relations::{CcsStructure, McsInstance, McsWitness, MeInstance};
+use neo_ccs::relations::{CcsClaim, CcsStructure, CcsWitness, CeClaim};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::Mat;
 use neo_fold::pi_ccs::FoldingMode;
@@ -48,12 +48,13 @@ const OP_HALT: u64 = 4;
 /// Setup real Ajtai public parameters for tests.
 fn setup_ajtai_pp(m: usize, seed: u64) -> AjtaiSModule {
     let d = D;
-    let kappa = neo_params::NeoParams::goldilocks_auto_r1cs_ccs(m)
+    let m_commit = neo_memory::ajtai::commit_cols_for_ccs_m(m);
+    let kappa = neo_params::NeoParams::goldilocks_auto_r1cs_ccs(m_commit)
         .expect("params")
         .kappa as usize;
 
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    let pp = ajtai_setup(&mut rng, d, kappa, m).expect("Ajtai setup should succeed");
+    let pp = ajtai_setup(&mut rng, d, kappa, m_commit).expect("Ajtai setup should succeed");
     set_global_pp(pp.clone()).expect("set_global_pp");
     AjtaiSModule::new(Arc::new(pp))
 }
@@ -167,7 +168,7 @@ fn create_mcs_with_bus(
     tag: u64,
     lut_insts: &[(&neo_memory::witness::LutInstance<Cmt, F>, &PlainLutTrace<F>)],
     mem_insts: &[(&neo_memory::witness::MemInstance<Cmt, F>, &PlainMemTrace<F>)],
-) -> (McsInstance<Cmt, F>, McsWitness<F>) {
+) -> (CcsClaim<Cmt, F>, CcsWitness<F>) {
     let m_in = 0usize;
     let mut z: Vec<F> = vec![F::ZERO; ccs.m];
     if !z.is_empty() {
@@ -205,7 +206,7 @@ fn create_mcs_with_bus(
     let x = z[..m_in].to_vec();
     let w = z[m_in..].to_vec();
 
-    (McsInstance { c, x, m_in }, McsWitness { w, Z })
+    (CcsClaim { c, x, m_in }, CcsWitness { w, Z })
 }
 
 /// Build a bytecode table for a simple program.
@@ -366,17 +367,18 @@ fn vm_simple_add_program() {
         let mem_bus = [(&mem_inst, &mem_trace)];
         let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, pc, &lut_bus, &mem_bus);
 
-        steps.push(StepWitnessBundle {
+        steps.push(crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
             mcs: (mcs, mcs_wit),
             lut_instances: vec![(opcode_inst, opcode_wit), (imm_inst, imm_wit)],
             mem_instances: vec![(mem_inst, mem_wit)],
+            time_columns: crate::common_setup::empty_time_columns(),
             _phantom: PhantomData::<K>,
-        });
+        }));
     }
 
     assert_eq!(register, 15, "Final register should be 10 + 5 = 15");
 
-    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_init: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"vm-add-program");
@@ -449,12 +451,13 @@ fn vm_register_file_operations() {
         let mem_bus = [(&reg_inst, &reg_trace)];
         let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, 0, &[], &mem_bus);
 
-        steps.push(StepWitnessBundle {
+        steps.push(crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
             mcs: (mcs, mcs_wit),
             lut_instances: vec![],
             mem_instances: vec![(reg_inst, reg_wit)],
+            time_columns: crate::common_setup::empty_time_columns(),
             _phantom: PhantomData::<K>,
-        });
+        }));
     }
 
     // Step 1: Write 20 to R1 (R0 still contains 10)
@@ -476,12 +479,13 @@ fn vm_register_file_operations() {
         let mem_bus = [(&reg_inst, &reg_trace)];
         let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, 1, &[], &mem_bus);
 
-        steps.push(StepWitnessBundle {
+        steps.push(crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
             mcs: (mcs, mcs_wit),
             lut_instances: vec![],
             mem_instances: vec![(reg_inst, reg_wit)],
+            time_columns: crate::common_setup::empty_time_columns(),
             _phantom: PhantomData::<K>,
-        });
+        }));
     }
 
     // Step 2: Read R0 (10), compute R0+R1=30, write to R2
@@ -504,15 +508,16 @@ fn vm_register_file_operations() {
         let mem_bus = [(&reg_inst, &reg_trace)];
         let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, 2, &[], &mem_bus);
 
-        steps.push(StepWitnessBundle {
+        steps.push(crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
             mcs: (mcs, mcs_wit),
             lut_instances: vec![],
             mem_instances: vec![(reg_inst, reg_wit)],
+            time_columns: crate::common_setup::empty_time_columns(),
             _phantom: PhantomData::<K>,
-        });
+        }));
     }
 
-    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_init: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"vm-register-file");
@@ -605,14 +610,15 @@ fn vm_combined_bytecode_and_data_memory() {
     let mem_bus = [(&ram_inst, &ram_trace)];
     let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, 0, &lut_bus, &mem_bus);
 
-    let step_bundle = StepWitnessBundle {
+    let step_bundle = crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
         mcs: (mcs, mcs_wit),
         lut_instances: vec![(bytecode_inst, bytecode_wit)],
         mem_instances: vec![(ram_inst, ram_wit)],
+        time_columns: crate::common_setup::empty_time_columns(),
         _phantom: PhantomData::<K>,
-    };
+    });
 
-    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_init: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"vm-combined-rom-ram");
@@ -672,14 +678,15 @@ fn vm_invalid_opcode_claim_fails() {
     let lut_bus = [(&bytecode_inst, &bad_trace)];
     let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, 0, &lut_bus, &[]);
 
-    let step_bundle = StepWitnessBundle {
+    let step_bundle = crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
         mcs: (mcs, mcs_wit),
         lut_instances: vec![(bytecode_inst, bytecode_wit)],
         mem_instances: vec![],
+        time_columns: crate::common_setup::empty_time_columns(),
         _phantom: PhantomData::<K>,
-    };
+    });
 
-    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_init: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"vm-invalid-opcode-claim");
@@ -766,15 +773,16 @@ fn vm_multi_instruction_sequence() {
         let mem_bus = [(&mem_inst, &mem_trace)];
         let (mcs, mcs_wit) = create_mcs_with_bus(&params, &ccs, &l, pc, &lut_bus, &mem_bus);
 
-        steps.push(StepWitnessBundle {
+        steps.push(crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
             mcs: (mcs, mcs_wit),
             lut_instances: vec![(bytecode_inst, bytecode_wit)],
             mem_instances: vec![(mem_inst, mem_wit)],
+            time_columns: crate::common_setup::empty_time_columns(),
             _phantom: PhantomData::<K>,
-        });
+        }));
     }
 
-    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_init: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"vm-multi-instr");

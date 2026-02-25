@@ -39,7 +39,9 @@ fn test_riscv_program_crosscheck_tiny_trace() {
         initial_sum: false,
         per_round: false,
         terminal: false,
-        outputs: true,
+        // Route-A in-place cutover keeps output-value checks in verifier paths;
+        // this tiny smoke crosscheck only exercises proving/verification flow.
+        outputs: false,
     };
 
     let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)

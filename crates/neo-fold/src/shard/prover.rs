@@ -17,6 +17,58 @@ pub(crate) fn mode_uses_sparse_cache(mode: &FoldingMode) -> bool {
     }
 }
 
+fn cpu_sumcheck_from_ccs(
+    claimed_sum: K,
+    round_polys: Vec<Vec<K>>,
+    r_time: &[K],
+) -> crate::shard_proof_types::CpuTimeSumcheckProof {
+    crate::shard_proof_types::CpuTimeSumcheckProof {
+        claimed_sum,
+        round_polys,
+        r_time: r_time.to_vec(),
+    }
+}
+
+fn shift_sumcheck_from_batched_time(
+    batched_time: &crate::shard_proof_types::BatchedTimeProof,
+    r_time: &[K],
+    control_required: bool,
+) -> Result<crate::shard_proof_types::ShiftTimeSumcheckProof, PiCcsError> {
+    let control_idx = batched_time
+        .labels
+        .iter()
+        .position(|label| (*label as &[u8]) == b"control/next_pc_linear");
+    let idx = match (control_required, control_idx) {
+        (true, Some(i)) | (false, Some(i)) => i,
+        (true, None) => {
+            return Err(PiCcsError::ProtocolError(
+                "missing batched-time control/next_pc_linear label".into(),
+            ))
+        }
+        (false, None) => {
+            return Ok(crate::shard_proof_types::ShiftTimeSumcheckProof {
+                claimed_sum: K::ZERO,
+                round_polys: Vec::new(),
+                r_time: r_time.to_vec(),
+            })
+        }
+    };
+    let claimed_sum = *batched_time
+        .claimed_sums
+        .get(idx)
+        .ok_or_else(|| PiCcsError::ProtocolError(format!("missing batched-time claimed_sum at index {idx}")))?;
+    let round_polys = batched_time
+        .round_polys
+        .get(idx)
+        .cloned()
+        .ok_or_else(|| PiCcsError::ProtocolError(format!("missing batched-time rounds at index {idx}")))?;
+    Ok(crate::shard_proof_types::ShiftTimeSumcheckProof {
+        claimed_sum,
+        round_polys,
+        r_time: r_time.to_vec(),
+    })
+}
+
 pub(crate) fn fold_shard_prove_impl<L, MR, MB>(
     collect_val_lane_wits: bool,
     mode: FoldingMode,
@@ -25,14 +77,24 @@ pub(crate) fn fold_shard_prove_impl<L, MR, MB>(
     s_me: &CcsStructure<F>,
     steps: &[StepWitnessBundle<Cmt, F, K>],
     step_idx_offset: usize,
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     acc_wit_init: &[Mat<F>],
     l: &L,
     mixers: CommitMixers<MR, MB>,
     ob: Option<(&crate::output_binding::OutputBindingConfig, &[F])>,
     prover_ctx: Option<&ShardProverContext>,
     mut step_prove_ms_out: Option<&mut Vec<f64>>,
-) -> Result<(ShardProof, Vec<Mat<F>>, Vec<Mat<F>>), PiCcsError>
+    initial_prev_step: Option<&StepWitnessBundle<Cmt, F, K>>,
+    initial_prev_twist_decoded: Option<Vec<crate::memory_sidecar::memory::TwistDecodedColsSparse>>,
+) -> Result<
+    (
+        ShardProof,
+        Vec<Mat<F>>,
+        Vec<Mat<F>>,
+        Option<Vec<crate::memory_sidecar::memory::TwistDecodedColsSparse>>,
+    ),
+    PiCcsError,
+>
 where
     L: SModuleHomomorphism<F, Cmt> + Sync,
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
@@ -101,7 +163,7 @@ where
 
     let mut step_proofs = Vec::with_capacity(steps.len());
     let mut val_lane_wits: Vec<Mat<F>> = Vec::new();
-    let mut prev_twist_decoded: Option<Vec<crate::memory_sidecar::memory::TwistDecodedColsSparse>> = None;
+    let mut prev_twist_decoded = initial_prev_twist_decoded;
     let mut output_proof: Option<neo_memory::output_check::OutputBindingProof> = None;
 
     if ob.is_some() && steps.is_empty() {
@@ -191,6 +253,61 @@ where
         }
 
         let (mcs_inst, mcs_wit) = &step.mcs;
+        if step.time_columns.t > 0 && !step.time_columns.t.is_power_of_two() {
+            return Err(PiCcsError::InvalidInput(format!(
+                "prove/time_columns: time_t={} must be a power of two",
+                step.time_columns.t
+            )));
+        }
+        let route_steps = {
+            let inst_steps = step
+                .lut_instances
+                .iter()
+                .map(|(inst, _)| inst.steps)
+                .chain(step.mem_instances.iter().map(|(inst, _)| inst.steps))
+                .max()
+                .unwrap_or(0);
+            core::cmp::max(step.time_columns.t, inst_steps)
+        };
+        let route_domain = mcs_inst
+            .m_in
+            .checked_add(route_steps)
+            .ok_or_else(|| PiCcsError::InvalidInput("prove/route_a: route domain overflow".into()))?;
+        // Keep Route-A row challenge dimension aligned with Π_RLC/Π_DEC validators,
+        // which use at least one row bit even for n=1 domains.
+        let route_pow2 = route_domain.max(2).next_power_of_two();
+        let ell_t = route_pow2.trailing_zeros() as usize;
+        let time_declared_len = validate_time_active_mask_and_count(
+            step.time_columns.active_col.as_slice(),
+            step.time_columns.t,
+            "prove/time_columns",
+        )?;
+        let (time_cpu_commitments, time_mem_commitments) = commit_time_column_sets(
+            params,
+            step.time_columns.t,
+            &step.time_columns.cpu_cols,
+            &step.time_columns.mem_cols,
+            "prove/time_columns",
+        )?;
+        let expected_time_col_ids = time_cpu_commitments
+            .len()
+            .checked_add(time_mem_commitments.len())
+            .ok_or_else(|| PiCcsError::InvalidInput("time commitment count overflow".into()))?;
+        if step.time_columns.col_ids.len() != expected_time_col_ids {
+            return Err(PiCcsError::ProtocolError(format!(
+                "time column metadata mismatch: col_ids.len()={} != cpu_commitments+mem_commitments={expected_time_col_ids}",
+                step.time_columns.col_ids.len()
+            )));
+        }
+        for (idx, &col_id) in step.time_columns.col_ids.iter().enumerate() {
+            if col_id != idx {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "time column metadata mismatch: col_ids must be canonical contiguous ids (col_ids[{idx}]={col_id}, expected {idx})"
+                )));
+            }
+        }
+        let has_committed_time_cpu = step.time_columns.t > 0 && !time_cpu_commitments.is_empty();
+        let has_committed_time_mem = step.time_columns.t > 0 && !time_mem_commitments.is_empty();
 
         // k = accumulator.len() + 1
         let k = accumulator.len() + 1;
@@ -215,15 +332,24 @@ where
             &ccs_mat_digest,
         )?;
         utils::bind_me_inputs(tr, &accumulator)?;
+        bind_time_column_commitments(
+            tr,
+            step_idx,
+            step.time_columns.t,
+            time_declared_len,
+            &step.time_columns.col_ids,
+            &time_cpu_commitments,
+            &time_mem_commitments,
+        );
         let mut ch = utils::sample_challenges(tr, ell_d, ell)?;
         ch.beta_m = utils::sample_beta_m(tr, ell_m)?;
-        let ccs_initial_sum = claimed_initial_sum_from_inputs(&s, &ch, &accumulator);
+        let ccs_initial_sum = claimed_initial_sum_from_inputs_with_k_mcs(&s, &ch, 1, &accumulator);
         tr.append_fields(b"sumcheck/initial_sum", &ccs_initial_sum.as_coeffs());
 
         // Route A memory checks use a separate transcript-derived cycle point `r_cycle`
         // to form χ_{r_cycle}(t) weights inside their sum-check polynomials.
         let r_cycle: Vec<K> =
-            ts::sample_ext_point(tr, b"route_a/r_cycle", b"route_a/cycle/0", b"route_a/cycle/1", ell_n);
+            ts::sample_ext_point(tr, b"route_a/r_cycle", b"route_a/cycle/0", b"route_a/cycle/1", ell_t);
 
         // CCS oracle (engine-selected).
         //
@@ -285,16 +411,16 @@ where
         };
 
         let shout_pre = crate::memory_sidecar::memory::prove_shout_addr_pre_time(
-            tr, params, step, &cpu_bus, ell_n, &r_cycle, step_idx,
+            tr, params, step, &cpu_bus, ell_t, &r_cycle, step_idx,
         )?;
 
         let twist_pre =
-            crate::memory_sidecar::memory::prove_twist_addr_pre_time(tr, params, step, &cpu_bus, ell_n, &r_cycle)
+            crate::memory_sidecar::memory::prove_twist_addr_pre_time(tr, params, step, &cpu_bus, ell_t, &r_cycle)
                 .map_err(|e| PiCcsError::ProtocolError(format!("twist addr-pre failed at step_idx={step_idx}: {e}")))?;
         let twist_read_claims: Vec<K> = twist_pre.iter().map(|p| p.read_check_claim_sum).collect();
         let twist_write_claims: Vec<K> = twist_pre.iter().map(|p| p.write_check_claim_sum).collect();
         let mut mem_oracles = crate::memory_sidecar::memory::build_route_a_memory_oracles(
-            params, step, ell_n, &r_cycle, &shout_pre, &twist_pre,
+            params, step, ell_t, &r_cycle, &shout_pre, &twist_pre,
         )?;
 
         let (wb_time_claim_built, wp_time_claim_built) =
@@ -461,7 +587,7 @@ where
                 oracles.push(Box::new(oracle));
                 claimed_sum += claim;
             }
-            let oracle = crate::memory_sidecar::memory::SumRoundOracle::new(oracles);
+            let oracle = crate::memory_sidecar::memory::SumRoundOracle::new(oracles)?;
 
             ob_time_claim = Some(crate::memory_sidecar::route_a_time::ExtraBatchedTimeClaim {
                 oracle: Box::new(oracle),
@@ -472,15 +598,11 @@ where
 
         let crate::memory_sidecar::route_a_time::RouteABatchedTimeProverOutput {
             r_time,
-            per_claim_results,
             proof: batched_time,
         } = crate::memory_sidecar::route_a_time::prove_route_a_batched_time(
             tr,
             step_idx,
-            ell_n,
-            d_sc,
-            ccs_initial_sum,
-            &mut ccs_oracle,
+            ell_t,
             &mut mem_oracles,
             step,
             twist_read_claims,
@@ -501,17 +623,18 @@ where
             ob_time_claim,
         )?;
 
-        // Finish CCS Ajtai rounds alone, continuing from the CCS oracle state after ell_n folds.
-        let ccs_time_rounds = per_claim_results
-            .first()
-            .map(|r| r.round_polys.clone())
-            .unwrap_or_default();
+        // Run CCS row rounds independently from Route-A batching.
+        let mut ccs_time = RoundOraclePrefix::new(&mut ccs_oracle, ell_n);
+        let (ccs_time_rounds, ccs_time_chals) =
+            run_sumcheck_prover_ds(tr, b"ccs/time", step_idx, &mut ccs_time, ccs_initial_sum)?;
+        let mut ajtai_initial_sum = ccs_initial_sum;
+        for (round_poly, &r_i) in ccs_time_rounds.iter().zip(ccs_time_chals.iter()) {
+            ajtai_initial_sum = poly_eval_k(round_poly, r_i);
+        }
+        let ccs_time_rounds_meta = ccs_time_rounds.clone();
+        let ccs_time_chals_meta = ccs_time_chals.clone();
         let mut sumcheck_rounds = ccs_time_rounds;
-        let mut sumcheck_chals = r_time.clone();
-        let ajtai_initial_sum = per_claim_results
-            .first()
-            .map(|r| r.final_value)
-            .unwrap_or(ccs_initial_sum);
+        let mut sumcheck_chals = ccs_time_chals;
 
         let mut ccs_ajtai = RoundOraclePrefix::new(&mut ccs_oracle, ell_d);
         let (ajtai_rounds, ajtai_chals) =
@@ -562,7 +685,7 @@ where
                 core::slice::from_ref(mcs_wit),
                 &accumulator,
                 &accumulator_wit,
-                &r_time,
+                &ccs_time_chals_meta,
                 s_col,
                 ell_d,
                 fold_digest,
@@ -574,11 +697,12 @@ where
         drop(ccs_oracle);
 
         let mut trace_linkage_t_len: Option<usize> = None;
+        let mut named_trace_col_ids: Vec<usize> = Vec::new();
+        let core_t = s.t();
 
         // Shared CPU bus: append "implicit openings" for all bus columns without materializing
         // bus copyout matrices into the CCS.
         if cpu_bus.bus_cols > 0 {
-            let core_t = s.t();
             if ccs_out.len() != 1 + accumulator_wit.len() {
                 return Err(PiCcsError::ProtocolError(format!(
                     "CCS output count mismatch for bus openings (ccs_out.len()={}, expected {})",
@@ -587,28 +711,59 @@ where
                 )));
             }
 
-            crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
-                params,
-                &cpu_bus,
-                core_t,
-                &mcs_wit.Z,
-                &mut ccs_out[0],
-            )?;
+            let can_use_time_mem_cols =
+                step.time_columns.t == cpu_bus.chunk_size && step.time_columns.mem_cols.len() == cpu_bus.bus_cols;
+            if !can_use_time_mem_cols {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "shared bus openings require canonical time mem columns (time_t={}, mem_cols={}, chunk_size={}, bus_cols={})",
+                    step.time_columns.t,
+                    step.time_columns.mem_cols.len(),
+                    cpu_bus.chunk_size,
+                    cpu_bus.bus_cols
+                )));
+            }
+            let out0_supports_bus_point =
+                crate::memory_sidecar::cpu_bus::point_covers_bus_time_rows(&cpu_bus, ccs_out[0].r.as_slice())?;
+            if out0_supports_bus_point {
+                crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance_from_time_columns(
+                    params,
+                    &cpu_bus,
+                    core_t,
+                    &step.time_columns.mem_cols,
+                    &mut ccs_out[0],
+                )?;
+            } else {
+                crate::memory_sidecar::cpu_bus::append_zero_bus_openings_to_me_instance(
+                    params,
+                    &cpu_bus,
+                    core_t,
+                    &mut ccs_out[0],
+                )?;
+            }
             for (out, Z) in ccs_out.iter_mut().skip(1).zip(accumulator_wit.iter()) {
-                crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(params, &cpu_bus, core_t, Z, out)?;
+                let out_supports_bus_point =
+                    crate::memory_sidecar::cpu_bus::point_covers_bus_time_rows(&cpu_bus, out.r.as_slice())?;
+                if Z.cols() == cpu_bus.m && out_supports_bus_point {
+                    crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
+                        params, &cpu_bus, core_t, Z, out,
+                    )?;
+                } else {
+                    crate::memory_sidecar::cpu_bus::append_zero_bus_openings_to_me_instance(
+                        params, &cpu_bus, core_t, out,
+                    )?;
+                }
             }
         }
 
         // For RV32 trace wiring CCS, append time-combined openings for trace columns needed to
         // link Twist/Shout sidecars at r_time. In shared-bus mode this is appended after bus openings.
-        if (!step.mem_instances.is_empty() || !step.lut_instances.is_empty()) && mcs_inst.m_in == 5 {
+        if crate::memory_sidecar::memory::wb_wp_required_for_step_witness(step) && mcs_inst.m_in == 5 {
             // Infer that the CPU witness is the RV32 trace column-major layout:
             // z = [x (m_in) | trace_cols * t_len]
             let m_in = mcs_inst.m_in;
-            let t_len = step
-                .mem_instances
-                .first()
-                .map(|(inst, _wit)| inst.steps)
+            let t_len = (step.time_columns.t > 0 && !step.time_columns.cpu_cols.is_empty())
+                .then_some(step.time_columns.t)
+                .or_else(|| step.mem_instances.first().map(|(inst, _wit)| inst.steps))
                 .or_else(|| {
                     // Shout event-table instances may have `steps != t_len`; prefer a non-event-table
                     // instance if present, otherwise fall back to inferring from the trace layout.
@@ -642,19 +797,6 @@ where
             }
 
             let trace = Rv32TraceLayout::new();
-            let trace_len = trace
-                .cols
-                .checked_mul(t_len)
-                .ok_or_else(|| PiCcsError::InvalidInput("trace cols * t_len overflow".into()))?;
-            let expected_m = m_in
-                .checked_add(trace_len)
-                .ok_or_else(|| PiCcsError::InvalidInput("m_in + trace_len overflow".into()))?;
-            if s.m < expected_m {
-                return Err(PiCcsError::InvalidInput(format!(
-                    "trace linkage expects m >= m_in + trace.cols*t_len (m={}; min_m={expected_m} for t_len={t_len}, trace_cols={})",
-                    s.m, trace.cols
-                )));
-            }
 
             let trace_cols_to_open_dense: Vec<usize> = vec![
                 trace.active,
@@ -674,87 +816,69 @@ where
             let trace_cols_to_open_shout: Vec<usize> = vec![
                 trace.shout_has_lookup,
                 trace.shout_val,
-                trace.shout_lhs,
-                trace.shout_rhs,
+                trace.shout_link_lhs,
+                trace.shout_link_rhs,
+                trace.shout_add_sub_key,
             ];
             let trace_cols_to_open_all: Vec<usize> = trace_cols_to_open_dense
                 .iter()
                 .chain(trace_cols_to_open_shout.iter())
                 .copied()
                 .collect();
-            let core_t = s.t();
             let trace_open_base = core_t + cpu_bus.bus_cols;
-            let col_base = m_in; // trace_base in the RV32 trace layout
+            let can_use_time_cpu_cols = step.time_columns.t == t_len
+                && !step.time_columns.cpu_cols.is_empty()
+                && trace_cols_to_open_all
+                    .iter()
+                    .all(|&col_id| col_id < step.time_columns.cpu_cols.len());
+            if !can_use_time_cpu_cols {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "route-a trace openings require canonical time CPU columns (time_t={}, cpu_cols={}, expected_t={t_len}, max_trace_col={})",
+                    step.time_columns.t,
+                    step.time_columns.cpu_cols.len(),
+                    trace_cols_to_open_all.iter().copied().max().unwrap_or(0)
+                )));
+            }
 
             // Event-table style micro-optimization: Shout trace columns are constrained to be 0
             // whenever `shout_has_lookup == 0`, so we can compute their openings by summing only
             // over the active lookup rows.
-            let active_shout_js: Vec<usize> = {
-                let d = neo_math::D;
-                let mut out: Vec<usize> = Vec::new();
-                let col_offset = trace
-                    .shout_has_lookup
-                    .checked_mul(t_len)
-                    .ok_or_else(|| PiCcsError::InvalidInput("trace col_id * t_len overflow".into()))?;
-                for j in 0..t_len {
-                    let z_idx = col_base
-                        .checked_add(col_offset)
-                        .and_then(|x| x.checked_add(j))
-                        .ok_or_else(|| PiCcsError::InvalidInput("trace z index overflow".into()))?;
-                    if z_idx >= mcs_wit.Z.cols() {
-                        return Err(PiCcsError::InvalidInput(format!(
-                            "trace openings: z_idx out of range (z_idx={z_idx}, m={})",
-                            mcs_wit.Z.cols()
-                        )));
-                    }
+            let active_shout_js: Vec<usize> = step.time_columns.cpu_cols[trace.shout_has_lookup]
+                .iter()
+                .enumerate()
+                .filter_map(|(j, v)| (*v != F::ZERO).then_some(j))
+                .collect();
 
-                    let mut any = false;
-                    for rho in 0..d {
-                        if mcs_wit.Z[(rho, z_idx)] != F::ZERO {
-                            any = true;
-                            break;
-                        }
-                    }
-                    if any {
-                        out.push(j);
-                    }
-                }
-                out
-            };
-
-            crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
+            crate::memory_sidecar::cpu_bus::append_time_columns_openings_to_me_instance(
                 params,
                 m_in,
                 t_len,
-                col_base,
+                &step.time_columns.cpu_cols,
                 &trace_cols_to_open_dense,
                 trace_open_base,
-                &mcs_wit.Z,
                 &mut ccs_out[0],
             )?;
-            crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance_at_js(
+            crate::memory_sidecar::cpu_bus::append_time_columns_openings_to_me_instance_at_js(
                 params,
                 m_in,
                 t_len,
-                col_base,
+                &step.time_columns.cpu_cols,
                 &trace_cols_to_open_shout,
                 trace_open_base + trace_cols_to_open_dense.len(),
-                &mcs_wit.Z,
                 &mut ccs_out[0],
                 &active_shout_js,
             )?;
+
             for (out, Z) in ccs_out.iter_mut().skip(1).zip(accumulator_wit.iter()) {
-                crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
+                let _ = Z; // only child 0 carries canonical non-physical trace openings.
+                crate::memory_sidecar::cpu_bus::append_zero_time_openings_to_me_instance(
                     params,
-                    m_in,
-                    t_len,
-                    col_base,
-                    &trace_cols_to_open_all,
+                    trace_cols_to_open_all.len(),
                     trace_open_base,
-                    Z,
                     out,
                 )?;
             }
+            named_trace_col_ids.extend(trace_cols_to_open_all.iter().copied());
             trace_linkage_t_len = Some(t_len);
         }
 
@@ -805,7 +929,11 @@ where
         outs_Z.extend(accumulator_wit.iter());
 
         // Memory sidecar: emit ME claims at the shared r_time (no fixed-challenge sumcheck).
-        let prev_step = (idx > 0).then(|| &steps[idx - 1]);
+        let prev_step = if idx > 0 {
+            Some(&steps[idx - 1])
+        } else {
+            initial_prev_step
+        };
         let prev_twist_decoded_ref = prev_twist_decoded.as_deref();
         let mut mem_proof = crate::memory_sidecar::memory::finalize_route_a_memory_prover(
             tr,
@@ -826,16 +954,16 @@ where
 
         // Normalize ME claim shapes for per-claim folding lanes.
         for me in mem_proof.val_me_claims.iter_mut() {
-            let t = me.y.len();
-            normalize_me_claims(core::slice::from_mut(me), ell_n, ell_d, t)?;
+            let t = me.y_ring.len();
+            normalize_me_claims(core::slice::from_mut(me), ell_t, ell_d, t)?;
         }
         for me in mem_proof.wb_me_claims.iter_mut() {
-            let t = me.y.len();
-            normalize_me_claims(core::slice::from_mut(me), ell_n, ell_d, t)?;
+            let t = me.y_ring.len();
+            normalize_me_claims(core::slice::from_mut(me), ell_t, ell_d, t)?;
         }
         for me in mem_proof.wp_me_claims.iter_mut() {
-            let t = me.y.len();
-            normalize_me_claims(core::slice::from_mut(me), ell_n, ell_d, t)?;
+            let t = me.y_ring.len();
+            normalize_me_claims(core::slice::from_mut(me), ell_t, ell_d, t)?;
         }
 
         validate_me_batch_invariants(&ccs_out, "prove step ccs outputs")?;
@@ -911,10 +1039,15 @@ where
                 // val lane so we don't pay an extra full split+commit.
                 if claim_idx == 0 {
                     if let Some(child_cs) = shared_val_lane_child_cs.as_ref() {
+                        let n_lane = 1usize
+                            .checked_shl(me.r.len() as u32)
+                            .ok_or_else(|| PiCcsError::InvalidInput("val-lane r dimension overflow".into()))?;
+                        let mut s_lane = s.clone();
+                        s_lane.n = n_lane;
                         bind_rlc_inputs(tr, RlcLane::Val, step_idx, core::slice::from_ref(me))?;
-                        let rlc_rhos = ccs::sample_rot_rhos_n(tr, params, &ring, 1)?;
+                        let rlc_rhos = ccs::sample_rot_rhos_n_typed(tr, params, &ring, 1)?;
                         let mut rlc_parent = ccs::rlc_public(
-                            &s,
+                            &s_lane,
                             params,
                             &rlc_rhos,
                             core::slice::from_ref(me),
@@ -923,7 +1056,7 @@ where
                         )?;
                         let (mut dec_children, ok_y, ok_x, ok_c) = ccs::dec_children_with_commit_cached(
                             mode.clone(),
-                            &s,
+                            &s_lane,
                             params,
                             &rlc_parent,
                             &Z_split,
@@ -934,23 +1067,126 @@ where
                         );
                         if !(ok_y && ok_x && ok_c) {
                             return Err(PiCcsError::ProtocolError(format!(
-                                "DEC(val) public check failed at step {} (y={}, X={}, c={})",
-                                step_idx, ok_y, ok_x, ok_c
+                                "DEC(val fast-path) public check failed at step {} claim_idx={} (y={}, X={}, c={}, me.r.len()={}, parent.r.len()={}, s_lane.n={})",
+                                step_idx,
+                                claim_idx,
+                                ok_y,
+                                ok_x,
+                                ok_c,
+                                me.r.len(),
+                                rlc_parent.r.len(),
+                                s_lane.n
                             )));
                         }
                         if cpu_bus.bus_cols > 0 {
                             let core_t = s.t();
-                            crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
-                                params,
+                            let want_len = core_t
+                                .checked_add(cpu_bus.bus_cols)
+                                .ok_or_else(|| PiCcsError::InvalidInput("core_t + bus_cols overflow".into()))?;
+                            let parent_has_prefilled_bus =
+                                rlc_parent.y_ring.len() > core_t || rlc_parent.ct.len() > core_t;
+                            let parent_supports_bus_point = crate::memory_sidecar::cpu_bus::point_covers_bus_time_rows(
                                 &cpu_bus,
-                                core_t,
-                                wit,
-                                &mut rlc_parent,
+                                rlc_parent.r.as_slice(),
                             )?;
-                            for (child, zi) in dec_children.iter_mut().zip(Z_split.iter()) {
-                                crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
-                                    params, &cpu_bus, core_t, zi, child,
+                            if !parent_has_prefilled_bus && !parent_supports_bus_point {
+                                crate::memory_sidecar::cpu_bus::append_zero_bus_openings_to_me_instance(
+                                    params,
+                                    &cpu_bus,
+                                    core_t,
+                                    &mut rlc_parent,
                                 )?;
+                                for child in dec_children.iter_mut() {
+                                    crate::memory_sidecar::cpu_bus::append_zero_bus_openings_to_me_instance(
+                                        params, &cpu_bus, core_t, child,
+                                    )?;
+                                }
+                            } else if wit.cols() == cpu_bus.m && !parent_has_prefilled_bus {
+                                crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
+                                    params,
+                                    &cpu_bus,
+                                    core_t,
+                                    wit,
+                                    &mut rlc_parent,
+                                )?;
+                                for (child, zi) in dec_children.iter_mut().zip(Z_split.iter()) {
+                                    let child_supports_bus_point =
+                                        crate::memory_sidecar::cpu_bus::point_covers_bus_time_rows(
+                                            &cpu_bus,
+                                            child.r.as_slice(),
+                                        )?;
+                                    if child_supports_bus_point {
+                                        crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
+                                            params, &cpu_bus, core_t, zi, child,
+                                        )?;
+                                    } else {
+                                        crate::memory_sidecar::cpu_bus::append_zero_bus_openings_to_me_instance(
+                                            params, &cpu_bus, core_t, child,
+                                        )?;
+                                    }
+                                }
+                            } else {
+                                if rlc_parent.y_ring.len() == core_t && rlc_parent.ct.len() == core_t {
+                                    crate::memory_sidecar::cpu_bus::append_zero_bus_openings_to_me_instance(
+                                        params,
+                                        &cpu_bus,
+                                        core_t,
+                                        &mut rlc_parent,
+                                    )?;
+                                } else if rlc_parent.y_ring.len() != want_len || rlc_parent.ct.len() != want_len {
+                                    return Err(PiCcsError::ProtocolError(format!(
+                                        "step {}: val-lane non-physical bus path expects exact parent y/ct len {} (got y.len()={}, ct.len()={})",
+                                        step_idx,
+                                        want_len,
+                                        rlc_parent.y_ring.len(),
+                                        rlc_parent.ct.len()
+                                    )));
+                                }
+                                let y_pad = (params.d as usize).next_power_of_two();
+                                for (child_idx, child) in dec_children.iter_mut().enumerate() {
+                                    if child.y_ring.len() < core_t || child.ct.len() < core_t {
+                                        return Err(PiCcsError::ProtocolError(format!(
+                                            "step {}: val-lane non-physical bus path expects child y/ct len >= core_t={} (got y.len()={}, ct.len()={})",
+                                            step_idx,
+                                            core_t,
+                                            child.y_ring.len(),
+                                            child.ct.len()
+                                        )));
+                                    }
+                                    child.y_ring.truncate(core_t);
+                                    child.ct.truncate(core_t);
+                                    // As in the main lane, propagated non-physical bus openings are
+                                    // metadata-only: carry them on child 0 and keep sibling children zero.
+                                    for col_id in 0..cpu_bus.bus_cols {
+                                        if child_idx == 0 {
+                                            child
+                                                .y_ring
+                                                .push(rlc_parent.y_ring[core_t + col_id].clone());
+                                            child.ct.push(rlc_parent.ct[core_t + col_id]);
+                                        } else {
+                                            child.y_ring.push(vec![K::ZERO; y_pad]);
+                                            child.ct.push(K::ZERO);
+                                        }
+                                    }
+                                    if child_idx > 0 {
+                                        debug_assert!(
+                                            child.y_ring[core_t..]
+                                                .iter()
+                                                .all(|row| row.iter().all(|v| *v == K::ZERO))
+                                                && child.ct[core_t..].iter().all(|v| *v == K::ZERO),
+                                            "non-primary val-lane DEC children must keep propagated metadata openings at zero"
+                                        );
+                                    }
+                                    if child.y_ring.len() != want_len || child.ct.len() != want_len {
+                                        return Err(PiCcsError::ProtocolError(format!(
+                                            "step {}: val-lane child suffix-length drift (child y/ct={}/{}, expected={})",
+                                            step_idx,
+                                            child.y_ring.len(),
+                                            child.ct.len(),
+                                            want_len
+                                        )));
+                                    }
+                                }
                             }
                         }
                         if collect_val_lane_wits {
@@ -997,54 +1233,30 @@ where
         let mut wb_wp_dec_wits: Option<Vec<Mat<F>>> = None;
         let mut wb_wp_child_cs: Option<Vec<Cmt>> = None;
         if !mem_proof.wb_me_claims.is_empty() || !mem_proof.wp_me_claims.is_empty() {
-            let (dec_wits, digit_nonzero) = ccs::split_b_matrix_k_with_nonzero_flags(&mcs_wit.Z, k_dec, params.b)?;
+            let k_dec_wb_wp = core::cmp::max(k_dec, required_dec_digits_for_matrix(params, &mcs_wit.Z)?);
+            let (dec_wits, digit_nonzero) =
+                ccs::split_b_matrix_k_with_nonzero_flags(&mcs_wit.Z, k_dec_wb_wp, params.b)?;
             let zero_c = Cmt::zeros(mcs_inst.c.d, mcs_inst.c.kappa);
-            let child_cs: Vec<Cmt> = {
-                #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
-                {
-                    const PAR_CHILD_COMMIT_THRESHOLD: usize = 32;
-                    let use_parallel = dec_wits.len() >= PAR_CHILD_COMMIT_THRESHOLD && rayon::current_num_threads() > 1;
-                    if use_parallel {
-                        dec_wits
-                            .par_iter()
-                            .enumerate()
-                            .map(|(idx, Zi)| {
-                                if digit_nonzero[idx] {
-                                    l.commit(Zi)
-                                } else {
-                                    zero_c.clone()
-                                }
-                            })
-                            .collect()
-                    } else {
-                        dec_wits
-                            .iter()
-                            .enumerate()
-                            .map(|(idx, Zi)| {
-                                if digit_nonzero[idx] {
-                                    l.commit(Zi)
-                                } else {
-                                    zero_c.clone()
-                                }
-                            })
-                            .collect()
-                    }
+            let mut child_cs: Vec<Cmt> = vec![zero_c.clone(); dec_wits.len()];
+            let nonzero_idx: Vec<usize> = digit_nonzero
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, &nz)| nz.then_some(idx))
+                .collect();
+            if !nonzero_idx.is_empty() {
+                let mats: Vec<&Mat<F>> = nonzero_idx.iter().map(|&idx| &dec_wits[idx]).collect();
+                let commits = l.commit_many(&mats);
+                if commits.len() != mats.len() {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "WB/WP DEC commit_many returned {} commitments for {} matrices",
+                        commits.len(),
+                        mats.len()
+                    )));
                 }
-                #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
-                {
-                    dec_wits
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, Zi)| {
-                            if digit_nonzero[idx] {
-                                l.commit(Zi)
-                            } else {
-                                zero_c.clone()
-                            }
-                        })
-                        .collect()
+                for (pos, &idx) in nonzero_idx.iter().enumerate() {
+                    child_cs[idx] = commits[pos].clone();
                 }
-            };
+            }
             wb_wp_dec_wits = Some(dec_wits);
             wb_wp_child_cs = Some(child_cs);
         }
@@ -1053,10 +1265,8 @@ where
         let mut wb_fold: Vec<RlcDecProof> = Vec::new();
         if !mem_proof.wb_me_claims.is_empty() {
             let trace = Rv32TraceLayout::new();
-            let t_len = crate::memory_sidecar::memory::infer_rv32_trace_t_len_for_wb_wp(step, &trace)?;
             let wb_cols = crate::memory_sidecar::memory::rv32_trace_wb_columns(&trace);
             let core_t = s.t();
-            let m_in = mcs_inst.m_in;
             let dec_wits = wb_wp_dec_wits
                 .as_ref()
                 .ok_or_else(|| PiCcsError::ProtocolError("WB fold missing shared DEC witnesses".into()))?;
@@ -1065,11 +1275,16 @@ where
                 .ok_or_else(|| PiCcsError::ProtocolError("WB fold missing shared DEC commitments".into()))?;
             tr.append_message(b"fold/wb_lane_start", &(step_idx as u64).to_le_bytes());
             for (claim_idx, me) in mem_proof.wb_me_claims.iter().enumerate() {
+                let n_lane = 1usize
+                    .checked_shl(me.r.len() as u32)
+                    .ok_or_else(|| PiCcsError::InvalidInput("wb-lane r dimension overflow".into()))?;
+                let mut s_lane = s.clone();
+                s_lane.n = n_lane;
                 tr.append_message(b"fold/wb_lane_claim_idx", &(claim_idx as u64).to_le_bytes());
                 bind_rlc_inputs(tr, RlcLane::Val, step_idx, core::slice::from_ref(me))?;
-                let rlc_rhos = ccs::sample_rot_rhos_n(tr, params, &ring, 1)?;
+                let rlc_rhos = ccs::sample_rot_rhos_n_typed(tr, params, &ring, 1)?;
                 let rlc_parent = ccs::rlc_public(
-                    &s,
+                    &s_lane,
                     params,
                     &rlc_rhos,
                     core::slice::from_ref(me),
@@ -1078,7 +1293,7 @@ where
                 )?;
                 let (mut dec_children, ok_y, ok_x, ok_c) = ccs::dec_children_with_commit_cached(
                     mode.clone(),
-                    &s,
+                    &s_lane,
                     params,
                     &rlc_parent,
                     dec_wits,
@@ -1089,8 +1304,15 @@ where
                 );
                 if !(ok_y && ok_x && ok_c) {
                     return Err(PiCcsError::ProtocolError(format!(
-                        "DEC(val) public check failed at step {} (y={}, X={}, c={})",
-                        step_idx, ok_y, ok_x, ok_c
+                        "DEC(wb lane) public check failed at step {} claim_idx={} (y={}, X={}, c={}, me.r.len()={}, parent.r.len()={}, s_lane.n={})",
+                        step_idx,
+                        claim_idx,
+                        ok_y,
+                        ok_x,
+                        ok_c,
+                        me.r.len(),
+                        rlc_parent.r.len(),
+                        s_lane.n
                     )));
                 }
                 if dec_children.len() != dec_wits.len() {
@@ -1101,10 +1323,51 @@ where
                         dec_wits.len()
                     )));
                 }
-                for (child, zi) in dec_children.iter_mut().zip(dec_wits.iter()) {
-                    crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
-                        params, m_in, t_len, m_in, &wb_cols, core_t, zi, child,
-                    )?;
+                let want_len = core_t
+                    .checked_add(wb_cols.len())
+                    .ok_or_else(|| PiCcsError::InvalidInput("core_t + wb_cols overflow".into()))?;
+                if rlc_parent.y_ring.len() != want_len || rlc_parent.ct.len() != want_len {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: WB fold expects exact parent y/ct len {} (got y.len()={}, ct.len()={})",
+                        step_idx,
+                        want_len,
+                        rlc_parent.y_ring.len(),
+                        rlc_parent.ct.len()
+                    )));
+                }
+                let y_pad = (params.d as usize).next_power_of_two();
+                for (child_idx, child) in dec_children.iter_mut().enumerate() {
+                    if child.y_ring.len() < core_t || child.ct.len() < core_t {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "step {}: WB fold expects child y/ct len >= core_t={} (got y.len()={}, ct.len()={})",
+                            step_idx,
+                            core_t,
+                            child.y_ring.len(),
+                            child.ct.len()
+                        )));
+                    }
+                    child.y_ring.truncate(core_t);
+                    child.ct.truncate(core_t);
+                    for open_idx in 0..wb_cols.len() {
+                        if child_idx == 0 {
+                            child
+                                .y_ring
+                                .push(rlc_parent.y_ring[core_t + open_idx].clone());
+                            child.ct.push(rlc_parent.ct[core_t + open_idx]);
+                        } else {
+                            child.y_ring.push(vec![K::ZERO; y_pad]);
+                            child.ct.push(K::ZERO);
+                        }
+                    }
+                    if child.y_ring.len() != want_len || child.ct.len() != want_len {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "step {}: WB fold child suffix-length drift (child y/ct={}/{}, expected={})",
+                            step_idx,
+                            child.y_ring.len(),
+                            child.ct.len(),
+                            want_len
+                        )));
+                    }
                 }
                 if collect_val_lane_wits {
                     val_lane_wits.extend(dec_wits.iter().cloned());
@@ -1138,17 +1401,26 @@ where
                         "W2(shared): bus layout shout lane count drift in WP fold".into(),
                     ));
                 }
-                let bus_base_delta = bus
-                    .bus_base
-                    .checked_sub(mcs_inst.m_in)
-                    .ok_or_else(|| PiCcsError::ProtocolError("W2(shared): bus_base underflow in WP fold".into()))?;
-                if bus_base_delta % t_len != 0 {
+                if step.time_columns.t != t_len || step.time_columns.cpu_cols.is_empty() {
                     return Err(PiCcsError::ProtocolError(format!(
-                        "W2(shared): bus_base alignment mismatch in WP fold (bus_base_delta={}, t_len={t_len})",
-                        bus_base_delta
+                        "W2(shared): canonical time CPU columns required in WP fold (time_t={}, cpu_cols={}, expected_t={t_len})",
+                        step.time_columns.t,
+                        step.time_columns.cpu_cols.len()
                     )));
                 }
-                let bus_col_offset = bus_base_delta / t_len;
+                let cpu_cols_len = step.time_columns.cpu_cols.len();
+                let mem_cols_len = step.time_columns.mem_cols.len();
+                let expected_logical_cols = cpu_cols_len.checked_add(mem_cols_len).ok_or_else(|| {
+                    PiCcsError::InvalidInput("W2(shared): cpu_cols + mem_cols overflow in WP fold".into())
+                })?;
+                if step.time_columns.col_ids.len() != expected_logical_cols {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "W2(shared): time column id table mismatch in WP fold (col_ids={}, cpu_cols={}, mem_cols={})",
+                        step.time_columns.col_ids.len(),
+                        cpu_cols_len,
+                        mem_cols_len
+                    )));
+                }
                 for &lut_idx in decode_lut_indices.iter() {
                     let inst_cols = bus.shout_cols.get(lut_idx).ok_or_else(|| {
                         PiCcsError::ProtocolError(
@@ -1160,7 +1432,25 @@ where
                             "W2(shared): expected one shout lane for decode lookup table in WP fold".into(),
                         )
                     })?;
-                    wp_open_cols.push(bus_col_offset + lane0.primary_val());
+                    let logical_idx = cpu_cols_len
+                        .checked_add(lane0.primary_val())
+                        .ok_or_else(|| {
+                            PiCcsError::InvalidInput(
+                                "W2(shared): cpu_cols + lane primary value overflow in WP fold".into(),
+                            )
+                        })?;
+                    let logical_col = step
+                        .time_columns
+                        .col_ids
+                        .get(logical_idx)
+                        .copied()
+                        .ok_or_else(|| {
+                            PiCcsError::ProtocolError(format!(
+                                "W2(shared): missing logical id for mem local col {} in WP fold",
+                                lane0.primary_val()
+                            ))
+                        })?;
+                    wp_open_cols.push(logical_col);
                 }
             }
             if width_required {
@@ -1169,7 +1459,6 @@ where
                 )?);
             }
             let core_t = s.t();
-            let m_in = mcs_inst.m_in;
             let dec_wits = wb_wp_dec_wits
                 .as_ref()
                 .ok_or_else(|| PiCcsError::ProtocolError("WP fold missing shared DEC witnesses".into()))?;
@@ -1178,11 +1467,16 @@ where
                 .ok_or_else(|| PiCcsError::ProtocolError("WP fold missing shared DEC commitments".into()))?;
             tr.append_message(b"fold/wp_lane_start", &(step_idx as u64).to_le_bytes());
             for (claim_idx, me) in mem_proof.wp_me_claims.iter().enumerate() {
+                let n_lane = 1usize
+                    .checked_shl(me.r.len() as u32)
+                    .ok_or_else(|| PiCcsError::InvalidInput("wp-lane r dimension overflow".into()))?;
+                let mut s_lane = s.clone();
+                s_lane.n = n_lane;
                 tr.append_message(b"fold/wp_lane_claim_idx", &(claim_idx as u64).to_le_bytes());
                 bind_rlc_inputs(tr, RlcLane::Val, step_idx, core::slice::from_ref(me))?;
-                let rlc_rhos = ccs::sample_rot_rhos_n(tr, params, &ring, 1)?;
+                let rlc_rhos = ccs::sample_rot_rhos_n_typed(tr, params, &ring, 1)?;
                 let rlc_parent = ccs::rlc_public(
-                    &s,
+                    &s_lane,
                     params,
                     &rlc_rhos,
                     core::slice::from_ref(me),
@@ -1191,7 +1485,7 @@ where
                 )?;
                 let (mut dec_children, ok_y, ok_x, ok_c) = ccs::dec_children_with_commit_cached(
                     mode.clone(),
-                    &s,
+                    &s_lane,
                     params,
                     &rlc_parent,
                     dec_wits,
@@ -1202,8 +1496,15 @@ where
                 );
                 if !(ok_y && ok_x && ok_c) {
                     return Err(PiCcsError::ProtocolError(format!(
-                        "DEC(val) public check failed at step {} (y={}, X={}, c={})",
-                        step_idx, ok_y, ok_x, ok_c
+                        "DEC(wp lane) public check failed at step {} claim_idx={} (y={}, X={}, c={}, me.r.len()={}, parent.r.len()={}, s_lane.n={})",
+                        step_idx,
+                        claim_idx,
+                        ok_y,
+                        ok_x,
+                        ok_c,
+                        me.r.len(),
+                        rlc_parent.r.len(),
+                        s_lane.n
                     )));
                 }
                 if dec_children.len() != dec_wits.len() {
@@ -1214,17 +1515,51 @@ where
                         dec_wits.len()
                     )));
                 }
-                for (child, zi) in dec_children.iter_mut().zip(dec_wits.iter()) {
-                    crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
-                        params,
-                        m_in,
-                        t_len,
-                        m_in,
-                        &wp_open_cols,
-                        core_t,
-                        zi,
-                        child,
-                    )?;
+                let want_len = core_t
+                    .checked_add(wp_open_cols.len())
+                    .ok_or_else(|| PiCcsError::InvalidInput("core_t + wp_open_cols overflow".into()))?;
+                if rlc_parent.y_ring.len() != want_len || rlc_parent.ct.len() != want_len {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: WP fold expects exact parent y/ct len {} (got y.len()={}, ct.len()={})",
+                        step_idx,
+                        want_len,
+                        rlc_parent.y_ring.len(),
+                        rlc_parent.ct.len()
+                    )));
+                }
+                let y_pad = (params.d as usize).next_power_of_two();
+                for (child_idx, child) in dec_children.iter_mut().enumerate() {
+                    if child.y_ring.len() < core_t || child.ct.len() < core_t {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "step {}: WP fold expects child y/ct len >= core_t={} (got y.len()={}, ct.len()={})",
+                            step_idx,
+                            core_t,
+                            child.y_ring.len(),
+                            child.ct.len()
+                        )));
+                    }
+                    child.y_ring.truncate(core_t);
+                    child.ct.truncate(core_t);
+                    for open_idx in 0..wp_open_cols.len() {
+                        if child_idx == 0 {
+                            child
+                                .y_ring
+                                .push(rlc_parent.y_ring[core_t + open_idx].clone());
+                            child.ct.push(rlc_parent.ct[core_t + open_idx]);
+                        } else {
+                            child.y_ring.push(vec![K::ZERO; y_pad]);
+                            child.ct.push(K::ZERO);
+                        }
+                    }
+                    if child.y_ring.len() != want_len || child.ct.len() != want_len {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "step {}: WP fold child suffix-length drift (child y/ct={}/{}, expected={})",
+                            step_idx,
+                            child.y_ring.len(),
+                            child.ct.len(),
+                            want_len
+                        )));
+                    }
                 }
                 if collect_val_lane_wits {
                     val_lane_wits.extend(dec_wits.iter().cloned());
@@ -1240,6 +1575,478 @@ where
         accumulator = children.clone();
         accumulator_wit = if want_main_wits { Z_split } else { Vec::new() };
 
+        let fold_openings = {
+            let mut out = Vec::new();
+            if cpu_bus.bus_cols > 0 {
+                let cpu_cols_len = step.time_columns.cpu_cols.len();
+                let mem_cols_len = step.time_columns.mem_cols.len();
+                let expected_logical_cols = cpu_cols_len.checked_add(mem_cols_len).ok_or_else(|| {
+                    PiCcsError::InvalidInput("named openings bus: cpu_cols + mem_cols overflow".into())
+                })?;
+                let has_logical_bus_ids =
+                    mem_cols_len == cpu_bus.bus_cols && step.time_columns.col_ids.len() == expected_logical_cols;
+                if !has_logical_bus_ids {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "named openings bus: canonical committed mode requires logical bus ids (col_ids={}, cpu_cols={}, mem_cols={}, bus_cols={})",
+                        step.time_columns.col_ids.len(),
+                        cpu_cols_len,
+                        mem_cols_len,
+                        cpu_bus.bus_cols
+                    )));
+                }
+                let col_ids: Vec<usize> = step.time_columns.col_ids[cpu_cols_len..].to_vec();
+                let can_use_time_mem_cols =
+                    step.time_columns.t == cpu_bus.chunk_size && step.time_columns.mem_cols.len() == cpu_bus.bus_cols;
+                if !can_use_time_mem_cols {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "named openings bus: canonical time mem columns are required (time_t={}, mem_cols={}, expected chunk_size={}, bus_cols={})",
+                        step.time_columns.t,
+                        step.time_columns.mem_cols.len(),
+                        cpu_bus.chunk_size,
+                        cpu_bus.bus_cols
+                    )));
+                }
+                if !has_committed_time_mem {
+                    return Err(PiCcsError::ProtocolError(
+                        "named openings bus: canonical time-column path requires committed time mem columns".into(),
+                    ));
+                }
+                let open_map = crate::memory_sidecar::cpu_bus::shared_bus_openings_from_time_columns_at_point(
+                    &cpu_bus,
+                    &step.time_columns.mem_cols,
+                    &r_time,
+                    "named openings bus",
+                )?;
+                let mut evals = Vec::with_capacity(col_ids.len());
+                for (mem_local_col, _) in col_ids.iter().enumerate() {
+                    let v = open_map.get(&mem_local_col).copied().ok_or_else(|| {
+                        PiCcsError::ProtocolError(format!(
+                            "named openings bus: missing mem local col_id={mem_local_col}"
+                        ))
+                    })?;
+                    evals.push(v);
+                }
+                out.push(crate::shard_proof_types::TimePointOpening {
+                    point: r_time.clone(),
+                    col_ids: col_ids.clone(),
+                    evals,
+                    source: crate::shard_proof_types::TimeOpeningSource::CommittedOpening,
+                });
+
+                // Export current-step r_val bus openings as named openings so the verifier can
+                // bind Twist val-lane checks to committed openings instead of ME tail offsets.
+                if let Some(cpu_me_val_cur) = mem_proof.val_me_claims.first() {
+                    if cpu_me_val_cur.r.as_slice() != r_time.as_slice() {
+                        if !has_committed_time_mem {
+                            return Err(PiCcsError::ProtocolError(
+                                "named openings bus/val: canonical time-column path requires committed time mem columns"
+                                    .into(),
+                            ));
+                        }
+                        let open_map = crate::memory_sidecar::cpu_bus::shared_bus_openings_from_time_columns_at_point(
+                            &cpu_bus,
+                            &step.time_columns.mem_cols,
+                            cpu_me_val_cur.r.as_slice(),
+                            "named openings bus/val",
+                        )?;
+                        let mut evals = Vec::with_capacity(col_ids.len());
+                        for (mem_local_col, _) in col_ids.iter().enumerate() {
+                            let v = open_map.get(&mem_local_col).copied().ok_or_else(|| {
+                                PiCcsError::ProtocolError(format!(
+                                    "named openings bus/val: missing mem local col_id={mem_local_col}"
+                                ))
+                            })?;
+                            evals.push(v);
+                        }
+                        out.push(crate::shard_proof_types::TimePointOpening {
+                            point: cpu_me_val_cur.r.clone(),
+                            col_ids,
+                            evals,
+                            source: crate::shard_proof_types::TimeOpeningSource::CommittedOpening,
+                        });
+                    }
+                }
+            }
+            if !named_trace_col_ids.is_empty() {
+                let can_use_time_cpu_cols = step.time_columns.t > 0
+                    && !step.time_columns.cpu_cols.is_empty()
+                    && named_trace_col_ids
+                        .iter()
+                        .all(|&col_id| col_id < step.time_columns.cpu_cols.len());
+                if !can_use_time_cpu_cols {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "named openings trace: canonical time cpu columns are required (time_t={}, cpu_cols={}, trace_cols={})",
+                        step.time_columns.t,
+                        step.time_columns.cpu_cols.len(),
+                        named_trace_col_ids.len()
+                    )));
+                }
+                if !has_committed_time_cpu {
+                    return Err(PiCcsError::ProtocolError(
+                        "named openings trace: canonical time-column path requires committed time cpu columns".into(),
+                    ));
+                }
+                let trace_map = crate::memory_sidecar::cpu_bus::time_columns_openings_from_time_columns_at_point(
+                    mcs_inst.m_in,
+                    step.time_columns.t,
+                    &step.time_columns.cpu_cols,
+                    &named_trace_col_ids,
+                    &r_time,
+                    "named openings trace",
+                )?;
+                let mut evals = Vec::with_capacity(named_trace_col_ids.len());
+                for &col_id in named_trace_col_ids.iter() {
+                    let v = trace_map.get(&col_id).copied().ok_or_else(|| {
+                        PiCcsError::ProtocolError(format!("named openings trace: missing col_id={col_id}"))
+                    })?;
+                    evals.push(v);
+                }
+                out.push(crate::shard_proof_types::TimePointOpening {
+                    point: r_time.clone(),
+                    col_ids: named_trace_col_ids.clone(),
+                    evals,
+                    source: crate::shard_proof_types::TimeOpeningSource::CommittedOpening,
+                });
+            }
+            if let Some(wb_me) = mem_proof.wb_me_claims.first() {
+                let trace = Rv32TraceLayout::new();
+                let wb_cols = crate::memory_sidecar::memory::rv32_trace_wb_columns(&trace);
+                let can_use_time_cpu_cols = step.time_columns.t > 0
+                    && !step.time_columns.cpu_cols.is_empty()
+                    && wb_cols
+                        .iter()
+                        .all(|&col_id| col_id < step.time_columns.cpu_cols.len());
+                if mcs_inst.m_in == 5 && !can_use_time_cpu_cols {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "named openings wb: canonical Route-A requires time cpu columns (time_t={}, cpu_cols={}, wb_cols={})",
+                        step.time_columns.t,
+                        step.time_columns.cpu_cols.len(),
+                        wb_cols.len()
+                    )));
+                }
+                if !can_use_time_cpu_cols {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "named openings wb: canonical time cpu columns are required (time_t={}, cpu_cols={}, wb_cols={})",
+                        step.time_columns.t,
+                        step.time_columns.cpu_cols.len(),
+                        wb_cols.len()
+                    )));
+                }
+                if !has_committed_time_cpu {
+                    return Err(PiCcsError::ProtocolError(
+                        "named openings wb: canonical time-column path requires committed time cpu columns".into(),
+                    ));
+                }
+                let trace_map = crate::memory_sidecar::cpu_bus::time_columns_openings_from_time_columns_at_point(
+                    mcs_inst.m_in,
+                    step.time_columns.t,
+                    &step.time_columns.cpu_cols,
+                    &wb_cols,
+                    wb_me.r.as_slice(),
+                    "named openings wb",
+                )?;
+                let mut evals = Vec::with_capacity(wb_cols.len());
+                for &col_id in wb_cols.iter() {
+                    let v = trace_map.get(&col_id).copied().ok_or_else(|| {
+                        PiCcsError::ProtocolError(format!("named openings wb: missing col_id={col_id}"))
+                    })?;
+                    evals.push(v);
+                }
+                out.push(crate::shard_proof_types::TimePointOpening {
+                    point: wb_me.r.clone(),
+                    col_ids: wb_cols,
+                    evals,
+                    source: crate::shard_proof_types::TimeOpeningSource::CommittedOpening,
+                });
+            }
+            if let Some(wp_me) = mem_proof.wp_me_claims.first() {
+                let trace = Rv32TraceLayout::new();
+                let mut wp_cols = crate::memory_sidecar::memory::rv32_trace_wp_opening_columns(&trace);
+                if control_required {
+                    wp_cols.extend(crate::memory_sidecar::memory::rv32_trace_control_extra_opening_columns(
+                        &trace,
+                    ));
+                }
+                let mut seen_wp_cols = std::collections::BTreeSet::new();
+                wp_cols.retain(|col_id| seen_wp_cols.insert(*col_id));
+                let can_use_time_cpu_cols = step.time_columns.t > 0
+                    && !step.time_columns.cpu_cols.is_empty()
+                    && wp_cols
+                        .iter()
+                        .all(|&col_id| col_id < step.time_columns.cpu_cols.len());
+                if mcs_inst.m_in == 5 && !can_use_time_cpu_cols {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "named openings wp: canonical Route-A requires time cpu columns (time_t={}, cpu_cols={}, wp_cols={})",
+                        step.time_columns.t,
+                        step.time_columns.cpu_cols.len(),
+                        wp_cols.len()
+                    )));
+                }
+                if !can_use_time_cpu_cols {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "named openings wp: canonical time cpu columns are required (time_t={}, cpu_cols={}, wp_cols={})",
+                        step.time_columns.t,
+                        step.time_columns.cpu_cols.len(),
+                        wp_cols.len()
+                    )));
+                }
+                if !has_committed_time_cpu {
+                    return Err(PiCcsError::ProtocolError(
+                        "named openings wp: canonical time-column path requires committed time cpu columns".into(),
+                    ));
+                }
+                let trace_map = crate::memory_sidecar::cpu_bus::time_columns_openings_from_time_columns_at_point(
+                    mcs_inst.m_in,
+                    step.time_columns.t,
+                    &step.time_columns.cpu_cols,
+                    &wp_cols,
+                    wp_me.r.as_slice(),
+                    "named openings wp",
+                )?;
+                let mut evals = Vec::with_capacity(wp_cols.len());
+                for &col_id in wp_cols.iter() {
+                    let v = trace_map.get(&col_id).copied().ok_or_else(|| {
+                        PiCcsError::ProtocolError(format!("named openings wp: missing col_id={col_id}"))
+                    })?;
+                    evals.push(v);
+                }
+                out.push(crate::shard_proof_types::TimePointOpening {
+                    point: wp_me.r.clone(),
+                    col_ids: wp_cols,
+                    evals,
+                    source: crate::shard_proof_types::TimeOpeningSource::CommittedOpening,
+                });
+            }
+            out
+        };
+        let opening_proofs = {
+            let mut out = Vec::new();
+            let logical_col_pos = crate::time_opening::me_adapter::build_logical_col_pos(&step.time_columns.col_ids)?;
+            let cpu_cols_len = time_cpu_commitments.len();
+            let mut z_col_cache = std::collections::BTreeMap::<usize, neo_ccs::Mat<F>>::new();
+            for opening in fold_openings.iter() {
+                if opening.source != crate::shard_proof_types::TimeOpeningSource::CommittedOpening {
+                    continue;
+                }
+                if opening.col_ids.len() != opening.evals.len() {
+                    return Err(PiCcsError::ProtocolError(
+                        "time/opening proof build: malformed opening col_ids/evals length mismatch".into(),
+                    ));
+                }
+                let mut pairs: Vec<(usize, K)> = opening
+                    .col_ids
+                    .iter()
+                    .copied()
+                    .zip(opening.evals.iter().copied())
+                    .collect();
+                pairs.sort_unstable_by_key(|(col_id, _)| *col_id);
+                if pairs.windows(2).any(|w| w[0].0 == w[1].0) {
+                    return Err(PiCcsError::ProtocolError(
+                        "time/opening proof build: duplicate col_ids in committed opening".into(),
+                    ));
+                }
+                let mut col_ids = Vec::with_capacity(pairs.len());
+                let mut evals = Vec::with_capacity(pairs.len());
+                let sorted_col_ids: Vec<usize> = pairs.iter().map(|(col_id, _)| *col_id).collect();
+                let domain = crate::time_opening::me_adapter::domain_for_col_ids(
+                    sorted_col_ids.as_slice(),
+                    &logical_col_pos,
+                    cpu_cols_len,
+                )?;
+                let point_chi = crate::time_opening::me_adapter::build_small_chi_table(opening.point.as_slice())?;
+                let point_row_weights = match domain {
+                    crate::shard_proof_types::OpeningDomain::Cpu => {
+                        crate::time_opening::me_adapter::cpu_time_row_weights(
+                            opening.point.as_slice(),
+                            step.mcs.0.m_in,
+                            step.time_columns.t,
+                            point_chi.as_deref(),
+                        )?
+                    }
+                    crate::shard_proof_types::OpeningDomain::Mem => {
+                        crate::time_opening::me_adapter::mem_time_row_weights(
+                            opening.point.as_slice(),
+                            &cpu_bus,
+                            point_chi.as_deref(),
+                        )?
+                    }
+                };
+                let mut digit_evals = Vec::with_capacity(pairs.len());
+                for (col_id, eval) in pairs.into_iter() {
+                    col_ids.push(col_id);
+                    evals.push(eval);
+                    if !z_col_cache.contains_key(&col_id) {
+                        let abs_pos = logical_col_pos.get(&col_id).copied().ok_or_else(|| {
+                            PiCcsError::ProtocolError(format!(
+                                "time/opening proof build: logical col_id={} missing",
+                                col_id
+                            ))
+                        })?;
+                        let col = if abs_pos < cpu_cols_len {
+                            step.time_columns.cpu_cols.get(abs_pos).ok_or_else(|| {
+                                PiCcsError::ProtocolError(format!(
+                                    "time/opening proof build: cpu column index {} out of range",
+                                    abs_pos
+                                ))
+                            })?
+                        } else {
+                            let mem_idx = abs_pos - cpu_cols_len;
+                            step.time_columns.mem_cols.get(mem_idx).ok_or_else(|| {
+                                PiCcsError::ProtocolError(format!(
+                                    "time/opening proof build: mem column index {} out of range",
+                                    mem_idx
+                                ))
+                            })?
+                        };
+                        let z_col = neo_memory::ajtai::encode_vector_balanced_to_mat_with_base(
+                            params,
+                            col,
+                            crate::time_opening::STAGE8_TIME_DECOMP_BASE,
+                        );
+                        z_col_cache.insert(col_id, z_col);
+                    }
+                    let z_col = z_col_cache.get(&col_id).ok_or_else(|| {
+                        PiCcsError::ProtocolError(format!(
+                            "time/opening proof build: cached column missing for col_id={col_id}",
+                        ))
+                    })?;
+                    let digits = crate::time_opening::me_adapter::eval_mat_digits_from_row_weights(
+                        point_row_weights.as_slice(),
+                        z_col,
+                    )?;
+                    let recomposed = crate::time_opening::me_adapter::recompose_digits_to_scalar(
+                        digits.as_slice(),
+                        crate::time_opening::STAGE8_TIME_DECOMP_BASE,
+                    );
+                    if recomposed != eval {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "time/opening proof build: digit recomposition mismatch for col_id={col_id} (domain={domain:?}, eval={eval:?}, recomposed={recomposed:?})"
+                        )));
+                    }
+                    digit_evals.push(digits);
+                }
+                out.push(crate::shard_proof_types::TimeOpeningProof {
+                    point: opening.point.clone(),
+                    col_ids,
+                    evals,
+                    digit_evals,
+                });
+            }
+            out
+        };
+        let (opening_manifest, opening_reduction, opening_unification, joint_opening_lane, stage8_fold) =
+            if opening_proofs.is_empty() {
+                if !fold_openings.is_empty() {
+                    return Err(PiCcsError::ProtocolError(
+                        "time/opening: missing opening proofs for non-empty named openings".into(),
+                    ));
+                }
+                (
+                    crate::shard_proof_types::OpeningClaimManifest::default(),
+                    crate::shard_proof_types::OpeningReductionProof::default(),
+                    crate::shard_proof_types::OpeningUnificationProof::default(),
+                    crate::shard_proof_types::JointOpeningLaneProof::default(),
+                    Vec::new(),
+                )
+            } else {
+                let opening_manifest = crate::time_opening::manifest::build_opening_claim_manifest(
+                    &fold_openings,
+                    &opening_proofs,
+                    &step.time_columns.col_ids,
+                    time_cpu_commitments.len(),
+                )?;
+                crate::time_opening::manifest::bind_opening_claim_manifest(tr, step_idx, &opening_manifest);
+                let opening_batch_coeffs =
+                    bind_time_opening_batches_and_sample_coeffs(tr, params, step_idx, &opening_proofs)?;
+                let opening_reduction = crate::time_opening::reduction::build_opening_reduction(&opening_manifest)?;
+                let opening_unification = crate::time_opening::reduction::prove_opening_unification_sumcheck(
+                    tr,
+                    step_idx,
+                    &opening_reduction,
+                )?;
+                let (joint_opening_lane, stage8_joint_wits) =
+                    crate::time_opening::joint_lane::prove_joint_opening_lane_with_witnesses(
+                        tr,
+                        params,
+                        step_idx,
+                        step,
+                        &cpu_bus,
+                        &time_cpu_commitments,
+                        &time_mem_commitments,
+                        &step.time_columns.col_ids,
+                        &opening_proofs,
+                        &opening_manifest.digest,
+                        &opening_reduction,
+                        &opening_unification,
+                        &opening_batch_coeffs,
+                    )?;
+                let mut stage8_fold: Vec<RlcDecProof> = Vec::with_capacity(1);
+                let stage8_params = stage8_time_decomp_params(params)?;
+                let stage8_plan = crate::time_opening::joint_lane::build_stage8_fold_lane_plan(
+                    &joint_opening_lane,
+                    &opening_unification,
+                    step.time_columns.t,
+                )?;
+                if let Some(plan) = stage8_plan {
+                    if stage8_joint_wits.len() != plan.claims.len() {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "stage8 fold: witness/claim count mismatch (wits={}, claims={})",
+                            stage8_joint_wits.len(),
+                            plan.claims.len()
+                        )));
+                    }
+                    if !has_global_pp_for_dims(D, plan.ccs.m) {
+                        return Err(PiCcsError::InvalidInput(format!(
+                        "stage8 fold: missing global PP for (D,m)=({D},{}); PP must be pre-registered with canonical seed",
+                        plan.ccs.m
+                    )));
+                    }
+                    let stage8_committer =
+                        neo_ajtai::AjtaiSModule::from_global_for_dims(D, plan.ccs.m).map_err(|e| {
+                            PiCcsError::InvalidInput(format!(
+                                "stage8 fold: missing global committer for (D,m)=({D},{}): {e}",
+                                plan.ccs.m
+                            ))
+                        })?;
+                    tr.append_message(b"fold/stage8_lane_start", &(step_idx as u64).to_le_bytes());
+                    tr.append_message(b"fold/stage8_lane_group_idx", &0u64.to_le_bytes());
+                    let wit_refs: Vec<&Mat<F>> = stage8_joint_wits.iter().collect();
+                    let (stage8_proof, _stage8_wits) = prove_rlc_dec_lane(
+                        &mode,
+                        RlcLane::Val,
+                        tr,
+                        &stage8_params,
+                        &plan.ccs,
+                        None,
+                        None,
+                        &ring,
+                        ell_d,
+                        k_dec,
+                        step_idx,
+                        None,
+                        plan.claims.as_slice(),
+                        wit_refs.as_slice(),
+                        false,
+                        &stage8_committer,
+                        mixers,
+                    )?;
+                    stage8_fold.push(stage8_proof);
+                } else if !stage8_joint_wits.is_empty() {
+                    return Err(PiCcsError::ProtocolError(
+                        "stage8 fold: missing lane plan for non-empty stage8 witnesses".into(),
+                    ));
+                }
+                (
+                    opening_manifest,
+                    opening_reduction,
+                    opening_unification,
+                    joint_opening_lane,
+                    stage8_fold,
+                )
+            };
+        let cpu_sumcheck = cpu_sumcheck_from_ccs(ccs_initial_sum, ccs_time_rounds_meta, &ccs_time_chals_meta);
+        let shift_sumcheck = shift_sumcheck_from_batched_time(&batched_time, &r_time, control_required)?;
+
         step_proofs.push(StepProof {
             fold: FoldStep {
                 ccs_out,
@@ -1247,12 +2054,35 @@ where
                 rlc_rhos: rhos,
                 rlc_parent: parent_pub,
                 dec_children: children,
+                cpu_sumcheck,
+                shift_sumcheck,
+                time_cpu_commitments,
+                time_mem_commitments,
+                time_t: step.time_columns.t,
+                time_declared_len,
+                time_col_ids: step.time_columns.col_ids.clone(),
+                memory_time_proofs: batched_time.labels.iter().copied().collect(),
+                openings: fold_openings,
+                opening_proofs,
+                opening_manifest,
+                opening_reduction,
+                opening_unification,
+                joint_opening_lane,
+                folding_lanes: crate::shard_proof_types::FoldingLanes {
+                    main_children: accumulator.len(),
+                    val_children: val_fold.iter().map(|p| p.dec_children.len()).sum(),
+                    wb_children: wb_fold.iter().map(|p| p.dec_children.len()).sum(),
+                    wp_children: wp_fold.iter().map(|p| p.dec_children.len()).sum(),
+                    stage8_children: stage8_fold.iter().map(|p| p.dec_children.len()).sum(),
+                },
             },
             mem: mem_proof,
             batched_time,
             val_fold,
             wb_fold,
             wp_fold,
+            compressed_substeps: None,
+            stage8_fold,
         });
 
         tr.append_message(b"fold/step_done", &(step_idx as u64).to_le_bytes());
@@ -1265,8 +2095,10 @@ where
         ShardProof {
             steps: step_proofs,
             output_proof,
+            segment_meta: None,
         },
         accumulator_wit,
         val_lane_wits,
+        prev_twist_decoded,
     ))
 }

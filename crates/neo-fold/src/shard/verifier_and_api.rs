@@ -6,7 +6,7 @@ pub fn fold_shard_prove<L, MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepWitnessBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     acc_wit_init: &[Mat<F>],
     l: &L,
     mixers: CommitMixers<MR, MB>,
@@ -16,23 +16,7 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let (proof, _final_main_wits, _val_lane_wits) = fold_shard_prove_impl(
-        false,
-        mode,
-        tr,
-        params,
-        s_me,
-        steps,
-        0,
-        acc_init,
-        acc_wit_init,
-        l,
-        mixers,
-        None,
-        None,
-        None,
-    )?;
-    Ok(proof)
+    fold_shard_prove_mixed_ccs_batched(mode, tr, params, s_me, steps, acc_init, acc_wit_init, l, mixers, None)
 }
 
 pub(crate) fn fold_shard_prove_with_context<L, MR, MB>(
@@ -41,7 +25,7 @@ pub(crate) fn fold_shard_prove_with_context<L, MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepWitnessBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     acc_wit_init: &[Mat<F>],
     l: &L,
     mixers: CommitMixers<MR, MB>,
@@ -52,23 +36,18 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let (proof, _final_main_wits, _val_lane_wits) = fold_shard_prove_impl(
-        false,
+    fold_shard_prove_mixed_ccs_batched(
         mode,
         tr,
         params,
         s_me,
         steps,
-        0,
         acc_init,
         acc_wit_init,
         l,
         mixers,
-        None,
         Some(ctx),
-        None,
-    )?;
-    Ok(proof)
+    )
 }
 
 pub(crate) fn fold_shard_prove_with_context_and_step_timings<L, MR, MB>(
@@ -77,7 +56,7 @@ pub(crate) fn fold_shard_prove_with_context_and_step_timings<L, MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepWitnessBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     acc_wit_init: &[Mat<F>],
     l: &L,
     mixers: CommitMixers<MR, MB>,
@@ -88,23 +67,26 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let mut step_prove_ms = Vec::with_capacity(steps.len());
-    let (proof, _final_main_wits, _val_lane_wits) = fold_shard_prove_impl(
-        false,
+    let start = time_now();
+    let proof = fold_shard_prove_mixed_ccs_batched(
         mode,
         tr,
         params,
         s_me,
         steps,
-        0,
         acc_init,
         acc_wit_init,
         l,
         mixers,
-        None,
         Some(ctx),
-        Some(&mut step_prove_ms),
     )?;
+    let total_ms = elapsed_ms(start);
+    let step_count = proof.steps.len();
+    let step_prove_ms = if step_count == 0 {
+        Vec::new()
+    } else {
+        vec![total_ms / (step_count as f64); step_count]
+    };
     Ok((proof, step_prove_ms))
 }
 
@@ -114,7 +96,7 @@ pub fn fold_shard_prove_with_output_binding<L, MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepWitnessBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     acc_wit_init: &[Mat<F>],
     l: &L,
     mixers: CommitMixers<MR, MB>,
@@ -126,23 +108,20 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let (proof, _final_main_wits, _val_lane_wits) = fold_shard_prove_impl(
-        false,
+    fold_shard_prove_mixed_ccs_batched_with_output_binding(
         mode,
         tr,
         params,
         s_me,
         steps,
-        0,
         acc_init,
         acc_wit_init,
         l,
         mixers,
-        Some((ob_cfg, final_memory_state)),
+        ob_cfg,
+        final_memory_state,
         None,
-        None,
-    )?;
-    Ok(proof)
+    )
 }
 
 pub(crate) fn fold_shard_prove_with_output_binding_with_context<L, MR, MB>(
@@ -151,7 +130,7 @@ pub(crate) fn fold_shard_prove_with_output_binding_with_context<L, MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepWitnessBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     acc_wit_init: &[Mat<F>],
     l: &L,
     mixers: CommitMixers<MR, MB>,
@@ -164,23 +143,20 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let (proof, _final_main_wits, _val_lane_wits) = fold_shard_prove_impl(
-        false,
+    fold_shard_prove_mixed_ccs_batched_with_output_binding(
         mode,
         tr,
         params,
         s_me,
         steps,
-        0,
         acc_init,
         acc_wit_init,
         l,
         mixers,
-        Some((ob_cfg, final_memory_state)),
+        ob_cfg,
+        final_memory_state,
         Some(ctx),
-        None,
-    )?;
-    Ok(proof)
+    )
 }
 
 pub fn fold_shard_prove_with_witnesses<L, MR, MB>(
@@ -189,7 +165,7 @@ pub fn fold_shard_prove_with_witnesses<L, MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepWitnessBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     acc_wit_init: &[Mat<F>],
     l: &L,
     mixers: CommitMixers<MR, MB>,
@@ -199,20 +175,17 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let (proof, final_main_wits, val_lane_wits) = fold_shard_prove_impl(
-        true,
+    let (proof, final_main_wits, val_lane_wits) = fold_shard_prove_mixed_ccs_batched_with_witnesses(
         mode,
         tr,
         params,
         s_me,
         steps,
-        0,
         acc_init,
         acc_wit_init,
         l,
         mixers,
-        None,
-        None,
+        0,
         None,
     )?;
     let outputs = proof.compute_fold_outputs(acc_init);
@@ -250,7 +223,7 @@ pub fn fold_shard_prove_with_witnesses_with_step_offset<L, MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepWitnessBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     acc_wit_init: &[Mat<F>],
     l: &L,
     mixers: CommitMixers<MR, MB>,
@@ -261,20 +234,17 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    let (proof, final_main_wits, val_lane_wits) = fold_shard_prove_impl(
-        true,
+    let (proof, final_main_wits, val_lane_wits) = fold_shard_prove_mixed_ccs_batched_with_witnesses(
         mode,
         tr,
         params,
         s_me,
         steps,
-        step_idx_offset,
         acc_init,
         acc_wit_init,
         l,
         mixers,
-        None,
-        None,
+        step_idx_offset,
         None,
     )?;
     let outputs = proof.compute_fold_outputs(acc_init);
@@ -306,6 +276,60 @@ where
 // Shard Verification
 // ============================================================================
 
+fn merge_step_time_columns_from_proof(
+    step: &StepInstanceBundle<Cmt, F, K>,
+    step_proof: &StepProof,
+) -> Result<StepInstanceBundle<Cmt, F, K>, PiCcsError> {
+    let mut out = step.clone();
+    let proof_t = step_proof.fold.time_t;
+    let proof_col_ids = &step_proof.fold.time_col_ids;
+    let cpu_cols_len = step_proof.fold.time_cpu_commitments.len();
+    let mem_cols_len = step_proof.fold.time_mem_commitments.len();
+    let expected_col_ids_len = cpu_cols_len
+        .checked_add(mem_cols_len)
+        .ok_or_else(|| PiCcsError::InvalidInput("step proof time col_id length overflow".into()))?;
+    if proof_col_ids.len() != expected_col_ids_len {
+        return Err(PiCcsError::ProtocolError(format!(
+            "step proof time_col_ids length mismatch: got {}, expected {} (=cpu_commitments+mem_commitments)",
+            proof_col_ids.len(),
+            expected_col_ids_len
+        )));
+    }
+    if proof_col_ids
+        .iter()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        .len()
+        != proof_col_ids.len()
+    {
+        return Err(PiCcsError::ProtocolError(
+            "step proof time_col_ids contains duplicates".into(),
+        ));
+    }
+    for (idx, &col_id) in proof_col_ids.iter().enumerate() {
+        if col_id != idx {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step proof time_col_ids must be canonical contiguous ids (time_col_ids[{idx}]={col_id}, expected {idx})"
+            )));
+        }
+    }
+
+    if proof_t == 0 && expected_col_ids_len > 0 {
+        return Err(PiCcsError::ProtocolError(
+            "step proof time columns are malformed: time_t=0 with non-empty time commitments".into(),
+        ));
+    }
+
+    // Verifier-side acceptance must not depend on statement-local time column payload.
+    // Replace statement payload with proof metadata only (t + logical ids + committed counts).
+    out.time_columns.t = proof_t;
+    out.time_columns.cpu_cols = vec![Vec::new(); cpu_cols_len];
+    out.time_columns.mem_cols = vec![Vec::new(); mem_cols_len];
+    out.time_columns.col_ids = proof_col_ids.clone();
+
+    Ok(out)
+}
+
 pub(crate) fn fold_shard_verify_impl<MR, MB>(
     mode: FoldingMode,
     tr: &mut Poseidon2Transcript,
@@ -313,17 +337,31 @@ pub(crate) fn fold_shard_verify_impl<MR, MB>(
     s_me: &CcsStructure<F>,
     steps: &[StepInstanceBundle<Cmt, F, K>],
     step_idx_offset: usize,
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
     ob_cfg: Option<&crate::output_binding::OutputBindingConfig>,
     prover_ctx: Option<&ShardProverContext>,
+    initial_prev_step: Option<&StepInstanceBundle<Cmt, F, K>>,
 ) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
 where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    for (step_idx, step) in steps.iter().enumerate() {
+    if steps.len() != proof.steps.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "step count mismatch: public {} vs proof {}",
+            steps.len(),
+            proof.steps.len()
+        )));
+    }
+
+    let mut effective_steps = Vec::with_capacity(steps.len());
+    for (step, step_proof) in steps.iter().zip(proof.steps.iter()) {
+        effective_steps.push(merge_step_time_columns_from_proof(step, step_proof)?);
+    }
+
+    for (step_idx, step) in effective_steps.iter().enumerate() {
         if step.lut_insts.is_empty() && step.mem_insts.is_empty() {
             continue;
         }
@@ -336,7 +374,7 @@ where
         }
     }
     tr.append_message(b"shard/cpu_bus_mode", &[1u8]);
-    let (s, cpu_bus) = crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(s_me, steps)?;
+    let (s, cpu_bus) = crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(s_me, &effective_steps)?;
     let dims = utils::build_dims_and_policy(params, s)?;
     let utils::Dims {
         ell_d,
@@ -348,13 +386,6 @@ where
     } = dims;
     let ring = ccs::RotRing::goldilocks();
 
-    if steps.len() != proof.steps.len() {
-        return Err(PiCcsError::InvalidInput(format!(
-            "step count mismatch: public {} vs proof {}",
-            steps.len(),
-            proof.steps.len()
-        )));
-    }
     if ob_cfg.is_some() && steps.is_empty() {
         return Err(PiCcsError::InvalidInput("output binding requires >= 1 step".into()));
     }
@@ -370,7 +401,7 @@ where
     }
 
     let mut accumulator = acc_init.to_vec();
-    let mut val_lane_obligations: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let mut val_lane_obligations: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let ccs_sparse_cache: Option<Arc<SparseCache<F>>> = if mode_uses_sparse_cache(&mode) {
         Some(
             prover_ctx
@@ -384,11 +415,11 @@ where
         .map(|ctx| ctx.ccs_mat_digest.clone())
         .unwrap_or_else(|| utils::digest_ccs_matrices_with_sparse_cache(s, ccs_sparse_cache.as_deref()));
 
-    for (idx, (step, step_proof)) in steps.iter().zip(proof.steps.iter()).enumerate() {
+    for (idx, (step, step_proof)) in effective_steps.iter().zip(proof.steps.iter()).enumerate() {
         let step_idx = step_idx_offset
             .checked_add(idx)
             .ok_or_else(|| PiCcsError::InvalidInput("step index overflow".into()))?;
-        let has_prev = idx > 0;
+        let has_prev = idx > 0 || initial_prev_step.is_some();
         absorb_step_memory(tr, step);
 
         let include_ob = ob_cfg.is_some() && (idx + 1 == steps.len());
@@ -459,6 +490,106 @@ where
             &ccs_mat_digest,
         )?;
         utils::bind_me_inputs(tr, &accumulator)?;
+        let expected_time_col_ids = step_proof
+            .fold
+            .time_cpu_commitments
+            .len()
+            .checked_add(step_proof.fold.time_mem_commitments.len())
+            .ok_or_else(|| PiCcsError::InvalidInput("verify/time_columns: commitment count overflow".into()))?;
+        if step_proof.fold.time_col_ids.len() != expected_time_col_ids {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: verify/time_columns col_ids mismatch: proof has {}, commitments imply {}",
+                idx,
+                step_proof.fold.time_col_ids.len(),
+                expected_time_col_ids
+            )));
+        }
+        if step_proof.fold.time_declared_len > step_proof.fold.time_t {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: verify/time_columns declared len {} exceeds time_t {}",
+                idx, step_proof.fold.time_declared_len, step_proof.fold.time_t
+            )));
+        }
+        let has_stage8_artifacts = !step_proof.fold.openings.is_empty()
+            || !step_proof.fold.opening_proofs.is_empty()
+            || !step_proof.fold.opening_unification.round_polys.is_empty()
+            || !step_proof.fold.joint_opening_lane.groups.is_empty()
+            || step_proof.fold.joint_opening_lane.unified_fold.is_some()
+            || !step_proof.stage8_fold.is_empty()
+            || !step_proof.fold.opening_manifest.entries.is_empty()
+            || !step_proof.fold.opening_reduction.groups.is_empty();
+        let requires_stage8_openings = cpu_bus.bus_cols > 0
+            || !step.mem_insts.is_empty()
+            || !step.lut_insts.is_empty()
+            || !step_proof.mem.wb_me_claims.is_empty()
+            || !step_proof.mem.wp_me_claims.is_empty();
+        if requires_stage8_openings && !has_stage8_artifacts {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: missing Stage-8 artifacts for load-bearing named openings",
+                idx
+            )));
+        }
+        if has_stage8_artifacts {
+            if step_proof.fold.openings.is_empty()
+                || step_proof.fold.opening_proofs.is_empty()
+                || step_proof.fold.opening_manifest.entries.is_empty()
+                || step_proof.fold.opening_reduction.groups.is_empty()
+                || step_proof.fold.opening_unification.round_polys.is_empty()
+                || step_proof.fold.joint_opening_lane.groups.is_empty()
+            {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: malformed Stage-8 artifact set (canonical mode requires openings/proofs/manifest/reduction/unification/groups)",
+                    idx
+                )));
+            }
+            let expected_stage8_fold_len = if step_proof.fold.joint_opening_lane.groups.is_empty() {
+                0usize
+            } else {
+                1usize
+            };
+            if step_proof.stage8_fold.len() != expected_stage8_fold_len {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: malformed Stage-8 artifact set (stage8_fold proofs={}, expected {})",
+                    idx,
+                    step_proof.stage8_fold.len(),
+                    expected_stage8_fold_len
+                )));
+            }
+        }
+        if has_stage8_artifacts {
+            if step_proof.fold.time_t == 0 {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: verify/time_columns time_t must be > 0 in Stage-8 committed mode",
+                    idx
+                )));
+            }
+            if !step_proof.fold.time_t.is_power_of_two() {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: verify/time_columns time_t {} must be a power of two",
+                    idx, step_proof.fold.time_t
+                )));
+            }
+            let observed_declared_len = validate_time_active_mask_and_count(
+                step.time_columns.active_col.as_slice(),
+                step_proof.fold.time_t,
+                "verify/time_columns",
+            )?;
+            if observed_declared_len != step_proof.fold.time_declared_len {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: verify/time_columns declared len mismatch (proof={}, observed={})",
+                    idx, step_proof.fold.time_declared_len, observed_declared_len
+                )));
+            }
+        }
+        bind_time_column_commitments(
+            tr,
+            step_idx,
+            step_proof.fold.time_t,
+            step_proof.fold.time_declared_len,
+            &step_proof.fold.time_col_ids,
+            &step_proof.fold.time_cpu_commitments,
+            &step_proof.fold.time_mem_commitments,
+        );
         let mut ch = utils::sample_challenges(tr, ell_d, ell)?;
         if step_proof.fold.ccs_proof.variant == crate::optimized_engine::PiCcsProofVariant::SplitNcV1 {
             ch.beta_m = utils::sample_beta_m(tr, ell_m)?;
@@ -478,14 +609,16 @@ where
 
         // Public initial sum T for CCS sumcheck (engine-selected).
         let claimed_initial = match &mode {
-            FoldingMode::Optimized => crate::optimized_engine::claimed_initial_sum_from_inputs(&s, &ch, &accumulator),
+            FoldingMode::Optimized => {
+                crate::optimized_engine::claimed_initial_sum_from_inputs_with_k_mcs(&s, &ch, 1, &accumulator)
+            }
             #[cfg(feature = "paper-exact")]
             FoldingMode::PaperExact => {
-                crate::paper_exact_engine::claimed_initial_sum_from_inputs(&s, &ch, &accumulator)
+                crate::paper_exact_engine::claimed_initial_sum_from_inputs_with_k_mcs(&s, &ch, 1, &accumulator)
             }
             #[cfg(feature = "paper-exact")]
             FoldingMode::OptimizedWithCrosscheck(_) => {
-                crate::optimized_engine::claimed_initial_sum_from_inputs(&s, &ch, &accumulator)
+                crate::optimized_engine::claimed_initial_sum_from_inputs_with_k_mcs(&s, &ch, 1, &accumulator)
             }
         };
         if let Some(x) = step_proof.fold.ccs_proof.sc_initial_sum {
@@ -499,8 +632,27 @@ where
 
         // Route A memory checks use a separate transcript-derived cycle point `r_cycle`
         // to form χ_{r_cycle}(t) weights inside their sum-check polynomials.
+        let route_steps = {
+            let inst_steps = step
+                .lut_insts
+                .iter()
+                .map(|inst| inst.steps)
+                .chain(step.mem_insts.iter().map(|inst| inst.steps))
+                .max()
+                .unwrap_or(0);
+            core::cmp::max(step_proof.fold.time_t, inst_steps)
+        };
+        let route_domain = step
+            .mcs_inst
+            .m_in
+            .checked_add(route_steps)
+            .ok_or_else(|| PiCcsError::ProtocolError("verify/route_a: route domain overflow".into()))?;
+        // Keep Route-A row challenge dimension aligned with Π_RLC/Π_DEC validators,
+        // which use at least one row bit even for n=1 domains.
+        let route_pow2 = route_domain.max(2).next_power_of_two();
+        let ell_t = route_pow2.trailing_zeros() as usize;
         let r_cycle: Vec<K> =
-            ts::sample_ext_point(tr, b"route_a/r_cycle", b"route_a/cycle/0", b"route_a/cycle/1", ell_n);
+            ts::sample_ext_point(tr, b"route_a/r_cycle", b"route_a/cycle/0", b"route_a/cycle/1", ell_t);
 
         let shout_pre = crate::memory_sidecar::memory::verify_shout_addr_pre_time(tr, step, &step_proof.mem, step_idx)?;
         let twist_pre = crate::memory_sidecar::memory::verify_twist_addr_pre_time(tr, step, &step_proof.mem)?;
@@ -509,24 +661,31 @@ where
         let decode_stage_enabled = crate::memory_sidecar::memory::decode_stage_required_for_step_instance(step);
         let width_stage_enabled = crate::memory_sidecar::memory::width_stage_required_for_step_instance(step);
         let control_stage_enabled = crate::memory_sidecar::memory::control_stage_required_for_step_instance(step);
-        let crate::memory_sidecar::route_a_time::RouteABatchedTimeVerifyOutput { r_time, final_values } =
-            crate::memory_sidecar::route_a_time::verify_route_a_batched_time(
-                tr,
-                step_idx,
-                ell_n,
-                d_sc,
-                claimed_initial,
-                step,
-                &step_proof.batched_time,
-                wb_enabled,
-                wp_enabled,
-                decode_stage_enabled,
-                width_stage_enabled,
-                control_stage_enabled,
-                ob_inc_total_degree_bound,
-            )?;
+        let crate::memory_sidecar::route_a_time::RouteABatchedTimeVerifyOutput {
+            r_time: route_r_time,
+            final_values,
+        } = crate::memory_sidecar::route_a_time::verify_route_a_batched_time(
+            tr,
+            step_idx,
+            ell_t,
+            step,
+            &step_proof.batched_time,
+            wb_enabled,
+            wp_enabled,
+            decode_stage_enabled,
+            width_stage_enabled,
+            control_stage_enabled,
+            ob_inc_total_degree_bound,
+        )?;
+        if route_r_time.len() != ell_t {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: Route-A r_time length mismatch (got {}, expected ell_t={ell_t})",
+                idx,
+                route_r_time.len()
+            )));
+        }
 
-        // CCS proof structure consistency with batched time proof.
+        // CCS proof structure consistency.
         let want_rounds_total = ell_n + ell_d;
         if step_proof.fold.ccs_proof.sumcheck_rounds.len() != want_rounds_total {
             return Err(PiCcsError::InvalidInput(format!(
@@ -544,29 +703,21 @@ where
                 want_rounds_total
             )));
         }
-        for (round_idx, (a, b)) in step_proof
-            .fold
-            .ccs_proof
-            .sumcheck_rounds
-            .iter()
-            .take(ell_n)
-            .zip(step_proof.batched_time.round_polys[0].iter())
-            .enumerate()
-        {
-            if a != b {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "step {}: CCS time round poly mismatch at round {}",
-                    idx, round_idx
-                )));
-            }
+        let ccs_time_rounds = &step_proof.fold.ccs_proof.sumcheck_rounds[..ell_n];
+        let ajtai_rounds = &step_proof.fold.ccs_proof.sumcheck_rounds[ell_n..];
+        let (ccs_r_time, ccs_time_final, ok_time) =
+            verify_sumcheck_rounds_ds(tr, b"ccs/time", step_idx, d_sc, claimed_initial, ccs_time_rounds);
+        if !ok_time {
+            return Err(PiCcsError::SumcheckError("Π_CCS row rounds invalid".into()));
         }
-
-        if step_proof.fold.ccs_proof.sumcheck_challenges[..ell_n] != r_time {
+        if ccs_r_time != step_proof.fold.ccs_proof.sumcheck_challenges[..ell_n] {
             return Err(PiCcsError::ProtocolError(format!(
-                "step {}: CCS time challenges mismatch with r_time",
+                "step {}: Π_CCS row challenges mismatch",
                 idx
             )));
         }
+
+        validate_time_sumcheck_metadata(step_idx, step_proof, &ccs_r_time, &route_r_time, control_stage_enabled)?;
 
         let expected_k = accumulator.len() + 1;
         if step_proof.fold.ccs_out.len() != expected_k {
@@ -583,9 +734,9 @@ where
                 idx
             )));
         }
-        if step_proof.fold.ccs_out[0].r != r_time {
+        if step_proof.fold.ccs_out[0].r != ccs_r_time {
             return Err(PiCcsError::ProtocolError(format!(
-                "step {}: Π_CCS output r != r_time (Route A requires shared r)",
+                "step {}: Π_CCS output r != ccs row point",
                 idx
             )));
         }
@@ -650,16 +801,15 @@ where
             }
         }
 
-        // Finish CCS Ajtai rounds alone (continuing transcript state after batched rounds).
-        let ajtai_rounds = &step_proof.fold.ccs_proof.sumcheck_rounds[ell_n..];
+        // Finish CCS Ajtai rounds alone (continuing transcript state after CCS row rounds).
         let (ajtai_chals, running_sum, ok) =
-            verify_sumcheck_rounds_ds(tr, b"ccs/ajtai", step_idx, d_sc, final_values[0], ajtai_rounds);
+            verify_sumcheck_rounds_ds(tr, b"ccs/ajtai", step_idx, d_sc, ccs_time_final, ajtai_rounds);
         if !ok {
             return Err(PiCcsError::SumcheckError("Π_CCS Ajtai rounds invalid".into()));
         }
 
         // Verify stored sumcheck challenges/final match transcript-derived values.
-        let mut r_all = r_time.clone();
+        let mut r_all = ccs_r_time.clone();
         r_all.extend_from_slice(&ajtai_chals);
         if r_all != step_proof.fold.ccs_proof.sumcheck_challenges {
             return Err(PiCcsError::ProtocolError(format!(
@@ -696,7 +846,7 @@ where
             &s,
             params,
             &ch,
-            &r_time,
+            &ccs_r_time,
             &ajtai_chals,
             &step_proof.fold.ccs_out,
             accumulator.first().map(|mi| mi.r.as_slice()),
@@ -770,9 +920,9 @@ where
             .checked_shl(ell_d as u32)
             .ok_or_else(|| PiCcsError::ProtocolError("2^ell_d overflow".into()))?;
         for (out_idx, out) in step_proof.fold.ccs_out.iter().enumerate() {
-            if out.r != r_time {
+            if out.r != ccs_r_time {
                 return Err(PiCcsError::ProtocolError(format!(
-                    "step {}: Π_CCS output[{out_idx}] r != r_time",
+                    "step {}: Π_CCS output[{out_idx}] r != ccs_r_time",
                     idx
                 )));
             }
@@ -825,8 +975,31 @@ where
             }
         }
 
+        let has_stage8_artifacts = !step_proof.fold.openings.is_empty()
+            || !step_proof.fold.opening_proofs.is_empty()
+            || !step_proof.fold.opening_unification.round_polys.is_empty()
+            || !step_proof.fold.joint_opening_lane.groups.is_empty()
+            || step_proof.fold.joint_opening_lane.unified_fold.is_some()
+            || !step_proof.stage8_fold.is_empty();
+        // Full-column commitment replay is intentionally skipped in verifier hot path.
+        // Soundness for load-bearing values is enforced via committed named openings
+        // (`validate_step_time_opening_proofs` + batched transcript checks).
+        // Commitment binding is enforced via transcript-bound batched opening checks below.
+        if has_stage8_artifacts || requires_stage8_openings {
+            validate_step_time_openings_consistency(step, step_proof, &cpu_bus, &route_r_time)?;
+        }
+
         // Verify mem proofs (shared CPU bus only).
-        let prev_step = (idx > 0).then(|| &steps[idx - 1]);
+        let prev_step = if idx > 0 {
+            Some(&effective_steps[idx - 1])
+        } else {
+            initial_prev_step
+        };
+        let prev_step_openings = if idx > 0 {
+            Some(proof.steps[idx - 1].fold.openings.as_slice())
+        } else {
+            None
+        };
         let mem_out = crate::memory_sidecar::memory::verify_route_a_memory_step(
             tr,
             &cpu_bus,
@@ -835,12 +1008,14 @@ where
             step,
             prev_step,
             &step_proof.fold.ccs_out[0],
-            &r_time,
+            &route_r_time,
             &r_cycle,
             &final_values,
             &step_proof.batched_time.claimed_sums,
-            1, // claim 0 is CCS/time
+            0,
             &step_proof.mem,
+            &step_proof.fold.openings,
+            prev_step_openings,
             &shout_pre,
             &twist_pre,
             step_idx,
@@ -1105,6 +1280,49 @@ where
             }
         }
 
+        if has_stage8_artifacts || requires_stage8_openings {
+            validate_step_time_opening_batches_with_transcript(tr, params, step_idx, step, step_proof, &cpu_bus)?;
+        }
+        let stage8_plan = crate::time_opening::joint_lane::build_stage8_fold_lane_plan(
+            &step_proof.fold.joint_opening_lane,
+            &step_proof.fold.opening_unification,
+            step_proof.fold.time_t,
+        )?;
+        let expected_stage8_proofs = if stage8_plan.is_some() { 1usize } else { 0usize };
+        if step_proof.stage8_fold.len() != expected_stage8_proofs {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: expected stage8_fold proofs to match Stage-8 lane plan (proofs={}, expected={})",
+                idx,
+                step_proof.stage8_fold.len(),
+                expected_stage8_proofs
+            )));
+        }
+        if let Some(plan) = stage8_plan {
+            let stage8_params = stage8_time_decomp_params(params)?;
+            tr.append_message(b"fold/stage8_lane_start", &(step_idx as u64).to_le_bytes());
+            tr.append_message(b"fold/stage8_lane_group_idx", &0u64.to_le_bytes());
+            let proof_stage8 = step_proof
+                .stage8_fold
+                .first()
+                .ok_or_else(|| PiCcsError::ProtocolError(format!("step {}: missing Stage-8 fold proof", idx)))?;
+            verify_rlc_dec_lane(
+                RlcLane::Val,
+                tr,
+                &stage8_params,
+                &plan.ccs,
+                &ring,
+                ell_d,
+                mixers,
+                step_idx,
+                plan.claims.as_slice(),
+                &proof_stage8.rlc_rhos,
+                &proof_stage8.rlc_parent,
+                &proof_stage8.dec_children,
+            )
+            .map_err(|e| PiCcsError::ProtocolError(format!("step {} stage8_fold verify failed: {e:?}", idx)))?;
+            val_lane_obligations.extend_from_slice(&proof_stage8.dec_children);
+        }
+
         tr.append_message(b"fold/step_done", &(step_idx as u64).to_le_bytes());
     }
 
@@ -1122,7 +1340,7 @@ pub fn fold_shard_verify<MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
 ) -> Result<ShardFoldOutputs<Cmt, F, K>, PiCcsError>
@@ -1130,7 +1348,7 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    fold_shard_verify_impl(mode, tr, params, s_me, steps, 0, acc_init, proof, mixers, None, None)
+    fold_shard_verify_mixed_ccs_batched(mode, tr, params, s_me, steps, 0, acc_init, proof, mixers, None)
 }
 
 /// Same as `fold_shard_verify`, but offsets the per-step transcript index by `step_idx_offset`.
@@ -1140,7 +1358,7 @@ pub fn fold_shard_verify_with_step_offset<MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
     step_idx_offset: usize,
@@ -1149,7 +1367,7 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    fold_shard_verify_impl(
+    fold_shard_verify_mixed_ccs_batched(
         mode,
         tr,
         params,
@@ -1160,7 +1378,6 @@ where
         proof,
         mixers,
         None,
-        None,
     )
 }
 
@@ -1170,7 +1387,7 @@ pub fn fold_shard_verify_with_step_linking<MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
     step_linking: &StepLinkingConfig,
@@ -1189,7 +1406,7 @@ pub fn fold_shard_verify_with_output_binding<MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
     ob_cfg: &crate::output_binding::OutputBindingConfig,
@@ -1198,18 +1415,8 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    fold_shard_verify_impl(
-        mode,
-        tr,
-        params,
-        s_me,
-        steps,
-        0,
-        acc_init,
-        proof,
-        mixers,
-        Some(ob_cfg),
-        None,
+    fold_shard_verify_mixed_ccs_batched_with_output_binding(
+        mode, tr, params, s_me, steps, 0, acc_init, proof, mixers, ob_cfg, None,
     )
 }
 
@@ -1219,7 +1426,7 @@ pub(crate) fn fold_shard_verify_with_context<MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
     prover_ctx: &ShardProverContext,
@@ -1228,7 +1435,7 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    fold_shard_verify_impl(
+    fold_shard_verify_mixed_ccs_batched(
         mode,
         tr,
         params,
@@ -1238,7 +1445,6 @@ where
         acc_init,
         proof,
         mixers,
-        None,
         Some(prover_ctx),
     )
 }
@@ -1249,7 +1455,7 @@ pub(crate) fn fold_shard_verify_with_step_linking_with_context<MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
     step_linking: &StepLinkingConfig,
@@ -1269,7 +1475,7 @@ pub(crate) fn fold_shard_verify_with_output_binding_with_context<MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
     ob_cfg: &crate::output_binding::OutputBindingConfig,
@@ -1279,7 +1485,7 @@ where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
-    fold_shard_verify_impl(
+    fold_shard_verify_mixed_ccs_batched_with_output_binding(
         mode,
         tr,
         params,
@@ -1289,7 +1495,7 @@ where
         acc_init,
         proof,
         mixers,
-        Some(ob_cfg),
+        ob_cfg,
         Some(prover_ctx),
     )
 }
@@ -1300,7 +1506,7 @@ pub(crate) fn fold_shard_verify_with_output_binding_and_step_linking_with_contex
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
     ob_cfg: &crate::output_binding::OutputBindingConfig,
@@ -1323,7 +1529,7 @@ pub fn fold_shard_verify_with_output_binding_and_step_linking<MR, MB>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
     ob_cfg: &crate::output_binding::OutputBindingConfig,
@@ -1343,7 +1549,7 @@ pub fn fold_shard_verify_and_finalize<MR, MB, Fin>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
     finalizer: &mut Fin,
@@ -1367,7 +1573,7 @@ pub fn fold_shard_verify_and_finalize_with_step_linking<MR, MB, Fin>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
     step_linking: &StepLinkingConfig,
@@ -1388,7 +1594,7 @@ pub fn fold_shard_verify_and_finalize_with_output_binding<MR, MB, Fin>(
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
     ob_cfg: &crate::output_binding::OutputBindingConfig,
@@ -1414,7 +1620,7 @@ pub fn fold_shard_verify_and_finalize_with_output_binding_and_step_linking<MR, M
     params: &NeoParams,
     s_me: &CcsStructure<F>,
     steps: &[StepInstanceBundle<Cmt, F, K>],
-    acc_init: &[MeInstance<Cmt, F, K>],
+    acc_init: &[CeClaim<Cmt, F, K>],
     proof: &ShardProof,
     mixers: CommitMixers<MR, MB>,
     ob_cfg: &crate::output_binding::OutputBindingConfig,

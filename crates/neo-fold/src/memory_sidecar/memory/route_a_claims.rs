@@ -1,5 +1,30 @@
 use super::*;
 
+struct ValueCursor<'a> {
+    vals: &'a [K],
+    idx: usize,
+}
+
+impl<'a> ValueCursor<'a> {
+    fn new(vals: &'a [K]) -> Self {
+        Self { vals, idx: 0 }
+    }
+
+    fn take(&mut self) -> K {
+        let v = self.vals[self.idx];
+        self.idx += 1;
+        v
+    }
+
+    fn take_arr<const N: usize>(&mut self) -> [K; N] {
+        core::array::from_fn(|_| self.take())
+    }
+
+    fn consumed(&self) -> usize {
+        self.idx
+    }
+}
+
 pub struct RouteAShoutTimeClaimsGuard<'a> {
     pub lane_ranges: Vec<core::ops::Range<usize>>,
     pub lanes: Vec<RouteAShoutTimeLaneClaims<'a>>,
@@ -15,11 +40,13 @@ pub struct RouteAShoutTimeLaneClaims<'a> {
     pub adapter_claim: K,
     pub event_table_hash_claim: Option<K>,
     pub gamma_group: Option<usize>,
+    pub transport_only: bool,
 }
 
 pub struct RouteAShoutTimeGammaGroupClaims<'a> {
     pub value_prefix: RoundOraclePrefix<'a>,
     pub adapter_prefix: RoundOraclePrefix<'a>,
+    pub bitness_prefix: RoundOraclePrefix<'a>,
     pub value_claim: K,
     pub adapter_claim: K,
 }
@@ -49,6 +76,7 @@ pub fn build_route_a_shout_time_claims_guard<'a>(
                 adapter_claim: lane.adapter_claim,
                 event_table_hash_claim: lane.event_table_hash_claim,
                 gamma_group: lane.gamma_group,
+                transport_only: lane.transport_only,
             });
         }
         let end = lanes.len();
@@ -59,6 +87,7 @@ pub fn build_route_a_shout_time_claims_guard<'a>(
         gamma_groups.push(RouteAShoutTimeGammaGroupClaims {
             value_prefix: RoundOraclePrefix::new(g.value.as_mut(), ell_n),
             adapter_prefix: RoundOraclePrefix::new(g.adapter.as_mut(), ell_n),
+            bitness_prefix: RoundOraclePrefix::new(g.bitness.as_mut(), ell_n),
             value_claim: g.value_claim,
             adapter_claim: g.adapter_claim,
         });
@@ -97,7 +126,7 @@ impl<'o> TimeBatchedClaims for ShoutRouteAProtocol<'o> {
         labels: &mut Vec<&'static [u8]>,
         claim_is_dynamic: &mut Vec<bool>,
         claims: &mut Vec<BatchedClaim<'a>>,
-    ) {
+    ) -> Result<(), PiCcsError> {
         append_route_a_shout_time_claims(
             &mut self.guard,
             claimed_sums,
@@ -105,7 +134,7 @@ impl<'o> TimeBatchedClaims for ShoutRouteAProtocol<'o> {
             labels,
             claim_is_dynamic,
             claims,
-        );
+        )
     }
 }
 
@@ -116,20 +145,27 @@ pub fn append_route_a_shout_time_claims<'a>(
     labels: &mut Vec<&'static [u8]>,
     claim_is_dynamic: &mut Vec<bool>,
     claims: &mut Vec<BatchedClaim<'a>>,
-) {
+) -> Result<(), PiCcsError> {
     if guard.lane_ranges.is_empty() {
-        return;
+        return Ok(());
     }
     if guard.bitness.len() != guard.lane_ranges.len() {
-        panic!("shout bitness count mismatch");
+        return Err(PiCcsError::ProtocolError(format!(
+            "shout bitness count mismatch (bitness={}, lane_ranges={})",
+            guard.bitness.len(),
+            guard.lane_ranges.len()
+        )));
     }
 
     let mut lane_ranges_iter = guard.lane_ranges.iter();
-    let mut next_end = lane_ranges_iter.next().expect("non-empty").end;
+    let mut next_end = lane_ranges_iter
+        .next()
+        .ok_or_else(|| PiCcsError::ProtocolError("shout lane_ranges unexpectedly empty".into()))?
+        .end;
     let mut bitness_iter = guard.bitness.iter_mut();
 
     for (lane_idx, lane) in guard.lanes.iter_mut().enumerate() {
-        if lane.gamma_group.is_none() {
+        if !lane.transport_only && lane.gamma_group.is_none() {
             claimed_sums.push(lane.value_claim);
             degree_bounds.push(lane.value_prefix.degree_bound());
             labels.push(b"shout/value");
@@ -152,9 +188,9 @@ pub fn append_route_a_shout_time_claims<'a>(
         }
 
         if let Some(prefix) = lane.event_table_hash_prefix.as_mut() {
-            let claim = lane
-                .event_table_hash_claim
-                .expect("event_table_hash_claim missing");
+            let claim = lane.event_table_hash_claim.ok_or_else(|| {
+                PiCcsError::ProtocolError(format!("event_table_hash_claim missing for shout lane_idx={lane_idx}"))
+            })?;
             claimed_sums.push(claim);
             degree_bounds.push(prefix.degree_bound());
             labels.push(b"shout/event_table_hash");
@@ -167,7 +203,11 @@ pub fn append_route_a_shout_time_claims<'a>(
         }
 
         if lane_idx + 1 == next_end {
-            let bitness_vec = bitness_iter.next().expect("shout bitness idx drift");
+            let bitness_vec = bitness_iter.next().ok_or_else(|| {
+                PiCcsError::ProtocolError(format!(
+                    "shout bitness idx drift at lane_idx={lane_idx} (missing bitness vector)"
+                ))
+            })?;
             for bit_oracle in bitness_vec.iter_mut() {
                 claimed_sums.push(K::ZERO);
                 degree_bounds.push(bit_oracle.degree_bound());
@@ -204,11 +244,24 @@ pub fn append_route_a_shout_time_claims<'a>(
             claimed_sum: group.adapter_claim,
             label: b"shout/adapter",
         });
+
+        claimed_sums.push(K::ZERO);
+        degree_bounds.push(group.bitness_prefix.degree_bound());
+        labels.push(b"shout/bitness");
+        claim_is_dynamic.push(false);
+        claims.push(BatchedClaim {
+            oracle: &mut group.bitness_prefix,
+            claimed_sum: K::ZERO,
+            label: b"shout/bitness",
+        });
     }
 
     if bitness_iter.next().is_some() {
-        panic!("shout bitness not fully consumed");
+        return Err(PiCcsError::ProtocolError(
+            "shout bitness not fully consumed after lane claim assembly".into(),
+        ));
     }
+    Ok(())
 }
 
 pub struct RouteATwistTimeClaimsGuard<'a> {
@@ -217,6 +270,8 @@ pub struct RouteATwistTimeClaimsGuard<'a> {
     pub read_check_claims: Vec<K>,
     pub write_check_claims: Vec<K>,
     pub bitness: Vec<Vec<Box<dyn RoundOracle>>>,
+    pub virtual_write_domain_prefixes: Vec<Option<RoundOraclePrefix<'a>>>,
+    pub nonvirtual_arch_domain_prefixes: Vec<Option<RoundOraclePrefix<'a>>>,
 }
 
 pub fn build_route_a_twist_time_claims_guard<'a>(
@@ -224,39 +279,54 @@ pub fn build_route_a_twist_time_claims_guard<'a>(
     ell_n: usize,
     read_check_claims: Vec<K>,
     write_check_claims: Vec<K>,
-) -> RouteATwistTimeClaimsGuard<'a> {
+) -> Result<RouteATwistTimeClaimsGuard<'a>, PiCcsError> {
     let mut read_check_prefixes: Vec<RoundOraclePrefix<'a>> = Vec::with_capacity(twist_oracles.len());
     let mut write_check_prefixes: Vec<RoundOraclePrefix<'a>> = Vec::with_capacity(twist_oracles.len());
     let mut bitness: Vec<Vec<Box<dyn RoundOracle>>> = Vec::with_capacity(twist_oracles.len());
+    let mut virtual_write_domain_prefixes: Vec<Option<RoundOraclePrefix<'a>>> = Vec::with_capacity(twist_oracles.len());
+    let mut nonvirtual_arch_domain_prefixes: Vec<Option<RoundOraclePrefix<'a>>> =
+        Vec::with_capacity(twist_oracles.len());
 
     if read_check_claims.len() != twist_oracles.len() {
-        panic!(
+        return Err(PiCcsError::ProtocolError(format!(
             "twist read-check claim count mismatch (claims={}, oracles={})",
             read_check_claims.len(),
             twist_oracles.len()
-        );
+        )));
     }
     if write_check_claims.len() != twist_oracles.len() {
-        panic!(
+        return Err(PiCcsError::ProtocolError(format!(
             "twist write-check claim count mismatch (claims={}, oracles={})",
             write_check_claims.len(),
             twist_oracles.len()
-        );
+        )));
     }
 
     for o in twist_oracles.iter_mut() {
         bitness.push(core::mem::take(&mut o.bitness));
         read_check_prefixes.push(RoundOraclePrefix::new(o.read_check.as_mut(), ell_n));
         write_check_prefixes.push(RoundOraclePrefix::new(o.write_check.as_mut(), ell_n));
+        let vd_prefix = o
+            .virtual_write_domain
+            .as_mut()
+            .map(|oracle| RoundOraclePrefix::new(oracle.as_mut(), ell_n));
+        virtual_write_domain_prefixes.push(vd_prefix);
+        let nvd_prefix = o
+            .nonvirtual_arch_domain
+            .as_mut()
+            .map(|oracle| RoundOraclePrefix::new(oracle.as_mut(), ell_n));
+        nonvirtual_arch_domain_prefixes.push(nvd_prefix);
     }
 
-    RouteATwistTimeClaimsGuard {
+    Ok(RouteATwistTimeClaimsGuard {
         read_check_prefixes,
         write_check_prefixes,
         read_check_claims,
         write_check_claims,
         bitness,
-    }
+        virtual_write_domain_prefixes,
+        nonvirtual_arch_domain_prefixes,
+    })
 }
 
 pub fn append_route_a_twist_time_claims<'a>(
@@ -266,12 +336,17 @@ pub fn append_route_a_twist_time_claims<'a>(
     labels: &mut Vec<&'static [u8]>,
     claim_is_dynamic: &mut Vec<bool>,
     claims: &mut Vec<BatchedClaim<'a>>,
-) {
-    for (((read_check_time, write_check_time), bitness_vec), (read_claim, write_claim)) in guard
+) -> Result<(), PiCcsError> {
+    for (
+        ((((read_check_time, write_check_time), bitness_vec), virtual_write_domain), nonvirtual_arch_domain),
+        (read_claim, write_claim),
+    ) in guard
         .read_check_prefixes
         .iter_mut()
         .zip(guard.write_check_prefixes.iter_mut())
         .zip(guard.bitness.iter_mut())
+        .zip(guard.virtual_write_domain_prefixes.iter_mut())
+        .zip(guard.nonvirtual_arch_domain_prefixes.iter_mut())
         .zip(
             guard
                 .read_check_claims
@@ -310,7 +385,30 @@ pub fn append_route_a_twist_time_claims<'a>(
                 label: b"twist/bitness",
             });
         }
+        if let Some(virtual_write_domain_oracle) = virtual_write_domain.as_mut() {
+            claimed_sums.push(K::ZERO);
+            degree_bounds.push(virtual_write_domain_oracle.degree_bound());
+            labels.push(b"twist/virtual_write_domain");
+            claim_is_dynamic.push(false);
+            claims.push(BatchedClaim {
+                oracle: virtual_write_domain_oracle,
+                claimed_sum: K::ZERO,
+                label: b"twist/virtual_write_domain",
+            });
+        }
+        if let Some(nonvirtual_arch_domain_oracle) = nonvirtual_arch_domain.as_mut() {
+            claimed_sums.push(K::ZERO);
+            degree_bounds.push(nonvirtual_arch_domain_oracle.degree_bound());
+            labels.push(b"twist/nonvirtual_arch_domain");
+            claim_is_dynamic.push(false);
+            claims.push(BatchedClaim {
+                oracle: nonvirtual_arch_domain_oracle,
+                claimed_sum: K::ZERO,
+                label: b"twist/nonvirtual_arch_domain",
+            });
+        }
     }
+    Ok(())
 }
 
 pub struct TwistRouteAProtocol<'a> {
@@ -323,10 +421,10 @@ impl<'a> TwistRouteAProtocol<'a> {
         ell_n: usize,
         read_check_claims: Vec<K>,
         write_check_claims: Vec<K>,
-    ) -> Self {
-        Self {
-            guard: build_route_a_twist_time_claims_guard(twist_oracles, ell_n, read_check_claims, write_check_claims),
-        }
+    ) -> Result<Self, PiCcsError> {
+        Ok(Self {
+            guard: build_route_a_twist_time_claims_guard(twist_oracles, ell_n, read_check_claims, write_check_claims)?,
+        })
     }
 }
 
@@ -339,7 +437,7 @@ impl<'o> TimeBatchedClaims for TwistRouteAProtocol<'o> {
         labels: &mut Vec<&'static [u8]>,
         claim_is_dynamic: &mut Vec<bool>,
         claims: &mut Vec<BatchedClaim<'a>>,
-    ) {
+    ) -> Result<(), PiCcsError> {
         append_route_a_twist_time_claims(
             &mut self.guard,
             claimed_sums,
@@ -347,7 +445,7 @@ impl<'o> TimeBatchedClaims for TwistRouteAProtocol<'o> {
             labels,
             claim_is_dynamic,
             claims,
-        );
+        )
     }
 }
 
@@ -381,8 +479,30 @@ pub(crate) fn build_bus_layout_for_step_witness(
     step: &StepWitnessBundle<Cmt, F, K>,
     t_len: usize,
 ) -> Result<BusLayout, PiCcsError> {
-    let m = step.mcs.1.Z.cols();
     let m_in = step.mcs.0.m_in;
+    if step.time_columns.t != t_len || step.time_columns.cpu_cols.is_empty() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "step bus layout requires canonical time columns (time_t={}, cpu_cols={}, expected_t={t_len})",
+            step.time_columns.t,
+            step.time_columns.cpu_cols.len()
+        )));
+    }
+    let cpu_region_len = step
+        .time_columns
+        .cpu_cols
+        .len()
+        .checked_mul(t_len)
+        .ok_or_else(|| PiCcsError::InvalidInput("step bus layout: cpu_cols*t_len overflow".into()))?;
+    let bus_region_len = step
+        .time_columns
+        .mem_cols
+        .len()
+        .checked_mul(t_len)
+        .ok_or_else(|| PiCcsError::InvalidInput("step bus layout: mem_cols*t_len overflow".into()))?;
+    let m = m_in
+        .checked_add(cpu_region_len)
+        .and_then(|v| v.checked_add(bus_region_len))
+        .ok_or_else(|| PiCcsError::InvalidInput("step bus layout: virtual m overflow".into()))?;
     let shout_shapes: Vec<ShoutInstanceShape> = step
         .lut_instances
         .iter()
@@ -402,14 +522,23 @@ pub(crate) fn build_bus_layout_for_step_witness(
         .mem_instances
         .iter()
         .map(|(inst, _)| (inst.d * inst.ell, inst.lanes.max(1)));
-    build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes(m, m_in, t_len, shout_shapes, twist).map_err(
-        |e| {
-            PiCcsError::InvalidInput(format!(
-                "step bus layout failed: m={m}, m_in={m_in}, t_len={t_len}, lut_insts={}, grouped_lut_insts={grouped_shout_instances}: {e}",
-                step.lut_instances.len()
-            ))
-        },
-    )
+    let layout =
+        build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes(m, m_in, t_len, shout_shapes, twist).map_err(
+            |e| {
+                PiCcsError::InvalidInput(format!(
+                    "step bus layout failed: m={m}, m_in={m_in}, t_len={t_len}, lut_insts={}, grouped_lut_insts={grouped_shout_instances}: {e}",
+                    step.lut_instances.len()
+                ))
+            },
+        )?;
+    if layout.bus_cols != step.time_columns.mem_cols.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "step bus layout mismatch: layout.bus_cols={} != time_columns.mem_cols.len()={}",
+            layout.bus_cols,
+            step.time_columns.mem_cols.len()
+        )));
+    }
+    Ok(layout)
 }
 
 #[inline]
@@ -528,15 +657,23 @@ pub(crate) fn build_route_a_decode_time_claims(
     let cpu_cols = vec![
         trace.active,
         trace.halted,
+        trace.is_virtual,
+        trace.virtual_sequence_remaining,
         trace.instr_word,
+        trace.rs1_addr,
+        trace.rs2_addr,
+        trace.rd_addr,
         trace.rs1_val,
         trace.rs2_val,
         trace.rd_val,
+        trace.rd_has_write,
         trace.ram_addr,
         trace.shout_has_lookup,
+        trace.shout_table_id,
         trace.shout_val,
         trace.shout_lhs,
         trace.shout_rhs,
+        trace.shout_add_sub_key,
     ];
     let cpu_decoded = decode_trace_col_values_batch(params, step, t_len, &cpu_cols)?;
 
@@ -594,11 +731,9 @@ pub(crate) fn build_route_a_decode_time_claims(
             bus_val_cols.push(lane0.primary_val());
         }
         let lookup_vals = decode_lookup_backed_col_values_batch(
-            params,
-            bus.bus_base,
             t_len,
-            &step.mcs.1.Z,
             bus.bus_cols,
+            Some(&step.time_columns.mem_cols),
             &bus_val_cols,
         )?;
         for (open_idx, &decode_col_id) in decode_open_cols.iter().enumerate() {
@@ -759,8 +894,17 @@ pub(crate) fn build_route_a_decode_time_claims(
     for j in 0..t_len {
         let active = cpu_value_at(trace.active, j)?;
         let halted = cpu_value_at(trace.halted, j)?;
+        let is_virtual = cpu_value_at(trace.is_virtual, j)?;
+        let virtual_sequence_remaining = cpu_value_at(trace.virtual_sequence_remaining, j)?;
+        let trace_rs1_addr = cpu_value_at(trace.rs1_addr, j)?;
+        let trace_rs2_addr = cpu_value_at(trace.rs2_addr, j)?;
+        let trace_rd_addr = cpu_value_at(trace.rd_addr, j)?;
+        let trace_rd_has_write = cpu_value_at(trace.rd_has_write, j)?;
         let decode_opcode = decode_value_at(decode.opcode, j)?;
-        let rd_has_write = decode_value_at(decode.rd_has_write, j)?;
+        let decode_rd_has_write = decode_value_at(decode.rd_has_write, j)?;
+        let decode_rs1_addr = decode_value_at(decode.rs1, j)?;
+        let decode_rs2_addr = decode_value_at(decode.rs2, j)?;
+        let decode_rd_addr = decode_value_at(decode.rd, j)?;
         let rd_is_zero = decode_value_at(decode.rd_is_zero, j)?;
         let rs1_val = cpu_value_at(trace.rs1_val, j)?;
         let rs2_val = cpu_value_at(trace.rs2_val, j)?;
@@ -769,9 +913,11 @@ pub(crate) fn build_route_a_decode_time_claims(
         let ram_has_write = decode_value_at(decode.ram_has_write, j)?;
         let ram_addr = cpu_value_at(trace.ram_addr, j)?;
         let shout_has_lookup = cpu_value_at(trace.shout_has_lookup, j)?;
+        let shout_table_id = cpu_value_at(trace.shout_table_id, j)?;
         let shout_val = cpu_value_at(trace.shout_val, j)?;
         let shout_lhs = cpu_value_at(trace.shout_lhs, j)?;
         let shout_rhs = cpu_value_at(trace.shout_rhs, j)?;
+        let shout_add_sub_key = cpu_value_at(trace.shout_add_sub_key, j)?;
         let opcode_flags = [
             decode_value_at(decode.op_lui, j)?,
             decode_value_at(decode.op_auipc, j)?,
@@ -796,7 +942,6 @@ pub(crate) fn build_route_a_decode_time_claims(
             decode_value_at(decode.funct3_is[6], j)?,
             decode_value_at(decode.funct3_is[7], j)?,
         ];
-        let rs2_decode = decode_value_at(decode.rs2, j)?;
         let imm_i = decode_value_at(decode.imm_i, j)?;
         let imm_s = decode_value_at(decode.imm_s, j)?;
 
@@ -852,10 +997,9 @@ pub(crate) fn build_route_a_decode_time_claims(
             opcode_flags[7] * (K::ONE - rd_is_zero),
             opcode_flags[8] * (K::ONE - rd_is_zero),
         ];
-        let shout_table_id = decode_value_at(decode.shout_table_id, j)?;
         let alu_reg_table_delta = w2_alu_reg_table_delta_from_bits(funct7_bits, funct3_is);
         let alu_imm_table_delta = funct7_bits[5] * funct3_is[5];
-        let alu_imm_shift_rhs_delta = (funct3_is[1] + funct3_is[5]) * (rs2_decode - imm_i);
+        let alu_imm_shift_rhs_delta = (funct3_is[1] + funct3_is[5]) * (decode_rs2_addr - imm_i);
         let selector_residuals = w2_decode_selector_residuals(
             active,
             decode_opcode,
@@ -867,14 +1011,24 @@ pub(crate) fn build_route_a_decode_time_claims(
         let bitness_residuals = w2_decode_bitness_residuals(opcode_flags, funct3_is);
         let alu_branch_residuals = w2_alu_branch_lookup_residuals(
             active,
+            is_virtual,
+            virtual_sequence_remaining,
             halted,
             shout_has_lookup,
             shout_lhs,
             shout_rhs,
+            shout_add_sub_key,
             shout_table_id,
+            trace_rs1_addr,
+            trace_rs2_addr,
+            trace_rd_addr,
+            decode_rs1_addr,
+            decode_rs2_addr,
+            decode_rd_addr,
             rs1_val,
             rs2_val,
-            rd_has_write,
+            trace_rd_has_write,
+            decode_rd_has_write,
             rd_is_zero,
             rd_val,
             ram_has_read,
@@ -889,7 +1043,7 @@ pub(crate) fn build_route_a_decode_time_claims(
             alu_reg_table_delta,
             alu_imm_table_delta,
             alu_imm_shift_rhs_delta,
-            rs2_decode,
+            decode_rs2_addr,
             imm_i,
             imm_s,
         );
@@ -929,22 +1083,32 @@ pub(crate) fn build_route_a_decode_time_claims(
     let main_field_cols = vec![
         trace.active,
         trace.halted,
+        trace.is_virtual,
+        trace.virtual_sequence_remaining,
+        trace.rs1_addr,
+        trace.rs2_addr,
+        trace.rd_addr,
         trace.rs1_val,
         trace.rs2_val,
         trace.rd_val,
+        trace.rd_has_write,
         trace.ram_addr,
         trace.shout_has_lookup,
+        trace.shout_table_id,
         trace.shout_val,
         trace.shout_lhs,
         trace.shout_rhs,
+        trace.shout_add_sub_key,
     ];
     let decode_field_cols = vec![
         decode.opcode,
+        decode.rs1,
+        decode.rs2,
+        decode.rd,
         decode.rd_is_zero,
         decode.rd_has_write,
         decode.ram_has_read,
         decode.ram_has_write,
-        decode.shout_table_id,
         decode.op_lui,
         decode.op_auipc,
         decode.op_jal,
@@ -975,7 +1139,6 @@ pub(crate) fn build_route_a_decode_time_claims(
         decode.funct7_bit[4],
         decode.funct7_bit[5],
         decode.funct7_bit[6],
-        decode.rs2,
         decode.imm_i,
         decode.imm_s,
     ];
@@ -1026,152 +1189,49 @@ pub(crate) fn build_route_a_decode_time_claims(
     let fields_weights = w2_decode_pack_weight_vector(r_cycle, W2_FIELDS_RESIDUAL_COUNT);
     let fields_oracle = FormulaOracleSparseTime::new(
         fields_sparse_cols,
-        5,
+        // Virtual-stage shape+semantic selectors introduce higher multiplicative degree;
+        // use the shared decode/fields bound with one slack degree.
+        W2_FIELDS_DEGREE_BOUND,
         r_cycle,
-        Box::new(move |vals: &[K]| {
-            let mut idx = 0usize;
-            let active = vals[idx];
-            idx += 1;
-            let halted = vals[idx];
-            idx += 1;
-            let rs1_val = vals[idx];
-            idx += 1;
-            let rs2_val = vals[idx];
-            idx += 1;
-            let rd_val = vals[idx];
-            idx += 1;
-            let ram_addr = vals[idx];
-            idx += 1;
-            let shout_has_lookup = vals[idx];
-            idx += 1;
-            let shout_val = vals[idx];
-            idx += 1;
-            let shout_lhs = vals[idx];
-            idx += 1;
-            let shout_rhs = vals[idx];
-            idx += 1;
-            let decode_opcode = vals[idx];
-            idx += 1;
-            let rd_is_zero = vals[idx];
-            idx += 1;
-            let rd_has_write = vals[idx];
-            idx += 1;
-            let ram_has_read = vals[idx];
-            idx += 1;
-            let ram_has_write = vals[idx];
-            idx += 1;
-            let shout_table_id = vals[idx];
-            idx += 1;
-            let opcode_flags = [
-                vals[idx],
-                vals[idx + 1],
-                vals[idx + 2],
-                vals[idx + 3],
-                vals[idx + 4],
-                vals[idx + 5],
-                vals[idx + 6],
-                vals[idx + 7],
-                vals[idx + 8],
-                vals[idx + 9],
-                vals[idx + 10],
-                vals[idx + 11],
-            ];
-            idx += 12;
-            let funct3_is = [
-                vals[idx],
-                vals[idx + 1],
-                vals[idx + 2],
-                vals[idx + 3],
-                vals[idx + 4],
-                vals[idx + 5],
-                vals[idx + 6],
-                vals[idx + 7],
-            ];
-            idx += 8;
-            let funct3_bits = [vals[idx], vals[idx + 1], vals[idx + 2]];
-            idx += 3;
-            let funct7_bits = [
-                vals[idx],
-                vals[idx + 1],
-                vals[idx + 2],
-                vals[idx + 3],
-                vals[idx + 4],
-                vals[idx + 5],
-                vals[idx + 6],
-            ];
-            idx += 7;
-            let rs2_decode = vals[idx];
-            idx += 1;
-            let imm_i = vals[idx];
-            idx += 1;
-            let imm_s = vals[idx];
-            let rd_keep = K::ONE - rd_is_zero;
-            let op_write_flags = [
-                opcode_flags[0] * rd_keep,
-                opcode_flags[1] * rd_keep,
-                opcode_flags[2] * rd_keep,
-                opcode_flags[3] * rd_keep,
-                opcode_flags[7] * rd_keep,
-                opcode_flags[8] * rd_keep,
-            ];
-            let alu_reg_table_delta = w2_alu_reg_table_delta_from_bits(funct7_bits, funct3_is);
-            let alu_imm_table_delta = funct7_bits[5] * funct3_is[5];
-            let alu_imm_shift_rhs_delta = (funct3_is[1] + funct3_is[5]) * (rs2_decode - imm_i);
-            let selector_residuals = w2_decode_selector_residuals(
-                active,
-                decode_opcode,
-                opcode_flags,
-                funct3_is,
-                funct3_bits,
-                opcode_flags[11],
-            );
-            let bitness_residuals = w2_decode_bitness_residuals(opcode_flags, funct3_is);
-            let alu_branch_residuals = w2_alu_branch_lookup_residuals(
-                active,
-                halted,
-                shout_has_lookup,
-                shout_lhs,
-                shout_rhs,
-                shout_table_id,
-                rs1_val,
-                rs2_val,
-                rd_has_write,
-                rd_is_zero,
-                rd_val,
-                ram_has_read,
-                ram_has_write,
-                ram_addr,
-                shout_val,
-                funct3_bits,
-                funct7_bits,
-                opcode_flags,
-                op_write_flags,
-                funct3_is,
-                alu_reg_table_delta,
-                alu_imm_table_delta,
-                alu_imm_shift_rhs_delta,
-                rs2_decode,
-                imm_i,
-                imm_s,
-            );
-            let mut weighted = K::ZERO;
-            let mut w_idx = 0usize;
-            for r in selector_residuals {
-                weighted += fields_weights[w_idx] * r;
-                w_idx += 1;
-            }
-            for r in bitness_residuals {
-                weighted += fields_weights[w_idx] * r;
-                w_idx += 1;
-            }
-            for r in alu_branch_residuals {
-                weighted += fields_weights[w_idx] * r;
-                w_idx += 1;
-            }
-            debug_assert_eq!(w_idx, fields_weights.len());
-            debug_assert_eq!(idx + 1, vals.len());
-            weighted
-        }),
+        move |vals: &[K]| {
+            let mut cursor = ValueCursor::new(vals);
+            let decode_inputs = W2DecodeFieldsOpenings {
+                active: cursor.take(),
+                halted: cursor.take(),
+                is_virtual: cursor.take(),
+                virtual_sequence_remaining: cursor.take(),
+                trace_rs1_addr: cursor.take(),
+                trace_rs2_addr: cursor.take(),
+                trace_rd_addr: cursor.take(),
+                rs1_val: cursor.take(),
+                rs2_val: cursor.take(),
+                rd_val: cursor.take(),
+                trace_rd_has_write: cursor.take(),
+                ram_addr: cursor.take(),
+                shout_has_lookup: cursor.take(),
+                shout_table_id: cursor.take(),
+                shout_val: cursor.take(),
+                shout_lhs: cursor.take(),
+                shout_rhs: cursor.take(),
+                shout_add_sub_key: cursor.take(),
+                decode_opcode: cursor.take(),
+                decode_rs1_addr: cursor.take(),
+                decode_rs2_addr: cursor.take(),
+                decode_rd_addr: cursor.take(),
+                rd_is_zero: cursor.take(),
+                decode_rd_has_write: cursor.take(),
+                ram_has_read: cursor.take(),
+                ram_has_write: cursor.take(),
+                opcode_flags: cursor.take_arr::<12>(),
+                funct3_is: cursor.take_arr::<8>(),
+                funct3_bits: cursor.take_arr::<3>(),
+                funct7_bits: cursor.take_arr::<7>(),
+                imm_i: cursor.take(),
+                imm_s: cursor.take(),
+            };
+            debug_assert_eq!(cursor.consumed(), vals.len());
+            w2_decode_fields_weighted_residual(&decode_inputs, &fields_weights)
+        },
     );
     let imm_oracle = WeightedMaskOracleSparseTime::new(
         active_zero,

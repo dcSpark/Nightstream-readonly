@@ -6,6 +6,7 @@ use neo_memory::riscv::ccs::{
     rv32_trace_shared_bus_requirements_with_specs, rv32_trace_shared_cpu_bus_config_with_specs, Rv32TraceCcsLayout,
     TraceShoutBusSpec,
 };
+use neo_memory::riscv::instruction::operand_mode_keys_enabled;
 use neo_memory::riscv::lookups::{RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID, REG_ID};
 use neo_memory::riscv::trace::{
     rv32_decode_lookup_backed_cols, rv32_decode_lookup_table_id_for_col, rv32_trace_lookup_addr_group_for_table_id,
@@ -354,6 +355,28 @@ fn rv32_trace_lookup_addr_group_coalesces_all_width_lookup_tables() {
         groups.len(),
         1,
         "all width lookup-backed tables should share one address group"
+    );
+}
+
+#[test]
+fn rv32_trace_lookup_addr_group_splits_add_sub_from_interleaved_opcodes_when_operand_mode_enabled() {
+    if !operand_mode_keys_enabled() {
+        return;
+    }
+
+    let shout = RiscvShoutTables::new(/*xlen=*/ 32);
+    let add_group = rv32_trace_lookup_addr_group_for_table_id(shout.opcode_to_id(RiscvOpcode::Add).0);
+    let sub_group = rv32_trace_lookup_addr_group_for_table_id(shout.opcode_to_id(RiscvOpcode::Sub).0);
+    let and_group = rv32_trace_lookup_addr_group_for_table_id(shout.opcode_to_id(RiscvOpcode::And).0);
+
+    assert!(add_group.is_some() && sub_group.is_some() && and_group.is_some());
+    assert_eq!(
+        add_group, sub_group,
+        "ADD and SUB must share one operand-mode addr group"
+    );
+    assert_ne!(
+        add_group, and_group,
+        "ADD/SUB addr group must be distinct from interleaved-key opcode addr group"
     );
 }
 

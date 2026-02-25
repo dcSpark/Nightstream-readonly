@@ -277,33 +277,35 @@ pub(crate) struct SumRoundOracle {
 }
 
 impl SumRoundOracle {
-    pub(crate) fn new(oracles: Vec<Box<dyn RoundOracle>>) -> Self {
+    pub(crate) fn new(oracles: Vec<Box<dyn RoundOracle>>) -> Result<Self, PiCcsError> {
         if oracles.is_empty() {
-            panic!("SumRoundOracle requires at least one oracle");
+            return Err(PiCcsError::ProtocolError(
+                "SumRoundOracle requires at least one oracle".into(),
+            ));
         }
 
         let num_rounds = oracles[0].num_rounds();
         let degree_bound = oracles[0].degree_bound();
         for (idx, o) in oracles.iter().enumerate().skip(1) {
             if o.num_rounds() != num_rounds {
-                panic!(
+                return Err(PiCcsError::ProtocolError(format!(
                     "SumRoundOracle num_rounds mismatch at idx={idx} (got {}, expected {num_rounds})",
                     o.num_rounds()
-                );
+                )));
             }
             if o.degree_bound() != degree_bound {
-                panic!(
+                return Err(PiCcsError::ProtocolError(format!(
                     "SumRoundOracle degree_bound mismatch at idx={idx} (got {}, expected {degree_bound})",
                     o.degree_bound()
-                );
+                )));
             }
         }
 
-        Self {
+        Ok(Self {
             oracles,
             num_rounds,
             degree_bound,
-        }
+        })
     }
 }
 
@@ -313,11 +315,13 @@ impl RoundOracle for SumRoundOracle {
         for o in self.oracles.iter_mut() {
             let ys = o.evals_at(points);
             if ys.len() != acc.len() {
-                panic!(
-                    "SumRoundOracle eval length mismatch (got {}, expected {})",
-                    ys.len(),
-                    acc.len()
-                );
+                // Non-fatal hardening: avoid panics on malformed oracle outputs.
+                // Mismatched lengths are treated as sparse truncation/zero-padding.
+                let n = core::cmp::min(ys.len(), acc.len());
+                for i in 0..n {
+                    acc[i] += ys[i];
+                }
+                continue;
             }
             for (a, y) in acc.iter_mut().zip(ys) {
                 *a += y;
@@ -598,6 +602,7 @@ pub struct RouteAShoutTimeLaneOracles {
     pub event_table_hash: Option<Box<dyn RoundOracle>>,
     pub event_table_hash_claim: Option<K>,
     pub gamma_group: Option<usize>,
+    pub transport_only: bool,
 }
 
 pub struct RouteAShoutGammaGroupOracles {
@@ -605,12 +610,15 @@ pub struct RouteAShoutGammaGroupOracles {
     pub value_claim: K,
     pub adapter: Box<dyn RoundOracle>,
     pub adapter_claim: K,
+    pub bitness: Box<dyn RoundOracle>,
 }
 
 pub struct RouteATwistTimeOracles {
     pub read_check: Box<dyn RoundOracle>,
     pub write_check: Box<dyn RoundOracle>,
     pub bitness: Vec<Box<dyn RoundOracle>>,
+    pub virtual_write_domain: Option<Box<dyn RoundOracle>>,
+    pub nonvirtual_arch_domain: Option<Box<dyn RoundOracle>>,
 }
 
 pub struct RouteAMemoryOracles {
@@ -634,7 +642,7 @@ pub trait TimeBatchedClaims {
         labels: &mut Vec<&'static [u8]>,
         claim_is_dynamic: &mut Vec<bool>,
         claims: &mut Vec<BatchedClaim<'a>>,
-    );
+    ) -> Result<(), PiCcsError>;
 }
 
 pub(crate) struct ShoutAddrPreBatchProverData {
@@ -688,16 +696,18 @@ pub struct RouteAMemoryVerifyOutput {
 pub(crate) struct TraceCpuLinkOpenings {
     pub(crate) shout_has_lookup: K,
     pub(crate) shout_val: K,
-    pub(crate) shout_lhs: K,
-    pub(crate) shout_rhs: K,
+    pub(crate) shout_link_lhs: K,
+    pub(crate) shout_link_rhs: K,
+    pub(crate) shout_add_sub_key: K,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct ShoutTraceLinkSums {
     pub(crate) has_lookup: K,
     pub(crate) val: K,
-    pub(crate) lhs: K,
-    pub(crate) rhs: K,
+    pub(crate) link_lhs: K,
+    pub(crate) link_rhs: K,
+    pub(crate) add_sub_key: K,
     pub(crate) table_id: K,
 }
 
@@ -717,15 +727,23 @@ pub(crate) fn verify_non_event_trace_shout_linkage(
             "trace linkage failed: Shout val mismatch".into(),
         ));
     }
-    if sums.lhs != cpu.shout_lhs {
-        return Err(PiCcsError::ProtocolError(
-            "trace linkage failed: Shout lhs mismatch".into(),
-        ));
+    if sums.link_lhs != cpu.shout_link_lhs {
+        return Err(PiCcsError::ProtocolError(format!(
+            "trace linkage failed: Shout lhs mismatch (sums={}, cpu={})",
+            sums.link_lhs, cpu.shout_link_lhs
+        )));
     }
-    if sums.rhs != cpu.shout_rhs {
-        return Err(PiCcsError::ProtocolError(
-            "trace linkage failed: Shout rhs mismatch".into(),
-        ));
+    if sums.link_rhs != cpu.shout_link_rhs {
+        return Err(PiCcsError::ProtocolError(format!(
+            "trace linkage failed: Shout rhs mismatch (sums={}, cpu={})",
+            sums.link_rhs, cpu.shout_link_rhs
+        )));
+    }
+    if sums.add_sub_key != cpu.shout_add_sub_key {
+        return Err(PiCcsError::ProtocolError(format!(
+            "trace linkage failed: Shout add/sub key mismatch (sums={}, cpu={})",
+            sums.add_sub_key, cpu.shout_add_sub_key
+        )));
     }
     if let Some(expected_table_id) = expected_table_id {
         if sums.table_id != expected_table_id {
@@ -744,13 +762,10 @@ pub(crate) fn eq_single_k(a: K, b: K) -> K {
 
 pub(crate) fn chi_cycle_children(r_cycle: &[K], bit_idx: usize, prefix_eq: K, pair_idx: usize) -> (K, K) {
     let mut suffix = K::ONE;
-    let mut shift = bit_idx + 1;
-    let mut idx = pair_idx;
-    while shift < r_cycle.len() {
-        let bit = idx & 1;
-        let bit_k = if bit == 1 { K::ONE } else { K::ZERO };
-        suffix *= eq_bit_affine(bit_k, r_cycle[shift]);
-        idx >>= 1;
+    let mut shift = 0usize;
+    for b in (bit_idx + 1)..r_cycle.len() {
+        let bit = (pair_idx >> shift) & 1;
+        suffix *= if bit == 1 { r_cycle[b] } else { K::ONE - r_cycle[b] };
         shift += 1;
     }
 
@@ -824,12 +839,24 @@ pub(crate) fn rv32_trace_wb_columns(layout: &Rv32TraceLayout) -> Vec<usize> {
     vec![layout.active, layout.halted, layout.shout_has_lookup]
 }
 
-pub(crate) const W2_FIELDS_RESIDUAL_COUNT: usize = 70;
+// Selector(8) + bitness(20) + ALU/branch/decomposition(682).
+pub(crate) const W2_FIELDS_RESIDUAL_COUNT: usize = 710;
+// Virtual DIV/REM stage selectors (up to rem=19) raise decode/fields multiplicative degree.
+pub(crate) const W2_FIELDS_DEGREE_BOUND: usize = 25;
 pub(crate) const W2_IMM_RESIDUAL_COUNT: usize = 4;
 
 #[inline]
 pub(crate) fn w2_bool01(v: K) -> K {
     v * (v - K::ONE)
+}
+
+#[inline]
+pub(crate) fn w2_reg_addr_from_bits(bits: [K; 5]) -> K {
+    bits[0]
+        + K::from(F::from_u64(2)) * bits[1]
+        + K::from(F::from_u64(4)) * bits[2]
+        + K::from(F::from_u64(8)) * bits[3]
+        + K::from(F::from_u64(16)) * bits[4]
 }
 
 #[inline]
@@ -916,124 +943,6 @@ pub(crate) fn w2_alu_reg_table_delta_from_bits(funct7_bits: [K; 7], funct3_is: [
         + K::from(F::from_u64(19)) * funct3_is[7];
 
     (K::ONE - is_rv32m) * base_delta + is_rv32m * rv32m_delta
-}
-
-#[inline]
-pub(crate) fn w2_alu_branch_lookup_residuals(
-    active: K,
-    halted: K,
-    shout_has_lookup: K,
-    shout_lhs: K,
-    shout_rhs: K,
-    shout_table_id: K,
-    rs1_val: K,
-    rs2_val: K,
-    rd_has_write: K,
-    rd_is_zero: K,
-    rd_val: K,
-    ram_has_read: K,
-    ram_has_write: K,
-    ram_addr: K,
-    shout_val: K,
-    funct3_bits: [K; 3],
-    funct7_bits: [K; 7],
-    opcode_flags: [K; 12],
-    op_write_flags: [K; 6],
-    funct3_is: [K; 8],
-    alu_reg_table_delta: K,
-    alu_imm_table_delta: K,
-    alu_imm_shift_rhs_delta: K,
-    rs2_decode: K,
-    imm_i: K,
-    imm_s: K,
-) -> [K; 42] {
-    let op_lui = opcode_flags[0];
-    let op_auipc = opcode_flags[1];
-    let op_jal = opcode_flags[2];
-    let op_jalr = opcode_flags[3];
-    let op_branch = opcode_flags[4];
-    let op_load = opcode_flags[5];
-    let op_store = opcode_flags[6];
-    let op_alu_imm = opcode_flags[7];
-    let op_alu_reg = opcode_flags[8];
-    let op_misc_mem = opcode_flags[9];
-    let op_system = opcode_flags[10];
-
-    let op_lui_write = op_write_flags[0];
-    let op_auipc_write = op_write_flags[1];
-    let op_jal_write = op_write_flags[2];
-    let op_jalr_write = op_write_flags[3];
-    let op_alu_imm_write = op_write_flags[4];
-    let op_alu_reg_write = op_write_flags[5];
-
-    let non_mem_ops =
-        op_lui + op_auipc + op_jal + op_jalr + op_branch + op_alu_imm + op_alu_reg + op_misc_mem + op_system;
-    let mem_lookup_ops = op_load + op_store;
-    let add_lookup_ops = op_load + op_store + op_jalr;
-    let add_table_id = K::from(F::from_u64(3));
-
-    let alu_table_base = K::from(F::from_u64(3)) * funct3_is[0]
-        + K::from(F::from_u64(7)) * funct3_is[1]
-        + K::from(F::from_u64(5)) * funct3_is[2]
-        + K::from(F::from_u64(6)) * funct3_is[3]
-        + K::from(F::from_u64(1)) * funct3_is[4]
-        + K::from(F::from_u64(8)) * funct3_is[5]
-        + K::from(F::from_u64(2)) * funct3_is[6];
-    let branch_table_expected =
-        K::from(F::from_u64(10)) - K::from(F::from_u64(5)) * funct3_bits[2] + (funct3_bits[1] * funct3_bits[2]);
-    let shift_selector = funct3_is[1] + funct3_is[5];
-    let funct7_m_tail =
-        funct7_bits[1] + funct7_bits[2] + funct7_bits[3] + funct7_bits[4] + funct7_bits[5] + funct7_bits[6];
-    let alu_reg_table_delta_expected = w2_alu_reg_table_delta_from_bits(funct7_bits, funct3_is);
-
-    [
-        (op_alu_imm + op_load + op_jalr) * (shout_has_lookup - K::ONE),
-        (op_alu_reg + op_store) * (shout_has_lookup - K::ONE),
-        op_branch * (shout_has_lookup - K::ONE),
-        (K::ONE - shout_has_lookup) * shout_table_id,
-        (op_alu_imm + op_alu_reg + op_branch + mem_lookup_ops + op_jalr) * (shout_lhs - rs1_val),
-        alu_imm_shift_rhs_delta - shift_selector * (rs2_decode - imm_i),
-        op_alu_imm * (shout_rhs - imm_i - alu_imm_shift_rhs_delta) + (op_load + op_jalr) * (shout_rhs - imm_i),
-        op_alu_reg * (shout_rhs - rs2_val) + op_store * (shout_rhs - imm_s),
-        op_branch * (shout_rhs - rs2_val),
-        op_alu_imm_write * (rd_val - shout_val),
-        op_alu_reg_write * (rd_val - shout_val),
-        op_alu_reg * (shout_table_id - alu_table_base - alu_reg_table_delta)
-            + op_store * (shout_table_id - add_table_id),
-        op_alu_imm * (shout_table_id - alu_table_base - alu_imm_table_delta)
-            + add_lookup_ops * (shout_table_id - add_table_id),
-        op_branch * (shout_table_id - branch_table_expected),
-        op_alu_reg * funct7_bits[0] * funct7_m_tail,
-        alu_reg_table_delta - alu_reg_table_delta_expected,
-        alu_imm_table_delta - funct7_bits[5] * funct3_is[5],
-        op_lui * rd_has_write - op_lui_write,
-        op_auipc * rd_has_write - op_auipc_write,
-        op_jal * rd_has_write - op_jal_write,
-        op_jalr * rd_has_write - op_jalr_write,
-        op_alu_imm * rd_has_write - op_alu_imm_write,
-        op_alu_reg * rd_has_write - op_alu_reg_write,
-        op_lui * (rd_has_write + rd_is_zero - K::ONE),
-        op_auipc * (rd_has_write + rd_is_zero - K::ONE),
-        op_jal * (rd_has_write + rd_is_zero - K::ONE),
-        op_jalr * (rd_has_write + rd_is_zero - K::ONE),
-        opcode_flags[5] * (rd_has_write + rd_is_zero - K::ONE),
-        op_alu_imm * (rd_has_write + rd_is_zero - K::ONE),
-        op_alu_reg * (rd_has_write + rd_is_zero - K::ONE),
-        op_branch * rd_has_write,
-        opcode_flags[6] * rd_has_write,
-        op_misc_mem * rd_has_write,
-        op_system * rd_has_write,
-        active * (halted - op_system),
-        opcode_flags[5] * (ram_has_read - K::ONE),
-        opcode_flags[6] * (ram_has_write - K::ONE),
-        non_mem_ops * ram_has_read,
-        non_mem_ops * ram_has_write,
-        non_mem_ops * ram_addr,
-        // RV32 effective addresses are modular (u32 wraparound). We therefore bind RAM addr to
-        // ADD lookup output (`shout_val`) instead of raw field addition `rs1 + imm`.
-        op_load * (ram_addr - shout_val),
-        op_store * (ram_addr - shout_val),
-    ]
 }
 
 #[inline]
@@ -1265,6 +1174,7 @@ pub(crate) fn control_imm_u_from_bits(
 pub(crate) fn control_next_pc_linear_residual(
     pc_before: K,
     pc_after: K,
+    is_virtual: K,
     op_lui: K,
     op_auipc: K,
     op_load: K,
@@ -1276,7 +1186,8 @@ pub(crate) fn control_next_pc_linear_residual(
     op_amo: K,
 ) -> K {
     let op_linear = op_lui + op_auipc + op_load + op_store + op_alu_imm + op_alu_reg + op_misc_mem + op_system + op_amo;
-    op_linear * (pc_after - pc_before - K::from(F::from_u64(4)))
+    let non_virtual = K::ONE - is_virtual;
+    non_virtual * op_linear * (pc_after - pc_before - K::from(F::from_u64(4)))
 }
 
 #[inline]
@@ -1353,6 +1264,8 @@ pub(crate) fn control_writeback_residuals(
 
 pub(crate) fn rv32_trace_wp_columns(layout: &Rv32TraceLayout) -> Vec<usize> {
     vec![
+        layout.is_virtual,
+        layout.virtual_sequence_remaining,
         layout.instr_word,
         layout.rs1_addr,
         layout.rs1_val,
@@ -1360,13 +1273,16 @@ pub(crate) fn rv32_trace_wp_columns(layout: &Rv32TraceLayout) -> Vec<usize> {
         layout.rs2_val,
         layout.rd_addr,
         layout.rd_val,
+        layout.rd_has_write,
         layout.ram_addr,
         layout.ram_rv,
         layout.ram_wv,
         layout.shout_has_lookup,
+        layout.shout_table_id,
         layout.shout_val,
         layout.shout_lhs,
         layout.shout_rhs,
+        layout.shout_add_sub_key,
         layout.jalr_drop_bit,
     ]
 }
@@ -1382,119 +1298,264 @@ pub(crate) fn rv32_trace_control_extra_opening_columns(layout: &Rv32TraceLayout)
     vec![layout.pc_before, layout.pc_after]
 }
 
+#[inline]
+pub(crate) fn named_opening(openings: &BTreeMap<usize, K>, col_id: usize, label: &str) -> Result<K, PiCcsError> {
+    openings
+        .get(&col_id)
+        .copied()
+        .ok_or_else(|| PiCcsError::ProtocolError(format!("{label}: missing opening col_id={col_id}")))
+}
+
+pub(crate) fn time_openings_for_point(
+    openings: &[crate::shard_proof_types::TimePointOpening],
+    point: &[K],
+    required_col_ids: &[usize],
+    label: &str,
+) -> Result<Option<BTreeMap<usize, K>>, PiCcsError> {
+    if required_col_ids.is_empty() {
+        return Ok(Some(BTreeMap::new()));
+    }
+    let opening = match time_opening_entry_for_point(openings, point, required_col_ids, label)? {
+        Some(opening) => opening,
+        None => return Ok(None),
+    };
+    let mut map = BTreeMap::new();
+    for (&col_id, &eval) in opening.col_ids.iter().zip(opening.evals.iter()) {
+        map.insert(col_id, eval);
+    }
+    Ok(Some(map))
+}
+
+pub(crate) fn time_opening_entry_for_point<'a>(
+    openings: &'a [crate::shard_proof_types::TimePointOpening],
+    point: &[K],
+    required_col_ids: &[usize],
+    label: &str,
+) -> Result<Option<&'a crate::shard_proof_types::TimePointOpening>, PiCcsError> {
+    if required_col_ids.is_empty() {
+        return Ok(None);
+    }
+    let mut required_norm = required_col_ids.to_vec();
+    required_norm.sort_unstable();
+    if required_norm.windows(2).any(|w| w[0] == w[1]) {
+        return Err(PiCcsError::ProtocolError(format!(
+            "{label}: required_col_ids contains duplicates"
+        )));
+    }
+
+    let mut matched: Option<&crate::shard_proof_types::TimePointOpening> = None;
+    for opening in openings
+        .iter()
+        .filter(|opening| opening.point.as_slice() == point)
+    {
+        if opening.col_ids.len() != opening.evals.len() {
+            return Err(PiCcsError::ProtocolError(format!(
+                "{label}: malformed time opening (col_ids={}, evals={})",
+                opening.col_ids.len(),
+                opening.evals.len()
+            )));
+        }
+        let mut opening_norm = opening.col_ids.clone();
+        opening_norm.sort_unstable();
+        if opening_norm.windows(2).any(|w| w[0] == w[1]) {
+            return Err(PiCcsError::ProtocolError(format!(
+                "{label}: malformed time opening has duplicate col_ids"
+            )));
+        }
+        if opening_norm != required_norm {
+            continue;
+        }
+
+        if matched.is_some() {
+            return Err(PiCcsError::ProtocolError(format!(
+                "{label}: duplicate time openings for the same point/column set"
+            )));
+        }
+        matched = Some(opening);
+    }
+
+    Ok(matched)
+}
+
+pub(crate) fn require_time_openings_for_point(
+    openings: &[crate::shard_proof_types::TimePointOpening],
+    point: &[K],
+    required_col_ids: &[usize],
+    label: &str,
+) -> Result<BTreeMap<usize, K>, PiCcsError> {
+    time_openings_for_point(openings, point, required_col_ids, label)?.ok_or_else(|| {
+        PiCcsError::ProtocolError(format!(
+            "{label}: missing required named time opening for point/column set"
+        ))
+    })
+}
+
+pub(crate) fn require_time_opening_entry_for_point<'a>(
+    openings: &'a [crate::shard_proof_types::TimePointOpening],
+    point: &[K],
+    required_col_ids: &[usize],
+    label: &str,
+) -> Result<&'a crate::shard_proof_types::TimePointOpening, PiCcsError> {
+    time_opening_entry_for_point(openings, point, required_col_ids, label)?.ok_or_else(|| {
+        PiCcsError::ProtocolError(format!(
+            "{label}: missing required named time opening for point/column set"
+        ))
+    })
+}
+
+pub(crate) fn require_time_openings_covering_point<'a>(
+    openings: &'a [crate::shard_proof_types::TimePointOpening],
+    point: &[K],
+    required_col_ids: &[usize],
+    label: &str,
+) -> Result<(&'a crate::shard_proof_types::TimePointOpening, BTreeMap<usize, K>), PiCcsError> {
+    if required_col_ids.is_empty() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "{label}: required_col_ids must be non-empty"
+        )));
+    }
+    let required: BTreeSet<usize> = required_col_ids.iter().copied().collect();
+    if required.len() != required_col_ids.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "{label}: required_col_ids contains duplicates"
+        )));
+    }
+
+    let mut matched: Option<(&crate::shard_proof_types::TimePointOpening, BTreeMap<usize, K>)> = None;
+    for opening in openings
+        .iter()
+        .filter(|opening| opening.point.as_slice() == point)
+    {
+        if opening.col_ids.len() != opening.evals.len() {
+            return Err(PiCcsError::ProtocolError(format!(
+                "{label}: malformed time opening (col_ids={}, evals={})",
+                opening.col_ids.len(),
+                opening.evals.len()
+            )));
+        }
+        let mut map = BTreeMap::new();
+        for (&col_id, &eval) in opening.col_ids.iter().zip(opening.evals.iter()) {
+            map.insert(col_id, eval);
+        }
+        if !required.iter().all(|col_id| map.contains_key(col_id)) {
+            continue;
+        }
+        let mut selected = BTreeMap::new();
+        for &col_id in required.iter() {
+            let eval = *map.get(&col_id).ok_or_else(|| {
+                PiCcsError::ProtocolError(format!("{label}: missing opening col_id={col_id} in matched entry"))
+            })?;
+            selected.insert(col_id, eval);
+        }
+        if matched.is_some() {
+            return Err(PiCcsError::ProtocolError(format!(
+                "{label}: multiple covering time openings found for point"
+            )));
+        }
+        matched = Some((opening, selected));
+    }
+
+    matched.ok_or_else(|| {
+        PiCcsError::ProtocolError(format!(
+            "{label}: missing required named time opening covering the requested columns"
+        ))
+    })
+}
+
+pub(crate) fn bus_logical_col_ids_for_step_instance(
+    step: &StepInstanceBundle<Cmt, F, K>,
+    cpu_bus: &BusLayout,
+    label: &str,
+) -> Result<Vec<usize>, PiCcsError> {
+    let cpu_cols_len = step.time_columns.cpu_cols.len();
+    let mem_cols_len = step.time_columns.mem_cols.len();
+    let total_cols = cpu_cols_len
+        .checked_add(mem_cols_len)
+        .ok_or_else(|| PiCcsError::InvalidInput(format!("{label}: cpu_cols + mem_cols overflow")))?;
+    if mem_cols_len != cpu_bus.bus_cols {
+        return Err(PiCcsError::ProtocolError(format!(
+            "{label}: mem_cols.len()={} must equal bus_cols={}",
+            mem_cols_len, cpu_bus.bus_cols
+        )));
+    }
+    if step.time_columns.col_ids.len() != total_cols {
+        return Err(PiCcsError::ProtocolError(format!(
+            "{label}: logical col_id table mismatch (col_ids={}, expected cpu+mem={})",
+            step.time_columns.col_ids.len(),
+            total_cols
+        )));
+    }
+    Ok(step.time_columns.col_ids[cpu_cols_len..].to_vec())
+}
+
 pub(crate) fn infer_rv32_trace_t_len_for_wb_wp(
     step: &StepWitnessBundle<Cmt, F, K>,
     trace: &Rv32TraceLayout,
 ) -> Result<usize, PiCcsError> {
-    if let Some((inst, _)) = step.mem_instances.first() {
-        return Ok(inst.steps);
-    }
-    if let Some((inst, _)) = step.lut_instances.first() {
-        return Ok(inst.steps);
-    }
-
-    let m_in = step.mcs.0.m_in;
-    let m = step.mcs.1.Z.cols();
-    let w = m
-        .checked_sub(m_in)
-        .ok_or_else(|| PiCcsError::InvalidInput("trace width underflow while inferring t_len".into()))?;
-    if trace.cols == 0 || w % trace.cols != 0 {
-        return Err(PiCcsError::InvalidInput(
-            "cannot infer RV32 trace t_len for WB/WP (missing mem/lut instances and non-divisible witness width)"
-                .into(),
-        ));
-    }
-    let t_len = w / trace.cols;
+    let t_len = step.time_columns.t;
     if t_len == 0 {
         return Err(PiCcsError::InvalidInput(
-            "RV32 trace t_len must be >= 1 for WB/WP".into(),
+            "WB/WP requires canonical time columns with t >= 1".into(),
         ));
+    }
+    if step.time_columns.cpu_cols.len() != trace.cols {
+        return Err(PiCcsError::InvalidInput(format!(
+            "WB/WP requires canonical RV32 time cpu columns (got {}, expected {})",
+            step.time_columns.cpu_cols.len(),
+            trace.cols
+        )));
     }
     Ok(t_len)
 }
 
 pub(crate) fn decode_trace_col_values_batch(
-    params: &NeoParams,
+    _params: &NeoParams,
     step: &StepWitnessBundle<Cmt, F, K>,
     t_len: usize,
     col_ids: &[usize],
 ) -> Result<BTreeMap<usize, Vec<K>>, PiCcsError> {
-    let m_in = step.mcs.0.m_in;
-    let m = step.mcs.1.Z.cols();
-    let d = neo_math::D;
-    let z = &step.mcs.1.Z;
-    if z.rows() != d {
+    if step.time_columns.t != t_len || step.time_columns.cpu_cols.is_empty() {
         return Err(PiCcsError::InvalidInput(format!(
-            "WB/WP: CPU witness Z.rows()={} != D={d}",
-            z.rows()
+            "WB/WP requires canonical time CPU columns (time_t={}, cpu_cols={}, expected_t={t_len})",
+            step.time_columns.t,
+            step.time_columns.cpu_cols.len()
         )));
-    }
-
-    let trace_base = m_in;
-    let b_k = K::from(F::from_u64(params.b as u64));
-    let mut pow_b = Vec::with_capacity(d);
-    let mut cur = K::ONE;
-    for _ in 0..d {
-        pow_b.push(cur);
-        cur *= b_k;
     }
 
     let unique_col_ids: BTreeSet<usize> = col_ids.iter().copied().collect();
     let mut decoded = BTreeMap::<usize, Vec<K>>::new();
     for col_id in unique_col_ids {
-        let col_start = trace_base
-            .checked_add(
-                col_id
-                    .checked_mul(t_len)
-                    .ok_or_else(|| PiCcsError::InvalidInput("WB/WP: col_id * t_len overflow".into()))?,
-            )
-            .ok_or_else(|| PiCcsError::InvalidInput("WB/WP: trace column start overflow".into()))?;
-
-        let mut out = Vec::with_capacity(t_len);
-        for j in 0..t_len {
-            let idx = col_start
-                .checked_add(j)
-                .ok_or_else(|| PiCcsError::InvalidInput("WB/WP: trace z idx overflow".into()))?;
-            if idx >= m {
-                return Err(PiCcsError::InvalidInput(format!(
-                    "WB/WP: trace z idx out of range (idx={idx}, m={m})"
-                )));
-            }
-            let mut acc = K::ZERO;
-            for rho in 0..d {
-                acc += pow_b[rho] * K::from(z[(rho, idx)]);
-            }
-            out.push(acc);
+        let vals = step.time_columns.cpu_cols.get(col_id).ok_or_else(|| {
+            PiCcsError::InvalidInput(format!(
+                "WB/WP: trace col_id {} out of range for time_columns.cpu_cols.len()={}",
+                col_id,
+                step.time_columns.cpu_cols.len()
+            ))
+        })?;
+        if vals.len() != t_len {
+            return Err(PiCcsError::InvalidInput(format!(
+                "WB/WP: time_columns.cpu_cols[{col_id}].len()={} != t_len={t_len}",
+                vals.len()
+            )));
         }
-        decoded.insert(col_id, out);
+        decoded.insert(col_id, vals.iter().copied().map(K::from).collect());
     }
 
     Ok(decoded)
 }
 
 pub(crate) fn decode_lookup_backed_col_values_batch(
-    params: &NeoParams,
-    m_in: usize,
     t_len: usize,
-    z: &neo_ccs::matrix::Mat<F>,
     max_cols: usize,
+    time_mem_cols: Option<&[Vec<F>]>,
     col_ids: &[usize],
 ) -> Result<BTreeMap<usize, Vec<K>>, PiCcsError> {
-    let m = z.cols();
-    let d = neo_math::D;
-    if z.rows() != d {
-        return Err(PiCcsError::InvalidInput(format!(
-            "W2: decode lookup-backed Z.rows()={} != D={d}",
-            z.rows()
-        )));
-    }
-
-    let b_k = K::from(F::from_u64(params.b as u64));
-    let mut pow_b = Vec::with_capacity(d);
-    let mut cur = K::ONE;
-    for _ in 0..d {
-        pow_b.push(cur);
-        cur *= b_k;
+    let mem_cols =
+        time_mem_cols.ok_or_else(|| PiCcsError::InvalidInput("W2: canonical time mem columns are required".into()))?;
+    if mem_cols.is_empty() {
+        return Err(PiCcsError::InvalidInput(
+            "W2: canonical time mem columns are required".into(),
+        ));
     }
 
     let unique_col_ids: BTreeSet<usize> = col_ids.iter().copied().collect();
@@ -1505,30 +1566,19 @@ pub(crate) fn decode_lookup_backed_col_values_batch(
                 "W2: decode lookup-backed column out of range (col_id={col_id}, cols={max_cols})"
             )));
         }
-        let col_start = m_in
-            .checked_add(
-                col_id
-                    .checked_mul(t_len)
-                    .ok_or_else(|| PiCcsError::InvalidInput("W2: col_id * t_len overflow".into()))?,
-            )
-            .ok_or_else(|| PiCcsError::InvalidInput("W2: trace column start overflow".into()))?;
-        let mut out = Vec::with_capacity(t_len);
-        for j in 0..t_len {
-            let idx = col_start
-                .checked_add(j)
-                .ok_or_else(|| PiCcsError::InvalidInput("W2: trace z idx overflow".into()))?;
-            if idx >= m {
-                return Err(PiCcsError::InvalidInput(format!(
-                    "W2: decode lookup-backed z idx out of range (idx={idx}, m={m})"
-                )));
-            }
-            let mut acc = K::ZERO;
-            for rho in 0..d {
-                acc += pow_b[rho] * K::from(z[(rho, idx)]);
-            }
-            out.push(acc);
+        let vals = mem_cols.get(col_id).ok_or_else(|| {
+            PiCcsError::InvalidInput(format!(
+                "W2: missing time mem column col_id={col_id} (mem_cols={})",
+                mem_cols.len()
+            ))
+        })?;
+        if vals.len() != t_len {
+            return Err(PiCcsError::InvalidInput(format!(
+                "W2: time mem column length mismatch for col_id={col_id} (len={}, t_len={t_len})",
+                vals.len()
+            )));
         }
-        decoded.insert(col_id, out);
+        decoded.insert(col_id, vals.iter().copied().map(K::from).collect());
     }
     Ok(decoded)
 }

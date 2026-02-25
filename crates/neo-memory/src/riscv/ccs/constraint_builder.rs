@@ -3,6 +3,7 @@ use neo_ccs::relations::CcsStructure;
 use neo_ccs::sparse::{CcsMatrix, CscMat};
 use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as F;
+use std::collections::HashMap;
 
 #[derive(Clone, Debug)]
 pub(super) struct Constraint<Ff: PrimeCharacteristicRing + Copy> {
@@ -22,6 +23,83 @@ impl<Ff: PrimeCharacteristicRing + Copy> Constraint<Ff> {
             b_terms,
             c_terms: Vec::new(),
         }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct UniformConstraintRow<Ff: PrimeCharacteristicRing + Copy> {
+    pub a: HashMap<usize, Ff>,
+    pub b: HashMap<usize, Ff>,
+    pub c: HashMap<usize, Ff>,
+}
+
+impl<Ff: PrimeCharacteristicRing + Copy> UniformConstraintRow<Ff> {
+    pub fn from_terms(
+        a_terms: impl IntoIterator<Item = (usize, Ff)>,
+        b_terms: impl IntoIterator<Item = (usize, Ff)>,
+        c_terms: impl IntoIterator<Item = (usize, Ff)>,
+    ) -> Self {
+        Self {
+            a: a_terms.into_iter().collect(),
+            b: b_terms.into_iter().collect(),
+            c: c_terms.into_iter().collect(),
+        }
+    }
+
+    #[inline]
+    pub fn eval_a(&self, col_id: usize) -> Ff {
+        self.a.get(&col_id).copied().unwrap_or(Ff::ZERO)
+    }
+
+    #[inline]
+    pub fn eval_b(&self, col_id: usize) -> Ff {
+        self.b.get(&col_id).copied().unwrap_or(Ff::ZERO)
+    }
+
+    #[inline]
+    pub fn eval_c(&self, col_id: usize) -> Ff {
+        self.c.get(&col_id).copied().unwrap_or(Ff::ZERO)
+    }
+}
+
+/// Time-independent CPU constraint key over per-step column ids.
+#[derive(Clone, Debug)]
+pub struct UniformConstraintKey<Ff: PrimeCharacteristicRing + Copy> {
+    pub m_cols: usize,
+    pub local_rows: Vec<UniformConstraintRow<Ff>>,
+    pub shift_rows: Vec<UniformConstraintRow<Ff>>,
+    pub boundary_rows: Vec<UniformConstraintRow<Ff>>,
+}
+
+impl<Ff: PrimeCharacteristicRing + Copy> UniformConstraintKey<Ff> {
+    pub fn new(m_cols: usize) -> Self {
+        Self {
+            m_cols,
+            local_rows: Vec::new(),
+            shift_rows: Vec::new(),
+            boundary_rows: Vec::new(),
+        }
+    }
+
+    #[inline]
+    pub fn eval_local_a(&self, local_row_id: usize, col_id: usize) -> Ff {
+        self.local_rows
+            .get(local_row_id)
+            .map_or(Ff::ZERO, |r| r.eval_a(col_id))
+    }
+
+    #[inline]
+    pub fn eval_local_b(&self, local_row_id: usize, col_id: usize) -> Ff {
+        self.local_rows
+            .get(local_row_id)
+            .map_or(Ff::ZERO, |r| r.eval_b(col_id))
+    }
+
+    #[inline]
+    pub fn eval_local_c(&self, local_row_id: usize, col_id: usize) -> Ff {
+        self.local_rows
+            .get(local_row_id)
+            .map_or(Ff::ZERO, |r| r.eval_c(col_id))
     }
 }
 

@@ -34,8 +34,14 @@ fn sample_uniform_fq<R: RngCore + CryptoRng>(rng: &mut R) -> Fq {
 #[doc(hidden)]
 #[inline]
 pub fn sample_uniform_rq<R: RngCore + CryptoRng>(rng: &mut R) -> RqEl {
-    let coeffs: [Fq; D] = core::array::from_fn(|_| sample_uniform_fq(rng));
+    let coeffs = sample_uniform_rq_coeffs(rng);
     cf_unmap(coeffs)
+}
+
+/// Sample a uniform coefficient vector in F_q^D that corresponds to a uniform R_q element.
+#[inline]
+fn sample_uniform_rq_coeffs<R: RngCore + CryptoRng>(rng: &mut R) -> [Fq; D] {
+    core::array::from_fn(|_| sample_uniform_fq(rng))
 }
 
 /// Rotation "one-step" for Φ₈₁(X) = X^54 + X^27 + 1
@@ -307,6 +313,16 @@ pub fn commit_row_major_seeded(seed: [u8; 32], d: usize, kappa: usize, m: usize,
 
     // Fast row slices.
     let z_rows: Vec<&[Fq]> = (0..d).map(|r| Z.row(r)).collect();
+    // Per-column sparsity is invariant across κ rows; compute once.
+    let mut last_nonzero_by_col = vec![usize::MAX; m];
+    for col_idx in 0..m {
+        for t in (0..d).rev() {
+            if z_rows[t][col_idx] != Fq::ZERO {
+                last_nonzero_by_col[col_idx] = t;
+                break;
+            }
+        }
+    }
     let (chunk_size, chunk_seeds_by_row) = seeded_pp_chunk_seeds(seed, kappa, m);
 
     for i in 0..kappa {
@@ -314,32 +330,69 @@ pub fn commit_row_major_seeded(seed: [u8; 32], d: usize, kappa: usize, m: usize,
         let acc = {
             #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
             {
-                (0..chunk_seeds.len())
-                    .into_par_iter()
-                    .fold(Acc::new, |mut st, chunk_idx| {
-                        let start = chunk_idx * chunk_size;
-                        let end = core::cmp::min(m, start + chunk_size);
-                        let mut rng = ChaCha8Rng::from_seed(chunk_seeds[chunk_idx]);
-                        let mut nxt = [Fq::ZERO; D];
-                        for col_idx in start..end {
-                            let a_ij = sample_uniform_rq(&mut rng);
-                            let mut rot_col = cf(a_ij);
-                            for t in 0..d {
-                                let mask = z_rows[t][col_idx];
+                if chunk_seeds.len() == 1 {
+                    // Avoid rayon scheduling overhead in the common small-m case.
+                    let mut st = Acc::new();
+                    let mut rng = ChaCha8Rng::from_seed(chunk_seeds[0]);
+                    let mut nxt = [Fq::ZERO; D];
+                    for col_idx in 0..m {
+                        // Keep deterministic seeded PP stream consumption even for sparse Z columns.
+                        let mut rot_col = sample_uniform_rq_coeffs(&mut rng);
+                        let last_t = last_nonzero_by_col[col_idx];
+                        if last_t == usize::MAX {
+                            continue;
+                        }
+                        for t in 0..last_t {
+                            let mask = z_rows[t][col_idx];
+                            if mask != Fq::ZERO {
                                 acc_mul_add_inplace(&mut st.acc, &rot_col, mask);
-                                rot_step(&rot_col, &mut nxt);
-                                core::mem::swap(&mut rot_col, &mut nxt);
                             }
+                            rot_step(&rot_col, &mut nxt);
+                            core::mem::swap(&mut rot_col, &mut nxt);
                         }
-                        st
-                    })
-                    .reduce_with(|mut a, b| {
-                        for r in 0..d {
-                            a.acc[r] += b.acc[r];
+                        let mask = z_rows[last_t][col_idx];
+                        if mask != Fq::ZERO {
+                            acc_mul_add_inplace(&mut st.acc, &rot_col, mask);
                         }
-                        a
-                    })
-                    .unwrap_or_else(Acc::new)
+                    }
+                    st
+                } else {
+                    (0..chunk_seeds.len())
+                        .into_par_iter()
+                        .fold(Acc::new, |mut st, chunk_idx| {
+                            let start = chunk_idx * chunk_size;
+                            let end = core::cmp::min(m, start + chunk_size);
+                            let mut rng = ChaCha8Rng::from_seed(chunk_seeds[chunk_idx]);
+                            let mut nxt = [Fq::ZERO; D];
+                            for col_idx in start..end {
+                                let mut rot_col = sample_uniform_rq_coeffs(&mut rng);
+                                let last_t = last_nonzero_by_col[col_idx];
+                                if last_t == usize::MAX {
+                                    continue;
+                                }
+                                for t in 0..last_t {
+                                    let mask = z_rows[t][col_idx];
+                                    if mask != Fq::ZERO {
+                                        acc_mul_add_inplace(&mut st.acc, &rot_col, mask);
+                                    }
+                                    rot_step(&rot_col, &mut nxt);
+                                    core::mem::swap(&mut rot_col, &mut nxt);
+                                }
+                                let mask = z_rows[last_t][col_idx];
+                                if mask != Fq::ZERO {
+                                    acc_mul_add_inplace(&mut st.acc, &rot_col, mask);
+                                }
+                            }
+                            st
+                        })
+                        .reduce_with(|mut a, b| {
+                            for r in 0..d {
+                                a.acc[r] += b.acc[r];
+                            }
+                            a
+                        })
+                        .unwrap_or_else(Acc::new)
+                }
             }
             #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
             {
@@ -350,13 +403,22 @@ pub fn commit_row_major_seeded(seed: [u8; 32], d: usize, kappa: usize, m: usize,
                     let mut rng = ChaCha8Rng::from_seed(chunk_seeds[chunk_idx]);
                     let mut nxt = [Fq::ZERO; D];
                     for col_idx in start..end {
-                        let a_ij = sample_uniform_rq(&mut rng);
-                        let mut rot_col = cf(a_ij);
-                        for t in 0..d {
+                        let mut rot_col = sample_uniform_rq_coeffs(&mut rng);
+                        let last_t = last_nonzero_by_col[col_idx];
+                        if last_t == usize::MAX {
+                            continue;
+                        }
+                        for t in 0..last_t {
                             let mask = z_rows[t][col_idx];
-                            acc_mul_add_inplace(&mut st.acc, &rot_col, mask);
+                            if mask != Fq::ZERO {
+                                acc_mul_add_inplace(&mut st.acc, &rot_col, mask);
+                            }
                             rot_step(&rot_col, &mut nxt);
                             core::mem::swap(&mut rot_col, &mut nxt);
+                        }
+                        let mask = z_rows[last_t][col_idx];
+                        if mask != Fq::ZERO {
+                            acc_mul_add_inplace(&mut st.acc, &rot_col, mask);
                         }
                     }
                 }
@@ -368,6 +430,239 @@ pub fn commit_row_major_seeded(seed: [u8; 32], d: usize, kappa: usize, m: usize,
     }
 
     C
+}
+
+/// Commit to many row-major matrices using one seeded PP stream.
+///
+/// All matrices must share the same `d×m` shape and are committed against the
+/// same seeded PP `(seed, d, kappa, m)`.
+#[allow(non_snake_case)]
+#[doc(hidden)]
+pub fn commit_row_major_seeded_many(
+    seed: [u8; 32],
+    d: usize,
+    kappa: usize,
+    m: usize,
+    Zs: &[&Mat<Fq>],
+) -> Vec<Commitment> {
+    assert_eq!(d, D, "Ajtai dimension mismatch: runtime d != compile-time D");
+    if Zs.is_empty() {
+        return Vec::new();
+    }
+    for (idx, z) in Zs.iter().enumerate() {
+        assert_eq!(z.rows(), d, "Zs[{idx}] must be d×m");
+        assert_eq!(z.cols(), m, "Zs[{idx}] must be d×m");
+    }
+
+    let n = Zs.len();
+    let mut out: Vec<Commitment> = (0..n).map(|_| Commitment::zeros(d, kappa)).collect();
+    if m == 0 {
+        return out;
+    }
+
+    // Fast row slices per matrix.
+    let z_rows_all: Vec<Vec<&[Fq]>> = Zs
+        .iter()
+        .map(|z| (0..d).map(|r| z.row(r)).collect())
+        .collect();
+
+    // Per-(matrix,column) sparsity metadata.
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+    let last_nonzero_all: Vec<Vec<usize>> = z_rows_all
+        .par_iter()
+        .map(|z_rows| {
+            let mut last_nonzero_by_col = vec![usize::MAX; m];
+            for col_idx in 0..m {
+                for t in (0..d).rev() {
+                    if z_rows[t][col_idx] != Fq::ZERO {
+                        last_nonzero_by_col[col_idx] = t;
+                        break;
+                    }
+                }
+            }
+            last_nonzero_by_col
+        })
+        .collect();
+    #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+    let last_nonzero_all: Vec<Vec<usize>> = z_rows_all
+        .iter()
+        .map(|z_rows| {
+            let mut last_nonzero_by_col = vec![usize::MAX; m];
+            for col_idx in 0..m {
+                for t in (0..d).rev() {
+                    if z_rows[t][col_idx] != Fq::ZERO {
+                        last_nonzero_by_col[col_idx] = t;
+                        break;
+                    }
+                }
+            }
+            last_nonzero_by_col
+        })
+        .collect();
+
+    let (chunk_size, chunk_seeds_by_row) = seeded_pp_chunk_seeds(seed, kappa, m);
+
+    for i in 0..kappa {
+        let chunk_seeds = &chunk_seeds_by_row[i];
+        let accs: Vec<[Fq; D]> = {
+            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+            {
+                if chunk_seeds.len() == 1 {
+                    let mut rng = ChaCha8Rng::from_seed(chunk_seeds[0]);
+                    let mut base_cols = vec![[Fq::ZERO; D]; m];
+                    for col in base_cols.iter_mut() {
+                        *col = sample_uniform_rq_coeffs(&mut rng);
+                    }
+
+                    if n > 1 && rayon::current_num_threads() > 1 {
+                        (0..n)
+                            .into_par_iter()
+                            .map(|z_idx| {
+                                let mut acc = [Fq::ZERO; D];
+                                let z_rows = &z_rows_all[z_idx];
+                                let last_nonzero = &last_nonzero_all[z_idx];
+                                let mut nxt = [Fq::ZERO; D];
+                                for col_idx in 0..m {
+                                    let last_t = last_nonzero[col_idx];
+                                    if last_t == usize::MAX {
+                                        continue;
+                                    }
+                                    let mut rot_col = base_cols[col_idx];
+                                    for t in 0..last_t {
+                                        let mask = z_rows[t][col_idx];
+                                        if mask != Fq::ZERO {
+                                            acc_mul_add_inplace(&mut acc, &rot_col, mask);
+                                        }
+                                        rot_step(&rot_col, &mut nxt);
+                                        core::mem::swap(&mut rot_col, &mut nxt);
+                                    }
+                                    let mask = z_rows[last_t][col_idx];
+                                    if mask != Fq::ZERO {
+                                        acc_mul_add_inplace(&mut acc, &rot_col, mask);
+                                    }
+                                }
+                                acc
+                            })
+                            .collect()
+                    } else {
+                        let mut local = vec![[Fq::ZERO; D]; n];
+                        let mut nxt = [Fq::ZERO; D];
+                        for col_idx in 0..m {
+                            let base_col = base_cols[col_idx];
+                            for z_idx in 0..n {
+                                let mut rot_col = base_col;
+                                let last_t = last_nonzero_all[z_idx][col_idx];
+                                if last_t == usize::MAX {
+                                    continue;
+                                }
+                                let z_rows = &z_rows_all[z_idx];
+                                for t in 0..last_t {
+                                    let mask = z_rows[t][col_idx];
+                                    if mask != Fq::ZERO {
+                                        acc_mul_add_inplace(&mut local[z_idx], &rot_col, mask);
+                                    }
+                                    rot_step(&rot_col, &mut nxt);
+                                    core::mem::swap(&mut rot_col, &mut nxt);
+                                }
+                                let mask = z_rows[last_t][col_idx];
+                                if mask != Fq::ZERO {
+                                    acc_mul_add_inplace(&mut local[z_idx], &rot_col, mask);
+                                }
+                            }
+                        }
+                        local
+                    }
+                } else {
+                    (0..chunk_seeds.len())
+                        .into_par_iter()
+                        .fold(
+                            || vec![[Fq::ZERO; D]; n],
+                            |mut local, chunk_idx| {
+                                let start = chunk_idx * chunk_size;
+                                let end = core::cmp::min(m, start + chunk_size);
+                                let mut rng = ChaCha8Rng::from_seed(chunk_seeds[chunk_idx]);
+                                let mut nxt = [Fq::ZERO; D];
+                                for col_idx in start..end {
+                                    let base_col = sample_uniform_rq_coeffs(&mut rng);
+                                    for z_idx in 0..n {
+                                        let mut rot_col = base_col;
+                                        let last_t = last_nonzero_all[z_idx][col_idx];
+                                        if last_t == usize::MAX {
+                                            continue;
+                                        }
+                                        let z_rows = &z_rows_all[z_idx];
+                                        for t in 0..last_t {
+                                            let mask = z_rows[t][col_idx];
+                                            if mask != Fq::ZERO {
+                                                acc_mul_add_inplace(&mut local[z_idx], &rot_col, mask);
+                                            }
+                                            rot_step(&rot_col, &mut nxt);
+                                            core::mem::swap(&mut rot_col, &mut nxt);
+                                        }
+                                        let mask = z_rows[last_t][col_idx];
+                                        if mask != Fq::ZERO {
+                                            acc_mul_add_inplace(&mut local[z_idx], &rot_col, mask);
+                                        }
+                                    }
+                                }
+                                local
+                            },
+                        )
+                        .reduce(
+                            || vec![[Fq::ZERO; D]; n],
+                            |mut a, b| {
+                                for z_idx in 0..n {
+                                    for r in 0..d {
+                                        a[z_idx][r] += b[z_idx][r];
+                                    }
+                                }
+                                a
+                            },
+                        )
+                }
+            }
+            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+            {
+                let mut local = vec![[Fq::ZERO; D]; n];
+                for chunk_idx in 0..chunk_seeds.len() {
+                    let start = chunk_idx * chunk_size;
+                    let end = core::cmp::min(m, start + chunk_size);
+                    let mut rng = ChaCha8Rng::from_seed(chunk_seeds[chunk_idx]);
+                    let mut nxt = [Fq::ZERO; D];
+                    for col_idx in start..end {
+                        let base_col = sample_uniform_rq_coeffs(&mut rng);
+                        for z_idx in 0..n {
+                            let mut rot_col = base_col;
+                            let last_t = last_nonzero_all[z_idx][col_idx];
+                            if last_t == usize::MAX {
+                                continue;
+                            }
+                            let z_rows = &z_rows_all[z_idx];
+                            for t in 0..last_t {
+                                let mask = z_rows[t][col_idx];
+                                if mask != Fq::ZERO {
+                                    acc_mul_add_inplace(&mut local[z_idx], &rot_col, mask);
+                                }
+                                rot_step(&rot_col, &mut nxt);
+                                core::mem::swap(&mut rot_col, &mut nxt);
+                            }
+                            let mask = z_rows[last_t][col_idx];
+                            if mask != Fq::ZERO {
+                                acc_mul_add_inplace(&mut local[z_idx], &rot_col, mask);
+                            }
+                        }
+                    }
+                }
+                local
+            }
+        };
+
+        for z_idx in 0..n {
+            out[z_idx].col_mut(i).copy_from_slice(&accs[z_idx]);
+        }
+    }
+
+    out
 }
 
 // Variable-time optimization removed for security and simplicity

@@ -11,7 +11,8 @@ pub mod common; // shared utilities and helper functions
 pub mod engines; // internal engine trait + wrappers (includes optimized_engine, paper_exact_engine, crosscheck_engine)
 pub mod error;
 pub mod sumcheck;
-// Re-export RLC/DEC from engines for a stable path
+pub mod superneo_eval; // transformed-matrix evaluators for SuperNeo migration
+                       // Re-export RLC/DEC from engines for a stable path
 pub use engines::pi_rlc_dec;
 
 // Re-export engine modules for convenience
@@ -30,4 +31,7 @@ pub use engines::optimized_engine::{
 pub use error::PiCcsError;
 
 // Re-export common utilities
-pub use common::{sample_rot_rhos_n, split_b_matrix_k, split_b_matrix_k_with_nonzero_flags, RotRing};
+pub use common::{
+    rot_rhos_from_mats, rot_rhos_to_mats, sample_rot_rhos_n, sample_rot_rhos_n_typed, split_b_matrix_k,
+    split_b_matrix_k_with_nonzero_flags, RotRho, RotRing,
+};

@@ -1,5 +1,7 @@
 use p3_field::Field;
 
+use crate::riscv::instruction::operand_mode_keys_enabled;
+
 use super::alu::lookup_entry;
 use super::isa::RiscvOpcode;
 
@@ -210,6 +212,32 @@ pub fn evaluate_sub_mle<F: Field>(r: &[F]) -> F {
     result
 }
 
+/// Evaluate an identity-table MLE over the low `xlen` key bits of a `2*xlen` address.
+///
+/// This is used for rollout paths where opcode tables are keyed by a combined
+/// operand rather than interleaved `(lhs, rhs)` bits.
+pub fn evaluate_low_word_identity_mle<F: Field>(r: &[F], xlen: usize) -> F {
+    debug_assert_eq!(r.len(), 2 * xlen);
+    let mut result = F::ZERO;
+    for i in 0..xlen {
+        result += F::from_u64(1u64 << i) * r[i];
+    }
+    result
+}
+
+/// Evaluate an identity-table MLE over the high `xlen` key bits of a `2*xlen` address.
+///
+/// This is used for rollout paths where MULHU is keyed by the full product and returns
+/// the upper word.
+pub fn evaluate_high_word_identity_mle<F: Field>(r: &[F], xlen: usize) -> F {
+    debug_assert_eq!(r.len(), 2 * xlen);
+    let mut result = F::ZERO;
+    for i in 0..xlen {
+        result += F::from_u64(1u64 << i) * r[xlen + i];
+    }
+    result
+}
+
 /// Evaluate the MLE of SLL (Shift Left Logical) at a random point.
 pub fn evaluate_sll_mle<F: Field>(r: &[F], xlen: usize) -> F {
     debug_assert_eq!(r.len(), 2 * xlen);
@@ -342,6 +370,10 @@ pub fn evaluate_opcode_mle<F: Field>(op: RiscvOpcode, r: &[F], xlen: usize) -> F
         RiscvOpcode::And => evaluate_and_mle(r),
         RiscvOpcode::Xor => evaluate_xor_mle(r),
         RiscvOpcode::Or => evaluate_or_mle(r),
+        RiscvOpcode::Add if operand_mode_keys_enabled() => evaluate_low_word_identity_mle(r, xlen),
+        RiscvOpcode::Sub if operand_mode_keys_enabled() => evaluate_low_word_identity_mle(r, xlen),
+        RiscvOpcode::Mul if operand_mode_keys_enabled() && xlen <= 32 => evaluate_low_word_identity_mle(r, xlen),
+        RiscvOpcode::Mulhu if operand_mode_keys_enabled() && xlen <= 32 => evaluate_high_word_identity_mle(r, xlen),
         RiscvOpcode::Add => evaluate_add_mle(r),
         RiscvOpcode::Sub => evaluate_sub_mle(r),
         RiscvOpcode::Eq => evaluate_eq_mle(r),

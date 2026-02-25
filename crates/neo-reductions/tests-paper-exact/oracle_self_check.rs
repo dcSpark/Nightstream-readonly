@@ -1,9 +1,10 @@
 #![cfg(feature = "paper-exact")]
 #![allow(non_snake_case)]
 
-use neo_ccs::{CcsStructure, Mat, McsWitness, SparsePoly, Term};
+use neo_ccs::{CcsStructure, CcsWitness, Mat, SparsePoly, Term};
 use neo_math::{D, F, K};
 use neo_params::NeoParams;
+use neo_reductions::optimized_engine::oracle::NcOracle;
 use neo_reductions::paper_exact_engine as refimpl;
 use neo_reductions::paper_exact_engine::oracle::PaperExactOracle;
 use neo_reductions::sumcheck::RoundOracle;
@@ -12,7 +13,7 @@ use p3_field::PrimeCharacteristicRing;
 fn sum_q_fe_over_hypercube(
     s: &CcsStructure<F>,
     params: &NeoParams,
-    mcs_witnesses: &[McsWitness<F>],
+    mcs_witnesses: &[CcsWitness<F>],
     me_witnesses: &[Mat<F>],
     ch: &neo_reductions::Challenges,
     ell_d: usize,
@@ -44,6 +45,100 @@ fn sum_q_fe_over_hypercube(
         }
     }
     total
+}
+
+#[inline]
+fn ceil_log2_usize(x: usize) -> usize {
+    if x <= 1 {
+        0
+    } else {
+        (usize::BITS as usize) - ((x - 1).leading_zeros() as usize)
+    }
+}
+
+#[inline]
+fn bool_mle_weight(mask: usize, point: &[K]) -> K {
+    let mut w = K::ONE;
+    for (bit, &x) in point.iter().enumerate() {
+        w *= if ((mask >> bit) & 1) == 1 { x } else { K::ONE - x };
+    }
+    w
+}
+
+#[inline]
+fn range_product_symmetric(val: K, b: u32) -> K {
+    let lo = -((b as i64) - 1);
+    let hi = (b as i64) - 1;
+    let mut prod = K::ONE;
+    for t in lo..=hi {
+        prod *= val - K::from(F::from_i64(t));
+    }
+    prod
+}
+
+fn sum_q_nc_over_hypercube(
+    params: &NeoParams,
+    expected_m: usize,
+    mcs_witnesses: &[CcsWitness<F>],
+    me_witnesses: &[Mat<F>],
+    ch: &neo_reductions::Challenges,
+    ell_d: usize,
+    ell_m: usize,
+) -> K {
+    assert_eq!(ch.beta_a.len(), ell_d, "beta_a length mismatch");
+    assert_eq!(ch.beta_m.len(), ell_m, "beta_m length mismatch");
+
+    let all_witnesses: Vec<&Mat<F>> = mcs_witnesses
+        .iter()
+        .map(|w| &w.Z)
+        .chain(me_witnesses.iter())
+        .collect();
+    let digits_tables: Vec<Vec<[K; D]>> = all_witnesses
+        .iter()
+        .map(|z| {
+            neo_reductions::common::build_witness_nc_digit_table(params, z, expected_m)
+                .expect("NC test fixture must decompose witness digits")
+        })
+        .collect();
+
+    let m_sz = 1usize << ell_m;
+    let d_sz = 1usize << ell_d;
+    let mut total = K::ZERO;
+    for sm in 0..m_sz {
+        let w_s = bool_mle_weight(sm, &ch.beta_m);
+        for am in 0..d_sz {
+            let w_a = bool_mle_weight(am, &ch.beta_a);
+            let mut g = ch.gamma;
+            let mut nc = K::ZERO;
+            for digits in digits_tables.iter() {
+                let y = if sm < expected_m && am < D {
+                    digits[sm][am]
+                } else {
+                    K::ZERO
+                };
+                nc += g * range_product_symmetric(y, params.b);
+                g *= ch.gamma;
+            }
+            total += w_s * w_a * nc;
+        }
+    }
+
+    total
+}
+
+fn nc_round0_sum_from_optimized_oracle(
+    s: &CcsStructure<F>,
+    params: &NeoParams,
+    mcs_witnesses: &[CcsWitness<F>],
+    me_witnesses: &[Mat<F>],
+    ch: &neo_reductions::Challenges,
+    ell_d: usize,
+    ell_m: usize,
+    d_sc: usize,
+) -> K {
+    let mut oracle = NcOracle::new(s, params, mcs_witnesses, me_witnesses, ch.clone(), ell_d, ell_m, d_sc);
+    let g0 = oracle.evals_at(&[K::ZERO, K::ONE]);
+    g0[0] + g0[1]
 }
 
 fn tiny_ccs_id(n: usize, m: usize) -> CcsStructure<F> {
@@ -106,12 +201,12 @@ fn round0_sum_matches_hypercube_sum_k1() {
 
     // One MCS witness with all-ones digits
     let z = make_digits_matrix(F::ONE, D, m);
-    let mcs_w = [McsWitness { w: vec![], Z: z }];
+    let mcs_w = [CcsWitness { w: vec![], Z: z }];
     let me_w: [Mat<F>; 0] = [];
 
     // Challenges sized to the round dimensions
     let ell_n = 1usize; // since n=2
-    let ell_d = 1usize; // use 1 Ajtai bit for the sum-check domain in this test
+    let ell_d = ceil_log2_usize(D);
     let ch = neo_reductions::Challenges {
         alpha: vec![K::from(F::from_u64(3)); ell_d],
         beta_a: vec![K::from(F::from_u64(5)); ell_d],
@@ -145,11 +240,11 @@ fn round0_sum_matches_hypercube_sum_k2_with_eval() {
 
     let z0 = make_digits_matrix(F::from_u64(2), D, m);
     let z1 = make_digits_matrix(F::from_u64(3), D, m);
-    let mcs_w = [McsWitness { w: vec![], Z: z0 }];
+    let mcs_w = [CcsWitness { w: vec![], Z: z0 }];
     let me_w = [z1];
 
     let ell_n = 1usize; // n=2
-    let ell_d = 1usize; // keep Ajtai domain tiny
+    let ell_d = ceil_log2_usize(D);
     let ch = neo_reductions::Challenges {
         alpha: vec![K::from(F::from_u64(13)); ell_d],
         beta_a: vec![K::from(F::from_u64(17)); ell_d],
@@ -184,7 +279,6 @@ fn round0_sum_matches_hypercube_sum_k2_with_eval() {
 }
 
 #[test]
-#[ignore] // Requires separate NC implementation that was removed when optimized_engine became paper-exact
 fn nc_sum_engine_matches_paper_nc_when_m1_not_identity() {
     // Construct a minimal CCS where M_1 ≠ I to expose NC drift
     let params = NeoParams::goldilocks_127();
@@ -193,62 +287,34 @@ fn nc_sum_engine_matches_paper_nc_when_m1_not_identity() {
 
     // One MCS witness with constant digits (ensures y differs from a single table lookup)
     let Z = make_digits_matrix(F::ONE, D, m);
-    let mcs_w = [McsWitness { w: vec![], Z }];
+    let mcs_w = [CcsWitness { w: vec![], Z }];
     let me_w: [Mat<F>; 0] = [];
 
-    // Challenges (tiny domains): ell_n = 1, ell_d = 1
-    let ell_n = 1usize;
-    let ell_d = 1usize;
+    // Challenges for NC-only parity: use the full Ajtai bit-width of D.
+    let ell_m = 1usize;
+    let ell_d = ceil_log2_usize(D);
+    assert!(1usize << ell_d >= D, "Ajtai domain must cover D rows");
     let ch = neo_reductions::Challenges {
-        alpha: vec![K::from(F::from_u64(3)); ell_d],
-        beta_a: vec![K::from(F::from_u64(5)); ell_d],
-        beta_r: vec![K::from(F::from_u64(7)); ell_n],
-        beta_m: Vec::new(),
+        alpha: Vec::new(),
+        beta_a: (0..ell_d)
+            .map(|i| K::from(F::from_u64(5 + i as u64)))
+            .collect(),
+        beta_r: Vec::new(),
+        beta_m: vec![K::from(F::from_u64(7)); ell_m],
         gamma: K::from(F::from_u64(11)),
     };
 
-    // Paper-exact total sum over the hypercube (k=1 ⇒ no Eval)
-    let paper_total = refimpl::sum_q_over_hypercube_paper_exact(&s, &params, &mcs_w, &me_w, &ch, ell_d, ell_n, None);
-
-    // Manually compute F(β_r) = Σ_row χ_{β_r}(row) · (M_1 · z)[row]
-    // where z[c] = Σ_{rho=0..D-1} b^rho · Z[rho,c]
-    let bF = F::from_u64(params.b as u64);
-    let mut pow_b = vec![F::ONE; D];
-    for i in 1..D {
-        pow_b[i] = pow_b[i - 1] * bF;
-    }
-    let z_vec: Vec<F> = (0..m)
-        .map(|c| {
-            let mut acc = F::ZERO;
-            for rho in 0..D {
-                acc += mcs_w[0].Z[(rho, c)] * pow_b[rho];
-            }
-            acc
-        })
-        .collect();
-
-    // χ_{β_r}
-    let chi_beta_r = neo_ccs::utils::tensor_point::<K>(&ch.beta_r);
-    let mut mz = vec![F::ZERO; n];
-    s.matrices[0].add_mul_into(&z_vec, &mut mz, n);
-    let mut f_beta = K::ZERO;
-    for row in 0..n {
-        f_beta += chi_beta_r[row] * K::from(mz[row]);
-    }
-
-    // Paper NC component extracted as paper_total - F_beta
-    let _nc_paper = paper_total - f_beta;
-
-    // Engine NC: since optimized_engine now uses paper-exact code, this test is obsolete
-    // Stub out the comparison
-    panic!("This test requires a separate NC implementation that was removed when optimized_engine became paper-exact");
+    let paper_nc = sum_q_nc_over_hypercube(&params, s.m, &mcs_w, &me_w, &ch, ell_d, ell_m);
+    let engine_nc = nc_round0_sum_from_optimized_oracle(&s, &params, &mcs_w, &me_w, &ch, ell_d, ell_m, 4);
+    assert_eq!(
+        engine_nc, paper_nc,
+        "NC round-0 sum mismatch (optimized oracle vs paper loop)"
+    );
 }
 
 #[test]
-#[ignore] // Requires separate NC implementation that was removed when optimized_engine became paper-exact
 fn nc_sum_engine_vs_paper_drift_with_custom_m1_and_Z() {
-    // Design M1 and Z so that engine NC uses a dot-product giving large non-range values,
-    // while paper NC (table lookup) sees different entries; this should expose drift if any.
+    // Stress with custom witness values and multiple witness channels (MCS + ME).
     let params = NeoParams::goldilocks_127();
     let (n, m) = (2usize, 2usize);
 
@@ -265,48 +331,23 @@ fn nc_sum_engine_vs_paper_drift_with_custom_m1_and_Z() {
     z_data[m] = F::from_u64(9);
     z_data[m + 1] = F::from_u64(23);
     let Z = Mat::from_row_major(D, m, z_data);
-    let mcs_w = [McsWitness { w: vec![], Z }];
-    let me_w: [Mat<F>; 0] = [];
+    let mcs_w = [CcsWitness { w: vec![], Z }];
+    let me_w = [make_digits_matrix(F::from_u64(6), D, m)];
 
-    let ell_n = 1usize; // n=2
-    let ell_d = 1usize; // keep Ajtai domain tiny
+    let ell_m = 1usize; // m=2
+    let ell_d = ceil_log2_usize(D);
+    assert!(1usize << ell_d >= D, "Ajtai domain must cover D rows");
     let ch = neo_reductions::Challenges {
-        alpha: vec![K::from(F::from_u64(13)); ell_d],
-        beta_a: vec![K::from(F::from_u64(17)); ell_d],
-        beta_r: vec![K::from(F::from_u64(19)); ell_n],
-        beta_m: Vec::new(),
+        alpha: Vec::new(),
+        beta_a: (0..ell_d)
+            .map(|i| K::from(F::from_u64(17 + i as u64)))
+            .collect(),
+        beta_r: Vec::new(),
+        beta_m: vec![K::from(F::from_u64(19)); ell_m],
         gamma: K::from(F::from_u64(23)),
     };
 
-    // Paper-exact total (k=1)
-    let paper_total = refimpl::sum_q_over_hypercube_paper_exact(&s, &params, &mcs_w, &me_w, &ch, ell_d, ell_n, None);
-
-    // Compute F_beta directly
-    let bF = F::from_u64(params.b as u64);
-    let mut pow_b = vec![F::ONE; D];
-    for i in 1..D {
-        pow_b[i] = pow_b[i - 1] * bF;
-    }
-    let z_vec: Vec<F> = (0..m)
-        .map(|c| {
-            let mut acc = F::ZERO;
-            for rho in 0..D {
-                acc += mcs_w[0].Z[(rho, c)] * pow_b[rho];
-            }
-            acc
-        })
-        .collect();
-    let chi_beta_r = neo_ccs::utils::tensor_point::<K>(&ch.beta_r);
-    let mut mz = vec![F::ZERO; n];
-    s.matrices[0].add_mul_into(&z_vec, &mut mz, n);
-    let mut f_beta = K::ZERO;
-    for row in 0..n {
-        f_beta += chi_beta_r[row] * K::from(mz[row]);
-    }
-
-    let _nc_paper = paper_total - f_beta;
-
-    // Engine NC: since optimized_engine now uses paper-exact code, this test is obsolete
-    // Stub out the comparison
-    panic!("This test requires a separate NC implementation that was removed when optimized_engine became paper-exact");
+    let paper_nc = sum_q_nc_over_hypercube(&params, s.m, &mcs_w, &me_w, &ch, ell_d, ell_m);
+    let engine_nc = nc_round0_sum_from_optimized_oracle(&s, &params, &mcs_w, &me_w, &ch, ell_d, ell_m, 4);
+    assert_eq!(engine_nc, paper_nc, "NC round-0 sum mismatch on custom fixture");
 }

@@ -150,6 +150,144 @@ fn eval_constraint(const_one_col: usize, c: &CpuConstraint<F>, z: &[F]) -> F {
 }
 
 #[test]
+fn test_twist_write_addr_domain_split_enforces_virtual_flag_vs_wa_bit5() {
+    let n = 16usize;
+    let m = 96usize;
+    let const_one_col = 0usize;
+    let flag_col = 20usize;
+
+    // One Twist lane with ell_addr=6 => write address bit[5] exists.
+    let bus = build_bus_layout_for_instances(m, 0, 1, [], [6]).expect("layout");
+    let lane = &bus.twist_cols[0].lanes[0];
+
+    let mut builder = CpuConstraintBuilder::<F>::new(n, m, const_one_col);
+    builder.add_twist_write_addr_domain_split(&bus, lane, flag_col, /*split_bit_idx=*/ 5);
+    assert_eq!(
+        builder.constraints().len(),
+        1,
+        "chunk_size=1 should produce one domain-split constraint"
+    );
+
+    let mut z = vec![F::ZERO; m];
+    z[const_one_col] = F::ONE;
+    z[bus.bus_cell(lane.has_write, 0)] = F::ONE;
+    z[flag_col] = F::ONE;
+
+    // Valid virtual write: wa_bit[5] = 1 => addr >= 32.
+    let wa_bit5_col = lane.wa_bits.start + 5;
+    z[bus.bus_cell(wa_bit5_col, 0)] = F::ONE;
+    for c in builder.constraints() {
+        assert_eq!(eval_constraint(const_one_col, c, &z), F::ZERO);
+        assert_eq!(c.label, CpuConstraintLabel::TwistWriteAddressDomainSplit);
+    }
+
+    // Tamper: keep has_write=1 and is_virtual=1, but force wa_bit[5]=0.
+    // This must violate the domain split.
+    z[bus.bus_cell(wa_bit5_col, 0)] = F::ZERO;
+    let violated = builder
+        .constraints()
+        .iter()
+        .any(|c| eval_constraint(const_one_col, c, &z) != F::ZERO);
+    assert!(violated, "expected domain-split violation when flag != wa_bit[5]");
+
+    // Gate check: when has_write=0, mismatch must be ignored.
+    z[bus.bus_cell(lane.has_write, 0)] = F::ZERO;
+    for c in builder.constraints() {
+        assert_eq!(
+            eval_constraint(const_one_col, c, &z),
+            F::ZERO,
+            "constraint should be gated off when has_write=0"
+        );
+    }
+}
+
+#[test]
+fn test_twist_write_addr_domain_split_fallback_without_bit5() {
+    let n = 16usize;
+    let m = 96usize;
+    let const_one_col = 0usize;
+    let flag_col = 24usize;
+
+    // One Twist lane with ell_addr=5 => bit[5] is absent.
+    let bus = build_bus_layout_for_instances(m, 0, 1, [], [5]).expect("layout");
+    let lane = &bus.twist_cols[0].lanes[0];
+    let wa_len = lane.wa_bits.end - lane.wa_bits.start;
+    assert_eq!(wa_len, 5, "expected wa_bits length without bit[5]");
+
+    let mut builder = CpuConstraintBuilder::<F>::new(n, m, const_one_col);
+    builder.add_twist_write_addr_domain_split(&bus, lane, flag_col, /*split_bit_idx=*/ 5);
+
+    let mut z = vec![F::ZERO; m];
+    z[const_one_col] = F::ONE;
+    z[bus.bus_cell(lane.has_write, 0)] = F::ONE;
+
+    // Fallback path enforces has_write * flag = 0 when bit[5] is unavailable.
+    z[flag_col] = F::ZERO;
+    for c in builder.constraints() {
+        assert_eq!(eval_constraint(const_one_col, c, &z), F::ZERO);
+    }
+
+    z[flag_col] = F::ONE;
+    let violated = builder
+        .constraints()
+        .iter()
+        .any(|c| eval_constraint(const_one_col, c, &z) != F::ZERO);
+    assert!(
+        violated,
+        "expected fallback domain-split violation when has_write=1 and flag=1"
+    );
+}
+
+#[test]
+fn test_twist_read_addr_domain_split_nonvirtual_enforces_bit5_zero() {
+    let n = 16usize;
+    let m = 96usize;
+    let const_one_col = 0usize;
+    let is_virtual_col = 28usize;
+
+    // One Twist lane with ell_addr=6 => read address bit[5] exists.
+    let bus = build_bus_layout_for_instances(m, 0, 1, [], [6]).expect("layout");
+    let lane = &bus.twist_cols[0].lanes[0];
+
+    let mut builder = CpuConstraintBuilder::<F>::new(n, m, const_one_col);
+    builder.add_twist_read_addr_domain_split_nonvirtual(&bus, lane, is_virtual_col, /*split_bit_idx=*/ 5);
+    assert_eq!(builder.constraints().len(), 1);
+
+    let mut z = vec![F::ZERO; m];
+    z[const_one_col] = F::ONE;
+    let ra_bit5_col = lane.ra_bits.start + 5;
+
+    // Non-virtual read: bit[5] must be 0.
+    z[is_virtual_col] = F::ZERO;
+    z[bus.bus_cell(ra_bit5_col, 0)] = F::ZERO;
+    for c in builder.constraints() {
+        assert_eq!(eval_constraint(const_one_col, c, &z), F::ZERO);
+        assert_eq!(c.label, CpuConstraintLabel::TwistReadAddressDomainSplit);
+    }
+
+    // Tamper: non-virtual row with bit[5]=1 must violate.
+    z[bus.bus_cell(ra_bit5_col, 0)] = F::ONE;
+    let violated = builder
+        .constraints()
+        .iter()
+        .any(|c| eval_constraint(const_one_col, c, &z) != F::ZERO);
+    assert!(
+        violated,
+        "expected non-virtual read-address domain-split violation when bit[5]=1"
+    );
+
+    // Virtual row: unconstrained by this split.
+    z[is_virtual_col] = F::ONE;
+    for c in builder.constraints() {
+        assert_eq!(
+            eval_constraint(const_one_col, c, &z),
+            F::ZERO,
+            "virtual rows should not be constrained by non-virtual read split"
+        );
+    }
+}
+
+#[test]
 fn test_twist_write_mirror_group_constraints() {
     // Two Twist instances with ell_addr=4 each.
     let n = 32;

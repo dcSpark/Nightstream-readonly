@@ -1,14 +1,22 @@
+use crate::addr::for_each_addr_bit_dim_major_le;
 use crate::mem_init::mem_init_from_state_map;
 use crate::plain::{LutTable, PlainMemLayout};
-use crate::witness::{LutInstance, LutTableSpec, LutWitness, MemInstance, MemWitness, StepWitnessBundle};
-use neo_vm_trace::TwistOpKind;
-use neo_vm_trace::VmTrace;
+use crate::riscv::exec_table::{Rv32ExecRow, Rv32ExecTable};
+use crate::riscv::lookups::uninterleave_bits;
+use crate::riscv::packed::build_rv32_packed_cols;
+use crate::witness::{LutInstance, LutTableSpec, LutWitness, MemInstance, MemWitness, StepWitnessBundle, TimeColumns};
+use crate::{
+    cpu::{build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, ShoutInstanceShape},
+    riscv::trace::{Rv32TraceLayout, Rv32TraceWitness},
+};
+use neo_vm_trace::{StepTrace, TwistOpKind, VmTrace};
 
-use neo_ccs::relations::{McsInstance, McsWitness};
-use p3_field::PrimeCharacteristicRing;
+use neo_ccs::relations::{CcsClaim, CcsWitness};
+use p3_field::{PrimeCharacteristicRing, PrimeField64};
 use p3_goldilocks::Goldilocks;
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::ops::Range;
 
 // Placeholder for CPU arithmetization interface
 pub trait CpuArithmetization<F, Cmt> {
@@ -18,12 +26,12 @@ pub trait CpuArithmetization<F, Cmt> {
         &self,
         trace: &VmTrace<u64, u64>,
         chunk_size: usize,
-    ) -> Result<Vec<(McsInstance<Cmt, F>, McsWitness<F>)>, Self::Error>;
+    ) -> Result<Vec<(CcsClaim<Cmt, F>, CcsWitness<F>)>, Self::Error>;
 
     fn build_ccs_steps(
         &self,
         trace: &VmTrace<u64, u64>,
-    ) -> Result<Vec<(McsInstance<Cmt, F>, McsWitness<F>)>, Self::Error> {
+    ) -> Result<Vec<(CcsClaim<Cmt, F>, CcsWitness<F>)>, Self::Error> {
         self.build_ccs_chunks(trace, 1)
     }
 
@@ -87,10 +95,517 @@ fn validate_chunk_size(chunk_size: usize) -> Result<(), ShardBuildError> {
     Ok(())
 }
 
+#[inline]
+fn canonical_chunk_size_pow2(chunk_size: usize) -> Result<usize, ShardBuildError> {
+    validate_chunk_size(chunk_size)?;
+    chunk_size
+        .checked_next_power_of_two()
+        .ok_or_else(|| ShardBuildError::InvalidChunkSize("chunk_size next_power_of_two overflow".into()))
+}
+
 fn bundles_only<Cmt, K>(
     out: Result<(Vec<StepWitnessBundle<Cmt, Goldilocks, K>>, ShardWitnessAux), ShardBuildError>,
 ) -> Result<Vec<StepWitnessBundle<Cmt, Goldilocks, K>>, ShardBuildError> {
     out.map(|(bundles, _aux)| bundles)
+}
+
+fn write_addr_bits_into_mem_cols(
+    mem_cols: &mut [Vec<Goldilocks>],
+    bit_cols: Range<usize>,
+    j: usize,
+    addr: u64,
+    d: usize,
+    n_side: usize,
+    ell: usize,
+) -> Result<(), ShardBuildError> {
+    if bit_cols.end.saturating_sub(bit_cols.start) != d * ell {
+        return Err(ShardBuildError::CcsError(format!(
+            "shared-bus addr-bit width mismatch: range_len={} vs d*ell={}",
+            bit_cols.end.saturating_sub(bit_cols.start),
+            d * ell
+        )));
+    }
+    for_each_addr_bit_dim_major_le(addr, d, n_side, ell, |idx, is_one| {
+        let col_id = bit_cols.start + idx;
+        mem_cols[col_id][j] = if is_one { Goldilocks::ONE } else { Goldilocks::ZERO };
+    });
+    Ok(())
+}
+
+fn build_shared_bus_layout_for_time_columns<Cmt>(
+    chunk_size: usize,
+    lut_instances: &[(LutInstance<Cmt, Goldilocks>, LutWitness<Goldilocks>)],
+    mem_instances: &[(MemInstance<Cmt, Goldilocks>, MemWitness<Goldilocks>)],
+) -> Result<crate::cpu::BusLayout, ShardBuildError> {
+    let shout_shapes: Vec<ShoutInstanceShape> = lut_instances
+        .iter()
+        .map(|(inst, _)| ShoutInstanceShape {
+            ell_addr: inst.d * inst.ell,
+            lanes: inst.lanes.max(1),
+            n_vals: 1usize,
+            addr_group: inst.addr_group,
+            selector_group: inst.selector_group,
+        })
+        .collect();
+    let twist_shapes: Vec<(usize, usize)> = mem_instances
+        .iter()
+        .map(|(inst, _)| (inst.d * inst.ell, inst.lanes.max(1)))
+        .collect();
+
+    let shout_upper_cols = shout_shapes.iter().try_fold(0usize, |acc, shape| {
+        let per_lane = shape
+            .ell_addr
+            .checked_add(1usize)
+            .and_then(|v| v.checked_add(shape.n_vals.max(1)))
+            .ok_or_else(|| {
+                ShardBuildError::CcsError("shared-bus layout overflow while sizing shout lane columns".into())
+            })?;
+        let lane_cols = shape.lanes.max(1).checked_mul(per_lane).ok_or_else(|| {
+            ShardBuildError::CcsError("shared-bus layout overflow while sizing shout instance columns".into())
+        })?;
+        acc.checked_add(lane_cols).ok_or_else(|| {
+            ShardBuildError::CcsError("shared-bus layout overflow while accumulating shout columns".into())
+        })
+    })?;
+    let twist_upper_cols = twist_shapes
+        .iter()
+        .try_fold(0usize, |acc, (ell_addr, lanes)| {
+            let per_lane = ell_addr
+                .checked_mul(2usize)
+                .and_then(|v| v.checked_add(5usize))
+                .ok_or_else(|| {
+                    ShardBuildError::CcsError("shared-bus layout overflow while sizing twist lane columns".into())
+                })?;
+            let lane_cols = (*lanes).max(1).checked_mul(per_lane).ok_or_else(|| {
+                ShardBuildError::CcsError("shared-bus layout overflow while sizing twist instance columns".into())
+            })?;
+            acc.checked_add(lane_cols).ok_or_else(|| {
+                ShardBuildError::CcsError("shared-bus layout overflow while accumulating twist columns".into())
+            })
+        })?;
+    let upper_bus_cols = shout_upper_cols
+        .checked_add(twist_upper_cols)
+        .ok_or_else(|| ShardBuildError::CcsError("shared-bus layout overflow while sizing total bus columns".into()))?;
+    let m_probe = chunk_size.checked_mul(upper_bus_cols).ok_or_else(|| {
+        ShardBuildError::CcsError("shared-bus layout overflow while sizing time-column witness width".into())
+    })?;
+
+    build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes(
+        m_probe,
+        0usize,
+        chunk_size,
+        shout_shapes.iter().copied(),
+        twist_shapes.iter().copied(),
+    )
+    .map_err(ShardBuildError::CcsError)
+}
+
+fn build_mem_time_columns_for_step<Cmt>(
+    chunk_steps: &[StepTrace<u64, u64>],
+    chunk_size: usize,
+    lut_instances: &[(LutInstance<Cmt, Goldilocks>, LutWitness<Goldilocks>)],
+    mem_instances: &[(MemInstance<Cmt, Goldilocks>, MemWitness<Goldilocks>)],
+) -> Result<Vec<Vec<Goldilocks>>, ShardBuildError> {
+    if lut_instances.is_empty() && mem_instances.is_empty() {
+        return Ok(Vec::new());
+    }
+    if chunk_steps.len() > chunk_size {
+        return Err(ShardBuildError::InvalidChunkSize(format!(
+            "chunk_steps.len()={} > chunk_size={chunk_size}",
+            chunk_steps.len()
+        )));
+    }
+
+    let bus = build_shared_bus_layout_for_time_columns(chunk_size, lut_instances, mem_instances)?;
+    let mut mem_cols = vec![vec![Goldilocks::ZERO; chunk_size]; bus.bus_cols];
+
+    let mut shout_idx_by_id = HashMap::<u32, usize>::new();
+    for (idx, (inst, _)) in lut_instances.iter().enumerate() {
+        if shout_idx_by_id.insert(inst.table_id, idx).is_some() {
+            return Err(ShardBuildError::InvalidInit(format!(
+                "duplicate shout table_id={} in step metadata",
+                inst.table_id
+            )));
+        }
+    }
+    let mut mem_idx_by_id = HashMap::<u32, usize>::new();
+    for (idx, (inst, _)) in mem_instances.iter().enumerate() {
+        if mem_idx_by_id.insert(inst.mem_id, idx).is_some() {
+            return Err(ShardBuildError::InvalidInit(format!(
+                "duplicate mem_id={} in step metadata",
+                inst.mem_id
+            )));
+        }
+    }
+
+    let mut mem_states: Vec<HashMap<u64, Goldilocks>> = Vec::with_capacity(mem_instances.len());
+    for (inst, _) in mem_instances.iter() {
+        let mut st = HashMap::new();
+        match &inst.init {
+            crate::mem_init::MemInit::Zero => {}
+            crate::mem_init::MemInit::Sparse(pairs) => {
+                for &(addr, val) in pairs {
+                    if val != Goldilocks::ZERO {
+                        st.insert(addr, val);
+                    }
+                }
+            }
+        }
+        mem_states.push(st);
+    }
+
+    let mut shout_events: Vec<Vec<Option<(u64, Goldilocks)>>> = bus
+        .shout_cols
+        .iter()
+        .map(|inst| vec![None; inst.lanes.len()])
+        .collect();
+    let mut used_shout: Vec<usize> = vec![0; shout_events.len()];
+    let mut twist_reads: Vec<Vec<Option<(u64, Goldilocks)>>> = bus
+        .twist_cols
+        .iter()
+        .map(|inst| vec![None; inst.lanes.len()])
+        .collect();
+    let mut twist_writes: Vec<Vec<Option<(u64, Goldilocks)>>> = bus
+        .twist_cols
+        .iter()
+        .map(|inst| vec![None; inst.lanes.len()])
+        .collect();
+
+    for (j, step) in chunk_steps.iter().enumerate() {
+        used_shout.fill(0);
+        for lanes in shout_events.iter_mut() {
+            lanes.fill(None);
+        }
+        for lanes in twist_reads.iter_mut() {
+            lanes.fill(None);
+        }
+        for lanes in twist_writes.iter_mut() {
+            lanes.fill(None);
+        }
+
+        for ev in &step.shout_events {
+            let table_id = ev.shout_id.0;
+            let idx = shout_idx_by_id.get(&table_id).copied().ok_or_else(|| {
+                ShardBuildError::MissingTable(format!("trace shout event references unknown table_id={table_id}"))
+            })?;
+            let lanes = shout_events[idx].len();
+            let lane_idx = used_shout[idx];
+            if lane_idx >= lanes {
+                return Err(ShardBuildError::InvalidChunkSize(format!(
+                    "too many shout events for table_id={table_id} at chunk row j={j}: lanes={lanes}"
+                )));
+            }
+            shout_events[idx][lane_idx] = Some((ev.key, Goldilocks::from_u64(ev.value)));
+            used_shout[idx] += 1;
+        }
+
+        for ev in &step.twist_events {
+            let mem_id = ev.twist_id.0;
+            let idx = mem_idx_by_id.get(&mem_id).copied().ok_or_else(|| {
+                ShardBuildError::MissingLayout(format!("trace twist event references unknown mem_id={mem_id}"))
+            })?;
+            match ev.kind {
+                TwistOpKind::Read => {
+                    let lanes = twist_reads.get_mut(idx).ok_or_else(|| {
+                        ShardBuildError::MissingLayout(format!("missing read lanes for mem_id={mem_id}"))
+                    })?;
+                    let lane_idx = if let Some(lane) = ev.lane {
+                        let lane_idx = usize::try_from(lane).map_err(|_| {
+                            ShardBuildError::InvalidChunkSize(format!(
+                                "invalid twist read lane for mem_id={mem_id}: lane={lane}"
+                            ))
+                        })?;
+                        if lane_idx >= lanes.len() {
+                            return Err(ShardBuildError::InvalidChunkSize(format!(
+                                "twist read lane out of range for mem_id={mem_id}: lane={lane_idx}, lanes={}",
+                                lanes.len()
+                            )));
+                        }
+                        if lanes[lane_idx].is_some() {
+                            return Err(ShardBuildError::InvalidChunkSize(format!(
+                                "multiple twist reads assigned to same lane for mem_id={mem_id}: lane={lane_idx}"
+                            )));
+                        }
+                        lane_idx
+                    } else {
+                        lanes.iter().position(|x| x.is_none()).ok_or_else(|| {
+                            ShardBuildError::InvalidChunkSize(format!(
+                                "too many twist reads for mem_id={mem_id} at j={j}: lanes={}",
+                                lanes.len()
+                            ))
+                        })?
+                    };
+                    lanes[lane_idx] = Some((ev.addr, Goldilocks::from_u64(ev.value)));
+                }
+                TwistOpKind::Write => {
+                    let lanes = twist_writes.get_mut(idx).ok_or_else(|| {
+                        ShardBuildError::MissingLayout(format!("missing write lanes for mem_id={mem_id}"))
+                    })?;
+                    if lanes.iter().flatten().any(|(addr, _)| *addr == ev.addr) {
+                        return Err(ShardBuildError::InvalidChunkSize(format!(
+                            "duplicate twist write addr in one step for mem_id={mem_id}: addr={}",
+                            ev.addr
+                        )));
+                    }
+                    let lane_idx = if let Some(lane) = ev.lane {
+                        let lane_idx = usize::try_from(lane).map_err(|_| {
+                            ShardBuildError::InvalidChunkSize(format!(
+                                "invalid twist write lane for mem_id={mem_id}: lane={lane}"
+                            ))
+                        })?;
+                        if lane_idx >= lanes.len() {
+                            return Err(ShardBuildError::InvalidChunkSize(format!(
+                                "twist write lane out of range for mem_id={mem_id}: lane={lane_idx}, lanes={}",
+                                lanes.len()
+                            )));
+                        }
+                        if lanes[lane_idx].is_some() {
+                            return Err(ShardBuildError::InvalidChunkSize(format!(
+                                "multiple twist writes assigned to same lane for mem_id={mem_id}: lane={lane_idx}"
+                            )));
+                        }
+                        lane_idx
+                    } else {
+                        lanes.iter().position(|x| x.is_none()).ok_or_else(|| {
+                            ShardBuildError::InvalidChunkSize(format!(
+                                "too many twist writes for mem_id={mem_id} at j={j}: lanes={}",
+                                lanes.len()
+                            ))
+                        })?
+                    };
+                    lanes[lane_idx] = Some((ev.addr, Goldilocks::from_u64(ev.value)));
+                }
+            }
+        }
+
+        for (inst_idx, (inst, _)) in lut_instances.iter().enumerate() {
+            let inst_cols = bus.shout_cols.get(inst_idx).ok_or_else(|| {
+                ShardBuildError::CcsError(format!("missing bus shout columns for inst_idx={inst_idx}"))
+            })?;
+            let d = inst.d;
+            let n_side = inst.n_side;
+            let ell = inst.ell;
+
+            for (lane_idx, shout_cols) in inst_cols.lanes.iter().enumerate() {
+                if let Some((key, val)) = shout_events[inst_idx][lane_idx] {
+                    match &inst.table_spec {
+                        Some(LutTableSpec::RiscvOpcodePacked { opcode, xlen }) => {
+                            if *xlen != 32 {
+                                return Err(ShardBuildError::InvalidInit(format!(
+                                    "packed shout requires xlen=32 (table_id={})",
+                                    inst.table_id
+                                )));
+                            }
+                            let (lhs_raw, rhs_raw) = uninterleave_bits(key as u128);
+                            let lhs = lhs_raw as u32;
+                            let rhs = rhs_raw as u32;
+                            let val_u64 = val.as_canonical_u64();
+                            if val_u64 > u32::MAX as u64 {
+                                return Err(ShardBuildError::InvalidChunkSize(format!(
+                                    "packed shout value out of u32 range for table_id={}: {}",
+                                    inst.table_id, val_u64
+                                )));
+                            }
+                            let packed_cols = build_rv32_packed_cols::<Goldilocks>(*opcode, lhs, rhs, val_u64 as u32)
+                                .map_err(|e| ShardBuildError::CcsError(e.to_string()))?;
+                            if packed_cols.len() != (shout_cols.addr_bits.end - shout_cols.addr_bits.start) {
+                                return Err(ShardBuildError::CcsError(format!(
+                                    "packed shout width mismatch for table_id={}: packed_cols={} bus_cols={}",
+                                    inst.table_id,
+                                    packed_cols.len(),
+                                    shout_cols.addr_bits.end - shout_cols.addr_bits.start
+                                )));
+                            }
+                            for (packed_idx, col_id) in shout_cols.addr_bits.clone().enumerate() {
+                                mem_cols[col_id][j] = packed_cols[packed_idx];
+                            }
+                        }
+                        Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. }) => {
+                            return Err(ShardBuildError::InvalidInit(format!(
+                                "RiscvOpcodeEventTablePacked is not supported in shared-bus step builder (table_id={})",
+                                inst.table_id
+                            )));
+                        }
+                        _ => {
+                            write_addr_bits_into_mem_cols(
+                                &mut mem_cols,
+                                shout_cols.addr_bits.clone(),
+                                j,
+                                key,
+                                d,
+                                n_side,
+                                ell,
+                            )?;
+                        }
+                    }
+                    mem_cols[shout_cols.has_lookup][j] = Goldilocks::ONE;
+                    mem_cols[shout_cols.primary_val()][j] = val;
+                }
+            }
+        }
+
+        for (inst_idx, (inst, _)) in mem_instances.iter().enumerate() {
+            let inst_cols = bus.twist_cols.get(inst_idx).ok_or_else(|| {
+                ShardBuildError::CcsError(format!("missing bus twist columns for inst_idx={inst_idx}"))
+            })?;
+            let state = mem_states
+                .get_mut(inst_idx)
+                .ok_or_else(|| ShardBuildError::MissingLayout(format!("missing state for mem_idx={inst_idx}")))?;
+            let k_u64 = u64::try_from(inst.k)
+                .map_err(|_| ShardBuildError::InvalidInit(format!("mem k overflows u64 for mem_id={}", inst.mem_id)))?;
+
+            let mut writes_to_apply: Vec<(u64, Goldilocks)> = Vec::new();
+            for (lane_idx, twist_cols) in inst_cols.lanes.iter().enumerate() {
+                let (has_read, ra, rv) = if let Some((addr, val)) = twist_reads[inst_idx][lane_idx] {
+                    (Goldilocks::ONE, addr, val)
+                } else {
+                    (Goldilocks::ZERO, 0u64, Goldilocks::ZERO)
+                };
+                if has_read == Goldilocks::ONE {
+                    if ra >= k_u64 {
+                        return Err(ShardBuildError::InvalidChunkSize(format!(
+                            "twist read addr out of range for mem_id={}: addr={} >= k={}",
+                            inst.mem_id, ra, inst.k
+                        )));
+                    }
+                    write_addr_bits_into_mem_cols(
+                        &mut mem_cols,
+                        twist_cols.ra_bits.clone(),
+                        j,
+                        ra,
+                        inst.d,
+                        inst.n_side,
+                        inst.ell,
+                    )?;
+                    mem_cols[twist_cols.rv][j] = rv;
+                }
+
+                let (has_write, wa, wv) = if let Some((addr, val)) = twist_writes[inst_idx][lane_idx] {
+                    (Goldilocks::ONE, addr, val)
+                } else {
+                    (Goldilocks::ZERO, 0u64, Goldilocks::ZERO)
+                };
+                let mut inc = Goldilocks::ZERO;
+                if has_write == Goldilocks::ONE {
+                    if wa >= k_u64 {
+                        return Err(ShardBuildError::InvalidChunkSize(format!(
+                            "twist write addr out of range for mem_id={}: addr={} >= k={}",
+                            inst.mem_id, wa, inst.k
+                        )));
+                    }
+                    write_addr_bits_into_mem_cols(
+                        &mut mem_cols,
+                        twist_cols.wa_bits.clone(),
+                        j,
+                        wa,
+                        inst.d,
+                        inst.n_side,
+                        inst.ell,
+                    )?;
+                    mem_cols[twist_cols.wv][j] = wv;
+                    let old = state.get(&wa).copied().unwrap_or(Goldilocks::ZERO);
+                    inc = wv - old;
+                    writes_to_apply.push((wa, wv));
+                }
+
+                mem_cols[twist_cols.has_read][j] = has_read;
+                mem_cols[twist_cols.has_write][j] = has_write;
+                mem_cols[twist_cols.inc][j] = inc;
+            }
+
+            for (wa, wv) in writes_to_apply {
+                if wv == Goldilocks::ZERO {
+                    state.remove(&wa);
+                } else {
+                    state.insert(wa, wv);
+                }
+            }
+        }
+    }
+
+    Ok(mem_cols)
+}
+
+fn build_time_columns_for_step<Cmt>(
+    _mcs: &(CcsClaim<Cmt, Goldilocks>, CcsWitness<Goldilocks>),
+    chunk_size: usize,
+    chunk_len: usize,
+    chunk_steps: &[StepTrace<u64, u64>],
+    lut_instances: &[(LutInstance<Cmt, Goldilocks>, LutWitness<Goldilocks>)],
+    mem_instances: &[(MemInstance<Cmt, Goldilocks>, MemWitness<Goldilocks>)],
+) -> Result<TimeColumns<Goldilocks>, ShardBuildError> {
+    fn cpu_cols_from_chunk_steps(
+        chunk_steps: &[StepTrace<u64, u64>],
+        chunk_size: usize,
+        strict_rv32: bool,
+    ) -> Result<Vec<Vec<Goldilocks>>, ShardBuildError> {
+        if chunk_steps.len() > chunk_size {
+            return Err(ShardBuildError::InvalidChunkSize(format!(
+                "chunk_steps.len()={} > chunk_size={chunk_size}",
+                chunk_steps.len()
+            )));
+        }
+
+        let trace_layout = Rv32TraceLayout::new();
+        if chunk_steps.is_empty() {
+            return Ok(vec![vec![Goldilocks::ZERO; chunk_size]; trace_layout.cols]);
+        }
+
+        let mut rows = Vec::with_capacity(chunk_size);
+        for step in chunk_steps {
+            match Rv32ExecRow::from_step(step) {
+                Ok(row) => rows.push(row),
+                Err(_e) if !strict_rv32 => {
+                    // Non-RV32 harness callers may use opaque instruction words.
+                    // For those callers, we only need a shape-compatible time-column payload.
+                    return Ok(vec![vec![Goldilocks::ZERO; chunk_size]; trace_layout.cols]);
+                }
+                Err(e) => return Err(ShardBuildError::CcsError(format!("step->exec conversion failed: {e}"))),
+            }
+        }
+        let mut cycle = rows
+            .last()
+            .ok_or_else(|| ShardBuildError::CcsError("empty rows after step conversion".into()))?
+            .cycle;
+        let pad_pc = rows.last().expect("rows non-empty").pc_after;
+        let pad_halted = rows.last().expect("rows non-empty").halted;
+        while rows.len() < chunk_size {
+            cycle = cycle
+                .checked_add(1)
+                .ok_or_else(|| ShardBuildError::CcsError("cycle overflow while padding chunk rows".into()))?;
+            rows.push(Rv32ExecRow::inactive(cycle, pad_pc, pad_halted));
+        }
+        let exec = Rv32ExecTable { rows };
+        let wit = Rv32TraceWitness::from_exec_table(&trace_layout, &exec)
+            .map_err(|e| ShardBuildError::CcsError(format!("trace witness build failed: {e}")))?;
+        Ok(wit.cols)
+    }
+
+    let cpu_cols = cpu_cols_from_chunk_steps(chunk_steps, chunk_size, /*strict_rv32=*/ _mcs.0.m_in == 5)?;
+    let mem_cols = build_mem_time_columns_for_step(chunk_steps, chunk_size, lut_instances, mem_instances)?;
+
+    if chunk_len > chunk_size {
+        return Err(ShardBuildError::InvalidChunkSize(format!(
+            "chunk_len={} exceeds chunk_size={chunk_size}",
+            chunk_len
+        )));
+    }
+    let mut active_col = vec![Goldilocks::ZERO; chunk_size];
+    for v in active_col.iter_mut().take(chunk_len) {
+        *v = Goldilocks::ONE;
+    }
+
+    let mut out = TimeColumns {
+        t: chunk_size,
+        cpu_cols,
+        mem_cols,
+        // This is the chunk pad mask consumed by time-domain gating checks.
+        active_col,
+        col_ids: Vec::new(),
+    };
+
+    out.col_ids = (0..(out.cpu_cols.len() + out.mem_cols.len())).collect();
+    Ok(out)
 }
 
 /// Build shard witness bundles for **shared CPU bus** mode.
@@ -183,7 +698,7 @@ pub fn build_shard_witness_shared_cpu_bus_from_trace_with_aux<Cmt, K, A>(
 where
     A: CpuArithmetization<Goldilocks, Cmt>,
 {
-    validate_chunk_size(chunk_size)?;
+    let chunk_size = canonical_chunk_size_pow2(chunk_size)?;
     if trace.steps.len() > max_steps {
         return Err(ShardBuildError::InvalidChunkSize(format!(
             "trace length {} exceeds max_steps {}",
@@ -417,10 +932,14 @@ where
             lut_instances.push((inst, wit));
         }
 
+        let chunk_steps = &trace.steps[chunk_start..chunk_end];
+        let time_columns =
+            build_time_columns_for_step(&mcs, chunk_size, chunk_len, chunk_steps, &lut_instances, &mem_instances)?;
         step_bundles.push(StepWitnessBundle {
             mcs,
             lut_instances,
             mem_instances,
+            time_columns,
             _phantom: PhantomData,
         });
 
@@ -459,7 +978,7 @@ where
     Sh: neo_vm_trace::Shout<u64>,
     A: CpuArithmetization<Goldilocks, Cmt>,
 {
-    validate_chunk_size(chunk_size)?;
+    let chunk_size = canonical_chunk_size_pow2(chunk_size)?;
 
     // 1) Run VM and collect the executed trace for this shard (up to `max_steps`).
     //

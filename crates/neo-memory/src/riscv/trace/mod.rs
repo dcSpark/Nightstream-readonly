@@ -1,3 +1,5 @@
+use crate::riscv::instruction::operand_mode_keys_enabled;
+
 pub mod air;
 pub mod decode_lookup;
 pub mod layout;
@@ -28,15 +30,29 @@ pub use witness::Rv32TraceWitness;
 /// These families all use the same interleaved `(lhs,rhs)` key width (`ell_addr=64`),
 /// so in RV32 trace shared-bus mode they can share one addr-bit range.
 pub const RV32_TRACE_OPCODE_ADDR_GROUP: u32 = 0x5256_4100;
+/// Shared-address group id for RV32 combined-key opcode Shout tables in operand-mode keying.
+///
+/// When operand-mode keys are enabled, these opcodes no longer use interleaved `(lhs,rhs)` keys.
+/// They must therefore not share opcode `addr_bits` with interleaved-key tables.
+pub const RV32_TRACE_OPCODE_COMBINED_ADDR_GROUP: u32 = 0x5256_4101;
 /// Shared selector-group id for decode lookup families (table_id range at `RV32_TRACE_DECODE_LOOKUP_TABLE_BASE`).
 pub const RV32_TRACE_DECODE_SELECTOR_GROUP: u32 = 0x5256_4B00;
 /// Shared selector-group id for width lookup families (table_id range at `RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE`).
 pub const RV32_TRACE_WIDTH_SELECTOR_GROUP: u32 = 0x5256_5B00;
 
 #[inline]
+pub fn rv32_trace_uses_combined_operand_key_table_id(table_id: u32) -> bool {
+    operand_mode_keys_enabled() && matches!(table_id, 3 | 4 | 12 | 14)
+}
+
+#[inline]
 pub fn rv32_trace_lookup_addr_group_for_table_id(table_id: u32) -> Option<u32> {
     if table_id <= 19 {
-        Some(RV32_TRACE_OPCODE_ADDR_GROUP)
+        if rv32_trace_uses_combined_operand_key_table_id(table_id) {
+            Some(RV32_TRACE_OPCODE_COMBINED_ADDR_GROUP)
+        } else {
+            Some(RV32_TRACE_OPCODE_ADDR_GROUP)
+        }
     } else {
         rv32_decode_lookup_addr_group_for_table_id(table_id)
             .or_else(|| rv32_width_lookup_addr_group_for_table_id(table_id))

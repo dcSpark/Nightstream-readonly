@@ -155,8 +155,20 @@ pub enum CpuConstraintLabel {
     TwistHasWriteBoolean,
     /// Bitness: each read address bit is 0 when inactive, boolean when active.
     TwistReadAddrBitBitness,
+    /// REG Twist read-domain split: on non-virtual rows, read-address bit[5] must be 0.
+    ///
+    /// With `split_bit_idx = 5`, this enforces:
+    /// - non-virtual reads target architectural regs (`addr < 32`).
+    /// Virtual rows remain unrestricted (they may read architectural or virtual regs).
+    TwistReadAddressDomainSplit,
     /// Bitness: each write address bit is 0 when inactive, boolean when active.
     TwistWriteAddrBitBitness,
+    /// REG Twist write-domain split: on write rows, `is_virtual` must match write-address bit[5].
+    ///
+    /// This enforces:
+    /// - non-virtual writes target architectural regs (`addr < 32`), and
+    /// - virtual writes target virtual regs (`addr >= 32`).
+    TwistWriteAddressDomainSplit,
     /// Padding: inc_at_write_addr == 0 (when NOT has_write)
     IncrementZeroPadding,
     /// Write: cpu_inc == bus_inc (when has_write)
@@ -528,6 +540,80 @@ impl<F: Field> CpuConstraintBuilder<F> {
                 let bit = layout.bus_cell(col_id, j);
                 self.add_gated_bit_constraint(CpuConstraintLabel::TwistWriteAddrBitBitness, bit, bus_has_write);
             }
+        }
+    }
+
+    /// Add write-domain split constraints using a CPU boolean flag and a Twist write-address bit.
+    ///
+    /// Enforces on every row `j`:
+    /// - if `wa_bits[split_bit_idx]` exists:
+    ///   `has_write_j * (flag_j - wa_bit_j) = 0`
+    /// - otherwise:
+    ///   `has_write_j * flag_j = 0`
+    ///
+    /// With `flag = is_virtual` and `split_bit_idx = 5`, this gives:
+    /// - virtual writes => addr bit5 = 1 => `addr >= 32`
+    /// - non-virtual writes => addr bit5 = 0 => `addr < 32`
+    pub fn add_twist_write_addr_domain_split(
+        &mut self,
+        layout: &BusLayout,
+        twist: &TwistCols,
+        flag_col_base: usize,
+        split_bit_idx: usize,
+    ) {
+        let wa_len = twist.wa_bits.end.saturating_sub(twist.wa_bits.start);
+        for j in 0..layout.chunk_size {
+            let bus_has_write = layout.bus_cell(twist.has_write, j);
+            let flag_col = flag_col_base + j;
+            if split_bit_idx < wa_len {
+                let split_bit_col = layout.bus_cell(twist.wa_bits.start + split_bit_idx, j);
+                self.constraints.push(CpuConstraint::new_terms(
+                    CpuConstraintLabel::TwistWriteAddressDomainSplit,
+                    bus_has_write,
+                    false,
+                    vec![(flag_col, F::ONE), (split_bit_col, -F::ONE)],
+                ));
+            } else {
+                // If address bit[split_bit_idx] is not present in this lane/domain, disallow
+                // writes under the flagged mode.
+                self.constraints.push(CpuConstraint::new_zero(
+                    CpuConstraintLabel::TwistWriteAddressDomainSplit,
+                    bus_has_write,
+                    flag_col,
+                ));
+            }
+        }
+    }
+
+    /// Add read-domain split constraints using a CPU virtual-row flag and a Twist read-address bit.
+    ///
+    /// Enforces on every row `j` (when `ra_bits[split_bit_idx]` exists):
+    /// - `(1 - is_virtual_j) * ra_bit_j = 0`
+    ///
+    /// With `split_bit_idx = 5`, this gives:
+    /// - non-virtual reads => addr bit5 = 0 => `addr < 32`
+    /// - virtual reads are unrestricted by this constraint.
+    pub fn add_twist_read_addr_domain_split_nonvirtual(
+        &mut self,
+        layout: &BusLayout,
+        twist: &TwistCols,
+        is_virtual_col_base: usize,
+        split_bit_idx: usize,
+    ) {
+        let ra_len = twist.ra_bits.end.saturating_sub(twist.ra_bits.start);
+        if split_bit_idx >= ra_len {
+            // Bit not present: this lane/domain is already confined below the split threshold.
+            return;
+        }
+
+        for j in 0..layout.chunk_size {
+            let is_virtual_col = is_virtual_col_base + j;
+            let split_bit_col = layout.bus_cell(twist.ra_bits.start + split_bit_idx, j);
+            self.constraints.push(CpuConstraint::new_zero_negated(
+                CpuConstraintLabel::TwistReadAddressDomainSplit,
+                is_virtual_col,
+                split_bit_col,
+            ));
         }
     }
 

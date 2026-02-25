@@ -185,12 +185,13 @@ fn rv32_trace_ccs_rejects_tampered_pc_transition() {
     let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
     let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
 
-    let idx = layout.cell(layout.trace.pc_before, 1) - layout.m_in;
+    // Uniform kernel stores one physical slot per trace column (row must be 0).
+    let idx = layout.cell(layout.trace.pc_before, 0) - layout.m_in;
     w[idx] = w[idx] + F::ONE;
 
     assert!(
         check_ccs_rowwise_zero(&ccs, &x, &w).is_err(),
-        "tampered pc_before on row 1 must violate trace transition wiring"
+        "tampered pc_before anchor must violate trace CCS wiring"
     );
 }
 

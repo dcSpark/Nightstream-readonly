@@ -1,4 +1,4 @@
-use crate::ajtai::decode_vector as ajtai_decode_vector;
+use crate::ajtai::decode_vector_for_ccs_m as ajtai_decode_vector_for_ccs_m;
 use crate::riscv::lookups::{compute_op, uninterleave_bits};
 use crate::sumcheck_proof::BatchedAddrProof;
 use crate::ts_common as ts;
@@ -46,22 +46,22 @@ pub struct ShoutWitnessParts<'a, F> {
 pub fn split_lut_mats<'a, F: Clone>(
     inst: &LutInstance<impl Clone, F>,
     wit: &'a LutWitness<F>,
-) -> ShoutWitnessParts<'a, F> {
+) -> Result<ShoutWitnessParts<'a, F>, PiCcsError> {
     let ell_addr = inst.d * inst.ell;
     let expected = ell_addr + 2;
-    assert_eq!(
-        wit.mats.len(),
-        expected,
-        "LutWitness has {} matrices, expected {} (d*ell={} + has_lookup + val)",
-        wit.mats.len(),
-        expected,
-        ell_addr
-    );
-    ShoutWitnessParts {
+    if wit.mats.len() != expected {
+        return Err(PiCcsError::InvalidInput(format!(
+            "LutWitness has {} matrices, expected {} (d*ell={} + has_lookup + val)",
+            wit.mats.len(),
+            expected,
+            ell_addr
+        )));
+    }
+    Ok(ShoutWitnessParts {
         addr_bit_mats: &wit.mats[..ell_addr],
         has_lookup_mat: &wit.mats[ell_addr],
         val_mat: &wit.mats[ell_addr + 1],
-    }
+    })
 }
 
 // ============================================================================
@@ -119,7 +119,7 @@ pub fn check_shout_semantics<F: PrimeField>(
 ) -> Result<(), PiCcsError> {
     crate::addr::validate_shout_bit_addressing(inst)?;
 
-    let parts = split_lut_mats(inst, wit);
+    let parts = split_lut_mats(inst, wit)?;
     let steps = inst.steps;
 
     // Bitness: addr bits + has_lookup.
@@ -128,7 +128,7 @@ pub fn check_shout_semantics<F: PrimeField>(
         .iter()
         .chain(core::iter::once(parts.has_lookup_mat))
     {
-        let v = ajtai_decode_vector(params, mat);
+        let v = ajtai_decode_vector_for_ccs_m(params, steps, mat).map_err(PiCcsError::InvalidInput)?;
         for (j, &x) in v.iter().enumerate() {
             if x != F::ZERO && x != F::ONE {
                 return Err(PiCcsError::InvalidInput(format!(
@@ -138,9 +138,10 @@ pub fn check_shout_semantics<F: PrimeField>(
         }
     }
 
-    let has_lookup = ajtai_decode_vector(params, parts.has_lookup_mat);
-    let val = ajtai_decode_vector(params, parts.val_mat);
-    let addrs = ts::decode_addrs_from_bits(params, parts.addr_bit_mats, inst.d, inst.ell, inst.n_side, steps);
+    let has_lookup =
+        ajtai_decode_vector_for_ccs_m(params, steps, parts.has_lookup_mat).map_err(PiCcsError::InvalidInput)?;
+    let val = ajtai_decode_vector_for_ccs_m(params, steps, parts.val_mat).map_err(PiCcsError::InvalidInput)?;
+    let addrs = ts::decode_addrs_from_bits(params, parts.addr_bit_mats, inst.d, inst.ell, inst.n_side, steps)?;
 
     for j in 0..steps {
         if has_lookup[j] == F::ONE {

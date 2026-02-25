@@ -19,7 +19,7 @@ use std::sync::Arc;
 
 use neo_ajtai::{set_global_pp, setup as ajtai_setup, AjtaiSModule, Commitment as Cmt};
 use neo_ccs::poly::SparsePoly;
-use neo_ccs::relations::{CcsStructure, McsInstance, McsWitness, MeInstance};
+use neo_ccs::relations::{CcsClaim, CcsStructure, CcsWitness, CeClaim};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::Mat;
 use neo_fold::pi_ccs::FoldingMode;
@@ -42,12 +42,13 @@ const M_IN: usize = 0;
 /// Setup real Ajtai public parameters for tests.
 fn setup_ajtai_pp(m: usize, seed: u64) -> AjtaiSModule {
     let d = D;
-    let kappa = neo_params::NeoParams::goldilocks_auto_r1cs_ccs(m)
+    let m_commit = neo_memory::ajtai::commit_cols_for_ccs_m(m);
+    let kappa = neo_params::NeoParams::goldilocks_auto_r1cs_ccs(m_commit)
         .expect("params")
         .kappa as usize;
 
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    let pp = ajtai_setup(&mut rng, d, kappa, m).expect("Ajtai setup should succeed");
+    let pp = ajtai_setup(&mut rng, d, kappa, m_commit).expect("Ajtai setup should succeed");
     set_global_pp(pp.clone()).expect("set_global_pp");
     AjtaiSModule::new(Arc::new(pp))
 }
@@ -67,13 +68,13 @@ fn create_mcs_from_z(
     l: &AjtaiSModule,
     m_in: usize,
     z: Vec<F>,
-) -> (McsInstance<Cmt, F>, McsWitness<F>) {
+) -> (CcsClaim<Cmt, F>, CcsWitness<F>) {
     let Z = neo_memory::ajtai::encode_vector_balanced_to_mat(params, &z);
     let c = l.commit(&Z);
 
     let x = z[..m_in].to_vec();
     let w = z[m_in..].to_vec();
-    (McsInstance { c, x, m_in }, McsWitness { w, Z })
+    (CcsClaim { c, x, m_in }, CcsWitness { w, Z })
 }
 
 fn make_shout_instance(
@@ -169,12 +170,13 @@ fn create_step_with_shout_bus(
     debug_assert_eq!(col_id, bus_cols_total);
 
     let (mcs, mcs_wit) = create_mcs_from_z(params, l, M_IN, z);
-    StepWitnessBundle {
+    crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
         mcs: (mcs, mcs_wit),
         lut_instances,
         mem_instances: vec![],
+        time_columns: crate::common_setup::empty_time_columns(),
         _phantom: PhantomData::<K>,
-    }
+    })
 }
 
 /// Two lookup tables used in the same step:
@@ -232,7 +234,7 @@ fn multi_table_shout_two_tables() {
         vec![(&opcode_table, opcode_trace0), (&range_table, range_trace0)],
     );
 
-    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_init: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"multi-table-two");
@@ -345,7 +347,7 @@ fn multi_table_shout_three_tables_interleaved() {
         ));
     }
 
-    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_init: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"multi-table-three");
@@ -429,7 +431,7 @@ fn multi_table_wrong_table_value_fails() {
         vec![(&table0, bad_trace0), (&table1, good_trace1)],
     );
 
-    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_init: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"multi-table-wrong");
@@ -537,7 +539,7 @@ fn multi_table_optional_lookups() {
         ));
     }
 
-    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_init: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"multi-table-optional");

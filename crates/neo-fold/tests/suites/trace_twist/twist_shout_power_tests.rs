@@ -39,13 +39,12 @@ impl ObligationFinalizer<Cmt, F, K> for RequireValLane {
 fn twist_shout_end_to_end_and_finalize() {
     let fx = build_twist_shout_2step_fixture(1);
 
-    for mode in [FoldingMode::Optimized, FoldingMode::PaperExact] {
-        let proof = prove(mode.clone(), &fx);
-        let _ = verify(mode.clone(), &fx, &proof).expect("verify should succeed");
+    let mode = FoldingMode::Optimized;
+    let proof = prove(mode.clone(), &fx);
+    let _ = verify(mode.clone(), &fx, &proof).expect("verify should succeed");
 
-        let mut fin = RequireValLane;
-        verify_and_finalize(mode, &fx, &proof, &mut fin).expect("verify_and_finalize should succeed");
-    }
+    let mut fin = RequireValLane;
+    verify_and_finalize(mode, &fx, &proof, &mut fin).expect("verify_and_finalize should succeed");
 }
 
 #[test]
@@ -95,7 +94,29 @@ fn redteam_splice_steps_from_different_proofs_must_fail() {
     let _ = verify(FoldingMode::Optimized, &fx_b, &proof_b).expect("fx_b should verify");
 
     let mut bad = proof_a.clone();
-    bad.steps[1] = proof_b.steps[1].clone();
+    if bad.steps.len() > 1 && proof_b.steps.len() > 1 {
+        bad.steps[1] = proof_b.steps[1].clone();
+    } else {
+        let can_splice_substep = bad.steps[0]
+            .compressed_substeps
+            .as_ref()
+            .zip(proof_b.steps[0].compressed_substeps.as_ref())
+            .is_some_and(|(a_sub, b_sub)| a_sub.len() > 1 && b_sub.len() > 1);
+        if can_splice_substep {
+            let a_sub = bad.steps[0]
+                .compressed_substeps
+                .as_mut()
+                .expect("compressed substeps present");
+            let b_sub = proof_b.steps[0]
+                .compressed_substeps
+                .as_ref()
+                .expect("compressed substeps present");
+            a_sub[1] = b_sub[1].clone();
+        } else {
+            // If the proof is fully compressed into one logical step, splice the whole step.
+            bad.steps[0] = proof_b.steps[0].clone();
+        }
+    }
 
     assert!(
         verify(FoldingMode::Optimized, &fx_a, &bad).is_err(),

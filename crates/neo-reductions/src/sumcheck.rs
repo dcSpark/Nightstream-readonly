@@ -140,6 +140,7 @@ pub fn run_sumcheck_prover<O: RoundOracle, Tr: Transcript>(
     let mut running_sum = initial_sum;
     let mut rounds = Vec::with_capacity(total_rounds);
     let mut challenges = Vec::with_capacity(total_rounds);
+    let mut xs_cache = std::collections::BTreeMap::<usize, Vec<K>>::new();
 
     #[cfg(feature = "debug-logs")]
     eprintln!(
@@ -151,8 +152,10 @@ pub fn run_sumcheck_prover<O: RoundOracle, Tr: Transcript>(
 
     for round_idx in 0..total_rounds {
         let deg = oracle.degree_bound();
-        let xs: Vec<K> = (0..=deg).map(|t| K::from(Fq::from_u64(t as u64))).collect();
-        let ys = oracle.evals_at(&xs);
+        let xs = xs_cache
+            .entry(deg)
+            .or_insert_with(|| (0..=deg).map(|t| K::from(Fq::from_u64(t as u64))).collect());
+        let ys = oracle.evals_at(xs.as_slice());
 
         #[cfg(feature = "debug-logs")]
         if round_idx < 3 {
@@ -192,7 +195,7 @@ pub fn run_sumcheck_prover<O: RoundOracle, Tr: Transcript>(
         }
 
         // Interpolate and normalize to low→high coefficient order.
-        let coeffs = interpolate_from_evals(&xs, &ys);
+        let coeffs = interpolate_from_evals(xs.as_slice(), &ys);
         debug_assert!(xs
             .iter()
             .zip(ys.iter())
@@ -386,6 +389,7 @@ pub fn run_batched_sumcheck_prover<Tr: Transcript>(
             final_value: K::ZERO,
         })
         .collect();
+    let mut xs_cache = std::collections::BTreeMap::<usize, Vec<K>>::new();
 
     // Track running sums per claim
     let mut running_sums: Vec<K> = claims.iter().map(|c| c.claimed_sum).collect();
@@ -400,13 +404,14 @@ pub fn run_batched_sumcheck_prover<Tr: Transcript>(
     for round_idx in 0..num_rounds {
         tr.append_message(b"batched/round_idx", &(round_idx as u64).to_le_bytes());
 
-        // 1. Collect round polynomials from ALL claims
-        let mut all_round_polys: Vec<Vec<K>> = Vec::with_capacity(claims.len());
-
-        for (claim_idx, claim) in claims.iter_mut().enumerate() {
+        // 1. Collect round polynomials from all claims.
+        for claim_idx in 0..claims.len() {
+            let claim = &mut claims[claim_idx];
             let deg = claim.oracle.degree_bound();
-            let xs: Vec<K> = (0..=deg).map(|t| K::from(Fq::from_u64(t as u64))).collect();
-            let ys = claim.oracle.evals_at(&xs);
+            let xs = xs_cache
+                .entry(deg)
+                .or_insert_with(|| (0..=deg).map(|t| K::from(Fq::from_u64(t as u64))).collect());
+            let ys = claim.oracle.evals_at(xs.as_slice());
 
             // Check invariant: p(0) + p(1) = running_sum
             let sum_at_01 = ys[0] + ys[1];
@@ -421,12 +426,16 @@ pub fn run_batched_sumcheck_prover<Tr: Transcript>(
             }
 
             // Interpolate to get polynomial coefficients
-            let coeffs = interpolate_from_evals(&xs, &ys);
-            all_round_polys.push(coeffs);
+            let coeffs = interpolate_from_evals(xs.as_slice(), &ys);
+            per_claim_results[claim_idx].round_polys.push(coeffs);
         }
 
         // 2. Append ALL round polynomials to transcript (domain separated by claim)
-        for (claim_idx, (claim, coeffs)) in claims.iter().zip(all_round_polys.iter()).enumerate() {
+        for (claim_idx, claim) in claims.iter().enumerate() {
+            let coeffs = per_claim_results[claim_idx]
+                .round_polys
+                .last()
+                .expect("batched sumcheck: missing round polynomial");
             tr.append_message(b"batched/claim_label", claim.label);
             tr.append_message(b"batched/claim_idx", &(claim_idx as u64).to_le_bytes());
             for &coeff in coeffs.iter() {
@@ -450,12 +459,13 @@ pub fn run_batched_sumcheck_prover<Tr: Transcript>(
         }
 
         // 4. Fold ALL oracles with the shared challenge and update running sums
-        for (claim_idx, (claim, coeffs)) in claims.iter_mut().zip(all_round_polys.iter()).enumerate() {
+        for (claim_idx, claim) in claims.iter_mut().enumerate() {
+            let coeffs = per_claim_results[claim_idx]
+                .round_polys
+                .last()
+                .expect("batched sumcheck: missing round polynomial");
             running_sums[claim_idx] = poly_eval_k(coeffs, shared_challenge);
             claim.oracle.fold(shared_challenge);
-            per_claim_results[claim_idx]
-                .round_polys
-                .push(coeffs.clone());
         }
     }
 

@@ -11,9 +11,26 @@ use neo_reductions::sumcheck::RoundOracle;
 use p3_field::PrimeCharacteristicRing;
 
 use crate::mle::build_chi_table;
+use crate::riscv::instruction::{
+    mask_to_xlen, opcode_uses_combined_lookup_key, operand_mode_keys_enabled, try_decode_lookup_operands,
+};
 use crate::sparse_time::SparseIdxVec;
 
 use super::lookups::{compute_op, evaluate_opcode_mle, uninterleave_bits, RiscvOpcode};
+
+#[inline]
+fn implicit_table_eval_at_addr(opcode: RiscvOpcode, addr: u64, xlen: usize) -> u64 {
+    if opcode_uses_combined_lookup_key(opcode) {
+        if matches!(opcode, RiscvOpcode::Mulhu) && xlen <= 32 {
+            return mask_to_xlen(addr >> xlen, xlen);
+        }
+        return mask_to_xlen(addr, xlen);
+    }
+
+    let (rs1, rs2) = try_decode_lookup_operands(opcode, addr, operand_mode_keys_enabled())
+        .unwrap_or_else(|| uninterleave_bits(addr as u128));
+    compute_op(opcode, rs1, rs2, xlen)
+}
 
 /// Address-domain lookup oracle for Shout with an implicit RISC-V opcode table.
 ///
@@ -58,7 +75,9 @@ impl RiscvAddressLookupOracleSparse {
             | RiscvOpcode::Eq
             | RiscvOpcode::Neq
             | RiscvOpcode::Slt
-            | RiscvOpcode::Sltu => Ok(()),
+            | RiscvOpcode::Sltu
+            | RiscvOpcode::Mul
+            | RiscvOpcode::Mulhu => Ok(()),
             _ => Err(PiCcsError::InvalidInput(format!(
                 "RISC-V implicit Shout table MLE not implemented for opcode {opcode:?} at xlen={xlen}"
             ))),
@@ -132,8 +151,7 @@ impl RiscvAddressLookupOracleSparse {
         // Claimed sum = Σ_a Table(a) * weight(a), summed over sparse support.
         let mut claimed_sum = K::ZERO;
         for (&addr, &w) in weights.iter() {
-            let (rs1, rs2) = uninterleave_bits(addr as u128);
-            let out = compute_op(opcode, rs1, rs2, xlen);
+            let out = implicit_table_eval_at_addr(opcode, addr, xlen);
             claimed_sum += K::from_u64(out) * w;
         }
 
@@ -219,8 +237,7 @@ impl RiscvAddressLookupOracleSparse {
         // Claimed sum = Σ_a Table(a) * weight(a), summed over sparse support.
         let mut claimed_sum = K::ZERO;
         for (&addr, &w) in weights.iter() {
-            let (rs1, rs2) = uninterleave_bits(addr as u128);
-            let out = compute_op(opcode, rs1, rs2, xlen);
+            let out = implicit_table_eval_at_addr(opcode, addr, xlen);
             claimed_sum += K::from_u64(out) * w;
         }
 

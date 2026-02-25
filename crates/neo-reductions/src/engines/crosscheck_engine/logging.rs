@@ -227,9 +227,9 @@ pub fn log_outputs_y_row_content_mismatch(
     eprintln!();
 }
 
-pub fn log_outputs_y_scalars_mismatch(idx: usize, match_count: usize, total_len: usize, mismatches: &[(usize, K, K)]) {
+pub fn log_outputs_ct_mismatch(idx: usize, match_count: usize, total_len: usize, mismatches: &[(usize, K, K)]) {
     eprintln!("\n╔═══════════════════════════════════════════════════════════════════════════╗");
-    eprintln!("║              CROSSCHECK: y_scalars Mismatch                               ║");
+    eprintln!("║              CROSSCHECK: ct Mismatch                                      ║");
     eprintln!("╚═══════════════════════════════════════════════════════════════════════════╝");
     eprintln!("  Output instance:   {}", idx);
     eprintln!("  Matching scalars:  {}/{}", match_count, total_len);

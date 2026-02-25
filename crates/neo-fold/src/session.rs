@@ -32,10 +32,10 @@ pub use circuit::*;
 use neo_ajtai::AjtaiSModule;
 use neo_ajtai::{has_seed_for_dims, s_lincomb, s_mul, unload_global_pp_for_dims, Commitment as Cmt};
 use neo_ccs::traits::SModuleHomomorphism;
-use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
+use neo_ccs::{CcsClaim, CcsStructure, CcsWitness, CeClaim, Mat};
 use neo_math::ring::Rq as RqEl;
 use neo_math::{D, F, K};
-use neo_memory::ajtai::encode_vector_balanced_to_mat;
+use neo_memory::ajtai::{commit_cols_for_ccs_m, decode_vector_for_ccs_m, encode_vector_for_ccs_m};
 use neo_memory::builder::{
     build_shard_witness_shared_cpu_bus_from_trace_with_aux, build_shard_witness_shared_cpu_bus_with_aux,
     CpuArithmetization, ShardWitnessAux,
@@ -247,7 +247,7 @@ fn default_mixers() -> CommitMixers<fn(&[Mat<F>], &[Cmt]) -> Cmt, fn(&[Cmt], u32
 /// This is exactly the paper's ME(b, L)^k input vector for the next Π_CCS.
 #[derive(Clone, Debug)]
 pub struct Accumulator {
-    pub me: Vec<MeInstance<Cmt, F, K>>,
+    pub me: Vec<CeClaim<Cmt, F, K>>,
     pub witnesses: Vec<Mat<F>>, // Z_i for each me[i]
 }
 
@@ -277,6 +277,7 @@ impl Accumulator {
             )));
         }
         let m_in0 = self.me[0].m_in;
+        let packed_cols = commit_cols_for_ccs_m(s.m);
         for (i, (m, Z)) in self.me.iter().zip(self.witnesses.iter()).enumerate() {
             if m.r.len() != ell_n {
                 return Err(PiCcsError::InvalidInput(format!(
@@ -296,23 +297,28 @@ impl Accumulator {
                     "Accumulator: all ME inputs must share the same m_in".into(),
                 ));
             }
-            if Z.rows() != D || Z.cols() != s.m {
+            if Z.rows() != D || Z.cols() != packed_cols {
                 return Err(PiCcsError::InvalidInput(format!(
-                    "Accumulator[{}]: Z has shape {}x{}, expected {}x{}",
-                    i,
-                    Z.rows(),
-                    Z.cols(),
+                    "Accumulator[{i}]: SuperNeo packed layout required (expected {}x{}, got {}x{})",
                     D,
-                    s.m
+                    packed_cols,
+                    Z.rows(),
+                    Z.cols()
                 )));
             }
+            decode_vector_for_ccs_m(params, s.m, Z).map_err(|e| {
+                PiCcsError::InvalidInput(format!(
+                    "Accumulator[{i}]: invalid SuperNeo packed witness layout for m={}: {e}",
+                    s.m
+                ))
+            })?;
             if m.X.rows() != D || m.X.cols() != m.m_in {
                 return Err(PiCcsError::InvalidInput(
                     "Accumulator: X dimension mismatch with m_in".into(),
                 ));
             }
             // Validate y-vector shape: t rows, each padded to 2^{ell_d}
-            if m.y.len() != s.t() || !m.y.iter().all(|row| row.len() == want_pad) {
+            if m.y_ring.len() != s.t() || !m.y_ring.iter().all(|row| row.len() == want_pad) {
                 return Err(PiCcsError::InvalidInput(format!(
                     "Accumulator[{}]: y shape invalid; expected t={} rows padded to 2^{{ell_d}}={}",
                     i,
@@ -353,7 +359,7 @@ pub fn me_from_z_balanced<Lm: SModuleHomomorphism<F, Cmt>>(
     z: &[F],
     r: &[K],
     m_in: usize,
-) -> Result<(MeInstance<Cmt, F, K>, Mat<F>), PiCcsError> {
+) -> Result<(CeClaim<Cmt, F, K>, Mat<F>), PiCcsError> {
     if z.len() != s.m {
         return Err(PiCcsError::InvalidInput(format!(
             "me_from_z_balanced: z length {} != CCS.m {}",
@@ -373,72 +379,22 @@ pub fn me_from_z_balanced<Lm: SModuleHomomorphism<F, Cmt>>(
             dims.ell_n
         )));
     }
-    let d_pad = 1usize << dims.ell_d;
 
-    let Z = encode_vector_balanced_to_mat(params, z);
-    let d = Z.rows();
+    let Z = encode_vector_for_ccs_m(params, s.m, z)
+        .map_err(|e| PiCcsError::InvalidInput(format!("me_from_z_balanced: witness encode failed: {e}")))?;
     let c = l.commit(&Z);
 
-    // X := first m_in columns of Z
-    let mut X = Mat::zero(d, m_in, F::ZERO);
-    for rr in 0..d {
-        for cc in 0..m_in {
-            X[(rr, cc)] = Z[(rr, cc)];
-        }
-    }
+    // X := first m_in logical witness columns.
+    let X = neo_reductions::common::project_x_from_witness_mat(&Z, s.m, m_in).map_err(|e| {
+        PiCcsError::InvalidInput(format!(
+            "me_from_z_balanced: X projection failed for m={}, m_in={}: {e}",
+            s.m, m_in
+        ))
+    })?;
 
-    // Build χ_r(row) and v_j := M_j^T χ_r (K^m), then y_{(j)} := Z · v_j (pad to d_pad)
-    let n_sz = 1usize << r.len();
-    let mut chi_r = vec![K::ZERO; n_sz];
-    for row in 0..n_sz {
-        let mut w = K::ONE;
-        for bit in 0..r.len() {
-            let rb = r[bit];
-            let is_one = ((row >> bit) & 1) == 1;
-            w *= if is_one { rb } else { K::ONE - rb };
-        }
-        chi_r[row] = w;
-    }
+    let (y_ring, ct) = neo_reductions::common::compute_y_from_Z_and_r(s, &Z, r, dims.ell_d, params.b);
 
-    let t = s.t();
-    let mut vjs: Vec<Vec<K>> = Vec::with_capacity(t);
-    for j in 0..t {
-        let mut vj = vec![K::ZERO; s.m];
-        s.matrices[j].add_mul_transpose_into(&chi_r, &mut vj, s.n);
-        vjs.push(vj);
-    }
-
-    // y rows padded to 2^{ell_d}; y_scalars = base-b recomposition of first D digits
-    let bF = F::from_u64(params.b as u64);
-    let mut pow_b_f = vec![F::ONE; d];
-    for t in 1..d {
-        pow_b_f[t] = pow_b_f[t - 1] * bF;
-    }
-    let pow_b_k: Vec<K> = pow_b_f.iter().copied().map(K::from).collect();
-
-    let mut y: Vec<Vec<K>> = Vec::with_capacity(t);
-    let mut y_scalars: Vec<K> = Vec::with_capacity(t);
-    for j in 0..t {
-        let mut yj = vec![K::ZERO; d_pad];
-        // first D digits
-        for rho in 0..d {
-            let mut acc = K::ZERO;
-            for c in 0..s.m {
-                acc += K::from(Z[(rho, c)]) * vjs[j][c];
-            }
-            yj[rho] = acc;
-        }
-        // higher positions remain zero
-
-        let mut scalar = K::ZERO;
-        for rho in 0..d {
-            scalar += yj[rho] * pow_b_k[rho];
-        }
-        y.push(yj);
-        y_scalars.push(scalar);
-    }
-
-    let me = MeInstance::<Cmt, F, K> {
+    let me = CeClaim::<Cmt, F, K> {
         c_step_coords: vec![],
         u_offset: 0,
         u_len: 0,
@@ -446,8 +402,9 @@ pub fn me_from_z_balanced<Lm: SModuleHomomorphism<F, Cmt>>(
         X,
         r: r.to_vec(),
         s_col: Vec::new(),
-        y,
-        y_scalars,
+        y_ring,
+        ct,
+        aux_openings: Vec::new(),
         y_zcol: Vec::new(),
         m_in,
         fold_digest: [0u8; 32],
@@ -468,7 +425,7 @@ pub fn me_from_z_balanced_select<Lm: SModuleHomomorphism<F, Cmt>>(
     z: &[F],
     r: &[K],
     x_col_indices: &[usize], // which columns of Z form X, in order
-) -> Result<(MeInstance<Cmt, F, K>, Mat<F>), PiCcsError> {
+) -> Result<(CeClaim<Cmt, F, K>, Mat<F>), PiCcsError> {
     if z.len() != s.m {
         return Err(PiCcsError::InvalidInput(format!(
             "me_from_z_balanced_select: z length {} != CCS.m {}",
@@ -485,25 +442,30 @@ pub fn me_from_z_balanced_select<Lm: SModuleHomomorphism<F, Cmt>>(
             dims.ell_n
         )));
     }
-    let d_pad = 1usize << dims.ell_d;
 
-    let Z = encode_vector_balanced_to_mat(params, z);
+    let Z = encode_vector_for_ccs_m(params, s.m, z)
+        .map_err(|e| PiCcsError::InvalidInput(format!("me_from_z_balanced_select: witness encode failed: {e}")))?;
     let d = Z.rows();
     let c = l.commit(&Z);
 
-    // X := selected columns of Z (not the first m_in)
+    // X := selected logical witness columns (not necessarily contiguous).
     let m_in = x_col_indices.len();
     let mut X = Mat::zero(d, m_in, F::ZERO);
+    let z_layout = neo_reductions::common::witness_mat_layout(&Z, s.m).map_err(|e| {
+        PiCcsError::InvalidInput(format!(
+            "me_from_z_balanced_select: invalid witness layout for m={}: {e}",
+            s.m
+        ))
+    })?;
     for (j, &col) in x_col_indices.iter().enumerate() {
-        if col >= Z.cols() {
+        if col >= s.m {
             return Err(PiCcsError::InvalidInput(format!(
-                "X column index {} out of range (Z has {} cols)",
-                col,
-                Z.cols()
+                "X column index {} out of range (logical witness width {})",
+                col, s.m
             )));
         }
         for rho in 0..d {
-            X[(rho, j)] = Z[(rho, col)];
+            X[(rho, j)] = neo_reductions::common::witness_mat_get_f(&Z, z_layout, s.m, rho, col);
         }
     }
 
@@ -512,63 +474,18 @@ pub fn me_from_z_balanced_select<Lm: SModuleHomomorphism<F, Cmt>>(
     {
         for (j, &col) in x_col_indices.iter().enumerate() {
             for rho in 0..d {
-                debug_assert_eq!(X[(rho, j)], Z[(rho, col)], "X != Z[:, col]");
+                debug_assert_eq!(
+                    X[(rho, j)],
+                    neo_reductions::common::witness_mat_get_f(&Z, z_layout, s.m, rho, col),
+                    "X != logical Z[:, col]"
+                );
             }
         }
     }
 
-    // Build χ_r(row) and v_j := M_j^T χ_r (K^m), then y_{(j)} := Z · v_j (pad to d_pad)
-    let n_sz = 1usize << r.len();
-    let mut chi_r = vec![K::ZERO; n_sz];
-    for row in 0..n_sz {
-        let mut w = K::ONE;
-        for bit in 0..r.len() {
-            let rb = r[bit];
-            let is_one = ((row >> bit) & 1) == 1;
-            w *= if is_one { rb } else { K::ONE - rb };
-        }
-        chi_r[row] = w;
-    }
+    let (y_ring, ct) = neo_reductions::common::compute_y_from_Z_and_r(s, &Z, r, dims.ell_d, params.b);
 
-    let t = s.t();
-    let mut vjs: Vec<Vec<K>> = Vec::with_capacity(t);
-    for j in 0..t {
-        let mut vj = vec![K::ZERO; s.m];
-        s.matrices[j].add_mul_transpose_into(&chi_r, &mut vj, s.n);
-        vjs.push(vj);
-    }
-
-    // y rows padded to 2^{ell_d}; y_scalars = base-b recomposition of first D digits
-    let bF = F::from_u64(params.b as u64);
-    let mut pow_b_f = vec![F::ONE; d];
-    for t in 1..d {
-        pow_b_f[t] = pow_b_f[t - 1] * bF;
-    }
-    let pow_b_k: Vec<K> = pow_b_f.iter().copied().map(K::from).collect();
-
-    let mut y: Vec<Vec<K>> = Vec::with_capacity(t);
-    let mut y_scalars: Vec<K> = Vec::with_capacity(t);
-    for j in 0..t {
-        let mut yj = vec![K::ZERO; d_pad];
-        // first D digits
-        for rho in 0..d {
-            let mut acc = K::ZERO;
-            for c in 0..s.m {
-                acc += K::from(Z[(rho, c)]) * vjs[j][c];
-            }
-            yj[rho] = acc;
-        }
-        // higher positions remain zero
-
-        let mut scalar = K::ZERO;
-        for rho in 0..d {
-            scalar += yj[rho] * pow_b_k[rho];
-        }
-        y.push(yj);
-        y_scalars.push(scalar);
-    }
-
-    let me = MeInstance::<Cmt, F, K> {
+    let me = CeClaim::<Cmt, F, K> {
         c_step_coords: vec![],
         u_offset: 0,
         u_len: 0,
@@ -576,8 +493,9 @@ pub fn me_from_z_balanced_select<Lm: SModuleHomomorphism<F, Cmt>>(
         X,
         r: r.to_vec(),
         s_col: Vec::new(),
-        y,
-        y_scalars,
+        y_ring,
+        ct,
+        aux_openings: Vec::new(),
         y_zcol: Vec::new(),
         m_in,
         fold_digest: [0u8; 32],
@@ -692,10 +610,11 @@ where
         let Some(commit_m) = self.commit_m else {
             return Ok(());
         };
-        if commit_m != m {
+        let expected_commit_m = commit_cols_for_ccs_m(m);
+        if commit_m != expected_commit_m {
             return Err(PiCcsError::InvalidInput(format!(
-                "session committer configured for CCS.m={}, but this step expects CCS.m={}; construct the session from the same CCS width",
-                commit_m, m
+                "session committer configured for witness columns={}, but this step expects witness columns={} (from CCS.m={}); construct the session from the same CCS width/layout",
+                commit_m, expected_commit_m, m
             )));
         }
         Ok(())
@@ -788,7 +707,7 @@ where
     }
 
     /// Access the accumulated public MCS instances (for verification APIs).
-    pub fn mcss_public(&self) -> Vec<McsInstance<Cmt, F>> {
+    pub fn mcss_public(&self) -> Vec<CcsClaim<Cmt, F>> {
         self.steps.iter().map(|step| step.mcs.0.clone()).collect()
     }
 
@@ -902,15 +821,16 @@ where
 
         let x: Vec<F> = x_indices.iter().map(|&i| z[i]).collect();
 
-        let Z = encode_vector_balanced_to_mat(&self.params, &z);
+        let Z = encode_vector_for_ccs_m(&self.params, m_expected, &z)
+            .map_err(|e| PiCcsError::InvalidInput(format!("encode step witness failed: {e}")))?;
         let c = self.l.commit(&Z);
         let m_in = spec.m_in;
 
         // w is the private witness (suffix)
         let w = z[m_in..].to_vec();
 
-        let mcs_inst = McsInstance { c, x, m_in };
-        let mcs_wit = McsWitness { w, Z };
+        let mcs_inst = CcsClaim { c, x, m_in };
+        let mcs_wit = CcsWitness { w, Z };
 
         self.shared_bus_aux = None;
         self.steps.push((mcs_inst, mcs_wit).into());
@@ -963,16 +883,17 @@ where
         z.extend_from_slice(input.witness);
         debug_assert_eq!(z.len(), m_expected);
 
-        let Z = encode_vector_balanced_to_mat(&self.params, &z);
+        let Z = encode_vector_for_ccs_m(&self.params, m_expected, &z)
+            .map_err(|e| PiCcsError::InvalidInput(format!("encode step witness failed: {e}")))?;
         let c = self.l.commit(&Z);
 
         // Produce MCS instance + witness
-        let mcs_inst = McsInstance {
+        let mcs_inst = CcsClaim {
             c,
             x: input.public_input.to_vec(),
             m_in,
         };
-        let mcs_wit = McsWitness {
+        let mcs_wit = CcsWitness {
             w: z[m_in..].to_vec(),
             Z,
         };
@@ -1118,6 +1039,58 @@ where
         self.steps.iter().any(|s| !s.lut_instances.is_empty())
     }
 
+    fn validate_step_bundle_superneo_layout(
+        &self,
+        s: &CcsStructure<F>,
+        step_idx: usize,
+        step: &StepWitnessBundle<Cmt, F, K>,
+    ) -> Result<(), PiCcsError> {
+        let m_in = step.mcs.0.m_in;
+        if step.mcs.0.x.len() != m_in {
+            return Err(PiCcsError::InvalidInput(format!(
+                "step {step_idx}: mcs.x length {} != m_in {}",
+                step.mcs.0.x.len(),
+                m_in
+            )));
+        }
+        let logical_m = m_in
+            .checked_add(step.mcs.1.w.len())
+            .ok_or_else(|| PiCcsError::InvalidInput(format!("step {step_idx}: m_in + witness length overflow")))?;
+        if logical_m != s.m {
+            return Err(PiCcsError::InvalidInput(format!(
+                "step {step_idx}: logical witness length m_in + |w| = {} does not match CCS.m = {}",
+                logical_m, s.m
+            )));
+        }
+
+        let z = &step.mcs.1.Z;
+        let packed_cols = commit_cols_for_ccs_m(s.m);
+        if z.rows() != D || z.cols() != packed_cols {
+            return Err(PiCcsError::InvalidInput(format!(
+                "step {step_idx}: SuperNeo packed witness layout required (expected {}x{}, got {}x{})",
+                D,
+                packed_cols,
+                z.rows(),
+                z.cols()
+            )));
+        }
+        decode_vector_for_ccs_m(&self.params, s.m, z).map_err(|e| {
+            PiCcsError::InvalidInput(format!(
+                "step {step_idx}: invalid SuperNeo packed witness encoding for m={}: {e}",
+                s.m
+            ))
+        })?;
+
+        Ok(())
+    }
+
+    fn ensure_steps_superneo_layout(&self, s: &CcsStructure<F>) -> Result<(), PiCcsError> {
+        for (step_idx, step) in self.steps.iter().enumerate() {
+            self.validate_step_bundle_superneo_layout(s, step_idx, step)?;
+        }
+        Ok(())
+    }
+
     fn ensure_accumulator_matches_ccs(&mut self, s: &CcsStructure<F>) -> Result<(), PiCcsError> {
         let Some(acc) = self.acc0.as_mut() else {
             return Ok(());
@@ -1129,7 +1102,7 @@ where
         if acc
             .me
             .iter()
-            .all(|me| me.y.len() == s.t() && me.y_scalars.len() == s.t())
+            .all(|me| me.y_ring.len() == s.t() && me.ct.len() == s.t())
         {
             return Ok(());
         }
@@ -1138,20 +1111,15 @@ where
         let d_pad = 1usize << dims.ell_d;
 
         for (me, z_mat) in acc.me.iter_mut().zip(acc.witnesses.iter()) {
-            let (y_vecs_d, y_scalars) = neo_memory::mle::compute_me_y_for_ccs(s, z_mat, &me.r, self.params.b as u64);
-
-            let d = z_mat.rows();
-            let mut y_padded: Vec<Vec<K>> = Vec::with_capacity(y_vecs_d.len());
-            for y_d in y_vecs_d {
-                let mut yj = vec![K::ZERO; d_pad];
-                for rho in 0..d {
-                    yj[rho] = y_d[rho];
-                }
-                y_padded.push(yj);
+            let (y_ring, ct) =
+                neo_reductions::common::compute_y_from_Z_and_r(s, z_mat, &me.r, dims.ell_d, self.params.b);
+            if y_ring.iter().any(|row| row.len() != d_pad) {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "accumulator normalization produced non-canonical y padding (expected {d_pad})"
+                )));
             }
-
-            me.y = y_padded;
-            me.y_scalars = y_scalars;
+            me.y_ring = y_ring;
+            me.ct = ct;
         }
 
         Ok(())
@@ -1181,10 +1149,10 @@ where
             ));
         }
 
-        let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> =
-            self.steps.iter().map(StepInstanceBundle::from).collect();
+        // Use witness-side steps for CCS preparation so Route-A time-column mode can be inferred
+        // before proof generation. `StepInstanceBundle` intentionally drops time_columns.
         let (s_prepared, _cpu_bus) =
-            crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(s, &steps_public)?;
+            crate::memory_sidecar::cpu_bus::prepare_ccs_for_shared_cpu_bus_steps(s, &self.steps)?;
         Ok(s_prepared)
     }
 
@@ -1296,6 +1264,8 @@ where
         let ctx = cache.ctx.clone();
 
         let result = (|| {
+            self.ensure_steps_superneo_layout(s)?;
+
             // Shared CPU bus: compute the prepared CCS shape (copy-outs) for accumulator validation.
             let s_prepared = self.prepared_ccs_for_accumulator(s)?;
             self.ensure_accumulator_matches_ccs(s_prepared)?;
@@ -1307,7 +1277,7 @@ where
             }
 
             // Validate or default the accumulator: None → k=1 simple case (no ME inputs).
-            let (seed_me, seed_me_wit): (&[MeInstance<Cmt, F, K>], &[Mat<F>]) = match &self.acc0 {
+            let (seed_me, seed_me_wit): (&[CeClaim<Cmt, F, K>], &[Mat<F>]) = match &self.acc0 {
                 Some(acc) => {
                     acc.check(&self.params, s_prepared)?;
                     // Also ensure accumulator m_in matches steps' m_in to avoid X-mixing shape issues.
@@ -1324,8 +1294,9 @@ where
 
             // If PP is reloadable (seeded), unload it before memory-heavy oracle/sumcheck work.
             // This keeps peak RSS low on constrained runtimes (e.g. WASM).
-            if has_seed_for_dims(D, s.m) {
-                let _ = unload_global_pp_for_dims(D, s.m);
+            let m_commit = commit_cols_for_ccs_m(s.m);
+            if has_seed_for_dims(D, m_commit) {
+                let _ = unload_global_pp_for_dims(D, m_commit);
             }
 
             shard::fold_shard_prove_with_context_and_step_timings(
@@ -1372,6 +1343,8 @@ where
         let ctx = cache.ctx.clone();
 
         let result = (|| {
+            self.ensure_steps_superneo_layout(s)?;
+
             // Shared CPU bus: compute the prepared CCS shape (copy-outs) for accumulator validation.
             let s_prepared = self.prepared_ccs_for_accumulator(s)?;
             self.ensure_accumulator_matches_ccs(s_prepared)?;
@@ -1383,7 +1356,7 @@ where
             }
 
             // Validate or default the accumulator: None → k=1 simple case (no ME inputs).
-            let (seed_me, seed_me_wit): (&[MeInstance<Cmt, F, K>], &[Mat<F>]) = match &self.acc0 {
+            let (seed_me, seed_me_wit): (&[CeClaim<Cmt, F, K>], &[Mat<F>]) = match &self.acc0 {
                 Some(acc) => {
                     acc.check(&self.params, s_prepared)?;
                     // Also ensure accumulator m_in matches steps' m_in to avoid X-mixing shape issues.
@@ -1400,8 +1373,9 @@ where
 
             // If PP is reloadable (seeded), unload it before memory-heavy oracle/sumcheck work.
             // This keeps peak RSS low on constrained runtimes (e.g. WASM).
-            if has_seed_for_dims(D, s.m) {
-                let _ = unload_global_pp_for_dims(D, s.m);
+            let m_commit = commit_cols_for_ccs_m(s.m);
+            if has_seed_for_dims(D, m_commit) {
+                let _ = unload_global_pp_for_dims(D, m_commit);
             }
 
             shard::fold_shard_prove_with_context(
@@ -1435,6 +1409,8 @@ where
         let ctx = cache.ctx.clone();
 
         let result = (|| {
+            self.ensure_steps_superneo_layout(s)?;
+
             let s_prepared = self.prepared_ccs_for_accumulator(s)?;
             self.ensure_accumulator_matches_ccs(s_prepared)?;
 
@@ -1443,7 +1419,7 @@ where
                 return Err(PiCcsError::InvalidInput("all steps must share the same m_in".into()));
             }
 
-            let (seed_me, seed_me_wit): (&[MeInstance<Cmt, F, K>], &[Mat<F>]) = match &self.acc0 {
+            let (seed_me, seed_me_wit): (&[CeClaim<Cmt, F, K>], &[Mat<F>]) = match &self.acc0 {
                 Some(acc) => {
                     acc.check(&self.params, s_prepared)?;
                     let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
@@ -1583,7 +1559,7 @@ where
     pub fn verify(
         &self,
         s: &CcsStructure<F>,
-        mcss_public: &[neo_ccs::McsInstance<Cmt, F>],
+        mcss_public: &[neo_ccs::CcsClaim<Cmt, F>],
         run: &FoldRun,
     ) -> Result<bool, PiCcsError> {
         let mut tr = Poseidon2Transcript::new(b"neo.fold/session");
@@ -1602,7 +1578,7 @@ where
         &self,
         tr: &mut Poseidon2Transcript,
         s: &CcsStructure<F>,
-        mcss_public: &[neo_ccs::McsInstance<Cmt, F>],
+        mcss_public: &[neo_ccs::CcsClaim<Cmt, F>],
         run: &FoldRun,
     ) -> Result<bool, PiCcsError> {
         let src_ptr = (s as *const CcsStructure<F>) as usize;
@@ -1623,7 +1599,7 @@ where
         let s_prepared = self.prepared_ccs_for_accumulator(s)?;
 
         // Validate (or empty) initial accumulator to mirror finalize()
-        let seed_me: &[MeInstance<Cmt, F, K>] = match &self.acc0 {
+        let seed_me: &[CeClaim<Cmt, F, K>] = match &self.acc0 {
             Some(acc) => {
                 acc.check(&self.params, s_prepared)?;
                 let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
@@ -1737,6 +1713,7 @@ where
                 || !step.mem.wp_me_claims.is_empty()
                 || !step.wb_fold.is_empty()
                 || !step.wp_fold.is_empty()
+                || !step.stage8_fold.is_empty()
         });
         if !(has_twist_or_shout || has_wb_or_wp) && !outputs.obligations.val.is_empty() {
             return Err(PiCcsError::ProtocolError(
@@ -1750,7 +1727,7 @@ where
     pub fn verify_with_output_binding_simple(
         &self,
         s: &CcsStructure<F>,
-        mcss_public: &[neo_ccs::McsInstance<Cmt, F>],
+        mcss_public: &[neo_ccs::CcsClaim<Cmt, F>],
         run: &FoldRun,
         ob_cfg: &crate::output_binding::OutputBindingConfig,
     ) -> Result<bool, PiCcsError> {
@@ -1773,7 +1750,7 @@ where
         &self,
         tr: &mut Poseidon2Transcript,
         s: &CcsStructure<F>,
-        mcss_public: &[neo_ccs::McsInstance<Cmt, F>],
+        mcss_public: &[neo_ccs::CcsClaim<Cmt, F>],
         run: &FoldRun,
         ob_cfg: &crate::output_binding::OutputBindingConfig,
     ) -> Result<bool, PiCcsError> {
@@ -1792,7 +1769,7 @@ where
         let steps_public: Vec<StepInstanceBundle<Cmt, F, K>> = self.steps.iter().map(|bundle| bundle.into()).collect();
         let s_prepared = self.prepared_ccs_for_accumulator(s)?;
 
-        let seed_me: &[MeInstance<Cmt, F, K>] = match &self.acc0 {
+        let seed_me: &[CeClaim<Cmt, F, K>] = match &self.acc0 {
             Some(acc) => {
                 acc.check(&self.params, s_prepared)?;
                 let acc_m_in = acc.me.first().map(|m| m.m_in).unwrap_or(m_in_steps);
@@ -1909,6 +1886,7 @@ where
                 || !step.mem.wp_me_claims.is_empty()
                 || !step.wb_fold.is_empty()
                 || !step.wp_fold.is_empty()
+                || !step.stage8_fold.is_empty()
         });
         if !(has_twist_or_shout || has_wb_or_wp) && !outputs.obligations.val.is_empty() {
             return Err(PiCcsError::ProtocolError(
@@ -1926,12 +1904,12 @@ impl FoldingSession<AjtaiSModule> {
     /// This is intended as a “few lines” frontend: it hides Ajtai PP generation and `NeoParams`
     /// selection.
     ///
-    /// - Commitment width uses `ccs.m` (witness width).
+    /// - Commitment width follows active embedding layout (`ccs.m` or `ccs.m / D`).
     /// - Parameters use `max(ccs.n, ccs.m)` to satisfy extension-field policy for both FE and NC.
     ///
     /// For deterministic parameters (e.g. in tests), use `new_ajtai_seeded`.
     pub fn new_ajtai(mode: FoldingMode, ccs: &CcsStructure<F>) -> Result<Self, PiCcsError> {
-        let m_commit = ccs.m;
+        let m_commit = commit_cols_for_ccs_m(ccs.m);
         let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n.max(ccs.m))
             .map_err(|e| PiCcsError::InvalidInput(format!("NeoParams::goldilocks_auto_r1cs_ccs failed: {e}")))?;
 
@@ -1952,7 +1930,7 @@ impl FoldingSession<AjtaiSModule> {
     ///
     /// This uses the sequential Ajtai setup to avoid any parallelism-related determinism concerns.
     pub fn new_ajtai_seeded(mode: FoldingMode, ccs: &CcsStructure<F>, seed: [u8; 32]) -> Result<Self, PiCcsError> {
-        let m_commit = ccs.m;
+        let m_commit = commit_cols_for_ccs_m(ccs.m);
         let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n.max(ccs.m))
             .map_err(|e| PiCcsError::InvalidInput(format!("NeoParams::goldilocks_auto_r1cs_ccs failed: {e}")))?;
 

@@ -94,8 +94,8 @@ fn rv32_trace_ccs_counts_follow_layout_shape() {
 
     assert_eq!(
         layout.m,
-        layout.m_in + layout.trace.cols * layout.t,
-        "layout width must equal public + flattened trace region"
+        layout.m_in + layout.trace.cols,
+        "layout width must equal public + uniform trace columns"
     );
     assert_eq!(ccs.m, layout.m, "CCS witness width must match layout width");
     assert!(ccs.n > layout.t, "CCS should include transition + wiring constraints");

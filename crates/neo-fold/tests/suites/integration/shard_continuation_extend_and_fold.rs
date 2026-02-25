@@ -5,7 +5,7 @@ use bellpepper_core::{Circuit, ConstraintSystem, Index, LinearCombination, Synth
 use ff::PrimeField;
 use neo_ajtai::Commitment as Cmt;
 use neo_ajtai::{s_lincomb, s_mul, set_global_pp_seeded, AjtaiSModule};
-use neo_ccs::relations::{McsInstance, McsWitness, MeInstance};
+use neo_ccs::relations::{CcsClaim, CcsWitness, CeClaim};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::{CcsMatrix, CcsStructure, CscMat, Mat, SparsePoly, Term};
 use neo_fold::pi_ccs::FoldingMode;
@@ -15,7 +15,7 @@ use neo_fold::shard::{
 };
 use neo_math::ring::{cf_inv, Rq as RqEl};
 use neo_math::{D, F, K};
-use neo_memory::ajtai::encode_vector_balanced_to_mat;
+use neo_memory::ajtai::{commit_cols_for_ccs_m, encode_vector_for_ccs_m};
 use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
 use neo_params::NeoParams;
 use neo_transcript::{Poseidon2Transcript, Transcript};
@@ -197,6 +197,7 @@ impl ConstraintSystem<FpGoldilocks> for TripletConstraintSystem {
 
 const STATE_BYTES: usize = 32;
 const STATE_BITS: usize = STATE_BYTES * 8;
+const PACK_CHUNK_BITS: usize = 32;
 
 struct Sha256StateChainCircuit {
     prev_state: [u8; STATE_BYTES],
@@ -217,41 +218,58 @@ impl Circuit<FpGoldilocks> for Sha256StateChainCircuit {
             .map(|b| b.map(Boolean::from))
             .collect::<Result<Vec<_>, _>>()?;
 
-        // Expose `prev_state` as compact public inputs.
-        bellpepper::gadgets::multipack::pack_into_inputs(cs.namespace(|| "prev_state"), &prev_bits)?;
+        // Expose `prev_state` as compact public inputs with b=2-safe chunk size.
+        for (chunk_idx, chunk_bits) in prev_bits.chunks(PACK_CHUNK_BITS).enumerate() {
+            bellpepper::gadgets::multipack::pack_into_inputs(
+                cs.namespace(|| format!("prev_state_chunk_{chunk_idx}")),
+                chunk_bits,
+            )?;
+        }
 
         // Compute `next_state = SHA256(prev_state)`.
         let hash_bits = bellpepper::gadgets::sha256::sha256(cs.namespace(|| "sha256"), &prev_bits)?;
         assert_eq!(hash_bits.len(), STATE_BITS);
 
-        // Expose `next_state` as compact public inputs.
-        bellpepper::gadgets::multipack::pack_into_inputs(cs.namespace(|| "next_state"), &hash_bits)?;
+        // Expose `next_state` as compact public inputs with b=2-safe chunk size.
+        for (chunk_idx, chunk_bits) in hash_bits.chunks(PACK_CHUNK_BITS).enumerate() {
+            bellpepper::gadgets::multipack::pack_into_inputs(
+                cs.namespace(|| format!("next_state_chunk_{chunk_idx}")),
+                chunk_bits,
+            )?;
+        }
 
         Ok(())
     }
 }
 
 fn state_packed_len() -> usize {
-    let cap = <FpGoldilocks as PrimeField>::CAPACITY as usize;
-    (STATE_BITS + cap - 1) / cap
+    STATE_BITS.div_ceil(PACK_CHUNK_BITS)
 }
 
 fn pack_state_bytes(state: &[u8; STATE_BYTES]) -> Vec<F> {
     let bits = bellpepper::gadgets::multipack::bytes_to_bits(state);
-    let packed = bellpepper::gadgets::multipack::compute_multipacking::<FpGoldilocks>(&bits);
-    packed.iter().map(|x| F::from_u64(fp_to_u64(x))).collect()
+    bits.chunks(PACK_CHUNK_BITS)
+        .map(|chunk| {
+            let mut limb = 0u64;
+            for (bit_idx, bit) in chunk.iter().enumerate() {
+                if *bit {
+                    limb |= 1u64 << bit_idx;
+                }
+            }
+            F::from_u64(limb)
+        })
+        .collect()
 }
 
 fn unpack_state_bytes_from_packed(packed: &[F]) -> [u8; STATE_BYTES] {
-    let cap = <FpGoldilocks as PrimeField>::CAPACITY as usize;
     debug_assert_eq!(packed.len(), state_packed_len());
     let mut out = [0u8; STATE_BYTES];
     for byte_idx in 0..STATE_BYTES {
         let mut byte = 0u8;
         for bit_in_byte in 0..8 {
             let bit_idx = byte_idx * 8 + bit_in_byte;
-            let elem_idx = bit_idx / cap;
-            let shift = bit_idx % cap;
+            let elem_idx = bit_idx / PACK_CHUNK_BITS;
+            let shift = bit_idx % PACK_CHUNK_BITS;
             let bit = (packed[elem_idx].as_canonical_u64() >> shift) & 1;
             if bit == 1 {
                 byte |= 1u8 << (7 - bit_in_byte);
@@ -361,11 +379,11 @@ fn build_step<L: SModuleHomomorphism<F, Cmt>>(
     m_in: usize,
     z: Vec<F>,
 ) -> StepWitnessBundle<Cmt, F, K> {
-    let Z = encode_vector_balanced_to_mat(params, &z);
+    let Z = encode_vector_for_ccs_m(params, z.len(), &z).expect("encode witness for CCS width");
     let c = l.commit(&Z);
     let x = z[..m_in].to_vec();
     let w = z[m_in..].to_vec();
-    StepWitnessBundle::from((McsInstance { c, x, m_in }, McsWitness { w, Z }))
+    StepWitnessBundle::from((CcsClaim { c, x, m_in }, CcsWitness { w, Z }))
 }
 
 #[test]
@@ -380,10 +398,10 @@ fn shard_continuation_extend_and_fold() {
     //
     // Circuit per step: prove `next_state = sha256(prev_state)` while exposing both states publicly.
     // - State is 32 bytes (256 bits).
-    // - Bellpepper multipacks bits into field elements of capacity CAPACITY=63 bits, so 256 bits
-    //   become `packed_len = ceil(256/63) = 5` field elements.
+    // - For b=2-safe representability, we pack public bits in 32-bit chunks, so 256 bits
+    //   become `packed_len = ceil(256/32) = 8` field elements.
     // - Therefore each step's public input vector is:
-    //     x = [1, pack(prev_state) (5 elems), pack(next_state) (5 elems)]  => m_in = 11
+    //     x = [1, pack(prev_state) (8 elems), pack(next_state) (8 elems)]  => m_in = 17
     //
     // Continuation flow:
     // 1) Stage 0 (prefix): prove one step with public statement (y0 -> y1). Keep the foldable
@@ -403,11 +421,11 @@ fn shard_continuation_extend_and_fold() {
     let total_start = Instant::now();
 
     let (ccs, m_in) = build_sha256_chain_ccs();
-    let mut params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n.max(ccs.m)).expect("params");
-    params.b = 3;
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(ccs.n.max(ccs.m)).expect("params");
     let seed = [42u8; 32];
-    set_global_pp_seeded(D, params.kappa as usize, ccs.m, seed).expect("set_global_pp_seeded");
-    let l = AjtaiSModule::from_global_for_dims(D, ccs.m).expect("AjtaiSModule init");
+    let m_commit = commit_cols_for_ccs_m(ccs.m);
+    set_global_pp_seeded(D, params.kappa as usize, m_commit, seed).expect("set_global_pp_seeded");
+    let l = AjtaiSModule::from_global_for_dims(D, m_commit).expect("AjtaiSModule init");
     let mixers = default_mixers();
 
     println!("=== Shard Continuation Test (SHA256 State Chaining) ===");
@@ -498,10 +516,10 @@ fn shard_continuation_extend_and_fold() {
     );
     println!("Stage 0 proved output (y1): {}", hex_lower(&y1));
 
-    let acc1: Vec<MeInstance<Cmt, F, K>> = out0.obligations.main.clone();
+    let acc1: Vec<CeClaim<Cmt, F, K>> = out0.obligations.main.clone();
     let acc1_wit: Vec<Mat<F>> = wits0.final_main_wits.clone();
     assert_eq!(acc1.len(), acc1_wit.len(), "accumulator witness count mismatch");
-    println!("  Accumulator size after prefix: {} MeInstance(s)", acc1.len());
+    println!("  Accumulator size after prefix: {} CeClaim(s)", acc1.len());
 
     let prove_extend_start = Instant::now();
     let (proof1, out1, _wits1) = fold_shard_prove_with_witnesses_with_step_offset(
@@ -716,5 +734,5 @@ fn shard_continuation_extend_and_fold() {
     println!("Total proving time:      {:?}", total_prove_duration);
     println!("Total verification time: {:?}", total_verify_duration);
     println!("Total elapsed time:      {:?}", total_start.elapsed());
-    println!("Final accumulator size:  {} MeInstance(s)", out1.obligations.main.len());
+    println!("Final accumulator size:  {} CeClaim(s)", out1.obligations.main.len());
 }

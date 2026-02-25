@@ -1,6 +1,6 @@
 #![allow(non_snake_case)]
 
-use neo_ccs::{CcsStructure, Mat, McsWitness, SparsePoly};
+use neo_ccs::{CcsStructure, CcsWitness, Mat, SparsePoly};
 use neo_math::{D, F, K};
 use neo_params::NeoParams;
 use neo_reductions::optimized_engine::oracle::NcOracle;
@@ -20,22 +20,24 @@ fn identity_left(n: usize, m: usize) -> Mat<F> {
 fn nc_oracle_round_polys_respect_degree_bound() {
     // Use a deliberately invalid witness (out-of-range digits) so that the NC polynomial
     // is generically non-zero and exercises the full `range_product` degree.
-    let n = 4usize;
-    let m = 8usize;
+    let n = D;
+    let m = D;
 
     let params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
     let s = CcsStructure::new(vec![identity_left(n, m)], SparsePoly::new(1, vec![])).expect("ccs");
     let dims = neo_reductions::engines::utils::build_dims_and_policy(&params, &s).expect("dims");
 
     // Vary digits across the table so the MLE isn't constant.
-    let mut data = Vec::with_capacity(D * m);
+    let packed_cols = m / D;
+    let mut data = Vec::with_capacity(D * packed_cols);
     for rho in 0..D {
-        for c in 0..m {
+        for blk in 0..packed_cols {
+            let c = blk * D + rho;
             data.push(F::from_u64(5 + (rho as u64) * 17 + (c as u64) * 31));
         }
     }
-    let Z = Mat::from_row_major(D, m, data);
-    let mcs_witnesses = vec![McsWitness { w: vec![F::ZERO; m], Z }];
+    let Z = Mat::from_row_major(D, packed_cols, data);
+    let mcs_witnesses = vec![CcsWitness { w: vec![F::ZERO; m], Z }];
 
     let ch = Challenges {
         alpha: (0..dims.ell_d)

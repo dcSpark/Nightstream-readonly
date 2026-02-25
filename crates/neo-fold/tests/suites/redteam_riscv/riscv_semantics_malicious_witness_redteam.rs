@@ -21,7 +21,7 @@ fn tamper_val_scalar(run: &Rv32TraceWiringRun) {
     let mut tampered = false;
     for step in &mut bad_proof.steps {
         for claim in &mut step.mem.val_me_claims {
-            if let Some(first) = claim.y_scalars.first_mut() {
+            if let Some(first) = claim.ct.first_mut() {
                 *first += K::ONE;
                 tampered = true;
                 break;

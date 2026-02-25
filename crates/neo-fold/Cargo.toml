@@ -79,6 +79,10 @@ name = "test_riscv_program_crosscheck"
 path = "riscv-tests/test_riscv_program_crosscheck.rs"
 
 [[test]]
+name = "test_riscv_program_rv32m_trace_prove_verify"
+path = "riscv-tests/test_riscv_program_rv32m_trace_prove_verify.rs"
+
+[[test]]
 name = "test_starstream_tx_valid_crosscheck"
 path = "starstream-tests/test_starstream_tx_valid_crosscheck.rs"
 

@@ -5,15 +5,12 @@ use p3_goldilocks::Goldilocks as F;
 use crate::riscv::exec_table::Rv32ExecTable;
 use crate::riscv::trace::{Rv32TraceLayout, Rv32TraceWitness};
 
-use super::constraint_builder::{build_r1cs_ccs, Constraint};
+use super::constraint_builder::{build_r1cs_ccs, Constraint, UniformConstraintKey, UniformConstraintRow};
 
 /// Fixed-width, time-in-rows trace CCS layout.
 ///
 /// This is a Tier 2.1 trace CCS with fixed columns over time (`t` rows),
 /// AIR-like wiring invariants, and a compact subset of ISA semantics guards.
-///
-/// Witness layout (column-major trace region):
-/// `cell(trace_col, row) = trace_base + trace_col * t + row`.
 #[derive(Clone, Debug)]
 pub struct Rv32TraceCcsLayout {
     pub t: usize,
@@ -33,6 +30,17 @@ pub struct Rv32TraceCcsLayout {
 
 impl Rv32TraceCcsLayout {
     pub fn new(t: usize) -> Result<Self, String> {
+        Self::new_internal(t)
+    }
+
+    /// Uniform Route-A kernel layout:
+    /// - physical witness width is column-based (`m_in + trace.cols`),
+    /// - time is handled by the batched time-domain sumcheck path.
+    pub fn new_uniform(t: usize) -> Result<Self, String> {
+        Self::new_internal(t)
+    }
+
+    fn new_internal(t: usize) -> Result<Self, String> {
         if t == 0 {
             return Err("Rv32TraceCcsLayout: t must be >= 1".into());
         }
@@ -46,10 +54,7 @@ impl Rv32TraceCcsLayout {
 
         let trace = Rv32TraceLayout::new();
         let trace_base = m_in;
-        let trace_len = trace
-            .cols
-            .checked_mul(t)
-            .ok_or_else(|| "Rv32TraceCcsLayout: trace_len overflow".to_string())?;
+        let trace_len = trace.cols;
         let m = trace_base
             .checked_add(trace_len)
             .ok_or_else(|| "Rv32TraceCcsLayout: m overflow".to_string())?;
@@ -68,12 +73,24 @@ impl Rv32TraceCcsLayout {
         })
     }
 
-    /// Full witness index for a trace cell.
+    /// Physical witness index for a trace column in uniform mode.
+    ///
+    /// `row` is kept in the API for call-site compatibility and must satisfy `row < t`,
+    /// but does not affect the physical index.
     #[inline]
     pub fn cell(&self, trace_col: usize, row: usize) -> usize {
         debug_assert!(trace_col < self.trace.cols);
         debug_assert!(row < self.t);
-        self.trace_base + trace_col * self.t + row
+        assert!(
+            row == 0,
+            "uniform kernel physical cell indexing must not use per-row offsets"
+        );
+        self.trace_base + trace_col
+    }
+
+    #[inline]
+    pub fn is_uniform_kernel(&self) -> bool {
+        true
     }
 }
 
@@ -112,13 +129,11 @@ pub fn rv32_trace_ccs_witness_from_trace_witness(
     x[layout.halted_in] = wit.cols[layout.trace.halted][0];
     x[layout.halted_out] = wit.cols[layout.trace.halted][layout.t - 1];
 
+    // Uniform kernel keeps one physical slot per trace column and delegates time checks
+    // to Route-A time-domain sumchecks.
     let mut w = vec![F::ZERO; layout.m - layout.m_in];
     for trace_col in 0..layout.trace.cols {
-        let col = &wit.cols[trace_col];
-        for row in 0..layout.t {
-            let idx = layout.cell(trace_col, row);
-            w[idx - layout.m_in] = col[row];
-        }
+        w[trace_col] = wit.cols[trace_col][0];
     }
 
     Ok((x, w))
@@ -133,118 +148,153 @@ pub fn build_rv32_trace_wiring_ccs_with_reserved_rows(
     layout: &Rv32TraceCcsLayout,
     reserved_rows: usize,
 ) -> Result<CcsStructure<F>, String> {
+    build_rv32_trace_uniform_kernel_ccs_with_reserved_rows(layout, reserved_rows)
+}
+
+fn legacy_trace_core_rows(t: usize) -> Result<usize, String> {
+    t.checked_mul(10)
+        .and_then(|v| v.checked_sub(1))
+        .ok_or_else(|| "RV32 trace CCS: core row count overflow".to_string())
+}
+
+fn build_rv32_trace_uniform_kernel_ccs_with_reserved_rows(
+    layout: &Rv32TraceCcsLayout,
+    reserved_rows: usize,
+) -> Result<CcsStructure<F>, String> {
     let one = layout.const_one;
-    let t = layout.t;
-    let tr = |c: usize, i: usize| -> usize { layout.cell(c, i) };
+    let tr = |c: usize| -> usize { layout.cell(c, 0) };
     let l = &layout.trace;
 
-    let mut cons: Vec<Constraint<F>> = Vec::new();
+    // Keep a minimal anchor relation in the physical CCS and push full time semantics
+    // into the Route-A time-domain sumchecks.
+    let cons: Vec<Constraint<F>> = vec![
+        Constraint::terms(one, false, vec![(tr(l.one), F::ONE), (one, -F::ONE)]),
+        Constraint::terms(one, false, vec![(layout.pc0, F::ONE), (tr(l.pc_before), -F::ONE)]),
+        Constraint::terms(one, false, vec![(layout.halted_in, F::ONE), (tr(l.halted), -F::ONE)]),
+        Constraint::terms(one, false, vec![(tr(l.active), F::ONE), (one, -F::ONE)]),
+        Constraint::terms(tr(l.shout_has_lookup), true, vec![(tr(l.shout_val), F::ONE)]),
+        Constraint::terms(tr(l.shout_has_lookup), true, vec![(tr(l.shout_lhs), F::ONE)]),
+        Constraint::terms(tr(l.shout_has_lookup), true, vec![(tr(l.shout_rhs), F::ONE)]),
+    ];
 
-    // Public bindings.
-    cons.push(Constraint::terms(
-        one,
-        false,
-        vec![(layout.pc0, F::ONE), (tr(l.pc_before, 0), -F::ONE)],
-    ));
-    cons.push(Constraint::terms(
-        one,
-        false,
-        vec![(layout.pc_final, F::ONE), (tr(l.pc_after, t - 1), -F::ONE)],
-    ));
-    cons.push(Constraint::terms(
-        one,
-        false,
-        vec![(layout.halted_in, F::ONE), (tr(l.halted, 0), -F::ONE)],
-    ));
-    cons.push(Constraint::terms(
-        one,
-        false,
-        vec![(layout.halted_out, F::ONE), (tr(l.halted, t - 1), -F::ONE)],
-    ));
-    // Execution anchor: the first trace row must be active.
-    cons.push(Constraint::terms(
-        one,
-        false,
-        vec![(tr(l.active, 0), F::ONE), (one, -F::ONE)],
-    ));
-
-    for i in 0..t {
-        let _halted = tr(l.halted, i);
-        let shout_has_lookup = tr(l.shout_has_lookup, i);
-
-        // Canonical AIR-style one-column.
-        cons.push(Constraint::terms(
-            one,
-            false,
-            vec![(tr(l.one, i), F::ONE), (one, -F::ONE)],
-        ));
-
-        // Booleanity and inactive-row quiescence are enforced by WB/WP sidecar stages.
-
-        // Shout padding: (1 - has_lookup) * val == 0.
-        cons.push(Constraint::terms(
-            shout_has_lookup,
-            true,
-            vec![(tr(l.shout_val, i), F::ONE)],
-        ));
-        cons.push(Constraint::terms(
-            shout_has_lookup,
-            true,
-            vec![(tr(l.shout_lhs, i), F::ONE)],
-        ));
-        cons.push(Constraint::terms(
-            shout_has_lookup,
-            true,
-            vec![(tr(l.shout_rhs, i), F::ONE)],
-        ));
-    }
-
-    for i in 0..t.saturating_sub(1) {
-        // pc_after[i] == pc_before[i+1]
-        cons.push(Constraint::terms(
-            one,
-            false,
-            vec![(tr(l.pc_after, i), F::ONE), (tr(l.pc_before, i + 1), -F::ONE)],
-        ));
-
-        // cycle[i+1] == cycle[i] + 1
-        cons.push(Constraint::terms(
-            one,
-            false,
-            vec![(tr(l.cycle, i + 1), F::ONE), (tr(l.cycle, i), -F::ONE), (one, -F::ONE)],
-        ));
-
-        // Once inactive, remain inactive: active[i+1] * (1 - active[i]) == 0
-        cons.push(Constraint::terms(
-            tr(l.active, i + 1),
-            false,
-            vec![(one, F::ONE), (tr(l.active, i), -F::ONE)],
-        ));
-
-        // Once halted, remain halted: halted[i] * (1 - halted[i+1]) == 0
-        cons.push(Constraint::terms(
-            tr(l.halted, i),
-            false,
-            vec![(one, F::ONE), (tr(l.halted, i + 1), -F::ONE)],
-        ));
-
-        // Halted tail quiescence:
-        // once halted, the next row must be inactive and keep the same pc_after.
-        cons.push(Constraint::terms(
-            tr(l.halted, i),
-            false,
-            vec![(tr(l.active, i + 1), F::ONE)],
-        ));
-        cons.push(Constraint::terms(
-            tr(l.halted, i),
-            false,
-            vec![(tr(l.pc_after, i), F::ONE), (tr(l.pc_after, i + 1), -F::ONE)],
-        ));
-    }
-
-    let n = cons
-        .len()
+    let n = legacy_trace_core_rows(layout.t)?
         .checked_add(reserved_rows)
         .ok_or_else(|| "RV32 trace CCS: n overflow".to_string())?;
     build_r1cs_ccs(&cons, n, layout.m, layout.const_one)
+}
+
+/// Build a time-independent per-step key for the RV32 trace constraints.
+///
+/// Column ids are per-step ids:
+/// - `0..m_in` are public columns,
+/// - `m_in..(m_in + trace.cols)` are trace columns.
+///
+/// Shift constraints reference next-step values using virtual ids:
+/// `next(col) = m_cols + col`.
+pub fn build_rv32_uniform_constraint_key() -> UniformConstraintKey<F> {
+    build_rv32_uniform_constraint_key_with_m_in(5)
+}
+
+/// Build a time-independent per-step key for the RV32 trace constraints with a caller-provided
+/// public-input prefix width.
+pub fn build_rv32_uniform_constraint_key_with_m_in(m_in: usize) -> UniformConstraintKey<F> {
+    assert!(
+        m_in >= 5,
+        "build_rv32_uniform_constraint_key_with_m_in requires m_in >= 5"
+    );
+    let trace = Rv32TraceLayout::new();
+    let m_cols = m_in + trace.cols;
+    let one = 0usize;
+    let pc0 = 1usize;
+    let pc_final = 2usize;
+    let halted_in = 3usize;
+    let halted_out = 4usize;
+    let tr = |c: usize| -> usize { m_in + c };
+    let next = |c: usize| -> usize { m_cols + c };
+
+    let mut key = UniformConstraintKey::new(m_cols);
+
+    // Boundary/public rows (evaluated outside the per-step local sum).
+    key.boundary_rows.push(UniformConstraintRow::from_terms(
+        [(one, F::ONE)],
+        [(pc0, F::ONE), (tr(trace.pc_before), -F::ONE)],
+        [],
+    ));
+    key.boundary_rows.push(UniformConstraintRow::from_terms(
+        [(one, F::ONE)],
+        [(pc_final, F::ONE), (tr(trace.pc_after), -F::ONE)],
+        [],
+    ));
+    key.boundary_rows.push(UniformConstraintRow::from_terms(
+        [(one, F::ONE)],
+        [(halted_in, F::ONE), (tr(trace.halted), -F::ONE)],
+        [],
+    ));
+    key.boundary_rows.push(UniformConstraintRow::from_terms(
+        [(one, F::ONE)],
+        [(halted_out, F::ONE), (tr(trace.halted), -F::ONE)],
+        [],
+    ));
+
+    // Local rows.
+    key.local_rows.push(UniformConstraintRow::from_terms(
+        [(one, F::ONE)],
+        [(tr(trace.one), F::ONE), (one, -F::ONE)],
+        [],
+    ));
+
+    // Shout padding: (1 - has_lookup) * val == 0
+    key.local_rows.push(UniformConstraintRow::from_terms(
+        [(one, F::ONE), (tr(trace.shout_has_lookup), -F::ONE)],
+        [(tr(trace.shout_val), F::ONE)],
+        [],
+    ));
+    key.local_rows.push(UniformConstraintRow::from_terms(
+        [(one, F::ONE), (tr(trace.shout_has_lookup), -F::ONE)],
+        [(tr(trace.shout_lhs), F::ONE)],
+        [],
+    ));
+    key.local_rows.push(UniformConstraintRow::from_terms(
+        [(one, F::ONE), (tr(trace.shout_has_lookup), -F::ONE)],
+        [(tr(trace.shout_rhs), F::ONE)],
+        [],
+    ));
+
+    // Shift rows over j -> j+1.
+    key.shift_rows.push(UniformConstraintRow::from_terms(
+        [(one, F::ONE)],
+        [(tr(trace.pc_after), F::ONE), (next(tr(trace.pc_before)), -F::ONE)],
+        [],
+    ));
+    key.shift_rows.push(UniformConstraintRow::from_terms(
+        [(one, F::ONE)],
+        [
+            (next(tr(trace.cycle)), F::ONE),
+            (tr(trace.cycle), -F::ONE),
+            (one, -F::ONE),
+        ],
+        [],
+    ));
+    key.shift_rows.push(UniformConstraintRow::from_terms(
+        [(next(tr(trace.active)), F::ONE)],
+        [(one, F::ONE), (tr(trace.active), -F::ONE)],
+        [],
+    ));
+    key.shift_rows.push(UniformConstraintRow::from_terms(
+        [(tr(trace.halted), F::ONE)],
+        [(one, F::ONE), (next(tr(trace.halted)), -F::ONE)],
+        [],
+    ));
+    key.shift_rows.push(UniformConstraintRow::from_terms(
+        [(tr(trace.halted), F::ONE)],
+        [(next(tr(trace.active)), F::ONE)],
+        [],
+    ));
+    key.shift_rows.push(UniformConstraintRow::from_terms(
+        [(tr(trace.halted), F::ONE)],
+        [(tr(trace.pc_after), F::ONE), (next(tr(trace.pc_after)), -F::ONE)],
+        [],
+    ));
+
+    key
 }

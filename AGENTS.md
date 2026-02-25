@@ -5,6 +5,11 @@
 - Avoid adding new Rust features or ENVs unless it is explicitly approved.
 - Never modify this file without explicit approval.
 - No single file should ever exceed 1,500 lines of code unless explicitly confirmed by the user.
+- Heavily avoid bloat. We want to maintain a compact and lean codebase.
+
+## Design & Architecture
+- When evaluating design or architectural decisions, think from first principles: reduce the problem to its irreducible truths—axioms, physical laws, hard constraints—and derive every conclusion strictly from those, rejecting inherited conventions and unstated assumptions.
+- Before proposing any architectural change: (1) list every assumption you are making, (2) challenge each by asking "is this a necessity or just a convention?", (3) discard any that fails. Only then derive your answer from what remains.
 
 ## Testing
 - Never add tests in the same implementation file, always prefer to add them to a file inside tests/ (current or new)

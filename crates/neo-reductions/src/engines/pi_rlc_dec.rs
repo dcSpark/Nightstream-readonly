@@ -6,7 +6,7 @@
 #![allow(non_snake_case)]
 
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::{CcsStructure, Mat, MeInstance};
+use neo_ccs::{CcsStructure, CeClaim, Mat};
 use neo_math::{F, K};
 use neo_params::NeoParams;
 
@@ -18,11 +18,11 @@ pub trait RlcDecOps {
         s: &CcsStructure<F>,
         params: &NeoParams,
         rhos: &[Mat<F>],
-        me_inputs: &[MeInstance<Cmt, F, K>],
+        me_inputs: &[CeClaim<Cmt, F, K>],
         Zs: &[Mat<F>],
         ell_d: usize,
         mix_commits: Comb,
-    ) -> (MeInstance<Cmt, F, K>, Mat<F>)
+    ) -> (CeClaim<Cmt, F, K>, Mat<F>)
     where
         Comb: Fn(&[Mat<F>], &[Cmt]) -> Cmt;
 
@@ -31,12 +31,12 @@ pub trait RlcDecOps {
     fn dec_children_with_commit<Comb>(
         s: &CcsStructure<F>,
         params: &NeoParams,
-        parent: &MeInstance<Cmt, F, K>,
+        parent: &CeClaim<Cmt, F, K>,
         Z_split: &[Mat<F>],
         ell_d: usize,
         child_commitments: &[Cmt],
         combine_b_pows: Comb,
-    ) -> (Vec<MeInstance<Cmt, F, K>>, bool, bool, bool)
+    ) -> (Vec<CeClaim<Cmt, F, K>>, bool, bool, bool)
     where
         Comb: Fn(&[Cmt], u32) -> Cmt;
 }
@@ -50,13 +50,13 @@ impl OptimizedRlcDec {
     pub fn dec_children_with_commit_cached<Comb>(
         s: &CcsStructure<F>,
         params: &NeoParams,
-        parent: &MeInstance<Cmt, F, K>,
+        parent: &CeClaim<Cmt, F, K>,
         Z_split: &[Mat<F>],
         ell_d: usize,
         child_commitments: &[Cmt],
         combine_b_pows: Comb,
         sparse: Option<&super::optimized_engine::oracle::SparseCache<F>>,
-    ) -> (Vec<MeInstance<Cmt, F, K>>, bool, bool, bool)
+    ) -> (Vec<CeClaim<Cmt, F, K>>, bool, bool, bool)
     where
         Comb: Fn(&[Cmt], u32) -> Cmt,
     {
@@ -81,11 +81,11 @@ impl RlcDecOps for OptimizedRlcDec {
         s: &CcsStructure<F>,
         params: &NeoParams,
         rhos: &[Mat<F>],
-        me_inputs: &[MeInstance<Cmt, F, K>],
+        me_inputs: &[CeClaim<Cmt, F, K>],
         Zs: &[Mat<F>],
         ell_d: usize,
         mix_commits: Comb,
-    ) -> (MeInstance<Cmt, F, K>, Mat<F>)
+    ) -> (CeClaim<Cmt, F, K>, Mat<F>)
     where
         Comb: Fn(&[Mat<F>], &[Cmt]) -> Cmt,
     {
@@ -98,12 +98,12 @@ impl RlcDecOps for OptimizedRlcDec {
     fn dec_children_with_commit<Comb>(
         s: &CcsStructure<F>,
         params: &NeoParams,
-        parent: &MeInstance<Cmt, F, K>,
+        parent: &CeClaim<Cmt, F, K>,
         Z_split: &[Mat<F>],
         ell_d: usize,
         child_commitments: &[Cmt],
         combine_b_pows: Comb,
-    ) -> (Vec<MeInstance<Cmt, F, K>>, bool, bool, bool)
+    ) -> (Vec<CeClaim<Cmt, F, K>>, bool, bool, bool)
     where
         Comb: Fn(&[Cmt], u32) -> Cmt,
     {
@@ -130,39 +130,47 @@ impl RlcDecOps for PaperExactRlcDec {
         s: &CcsStructure<F>,
         params: &NeoParams,
         rhos: &[Mat<F>],
-        me_inputs: &[MeInstance<Cmt, F, K>],
+        me_inputs: &[CeClaim<Cmt, F, K>],
         Zs: &[Mat<F>],
         ell_d: usize,
         mix_commits: Comb,
-    ) -> (MeInstance<Cmt, F, K>, Mat<F>)
+    ) -> (CeClaim<Cmt, F, K>, Mat<F>)
     where
         Comb: Fn(&[Mat<F>], &[Cmt]) -> Cmt,
     {
-        let (mut out, Z) = super::paper_exact_engine::rlc_reduction_paper_exact(s, params, rhos, me_inputs, Zs, ell_d);
-        let inputs_c: Vec<Cmt> = me_inputs.iter().map(|m| m.c.clone()).collect();
-        out.c = mix_commits(rhos, &inputs_c);
-        (out, Z)
+        // Keep PaperExact auditable: route through wrapper entrypoint so paper-core formulas stay CE-free.
+        super::paper_exact_engine::rlc_reduction_paper_exact_with_commit_mix(
+            s,
+            params,
+            rhos,
+            me_inputs,
+            Zs,
+            ell_d,
+            mix_commits,
+        )
     }
 
     fn dec_children_with_commit<Comb>(
         s: &CcsStructure<F>,
         params: &NeoParams,
-        parent: &MeInstance<Cmt, F, K>,
+        parent: &CeClaim<Cmt, F, K>,
         Z_split: &[Mat<F>],
         ell_d: usize,
         child_commitments: &[Cmt],
         combine_b_pows: Comb,
-    ) -> (Vec<MeInstance<Cmt, F, K>>, bool, bool, bool)
+    ) -> (Vec<CeClaim<Cmt, F, K>>, bool, bool, bool)
     where
         Comb: Fn(&[Cmt], u32) -> Cmt,
     {
-        let (mut children, ok_y, ok_X) =
-            super::paper_exact_engine::dec_reduction_paper_exact(s, params, parent, Z_split, ell_d);
-        // Patch children commitments and check c relation
-        for (ch, c) in children.iter_mut().zip(child_commitments.iter()) {
-            ch.c = c.clone();
-        }
-        let ok_c = combine_b_pows(child_commitments, params.b) == parent.c;
-        (children, ok_y, ok_X, ok_c)
+        // Keep PaperExact auditable: wrapper applies CE-only patching over paper-core DEC outputs.
+        super::paper_exact_engine::dec_reduction_paper_exact_with_commit_check(
+            s,
+            params,
+            parent,
+            Z_split,
+            ell_d,
+            child_commitments,
+            combine_b_pows,
+        )
     }
 }

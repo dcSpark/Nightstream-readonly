@@ -14,7 +14,7 @@
 
 use neo_ajtai::{set_global_pp, setup as ajtai_setup, AjtaiSModule};
 use neo_ccs::traits::SModuleHomomorphism;
-use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance, SparsePoly, Term};
+use neo_ccs::{CcsStructure, Mat, CcsClaim, CcsWitness, CeClaim, SparsePoly, Term};
 use neo_math::{D, F, K};
 use neo_params::NeoParams;
 use neo_reductions::optimized_engine::{precompute, sparse_matrix, terminal};
@@ -55,15 +55,15 @@ fn mcs_from_z(
     z_full: Vec<F>,
     m_in: usize,
     l: &AjtaiSModule,
-) -> (McsInstance<neo_ajtai::Commitment, F>, McsWitness<F>) {
+) -> (CcsClaim<neo_ajtai::Commitment, F>, CcsWitness<F>) {
     let z = z_to_z_row_major(params, &z_full);
     let c = l.commit(&z);
-    let inst = McsInstance {
+    let inst = CcsClaim {
         c,
         x: z_full[..m_in].to_vec(),
         m_in,
     };
-    let wit = McsWitness {
+    let wit = CcsWitness {
         w: z_full[m_in..].to_vec(),
         Z: z,
     };
@@ -375,15 +375,15 @@ proptest! {
 
         // Create ME instance
         let r_in = vec![K::from(F::from_u64(rng.next_u64() % 1000)); 1];
-        let me_input = MeInstance {
+        let me_input = CeClaim {
             c_step_coords: vec![],
             u_offset: 0,
             u_len: 0,
             c: l.commit(&me_z),
             X: l.project_x(&me_z, 0),
             r: r_in.clone(),
-            y: vec![vec![K::ZERO; D]],
-            y_scalars: vec![K::ZERO],
+            y_ring: vec![vec![K::ZERO; D]],
+            ct: vec![K::ZERO],
             m_in: 0,
             fold_digest: [0u8; 32],
         };
@@ -676,15 +676,15 @@ fn test_rhs_terminal_comprehensive() {
     let me_z = z_to_z_row_major(&params, &z1_full);
 
     let r_in = vec![K::from(F::from_u64(29)); 1];
-    let me_input = MeInstance {
+    let me_input = CeClaim {
         c_step_coords: vec![],
         u_offset: 0,
         u_len: 0,
         c: l.commit(&me_z),
         X: l.project_x(&me_z, 0),
         r: r_in.clone(),
-        y: vec![vec![K::ZERO; D]],
-        y_scalars: vec![K::ZERO],
+        y_ring: vec![vec![K::ZERO; D]],
+        ct: vec![K::ZERO],
         m_in: 0,
         fold_digest: [0u8; 32],
     };

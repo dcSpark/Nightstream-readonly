@@ -23,7 +23,7 @@ pub use paper_exact::{
 
     chi_row_at_bool_point,
     // Public claimed sum for sumcheck
-    claimed_initial_sum_from_inputs,
+    claimed_initial_sum_from_inputs_with_k_mcs,
 
     dec_reduction_paper_exact,
     dec_reduction_paper_exact_with_commit_check,
@@ -40,10 +40,12 @@ pub use paper_exact::{
     recomposed_z_from_Z,
 
     rhs_terminal_identity_fe_paper_exact,
+    rhs_terminal_identity_fe_paper_exact_with_k_mcs,
     rhs_terminal_identity_nc_paper_exact,
 
     // Terminal identity (verifier RHS)
     rhs_terminal_identity_paper_exact,
+    rhs_terminal_identity_paper_exact_with_k_mcs,
     // Paper-exact RLC/DEC
     rlc_reduction_paper_exact,
     rlc_reduction_paper_exact_with_commit_mix,

@@ -18,7 +18,7 @@ use std::sync::Arc;
 
 use neo_ajtai::{set_global_pp, setup as ajtai_setup, AjtaiSModule, Commitment as Cmt};
 use neo_ccs::poly::SparsePoly;
-use neo_ccs::relations::{CcsStructure, McsInstance, McsWitness, MeInstance};
+use neo_ccs::relations::{CcsClaim, CcsStructure, CcsWitness, CeClaim};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::Mat;
 use neo_fold::pi_ccs::FoldingMode;
@@ -42,12 +42,13 @@ const M_IN: usize = 0;
 /// Setup real Ajtai public parameters for tests.
 fn setup_ajtai_pp(m: usize, seed: u64) -> AjtaiSModule {
     let d = D;
-    let kappa = neo_params::NeoParams::goldilocks_auto_r1cs_ccs(m)
+    let m_commit = neo_memory::ajtai::commit_cols_for_ccs_m(m);
+    let kappa = neo_params::NeoParams::goldilocks_auto_r1cs_ccs(m_commit)
         .expect("params")
         .kappa as usize;
 
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
-    let pp = ajtai_setup(&mut rng, d, kappa, m).expect("Ajtai setup should succeed");
+    let pp = ajtai_setup(&mut rng, d, kappa, m_commit).expect("Ajtai setup should succeed");
     set_global_pp(pp.clone()).expect("set_global_pp");
     AjtaiSModule::new(Arc::new(pp))
 }
@@ -67,12 +68,12 @@ fn create_mcs_from_z(
     l: &AjtaiSModule,
     m_in: usize,
     z: Vec<F>,
-) -> (McsInstance<Cmt, F>, McsWitness<F>) {
-    let Z = neo_memory::ajtai::encode_vector_balanced_to_mat(params, &z);
+) -> (CcsClaim<Cmt, F>, CcsWitness<F>) {
+    let Z = neo_memory::ajtai::encode_vector_for_ccs_m(params, z.len(), &z).expect("encode witness for CCS width");
     let c = l.commit(&Z);
     let x = z[..m_in].to_vec();
     let w = z[m_in..].to_vec();
-    (McsInstance { c, x, m_in }, McsWitness { w, Z })
+    (CcsClaim { c, x, m_in }, CcsWitness { w, Z })
 }
 
 fn make_twist_instance(
@@ -195,12 +196,13 @@ fn create_step_with_twist_bus(
     debug_assert_eq!(col_id, bus_cols_total);
 
     let (mcs, mcs_wit) = create_mcs_from_z(params, l, M_IN, z);
-    StepWitnessBundle {
+    crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
         mcs: (mcs, mcs_wit),
         lut_instances: vec![],
         mem_instances: mem_instances.into_iter().map(|(i, w, _)| (i, w)).collect(),
+        time_columns: crate::common_setup::empty_time_columns(),
         _phantom: PhantomData::<K>,
-    }
+    })
 }
 
 /// Valid 3-step memory trace:
@@ -296,7 +298,7 @@ fn memory_cross_step_read_consistency() {
         ));
     }
 
-    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_init: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"mem-cross-step");
@@ -363,7 +365,7 @@ fn memory_read_uninitialized_returns_zero() {
     let (mem_inst, mem_wit) = make_twist_instance(0, &mem_layout, mem_init, 1);
     let step_bundle = create_step_with_twist_bus(&params, &ccs, &l, 0, vec![(mem_inst, mem_wit, mem_trace)]);
 
-    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_init: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"mem-uninitialized");
@@ -433,7 +435,7 @@ fn memory_tamper_read_value_fails() {
     let (mem_inst, mem_wit) = make_twist_instance(0, &mem_layout, mem_init, 1);
     let step_bundle = create_step_with_twist_bus(&params, &ccs, &l, 0, vec![(mem_inst, mem_wit, bad_mem_trace)]);
 
-    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_init: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"mem-tamper-read");
@@ -504,7 +506,7 @@ fn memory_tamper_write_increment_fails() {
     let (mem_inst, mem_wit) = make_twist_instance(0, &mem_layout, mem_init, 1);
     let step_bundle = create_step_with_twist_bus(&params, &ccs, &l, 0, vec![(mem_inst, mem_wit, bad_mem_trace)]);
 
-    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_init: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"mem-tamper-inc");
@@ -599,7 +601,7 @@ fn memory_multiple_regions_same_step() {
         vec![(ram_inst, ram_wit, ram_trace), (reg_inst, reg_wit, reg_trace)],
     );
 
-    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_init: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"mem-multi-region");
@@ -668,7 +670,7 @@ fn memory_sparse_initialization() {
     let (mem_inst, mem_wit) = make_twist_instance(0, &mem_layout, mem_init, 1);
     let step_bundle = create_step_with_twist_bus(&params, &ccs, &l, 0, vec![(mem_inst, mem_wit, mem_trace)]);
 
-    let acc_init: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let acc_init: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let acc_wit_init: Vec<Mat<F>> = Vec::new();
 
     let mut tr_prove = Poseidon2Transcript::new(b"mem-sparse-init");

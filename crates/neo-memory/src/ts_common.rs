@@ -4,16 +4,15 @@
 //! duplicated transcript sampling, ME-opening construction, CCS padding, and
 //! Ajtai decode+pad utilities used by both protocols.
 
-use crate::mle::compute_me_y_for_ccs;
 use neo_ajtai::Commitment as AjtaiCmt;
-use neo_ccs::{matrix::Mat, relations::MeInstance, CcsStructure};
+use neo_ccs::{matrix::Mat, relations::CeClaim, CcsStructure};
 use neo_math::{from_complex, F as BaseField, K as KElem};
 use neo_params::NeoParams;
 use neo_reductions::error::PiCcsError;
 use neo_transcript::{Poseidon2Transcript, Transcript, TranscriptProtocol};
 use p3_field::{PrimeCharacteristicRing, PrimeField};
 
-use crate::ajtai::decode_vector as ajtai_decode_vector;
+use crate::ajtai::decode_vector_for_ccs_m as ajtai_decode_vector_for_ccs_m;
 
 // ============================================================================
 // Transcript sampling helpers
@@ -72,26 +71,18 @@ pub fn absorb_ajtai_commitments(
 // CCS padding + ME opening
 // ============================================================================
 
-pub fn pad_mat_to_ccs_width(mat: &Mat<BaseField>, target_cols: usize) -> Result<Mat<BaseField>, PiCcsError> {
-    if mat.cols() > target_cols {
-        return Err(PiCcsError::InvalidInput(format!(
-            "pad_mat_to_ccs_width: matrix width ({}) exceeds CCS width ({})",
-            mat.cols(),
-            target_cols
-        )));
-    }
-    if mat.cols() == target_cols {
-        return Ok(mat.clone());
-    }
-    let d = mat.rows();
-    let mut out = Mat::zero(d, target_cols, BaseField::ZERO);
-    for r in 0..d {
-        let row = mat.row(r);
-        for c in 0..mat.cols() {
-            out.set(r, c, row[c]);
-        }
-    }
-    Ok(out)
+pub fn require_mat_layout_for_ccs_width(
+    mat: &Mat<BaseField>,
+    target_cols: usize,
+) -> Result<Mat<BaseField>, PiCcsError> {
+    // Keep this helper as the single shape gate for Route-A claim emission:
+    // it now enforces the same strict layout policy as reductions.
+    neo_reductions::common::witness_mat_layout(mat, target_cols).map_err(|e| {
+        PiCcsError::InvalidInput(format!(
+            "require_mat_layout_for_ccs_width: witness shape incompatible with logical CCS width m={target_cols}: {e}"
+        ))
+    })?;
+    Ok(mat.clone())
 }
 
 /// Shared ME-opening constructor.
@@ -106,7 +97,7 @@ pub fn mk_me_opening_with_ccs<Cmt, KOut>(
     mat: &Mat<BaseField>,
     r: &[KElem],
     m_in: usize,
-) -> Result<MeInstance<Cmt, BaseField, KOut>, PiCcsError>
+) -> Result<CeClaim<Cmt, BaseField, KOut>, PiCcsError>
 where
     KOut: From<KElem> + Clone,
     Cmt: Clone,
@@ -114,42 +105,42 @@ where
     let d = params.d as usize;
     let t = s.t();
     let y_pad = d.next_power_of_two();
+    let ell_d = y_pad.trailing_zeros() as usize;
 
     // Pad witness to CCS width
-    let z_padded = pad_mat_to_ccs_width(mat, s.m)?;
+    let z_padded = require_mat_layout_for_ccs_width(mat, s.m)?;
 
-    // X = L_x(Z)
-    let x_mat = crate::mle::compute_me_x(&z_padded, m_in);
+    // X = L_x(Z) over logical witness columns.
+    let x_mat = neo_reductions::common::project_x_from_witness_mat(&z_padded, s.m, m_in).map_err(|e| {
+        PiCcsError::InvalidInput(format!(
+            "mk_me_opening_with_ccs: X projection failed for m={}, m_in={}: {e}",
+            s.m, m_in
+        ))
+    })?;
 
-    // CCS-aware y_j / y_scalar_j
-    let (mut y_vecs_k, mut y_scalars_k) = compute_me_y_for_ccs(s, &z_padded, r, params.b as u64);
-
-    // Ensure canonical shapes (matches neo-fold normalization).
-    for row in y_vecs_k.iter_mut() {
-        row.resize(y_pad, KElem::ZERO);
-    }
-    y_vecs_k.resize_with(t, || vec![KElem::ZERO; y_pad]);
-    y_scalars_k.resize(t, KElem::ZERO);
-
-    let y: Vec<Vec<KOut>> = y_vecs_k
+    let (mut y_ring_k, mut ct_k) = neo_reductions::common::compute_y_from_Z_and_r(s, &z_padded, r, ell_d, params.b);
+    y_ring_k.resize_with(t, || vec![KElem::ZERO; y_pad]);
+    ct_k.resize(t, KElem::ZERO);
+    let y_ring: Vec<Vec<KOut>> = y_ring_k
         .into_iter()
         .map(|yj| yj.into_iter().map(KOut::from).collect())
         .collect();
 
-    let y_scalars: Vec<KOut> = y_scalars_k.into_iter().map(KOut::from).collect();
+    let ct: Vec<KOut> = ct_k.into_iter().map(KOut::from).collect();
 
     let fold_digest = {
         let mut fork = tr.fork(digest_label);
         fork.digest32()
     };
 
-    Ok(MeInstance {
+    Ok(CeClaim {
         c: comm.clone(),
         X: x_mat,
         r: r.iter().copied().map(KOut::from).collect(),
         s_col: Vec::new(),
-        y,
-        y_scalars,
+        y_ring,
+        ct,
+        aux_openings: Vec::new(),
         y_zcol: Vec::new(),
         m_in,
         fold_digest,
@@ -157,25 +148,6 @@ where
         u_offset: 0,
         u_len: 0,
     })
-}
-
-// ============================================================================
-// Decode helpers
-// ============================================================================
-
-/// Decode an Ajtai-encoded column vector and pad to a power-of-two domain length.
-pub fn decode_mat_to_k_padded(params: &NeoParams, mat: &Mat<BaseField>, pow2_len: usize) -> Vec<KElem> {
-    let v = ajtai_decode_vector(params, mat);
-    let mut out: Vec<KElem> = v.into_iter().map(Into::into).collect();
-    out.resize(pow2_len, KElem::ZERO);
-    out
-}
-
-/// Decode many Ajtai matrices into padded `KElem` vectors (common for bit-columns).
-pub fn decode_mats_to_k_padded(params: &NeoParams, mats: &[Mat<BaseField>], pow2_len: usize) -> Vec<Vec<KElem>> {
-    mats.iter()
-        .map(|m| decode_mat_to_k_padded(params, m, pow2_len))
-        .collect()
 }
 
 /// Decode address bits into flattened addresses (shared by semantic checkers).
@@ -186,36 +158,36 @@ pub fn decode_addrs_from_bits<F: PrimeField>(
     ell: usize,
     n_side: usize,
     steps: usize,
-) -> Vec<u64> {
+) -> Result<Vec<u64>, PiCcsError> {
     let decoded: Vec<Vec<F>> = addr_bit_mats
         .iter()
-        .map(|m| ajtai_decode_vector(params, m))
-        .collect();
+        .map(|m| ajtai_decode_vector_for_ccs_m(params, steps, m).map_err(PiCcsError::InvalidInput))
+        .collect::<Result<Vec<_>, _>>()?;
 
     let mut addrs = vec![0u64; steps];
     for dim in 0..d {
         let base = dim * ell;
         let stride = (n_side as u64)
             .checked_pow(dim as u32)
-            .expect("decode_addrs_from_bits: stride overflow");
+            .ok_or_else(|| PiCcsError::InvalidInput("decode_addrs_from_bits: stride overflow".into()))?;
         for b in 0..ell {
             let col = &decoded[base + b];
             let bit_weight = 1u64
                 .checked_shl(b as u32)
-                .expect("decode_addrs_from_bits: bit_weight overflow");
+                .ok_or_else(|| PiCcsError::InvalidInput("decode_addrs_from_bits: bit_weight overflow".into()))?;
             for j in 0..steps.min(col.len()) {
                 if col[j] == F::ONE {
-                    let delta = bit_weight
-                        .checked_mul(stride)
-                        .expect("decode_addrs_from_bits: address contribution overflow");
+                    let delta = bit_weight.checked_mul(stride).ok_or_else(|| {
+                        PiCcsError::InvalidInput("decode_addrs_from_bits: address contribution overflow".into())
+                    })?;
                     addrs[j] = addrs[j]
                         .checked_add(delta)
-                        .expect("decode_addrs_from_bits: address overflow");
+                        .ok_or_else(|| PiCcsError::InvalidInput("decode_addrs_from_bits: address overflow".into()))?;
                 }
             }
         }
     }
-    addrs
+    Ok(addrs)
 }
 
 // ============================================================================
@@ -231,7 +203,7 @@ pub fn emit_me_claims_for_mats<Cmt>(
     mats: &[Mat<BaseField>],
     r: &[KElem],
     m_in: usize,
-) -> Result<Vec<MeInstance<Cmt, BaseField, KElem>>, PiCcsError>
+) -> Result<Vec<CeClaim<Cmt, BaseField, KElem>>, PiCcsError>
 where
     Cmt: Clone,
 {

@@ -38,7 +38,18 @@ pub(crate) fn prove_shout_addr_pre_time(
 
     let mut flat_lane_idx: usize = 0;
     let bus = cpu_bus;
-    let cpu_z_k = crate::memory_sidecar::cpu_bus::decode_cpu_z_to_k(params, &step.mcs.1.Z);
+    let use_time_mem_cols = step.time_columns.t == bus.chunk_size && step.time_columns.mem_cols.len() == bus.bus_cols;
+    let expected_m = step
+        .mcs
+        .0
+        .m_in
+        .checked_add(step.mcs.1.w.len())
+        .ok_or_else(|| PiCcsError::InvalidInput("shared_cpu_bus witness width overflow".into()))?;
+    let cpu_z_k = if use_time_mem_cols {
+        Vec::new()
+    } else {
+        crate::memory_sidecar::cpu_bus::decode_cpu_z_to_k(params, &step.mcs.1.Z, expected_m)?
+    };
     if bus.shout_cols.len() != step.lut_instances.len() || bus.twist_cols.len() != step.mem_instances.len() {
         return Err(PiCcsError::InvalidInput(
             "shared_cpu_bus layout mismatch for step (instance counts)".into(),
@@ -63,8 +74,17 @@ pub(crate) fn prove_shout_addr_pre_time(
         if let Some(cached) = full_col_sparse_cache.get(&(col_id, steps)) {
             return Ok(cached.clone());
         }
-        let decoded =
-            crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(&cpu_z_k, bus, col_id, steps, pow2_cycle)?;
+        let decoded = if use_time_mem_cols {
+            crate::memory_sidecar::cpu_bus::build_time_sparse_from_mem_cols(
+                &step.time_columns.mem_cols,
+                bus,
+                col_id,
+                steps,
+                pow2_cycle,
+            )?
+        } else {
+            crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(&cpu_z_k, bus, col_id, steps, pow2_cycle)?
+        };
         full_col_sparse_cache.insert((col_id, steps), decoded.clone());
         Ok(decoded)
     };
@@ -118,11 +138,8 @@ pub(crate) fn prove_shout_addr_pre_time(
             let addr_key = (shout_cols.addr_bits.start, shout_cols.addr_bits.end);
             let shared_addr_group = addr_range_counts.get(&addr_key).copied().unwrap_or(0) > 1;
 
-            let (has_lookup, active_js, has_any_lookup) = if let Some((cached_has, cached_js, cached_any)) =
-                has_lookup_cache.get(&(shout_cols.has_lookup, lut_inst.steps))
-            {
-                (cached_has.clone(), cached_js.clone(), *cached_any)
-            } else {
+            let cache_key = (shout_cols.has_lookup, lut_inst.steps);
+            if !has_lookup_cache.contains_key(&cache_key) {
                 let has_lookup = decode_full_col(shout_cols.has_lookup, lut_inst.steps)?;
                 let has_any_lookup = has_lookup
                     .entries()
@@ -152,12 +169,12 @@ pub(crate) fn prove_shout_addr_pre_time(
                 } else {
                     Vec::new()
                 };
-                has_lookup_cache.insert(
-                    (shout_cols.has_lookup, lut_inst.steps),
-                    (has_lookup.clone(), active_js.clone(), has_any_lookup),
-                );
-                (has_lookup, active_js, has_any_lookup)
-            };
+                has_lookup_cache.insert(cache_key, (has_lookup, active_js, has_any_lookup));
+            }
+            let (has_lookup, active_js, has_any_lookup) = has_lookup_cache
+                .get(&cache_key)
+                .map(|(cached_has, cached_js, cached_any)| (cached_has.clone(), cached_js.as_slice(), *cached_any))
+                .ok_or_else(|| PiCcsError::ProtocolError("Shout(Route A): missing has_lookup cache entry".into()))?;
 
             let addr_bits: Vec<SparseIdxVec<K>> = if shared_addr_group {
                 let mut out = Vec::with_capacity(inst_ell_addr);
@@ -168,9 +185,19 @@ pub(crate) fn prove_shout_addr_pre_time(
             } else if has_any_lookup {
                 let mut out = Vec::with_capacity(inst_ell_addr);
                 for col_id in shout_cols.addr_bits.clone() {
-                    out.push(crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col_at_js(
-                        z, bus, col_id, &active_js, pow2_cycle,
-                    )?);
+                    out.push(if use_time_mem_cols {
+                        crate::memory_sidecar::cpu_bus::build_time_sparse_from_mem_cols_at_js(
+                            &step.time_columns.mem_cols,
+                            bus,
+                            col_id,
+                            active_js,
+                            pow2_cycle,
+                        )?
+                    } else {
+                        crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col_at_js(
+                            z, bus, col_id, active_js, pow2_cycle,
+                        )?
+                    });
                 }
                 out
             } else {
@@ -178,13 +205,23 @@ pub(crate) fn prove_shout_addr_pre_time(
             };
 
             let val = if has_any_lookup {
-                crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col_at_js(
-                    z,
-                    bus,
-                    shout_cols.primary_val(),
-                    &active_js,
-                    pow2_cycle,
-                )?
+                if use_time_mem_cols {
+                    crate::memory_sidecar::cpu_bus::build_time_sparse_from_mem_cols_at_js(
+                        &step.time_columns.mem_cols,
+                        bus,
+                        shout_cols.primary_val(),
+                        active_js,
+                        pow2_cycle,
+                    )?
+                } else {
+                    crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col_at_js(
+                        z,
+                        bus,
+                        shout_cols.primary_val(),
+                        active_js,
+                        pow2_cycle,
+                    )?
+                }
             } else {
                 SparseIdxVec::new(pow2_cycle)
             };
@@ -296,8 +333,8 @@ pub(crate) fn prove_shout_addr_pre_time(
             let (r_addr, per_claim_results) =
                 run_batched_sumcheck_prover_ds(tr, b"shout/addr_pre_time", step_idx, claims.as_mut_slice())?;
             let round_polys = per_claim_results
-                .iter()
-                .map(|r| r.round_polys.clone())
+                .into_iter()
+                .map(|r| r.round_polys)
                 .collect::<Vec<_>>();
             (r_addr, round_polys)
         };

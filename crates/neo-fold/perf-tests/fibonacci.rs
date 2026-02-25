@@ -109,10 +109,11 @@ fn test_perf_fibonacci_10k_optimized() {
     params.b = 4;
 
     // Setup Ajtai
+    let m_commit = stepper.n_vars.div_ceil(D);
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-    let pp = ajtai_setup(&mut rng, D, 16, stepper.n_vars).expect("Ajtai setup");
+    let pp = ajtai_setup(&mut rng, D, 16, m_commit).expect("Ajtai setup");
     let _ = set_global_pp(pp);
-    let l = AjtaiSModule::from_global_for_dims(D, stepper.n_vars).expect("AjtaiSModule");
+    let l = AjtaiSModule::from_global_for_dims(D, m_commit).expect("AjtaiSModule");
 
     let mut session = FoldingSession::new(FoldingMode::Optimized, params, l);
 

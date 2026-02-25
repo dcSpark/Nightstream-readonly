@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::{poly::SparsePoly, poly::Term, CcsStructure, Mat, MeInstance};
+use neo_ccs::{poly::SparsePoly, poly::Term, CcsStructure, CeClaim, Mat};
 use neo_math::{D, F, K};
 use neo_reductions::{optimized_engine, paper_exact_engine, Challenges};
 use p3_field::PrimeCharacteristicRing;
@@ -44,7 +44,7 @@ fn claimed_initial_sum_optimized_matches_paper_exact() {
         y0[rho] = K::from(F::from_u64((rho as u64) + 1));
     }
 
-    let me_inputs: Vec<MeInstance<Cmt, F, K>> = vec![MeInstance {
+    let me_inputs: Vec<CeClaim<Cmt, F, K>> = vec![CeClaim {
         c_step_coords: vec![],
         u_offset: 0,
         u_len: 0,
@@ -52,8 +52,9 @@ fn claimed_initial_sum_optimized_matches_paper_exact() {
         X: Mat::zero(D, 1, F::ZERO),
         r: vec![K::from(F::from_u64(3)), K::from(F::from_u64(5))],
         s_col: vec![],
-        y: vec![y0],
-        y_scalars: vec![K::ZERO],
+        y_ring: vec![y0],
+        ct: vec![K::ZERO],
+        aux_openings: Vec::new(),
         y_zcol: vec![],
         m_in: 1,
         fold_digest: [0u8; 32],
@@ -69,7 +70,7 @@ fn claimed_initial_sum_optimized_matches_paper_exact() {
         gamma: K::from(F::from_u64(11)),
     };
 
-    let t_opt = optimized_engine::claimed_initial_sum_from_inputs(&s, &ch, &me_inputs);
-    let t_paper = paper_exact_engine::claimed_initial_sum_from_inputs(&s, &ch, &me_inputs);
+    let t_opt = optimized_engine::claimed_initial_sum_from_inputs_with_k_mcs(&s, &ch, 1, &me_inputs);
+    let t_paper = paper_exact_engine::claimed_initial_sum_from_inputs_with_k_mcs(&s, &ch, 1, &me_inputs);
     assert_eq!(t_opt, t_paper);
 }

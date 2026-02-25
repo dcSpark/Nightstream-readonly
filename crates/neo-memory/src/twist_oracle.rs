@@ -999,6 +999,14 @@ fn expr_neq_from_prod(val: K, prod: K) -> K {
     val + prod - K::ONE
 }
 
+fn expr_virtual_write_domain(cols: &[K; 2]) -> K {
+    cols[0] * (K::ONE - cols[1])
+}
+
+fn expr_nonvirtual_arch_domain(cols: &[K; 2]) -> K {
+    (K::ONE - cols[0]) * cols[1]
+}
+
 fn expr_eq_from_prod_bits(cols: &[K; 1], bits: &[K], _bit_sum: K, _w: &[K; 0]) -> K {
     let mut prod = K::ONE;
     for &b in bits {
@@ -1057,6 +1065,22 @@ define_sparse_time_expr_oracle!(
     3,
     expr_rv32_packed_sub,
     [lhs, rhs, borrow, val]
+);
+
+define_sparse_time_expr_oracle!(
+    Rv32VirtualWriteDomainOracleSparseTime,
+    2,
+    4,
+    expr_virtual_write_domain,
+    [has_write, wa_bit5]
+);
+
+define_sparse_time_expr_oracle!(
+    Rv32NonVirtualArchDomainOracleSparseTime,
+    2,
+    4,
+    expr_nonvirtual_arch_domain,
+    [is_virtual, addr_bit5]
 );
 
 macro_rules! define_weighted_bits32_oracle3 {
@@ -1942,24 +1966,60 @@ pub struct LazyWeightedBitnessOracleSparseTime {
     r_cycle: Vec<K>,
     prefix_eq: K,
     cols: Vec<SparseIdxVec<K>>,
+    support: SparseIdxVec<K>,
     weights: Vec<K>,
     degree_bound: usize,
+    pair_marks: Vec<u32>,
+    pair_epoch: u32,
+    pair_scratch: Vec<usize>,
+    col_child0: Vec<K>,
+    col_child1: Vec<K>,
 }
 
 impl LazyWeightedBitnessOracleSparseTime {
+    #[inline]
+    fn sparse_union_support(cols: &[SparseIdxVec<K>]) -> SparseIdxVec<K> {
+        if cols.is_empty() {
+            return SparseIdxVec::new(1);
+        }
+        let len = cols[0].len();
+        let mut seen = vec![false; len];
+        for col in cols {
+            debug_assert_eq!(col.len(), len);
+            for &(idx, _v) in col.entries() {
+                seen[idx] = true;
+            }
+        }
+        let mut entries = Vec::new();
+        for (idx, hit) in seen.into_iter().enumerate() {
+            if hit {
+                entries.push((idx, K::ONE));
+            }
+        }
+        SparseIdxVec::from_entries(len, entries)
+    }
+
     pub fn new_with_cycle(r_cycle: &[K], cols: Vec<SparseIdxVec<K>>, weights: Vec<K>) -> Self {
         let ell_n = r_cycle.len();
+        let col_count = cols.len();
         debug_assert_eq!(cols.len(), weights.len());
         for col in &cols {
             debug_assert_eq!(col.len(), 1usize << ell_n);
         }
+        let support = Self::sparse_union_support(&cols);
         Self {
             bit_idx: 0,
             r_cycle: r_cycle.to_vec(),
             prefix_eq: K::ONE,
             cols,
+            support,
             weights,
             degree_bound: 3,
+            pair_marks: Vec::new(),
+            pair_epoch: 1,
+            pair_scratch: Vec::new(),
+            col_child0: vec![K::ZERO; col_count],
+            col_child1: vec![K::ZERO; col_count],
         }
     }
 }
@@ -1980,19 +2040,33 @@ impl RoundOracle for LazyWeightedBitnessOracleSparseTime {
             return vec![v; points.len()];
         }
 
-        let mut pairs: Vec<usize> = Vec::new();
-        for col in &self.cols {
-            for &(idx, _v) in col.entries() {
-                pairs.push(idx >> 1);
+        let pair_domain = self.support.len() >> 1;
+        if self.pair_marks.len() < pair_domain {
+            self.pair_marks.resize(pair_domain, 0);
+        }
+        self.pair_epoch = self.pair_epoch.wrapping_add(1);
+        if self.pair_epoch == 0 {
+            self.pair_marks.fill(0);
+            self.pair_epoch = 1;
+        }
+        self.pair_scratch.clear();
+        let epoch = self.pair_epoch;
+        for &(idx, _v) in self.support.entries() {
+            let pair = idx >> 1;
+            if self.pair_marks[pair] != epoch {
+                self.pair_marks[pair] = epoch;
+                self.pair_scratch.push(pair);
             }
         }
-        pairs.sort_unstable();
-        pairs.dedup();
 
         let mut ys = vec![K::ZERO; points.len()];
-        for &pair in pairs.iter() {
+        for &pair in self.pair_scratch.iter() {
             let child0 = 2 * pair;
             let child1 = child0 + 1;
+            for (j, col) in self.cols.iter().enumerate() {
+                self.col_child0[j] = col.get(child0);
+                self.col_child1[j] = col.get(child1);
+            }
 
             let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
 
@@ -2003,9 +2077,12 @@ impl RoundOracle for LazyWeightedBitnessOracleSparseTime {
                 }
 
                 let mut bit_sum = K::ZERO;
-                for (col, w) in self.cols.iter().zip(self.weights.iter()) {
-                    let b0 = col.get(child0);
-                    let b1 = col.get(child1);
+                for ((&b0, &b1), w) in self
+                    .col_child0
+                    .iter()
+                    .zip(self.col_child1.iter())
+                    .zip(self.weights.iter())
+                {
                     if b0 == K::ZERO && b1 == K::ZERO {
                         continue;
                     }
@@ -2035,6 +2112,7 @@ impl RoundOracle for LazyWeightedBitnessOracleSparseTime {
         for col in self.cols.iter_mut() {
             col.fold_round_in_place(r);
         }
+        self.support.fold_round_in_place(r);
         self.bit_idx += 1;
     }
 }

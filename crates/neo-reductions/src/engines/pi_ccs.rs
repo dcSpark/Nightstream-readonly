@@ -8,7 +8,7 @@
 #![allow(non_snake_case)]
 
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
+use neo_ccs::{CcsClaim, CcsStructure, CcsWitness, CeClaim, Mat};
 use neo_math::{F, K};
 use neo_params::NeoParams;
 use neo_transcript::Poseidon2Transcript;
@@ -28,21 +28,21 @@ pub trait PiCcsEngine {
         tr: &mut Poseidon2Transcript,
         params: &NeoParams,
         s: &CcsStructure<F>,
-        mcs_list: &[McsInstance<Cmt, F>],
-        mcs_witnesses: &[McsWitness<F>],
-        me_inputs: &[MeInstance<Cmt, F, K>],
+        mcs_list: &[CcsClaim<Cmt, F>],
+        mcs_witnesses: &[CcsWitness<F>],
+        me_inputs: &[CeClaim<Cmt, F, K>],
         me_witnesses: &[Mat<F>],
         log: &L,
-    ) -> Result<(Vec<MeInstance<Cmt, F, K>>, PiCcsProof), PiCcsError>;
+    ) -> Result<(Vec<CeClaim<Cmt, F, K>>, PiCcsProof), PiCcsError>;
 
     fn verify(
         &self,
         tr: &mut Poseidon2Transcript,
         params: &NeoParams,
         s: &CcsStructure<F>,
-        mcs_list: &[McsInstance<Cmt, F>],
-        me_inputs: &[MeInstance<Cmt, F, K>],
-        me_outputs: &[MeInstance<Cmt, F, K>],
+        mcs_list: &[CcsClaim<Cmt, F>],
+        me_inputs: &[CeClaim<Cmt, F, K>],
+        me_outputs: &[CeClaim<Cmt, F, K>],
         proof: &PiCcsProof,
     ) -> Result<bool, PiCcsError>;
 }
@@ -57,12 +57,12 @@ impl PiCcsEngine for OptimizedEngine {
         tr: &mut Poseidon2Transcript,
         params: &NeoParams,
         s: &CcsStructure<F>,
-        mcs_list: &[McsInstance<Cmt, F>],
-        mcs_witnesses: &[McsWitness<F>],
-        me_inputs: &[MeInstance<Cmt, F, K>],
+        mcs_list: &[CcsClaim<Cmt, F>],
+        mcs_witnesses: &[CcsWitness<F>],
+        me_inputs: &[CeClaim<Cmt, F, K>],
         me_witnesses: &[Mat<F>],
         log: &L,
-    ) -> Result<(Vec<MeInstance<Cmt, F, K>>, PiCcsProof), PiCcsError> {
+    ) -> Result<(Vec<CeClaim<Cmt, F, K>>, PiCcsProof), PiCcsError> {
         super::optimized_engine::pi_ccs_prove(tr, params, s, mcs_list, mcs_witnesses, me_inputs, me_witnesses, log)
     }
 
@@ -71,9 +71,9 @@ impl PiCcsEngine for OptimizedEngine {
         tr: &mut Poseidon2Transcript,
         params: &NeoParams,
         s: &CcsStructure<F>,
-        mcs_list: &[McsInstance<Cmt, F>],
-        me_inputs: &[MeInstance<Cmt, F, K>],
-        me_outputs: &[MeInstance<Cmt, F, K>],
+        mcs_list: &[CcsClaim<Cmt, F>],
+        me_inputs: &[CeClaim<Cmt, F, K>],
+        me_outputs: &[CeClaim<Cmt, F, K>],
         proof: &PiCcsProof,
     ) -> Result<bool, PiCcsError> {
         super::optimized_engine::pi_ccs_verify(tr, params, s, mcs_list, me_inputs, me_outputs, proof)
@@ -92,12 +92,12 @@ impl PiCcsEngine for PaperExactEngine {
         tr: &mut Poseidon2Transcript,
         params: &NeoParams,
         s: &CcsStructure<F>,
-        mcs_list: &[McsInstance<Cmt, F>],
-        mcs_witnesses: &[McsWitness<F>],
-        me_inputs: &[MeInstance<Cmt, F, K>],
+        mcs_list: &[CcsClaim<Cmt, F>],
+        mcs_witnesses: &[CcsWitness<F>],
+        me_inputs: &[CeClaim<Cmt, F, K>],
         me_witnesses: &[Mat<F>],
         log: &L,
-    ) -> Result<(Vec<MeInstance<Cmt, F, K>>, PiCcsProof), PiCcsError> {
+    ) -> Result<(Vec<CeClaim<Cmt, F, K>>, PiCcsProof), PiCcsError> {
         super::paper_exact_engine::paper_exact_prove(
             tr,
             params,
@@ -115,9 +115,9 @@ impl PiCcsEngine for PaperExactEngine {
         tr: &mut Poseidon2Transcript,
         params: &NeoParams,
         s: &CcsStructure<F>,
-        mcs_list: &[McsInstance<Cmt, F>],
-        me_inputs: &[MeInstance<Cmt, F, K>],
-        me_outputs: &[MeInstance<Cmt, F, K>],
+        mcs_list: &[CcsClaim<Cmt, F>],
+        me_inputs: &[CeClaim<Cmt, F, K>],
+        me_outputs: &[CeClaim<Cmt, F, K>],
         proof: &PiCcsProof,
     ) -> Result<bool, PiCcsError> {
         super::paper_exact_engine::paper_exact_verify(tr, params, s, mcs_list, me_inputs, me_outputs, proof)
@@ -132,12 +132,12 @@ impl<I: PiCcsEngine, R: PiCcsEngine> PiCcsEngine for CrossCheckEngine<I, R> {
         tr: &mut Poseidon2Transcript,
         params: &NeoParams,
         s: &CcsStructure<F>,
-        mcs_list: &[McsInstance<Cmt, F>],
-        mcs_witnesses: &[McsWitness<F>],
-        me_inputs: &[MeInstance<Cmt, F, K>],
+        mcs_list: &[CcsClaim<Cmt, F>],
+        mcs_witnesses: &[CcsWitness<F>],
+        me_inputs: &[CeClaim<Cmt, F, K>],
         me_witnesses: &[Mat<F>],
         log: &L,
-    ) -> Result<(Vec<MeInstance<Cmt, F, K>>, PiCcsProof), PiCcsError> {
+    ) -> Result<(Vec<CeClaim<Cmt, F, K>>, PiCcsProof), PiCcsError> {
         super::crosscheck_engine::crosscheck_prove(
             &self.inner,
             &self.cfg,
@@ -157,9 +157,9 @@ impl<I: PiCcsEngine, R: PiCcsEngine> PiCcsEngine for CrossCheckEngine<I, R> {
         tr: &mut Poseidon2Transcript,
         params: &NeoParams,
         s: &CcsStructure<F>,
-        mcs_list: &[McsInstance<Cmt, F>],
-        me_inputs: &[MeInstance<Cmt, F, K>],
-        me_outputs: &[MeInstance<Cmt, F, K>],
+        mcs_list: &[CcsClaim<Cmt, F>],
+        me_inputs: &[CeClaim<Cmt, F, K>],
+        me_outputs: &[CeClaim<Cmt, F, K>],
         proof: &PiCcsProof,
     ) -> Result<bool, PiCcsError> {
         super::crosscheck_engine::crosscheck_verify(&self.inner, tr, params, s, mcs_list, me_inputs, me_outputs, proof)

@@ -9,5 +9,6 @@ mod shared_cpu_bus_layout_consistency;
 mod shared_cpu_bus_linkage;
 mod shared_cpu_bus_packed_attacks;
 mod shared_cpu_bus_padding_attacks;
+mod shared_cpu_bus_virtual_domain_attacks;
 mod shared_cpu_bus_width_attacks;
 mod ts_route_a_negative;

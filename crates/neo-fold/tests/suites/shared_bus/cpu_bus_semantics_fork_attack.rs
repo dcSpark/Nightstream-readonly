@@ -35,7 +35,7 @@
 use std::marker::PhantomData;
 
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::relations::{CcsStructure, McsInstance, McsWitness};
+use neo_ccs::relations::{CcsClaim, CcsStructure, CcsWitness};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::Mat;
 use neo_fold::pi_ccs::FoldingMode;
@@ -178,12 +178,12 @@ fn cpu_semantic_shadow_fork_attack_should_be_rejected() {
     let c_cpu = l.commit(&Z_cpu);
 
     let mcs = (
-        McsInstance {
+        CcsClaim {
             c: c_cpu,
             x: z_cpu[..m_in].to_vec(),
             m_in,
         },
-        McsWitness {
+        CcsWitness {
             w: z_cpu[m_in..].to_vec(),
             Z: Z_cpu,
         },
@@ -227,12 +227,13 @@ fn cpu_semantic_shadow_fork_attack_should_be_rejected() {
     };
     let mem_wit = MemWitness { mats: Vec::new() };
 
-    let steps_witness = vec![StepWitnessBundle {
+    let steps_witness = vec![crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
         mcs,
         lut_instances: vec![],
         mem_instances: vec![(mem_inst, mem_wit)],
+        time_columns: crate::common_setup::empty_time_columns(),
         _phantom: PhantomData::<K>,
-    }];
+    })];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, K>> =
         steps_witness.iter().map(StepInstanceBundle::from).collect();
 
@@ -385,12 +386,12 @@ fn cpu_semantic_fork_splice_attack_should_be_rejected() {
     let c_fake = l.commit(&Z_fake);
 
     let mcs = (
-        McsInstance {
+        CcsClaim {
             c: c_fake,
             x: z_fake[..m_in].to_vec(),
             m_in,
         },
-        McsWitness {
+        CcsWitness {
             w: z_fake[m_in..].to_vec(),
             Z: Z_fake,
         },
@@ -426,12 +427,13 @@ fn cpu_semantic_fork_splice_attack_should_be_rejected() {
     };
     let mem_wit = MemWitness { mats: Vec::new() };
 
-    let steps_witness = vec![StepWitnessBundle {
+    let steps_witness = vec![crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
         mcs,
         lut_instances: vec![],
         mem_instances: vec![(mem_inst, mem_wit)],
+        time_columns: crate::common_setup::empty_time_columns(),
         _phantom: PhantomData::<K>,
-    }];
+    })];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, K>> =
         steps_witness.iter().map(StepInstanceBundle::from).collect();
 
@@ -568,12 +570,12 @@ fn cpu_lookup_shadow_fork_attack_should_be_rejected() {
     let c_cpu = l.commit(&Z_cpu);
 
     let mcs = (
-        McsInstance {
+        CcsClaim {
             c: c_cpu,
             x: z_cpu[..m_in].to_vec(),
             m_in,
         },
-        McsWitness {
+        CcsWitness {
             w: z_cpu[m_in..].to_vec(),
             Z: Z_cpu,
         },
@@ -640,12 +642,13 @@ fn cpu_lookup_shadow_fork_attack_should_be_rejected() {
     };
     let mem_wit = MemWitness { mats: Vec::new() };
 
-    let steps_witness = vec![StepWitnessBundle {
+    let steps_witness = vec![crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
         mcs,
         lut_instances: vec![(lut_inst, lut_wit)],
         mem_instances: vec![(mem_inst, mem_wit)],
+        time_columns: crate::common_setup::empty_time_columns(),
         _phantom: PhantomData::<K>,
-    }];
+    })];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, K>> =
         steps_witness.iter().map(StepInstanceBundle::from).collect();
 

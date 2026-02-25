@@ -6,7 +6,7 @@
 
 use crate::error::PiCcsError;
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::{CcsMatrix, CcsStructure, McsInstance, MeInstance, SparsePoly};
+use neo_ccs::{CcsClaim, CcsMatrix, CcsStructure, CeClaim, SparsePoly};
 use neo_math::{KExtensions, D, F, K};
 use neo_params::NeoParams;
 use neo_transcript::{labels as tr_labels, Poseidon2Transcript, Transcript};
@@ -85,7 +85,7 @@ pub fn bind_header_and_instances(
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
     s: &CcsStructure<F>,
-    mcs_list: &[McsInstance<Cmt, F>],
+    mcs_list: &[CcsClaim<Cmt, F>],
     dims: Dims,
 ) -> Result<(), PiCcsError> {
     let digest = digest_ccs_matrices(s);
@@ -99,7 +99,7 @@ pub fn bind_header_and_instances_with_digest(
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
     s: &CcsStructure<F>,
-    mcs_list: &[McsInstance<Cmt, F>],
+    mcs_list: &[CcsClaim<Cmt, F>],
     dims: Dims,
     mat_digest: &[Goldilocks],
 ) -> Result<(), PiCcsError> {
@@ -162,7 +162,7 @@ pub fn bind_header_and_instances_with_digest(
 }
 
 /// Bind ME inputs to transcript
-pub fn bind_me_inputs(tr: &mut Poseidon2Transcript, me_inputs: &[MeInstance<Cmt, F, K>]) -> Result<(), PiCcsError> {
+pub fn bind_me_inputs(tr: &mut Poseidon2Transcript, me_inputs: &[CeClaim<Cmt, F, K>]) -> Result<(), PiCcsError> {
     // v2 batches (r, y) coefficient absorption under a single label+len framing for performance.
     // This is NOT transcript-equivalent to the previous per-limb/per-element `append_fields` loop.
     tr.append_message(b"neo/ccs/me_inputs/v2", b"");
@@ -184,19 +184,162 @@ pub fn bind_me_inputs(tr: &mut Poseidon2Transcript, me_inputs: &[MeInstance<Cmt,
             me.r.iter().flat_map(|limb| limb.as_coeffs().into_iter()),
         );
 
-        let y_elem_count: usize = me.y.iter().try_fold(0usize, |acc, yj| {
+        let y_elem_count: usize = me.y_ring.iter().try_fold(0usize, |acc, yj| {
             acc.checked_add(yj.len())
-                .ok_or_else(|| PiCcsError::InvalidInput("ME.y length overflow".into()))
+                .ok_or_else(|| PiCcsError::InvalidInput("ME.y_ring length overflow".into()))
         })?;
         let y_field_len = y_elem_count
             .checked_mul(k_coeffs_len)
-            .ok_or_else(|| PiCcsError::InvalidInput("ME.y length overflow".into()))?;
+            .ok_or_else(|| PiCcsError::InvalidInput("ME.y_ring length overflow".into()))?;
         tr.append_fields_iter(
             b"y_elem",
             y_field_len,
-            me.y.iter()
+            me.y_ring
+                .iter()
                 .flat_map(|yj| yj.iter().flat_map(|y_elem| y_elem.as_coeffs().into_iter())),
         );
+    }
+
+    Ok(())
+}
+
+/// Validate CE `ct` semantics on outputs (SuperNeo-only).
+///
+/// `ct[j] = constant_term(y_ring[j])`.
+pub fn validate_ct_constant_term<Ff>(
+    s: &CcsStructure<Ff>,
+    _params: &NeoParams,
+    me_outputs: &[CeClaim<Cmt, Ff, K>],
+) -> Result<(), PiCcsError>
+where
+    Ff: Field + PrimeCharacteristicRing + Copy,
+    K: From<Ff>,
+{
+    for (idx, out) in me_outputs.iter().enumerate() {
+        if out.ct.len() < s.t() {
+            return Err(PiCcsError::ProtocolError(format!(
+                "me_outputs[{idx}].ct.len()={} is smaller than s.t()={}",
+                out.ct.len(),
+                s.t()
+            )));
+        }
+
+        for j in 0..s.t() {
+            let row = &out.y_ring[j];
+            let want = crate::common::ct_from_y_digits(row);
+            if out.ct[j] != want {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "me_outputs[{idx}].ct[{j}] does not match SuperNeo constant-term semantics"
+                )));
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate that all ME inputs share the same evaluation point `r`.
+///
+/// Returns `None` when `me_inputs` is empty, otherwise returns a shared `r` slice.
+pub fn shared_me_input_r<'a, C, Ff>(
+    me_inputs: &'a [CeClaim<C, Ff, K>],
+    ell_n: usize,
+) -> Result<Option<&'a [K]>, PiCcsError>
+where
+    Ff: Field + PrimeCharacteristicRing + Copy,
+{
+    if me_inputs.is_empty() {
+        return Ok(None);
+    }
+
+    let r0 = me_inputs[0].r.as_slice();
+    if r0.len() != ell_n {
+        return Err(PiCcsError::InvalidInput(format!(
+            "ME input r length mismatch at accumulator #0: expected ell_n = {}, got {}",
+            ell_n,
+            r0.len()
+        )));
+    }
+
+    for (idx, me) in me_inputs.iter().enumerate().skip(1) {
+        if me.r.len() != ell_n {
+            return Err(PiCcsError::InvalidInput(format!(
+                "ME input r length mismatch at accumulator #{}: expected ell_n = {}, got {}",
+                idx,
+                ell_n,
+                me.r.len()
+            )));
+        }
+        if me.r.as_slice() != r0 {
+            return Err(PiCcsError::InvalidInput(format!(
+                "ME input r mismatch at accumulator #{}: all ME inputs must share the same r",
+                idx
+            )));
+        }
+    }
+
+    Ok(Some(r0))
+}
+
+/// Validate MCS-output `X` content against public `x` under SuperNeo packed semantics.
+///
+/// `x[c] = X[c % D, c]` and all off-lane rows in column `c` must be zero.
+pub fn validate_mcs_output_x_recomposition<Ff>(
+    _params: &NeoParams,
+    ccs_m: usize,
+    mcs_list: &[CcsClaim<Cmt, Ff>],
+    me_outputs: &[CeClaim<Cmt, Ff, K>],
+) -> Result<(), PiCcsError>
+where
+    Ff: Field + PrimeCharacteristicRing + Copy,
+{
+    if ccs_m == 0 {
+        return Err(PiCcsError::InvalidInput("CCS width m must be > 0".into()));
+    }
+    for (idx, inst) in mcs_list.iter().enumerate() {
+        let out = me_outputs.get(idx).ok_or_else(|| {
+            PiCcsError::ProtocolError(format!(
+                "missing me_outputs entry for mcs_list index {} (|me_outputs|={})",
+                idx,
+                me_outputs.len()
+            ))
+        })?;
+
+        if inst.x.len() != inst.m_in {
+            return Err(PiCcsError::InvalidInput(format!(
+                "mcs_list[{idx}].x.len()={}, expected m_in={}",
+                inst.x.len(),
+                inst.m_in
+            )));
+        }
+        if out.X.cols() != inst.m_in {
+            return Err(PiCcsError::ProtocolError(format!(
+                "me_outputs[{idx}].X cols mismatch (got {}, expected {})",
+                out.X.cols(),
+                inst.m_in
+            )));
+        }
+
+        for c in 0..inst.m_in {
+            let lane = c % D;
+            let got = out.X[(lane, c)];
+            if got != inst.x[c] {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "me_outputs[{idx}].X lane {} at column {} does not match mcs_list[{idx}].x[{}]",
+                    lane, c, c
+                )));
+            }
+            if let Some((rho, _)) = (0..D)
+                .filter(|&rho| rho != lane)
+                .map(|rho| (rho, out.X[(rho, c)]))
+                .find(|(_, v)| *v != Ff::ZERO)
+            {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "me_outputs[{idx}].X column {} has non-zero off-lane row {} in SuperNeo packed layout",
+                    c, rho
+                )));
+            }
+        }
     }
 
     Ok(())

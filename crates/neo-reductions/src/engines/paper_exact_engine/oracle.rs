@@ -1,11 +1,11 @@
-//! Paper-exact RoundOracle: literal, slow reference for Q(X) in Π_CCS.
+//! Paper-exact RoundOracle for the SplitNcV1 FE channel.
 //!
-//! This oracle evaluates the paper's Q(X) by brute-force summing over the
+//! This oracle evaluates the FE-only polynomial by brute-force summing over the
 //! remaining Boolean variables each round. It is suitable for testing and
 //! cross-checking correctness against the optimized engine.
 //!
 //! Variable order (rounds): first the `ell_n` row bits, then the `ell_d` Ajtai bits.
-//! All γ exponents, eq-gating, and range products follow §4.4 exactly.
+//! NC/range terms are handled by the separate NC sumcheck channel in SplitNcV1.
 
 #![allow(non_snake_case)]
 
@@ -14,7 +14,7 @@ use p3_field::{Field, PrimeCharacteristicRing};
 
 use crate::optimized_engine::Challenges;
 use crate::sumcheck::RoundOracle;
-use neo_ccs::{CcsMatrix, CcsStructure, Mat, McsWitness};
+use neo_ccs::{CcsStructure, CcsWitness, Mat};
 
 #[cfg(feature = "paper-exact")]
 pub struct PaperExactOracle<'a, F>
@@ -25,7 +25,7 @@ where
     pub s: &'a CcsStructure<F>,
     pub params: &'a neo_params::NeoParams,
     // Witnesses in the same order as the engine: all MCS first, then ME
-    pub mcs_witnesses: &'a [McsWitness<F>],
+    pub mcs_witnesses: &'a [CcsWitness<F>],
     pub me_witnesses: &'a [Mat<F>],
     // Challenges (α, β, γ)
     pub ch: Challenges,
@@ -40,6 +40,8 @@ where
     pub ajtai_chals: Vec<K>,
     // Input ME r (if any) for Eval gating
     pub r_inputs: Option<Vec<K>>,
+    // Cached SuperNeo evaluator backend (formula unchanged).
+    superneo_cache: crate::superneo_eval::SuperneoEvalCache,
 }
 
 #[cfg(feature = "paper-exact")]
@@ -51,7 +53,7 @@ where
     pub fn new(
         s: &'a CcsStructure<F>,
         params: &'a neo_params::NeoParams,
-        mcs_witnesses: &'a [McsWitness<F>],
+        mcs_witnesses: &'a [CcsWitness<F>],
         me_witnesses: &'a [Mat<F>],
         ch: Challenges,
         ell_d: usize,
@@ -60,6 +62,13 @@ where
         r_inputs: Option<&[K]>,
     ) -> Self {
         assert!(!mcs_witnesses.is_empty(), "need at least one MCS instance for F-term");
+        let superneo_cache = crate::superneo_eval::build_superneo_eval_cache(s).unwrap_or_else(|| {
+            panic!(
+                "PaperExactOracle requires SuperNeo-compatible CCS shape (m={}, matrices={})",
+                s.m,
+                s.matrices.len()
+            )
+        });
         Self {
             s,
             params,
@@ -73,6 +82,7 @@ where
             row_chals: Vec::with_capacity(ell_n),
             ajtai_chals: Vec::with_capacity(ell_d),
             r_inputs: r_inputs.map(|r| r.to_vec()),
+            superneo_cache,
         }
     }
 
@@ -93,39 +103,30 @@ where
     }
 
     #[inline]
-    fn get_M(a: &CcsMatrix<F>, row: usize, col: usize) -> F {
-        if row >= a.rows() || col >= a.cols() {
-            return F::ZERO;
-        }
-        match a {
-            CcsMatrix::Identity { .. } => {
-                if row == col {
-                    F::ONE
-                } else {
-                    F::ZERO
-                }
-            }
-            CcsMatrix::Csc(m) => {
-                let s = m.col_ptr[col];
-                let e = m.col_ptr[col + 1];
-                match m.row_idx[s..e].binary_search(&row) {
-                    Ok(idx) => m.vals[s + idx],
-                    Err(_) => F::ZERO,
-                }
-            }
-        }
+    fn eval_all_mats_ct_only(&self, z: &[K], chi_r: &[K]) -> Vec<K> {
+        let y_ring = crate::superneo_eval::eval_all_mats_ring_cached(&self.superneo_cache, z, chi_r, self.s.n);
+        y_ring.into_iter().map(|coeffs| coeffs[0]).collect()
     }
 
-    /// Evaluate the literal Q at extension point (α′, r′), including Eval block.
-    /// Matches §4.4 exactly with:
-    ///   Q = eq((α′,r′),β)·(F' + Σ γ^i N_i') + γ^k Σ_{j=1,i=2}^{t,k} γ^{i+(j-1)k-1} · E_{(i,j)}
-    /// and E_{(i,j)} = eq((α′,r′),(α,r)) · ẏ'_{(i,j)}(α′).
+    /// Evaluate FE-only Q at extension point (α′, r′), including Eval block.
+    ///
+    /// This SplitNcV1 FE oracle intentionally uses constant-term projections (`ct`) from
+    /// ring evaluations as its scalar openings and excludes NC/range terms.
+    ///
+    /// Formula:
+    ///   Q_fe = eq((α′,r′),β)·F' + γ^k Σ_{j=1,i=2}^{t,k} γ^{i+(j-1)k-1} · E_{(i,j)}
+    /// with E_{(i,j)} = eq((α′,r′),(α,r)) · ẏ'_{(i,j)}(α′).
+    /// NC/range terms are intentionally excluded in this FE channel oracle.
     fn eval_q_ext(&self, alpha_prime: &[K], r_prime: &[K]) -> K {
-        use core::cmp::min;
-
         // Build χ tables for α′ and r′
         let d_sz = 1usize << alpha_prime.len();
         let n_sz = 1usize << r_prime.len();
+        assert!(
+            d_sz >= D,
+            "PaperExactOracle::eval_q_ext: alpha dimension too small (2^|alpha'|={} < D={})",
+            d_sz,
+            D
+        );
 
         let mut chi_a = vec![K::ZERO; d_sz];
         for rho in 0..d_sz {
@@ -151,112 +152,83 @@ where
 
         // eq((α′,r′), β) and eq((α′,r′),(α,r))
         let eq_beta = Self::eq_points(alpha_prime, &self.ch.beta_a) * Self::eq_points(r_prime, &self.ch.beta_r);
-
-        let eq_ar = match self.r_inputs {
-            Some(ref r_in) => Self::eq_points(alpha_prime, &self.ch.alpha) * Self::eq_points(r_prime, r_in),
-            None => K::ZERO,
+        let k_mcs = self.mcs_witnesses.len();
+        let k_total = k_mcs + self.me_witnesses.len();
+        let eq_ar = if k_total > k_mcs {
+            let r_in = self
+                .r_inputs
+                .as_ref()
+                .expect("PaperExactOracle::eval_q_ext: missing shared ME input r");
+            Self::eq_points(alpha_prime, &self.ch.alpha) * Self::eq_points(r_prime, r_in)
+        } else {
+            K::ZERO
         };
 
         // ---------------------------
-        // FE-only: F' := f( Ẽ(M_j z_1)(r') ) using z_1 from the first MCS instance
+        // FE-only:
+        // F' := Σ_{i=1..k_mcs} γ^{i-1} · f( Ẽ(M_j z_i)(r') )_j
         // ---------------------------
-        let mut z1 = vec![K::ZERO; self.s.m];
-        {
-            // base-b powers in K for recomposition of digits
-            let bF = F::from_u64(self.params.b as u64);
-            let mut pow_b_f = vec![F::ONE; D];
-            for i in 1..D {
-                pow_b_f[i] = pow_b_f[i - 1] * bF;
-            }
-            let pow_b_k: Vec<K> = pow_b_f.iter().copied().map(K::from).collect();
-            for c in 0..self.s.m {
-                let mut acc = K::ZERO;
-                for rho in 0..D {
-                    acc += K::from(self.mcs_witnesses[0].Z[(rho, c)]) * pow_b_k[rho];
-                }
-                z1[c] = acc;
-            }
+        let mut gamma_pow_mcs = vec![K::ONE; k_mcs];
+        for i in 1..k_mcs {
+            gamma_pow_mcs[i] = gamma_pow_mcs[i - 1] * self.ch.gamma;
         }
 
-        let mut m_vals = vec![K::ZERO; self.s.t()];
-        for j in 0..self.s.t() {
-            // Ẽ( (M_j z_1) )(r′) = Σ_row χ_r[row] · Σ_c M_j[row,c]·z1[c]
-            let mut y_eval = K::ZERO;
-            for row in 0..n_sz {
-                let wr = if row < self.s.n { chi_r[row] } else { K::ZERO };
-                if wr == K::ZERO {
-                    continue;
-                }
-                let mut y_row = K::ZERO;
-                for c in 0..self.s.m {
-                    y_row += K::from(Self::get_M(&self.s.matrices[j], row, c)) * z1[c];
-                }
-                y_eval += wr * y_row;
-            }
-            m_vals[j] = y_eval;
+        let mut F_prime = K::ZERO;
+        for (mcs_idx, w) in self.mcs_witnesses.iter().enumerate() {
+            let z_i = crate::common::decode_superneo_coeffs_from_witness_mat(&w.Z, self.s.m).unwrap_or_else(|e| {
+                panic!(
+                    "PaperExactOracle::eval_q_ext: invalid packed MCS witness[{mcs_idx}] shape for m={}: {e}",
+                    self.s.m
+                )
+            });
+
+            let m_vals = self.eval_all_mats_ct_only(&z_i, &chi_r);
+            F_prime += gamma_pow_mcs[mcs_idx] * self.s.f.eval_in_ext::<K>(&m_vals);
         }
-        let F_prime = self.s.f.eval_in_ext::<K>(&m_vals);
 
         // ---------------------------------------
         // Eval block: compute Σ_{j=1,i=2}^{t,k} γ^{i+(j-1)k-1} · ẏ'_{(i,j)}(α′)
         // and then multiply once by outer γ^k and by eq_ar.
         // ---------------------------------------
         let mut eval_inner_sum = K::ZERO;
-        let k_total = self.mcs_witnesses.len() + self.me_witnesses.len();
-        if k_total >= 2 && eq_ar != K::ZERO {
+        if k_total > k_mcs && eq_ar != K::ZERO {
             // γ^k
             let mut gamma_to_k = K::ONE;
             for _ in 0..k_total {
                 gamma_to_k *= self.ch.gamma;
             }
 
-            for j in 0..self.s.t() {
-                // vj := M_j^T · χ_{r'}
-                let mut vj = vec![K::ZERO; self.s.m];
-                for row in 0..n_sz {
-                    let wr = if row < self.s.n { chi_r[row] } else { K::ZERO };
-                    if wr == K::ZERO {
-                        continue;
-                    }
-                    for c in 0..self.s.m {
-                        vj[c] += K::from(Self::get_M(&self.s.matrices[j], row, c)) * wr;
-                    }
+            // Eval block runs over ME slots i ∈ [k_mcs, k_total) (0-based).
+            for (i_abs, Zi) in self
+                .mcs_witnesses
+                .iter()
+                .map(|w| &w.Z)
+                .chain(self.me_witnesses.iter())
+                .enumerate()
+                .skip(k_mcs)
+            {
+                let z_i = crate::common::decode_superneo_coeffs_from_witness_mat(Zi, self.s.m).unwrap_or_else(|e| {
+                    panic!(
+                        "PaperExactOracle::eval_q_ext: invalid witness shape for m={}: {e}",
+                        self.s.m
+                    )
+                });
+                let y_by_j_ring =
+                    crate::superneo_eval::eval_all_mats_ring_cached(&self.superneo_cache, &z_i, &chi_r, self.s.n);
+
+                // inner weight = γ^{i-1} · (γ^k)^j  (0-based j)
+                let mut gamma_i = K::ONE;
+                for _ in 0..i_abs {
+                    gamma_i *= self.ch.gamma;
                 }
-
-                // i starts from the second instance (skip index 0)
-                for (i_abs, Zi) in self
-                    .mcs_witnesses
-                    .iter()
-                    .map(|w| &w.Z)
-                    .chain(self.me_witnesses.iter())
-                    .enumerate()
-                    .skip(1)
-                {
-                    // y_digits = Z_i · vj
-                    let mut y_digits = vec![K::ZERO; D];
-                    for rho in 0..D {
-                        let mut acc = K::ZERO;
-                        for c in 0..self.s.m {
-                            acc += K::from(Zi[(rho, c)]) * vj[c];
-                        }
-                        y_digits[rho] = acc;
-                    }
-                    // ẏ'_{(i,j)}(α′) = ⟨ y_digits, χ_{α′} ⟩
+                let mut gamma_k_pow_j = K::ONE;
+                for yj in y_by_j_ring.iter().take(self.s.t()) {
                     let mut y_eval = K::ZERO;
-                    for rho in 0..min(D, d_sz) {
-                        y_eval += y_digits[rho] * chi_a[rho];
+                    for rho in 0..core::cmp::min(D, d_sz) {
+                        y_eval += yj[rho] * chi_a[rho];
                     }
-
-                    // inner weight = γ^{i-1} · (γ^k)^j  (0-based j)
-                    let mut weight = K::ONE;
-                    for _ in 0..i_abs {
-                        weight *= self.ch.gamma;
-                    } // γ^{i-1}
-                    for _ in 0..j {
-                        weight *= gamma_to_k;
-                    } // (γ^k)^j
-
-                    eval_inner_sum += weight * y_eval;
+                    eval_inner_sum += (gamma_i * gamma_k_pow_j) * y_eval;
+                    gamma_k_pow_j *= gamma_to_k;
                 }
             }
 

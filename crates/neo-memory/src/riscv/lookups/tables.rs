@@ -1,10 +1,53 @@
 use neo_vm_trace::{Shout, ShoutId};
 use p3_field::Field;
 
-use super::alu::{compute_op, lookup_entry};
-use super::bits::{interleave_bits, uninterleave_bits};
+use crate::riscv::instruction::{
+    encode_lookup_key, mask_to_xlen, opcode_operand_mode, operand_mode_keys_enabled, try_decode_lookup_operands,
+    OperandMode,
+};
+
+use super::alu::compute_op;
+use super::bits::uninterleave_bits;
 use super::isa::RiscvOpcode;
 use super::mle::evaluate_opcode_mle;
+
+#[inline]
+fn combined_key_lookup_result(op: RiscvOpcode, key: u64, xlen: usize) -> Option<u64> {
+    if !operand_mode_keys_enabled() {
+        return None;
+    }
+
+    match opcode_operand_mode(op) {
+        OperandMode::AddOperands | OperandMode::SubtractOperands
+            if matches!(op, RiscvOpcode::Add | RiscvOpcode::Sub) =>
+        {
+            // ADD/SUB combined-key mode: table behaves as low-word identity.
+            Some(mask_to_xlen(key, xlen))
+        }
+        OperandMode::MultiplyOperands if xlen <= 32 && matches!(op, RiscvOpcode::Mul) => {
+            // MUL combined-key mode: key is full product; output is low word.
+            Some(mask_to_xlen(key, xlen))
+        }
+        OperandMode::MultiplyOperands if xlen <= 32 && matches!(op, RiscvOpcode::Mulhu) => {
+            // MULHU combined-key mode: key is full product; output is upper word.
+            Some(mask_to_xlen(key >> xlen, xlen))
+        }
+        _ => None,
+    }
+}
+
+#[inline]
+fn lookup_result_for_key(op: RiscvOpcode, key: u128, xlen: usize) -> u64 {
+    let key_u64 = key as u64;
+
+    if let Some(result) = combined_key_lookup_result(op, key_u64, xlen) {
+        return result;
+    }
+
+    let (rs1, rs2) =
+        try_decode_lookup_operands(op, key_u64, operand_mode_keys_enabled()).unwrap_or_else(|| uninterleave_bits(key));
+    compute_op(op, rs1, rs2, xlen)
+}
 
 /// A RISC-V instruction lookup table compatible with Neo's Shout protocol.
 ///
@@ -34,7 +77,7 @@ impl<F: Field> RiscvLookupTable<F> {
             Some(
                 (0..table_size)
                     .map(|idx| {
-                        let entry = lookup_entry(opcode, idx as u128, xlen);
+                        let entry = lookup_result_for_key(opcode, idx as u128, xlen);
                         F::from_u64(entry)
                     })
                     .collect(),
@@ -56,17 +99,15 @@ impl<F: Field> RiscvLookupTable<F> {
         if let Some(ref values) = self.values {
             values[index as usize]
         } else {
-            let entry = lookup_entry(self.opcode, index, self.xlen);
+            let entry = lookup_result_for_key(self.opcode, index, self.xlen);
             F::from_u64(entry)
         }
     }
 
     /// Look up a value by operands.
     pub fn lookup_operands(&self, x: u64, y: u64) -> F {
-        let index = interleave_bits(x, y);
-        // Mask the index to the correct bit width (index is LSB-aligned)
-        let mask = (1u128 << (2 * self.xlen)) - 1;
-        self.lookup(index & mask)
+        let key = encode_lookup_key(self.opcode, x, y, self.xlen);
+        self.lookup(key as u128)
     }
 
     /// Evaluate the MLE at a random point.
@@ -116,10 +157,7 @@ impl RiscvLookupEvent {
 
     /// Get the lookup index for this event.
     pub fn lookup_index(&self, xlen: usize) -> u128 {
-        let index = interleave_bits(self.rs1, self.rs2);
-        // With LSB-aligned interleaving, the index is at the LSB
-        let mask = (1u128 << (2 * xlen)) - 1;
-        index & mask
+        encode_lookup_key(self.opcode, self.rs1, self.rs2, xlen) as u128
     }
 }
 
@@ -275,10 +313,8 @@ impl RiscvShoutTables {
 
 impl Shout<u64> for RiscvShoutTables {
     fn lookup(&mut self, shout_id: ShoutId, key: u64) -> u64 {
-        // The key is an interleaved index containing both operands
         if let Some(op) = self.id_to_opcode(shout_id) {
-            let (rs1, rs2) = uninterleave_bits(key as u128);
-            compute_op(op, rs1, rs2, self.xlen)
+            lookup_result_for_key(op, key as u128, self.xlen)
         } else {
             0 // Unknown table
         }

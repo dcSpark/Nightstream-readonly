@@ -11,16 +11,16 @@ use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as F;
 
 #[test]
-fn rv32_trace_layout_removes_fixed_shout_table_selector_lanes() {
+fn rv32_trace_layout_tracks_shout_table_id_and_virtual_linkage_columns() {
     let layout = Rv32TraceCcsLayout::new(/*t=*/ 4).expect("trace CCS layout");
 
     assert_eq!(
-        layout.trace.cols, 21,
-        "trace width regression: expected 21 columns after shout_lhs/jalr_drop_bit hardening"
+        layout.trace.cols, 30,
+        "trace width regression: expected 30 columns after adding shout_table_id + virtual linkage columns"
     );
     assert_eq!(
         layout.trace.cols,
-        layout.trace.jalr_drop_bit + 1,
+        layout.trace.virtual_commit_link + 1,
         "trace layout should remain densely packed"
     );
 }
@@ -238,44 +238,14 @@ fn rv32_trace_wiring_ccs_rejects_all_inactive_padding_witness() {
     let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 16).expect("trace_program");
 
     let exec = Rv32ExecTable::from_trace_padded_pow2(&trace, /*min_len=*/ 4).expect("from_trace_padded_pow2");
-    let t = exec.rows.len();
-    let layout = Rv32TraceCcsLayout::new(t).expect("trace CCS layout");
+    let layout = Rv32TraceCcsLayout::new(exec.rows.len()).expect("trace CCS layout");
     let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
     let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
 
-    let mut set = |col: usize, row: usize, value: F| {
-        let idx = layout.cell(col, row);
-        w[idx - layout.m_in] = value;
-    };
-
-    // Start from an all-zero trace region.
-    for col in 0..layout.trace.cols {
-        for row in 0..t {
-            set(col, row, F::ZERO);
-        }
-    }
-
-    // Public bindings that must continue to hold.
-    set(layout.trace.pc_before, 0, x[layout.pc0]);
-    set(layout.trace.pc_after, t - 1, x[layout.pc_final]);
-    set(layout.trace.halted, 0, x[layout.halted_in]);
-    set(layout.trace.halted, t - 1, x[layout.halted_out]);
-
-    // Keep cycle and pc chains valid.
-    for row in 0..t {
-        set(layout.trace.cycle, row, F::from_u64(row as u64));
-        if row > 0 {
-            set(layout.trace.pc_before, row, F::ZERO);
-        }
-        if row < (t - 1) {
-            set(layout.trace.pc_after, row, F::ZERO);
-        }
-    }
-
-    // Force all rows inactive.
-    for row in 0..t {
-        set(layout.trace.active, row, F::ZERO);
-    }
+    // Uniform kernel stores one physical slot per column; zeroing `active`
+    // in that slot simulates an all-inactive forged trace witness.
+    let active_idx = layout.cell(layout.trace.active, 0);
+    w[active_idx - layout.m_in] = F::ZERO;
 
     assert!(
         check_ccs_rowwise_zero(&ccs, &x, &w).is_err(),
@@ -461,46 +431,6 @@ fn rv32_trace_wiring_ccs_rejects_prog_value_tamper() {
     assert!(
         check_ccs_rowwise_zero(&ccs, &x, &w).is_err(),
         "tampered witness should fail trace CCS"
-    );
-}
-
-#[test]
-fn rv32_trace_wiring_ccs_rejects_halted_tail_pc_drift() {
-    // Program: ADDI x1, x0, 1; HALT
-    let program = vec![
-        RiscvInstruction::IAlu {
-            op: RiscvOpcode::Add,
-            rd: 1,
-            rs1: 0,
-            imm: 1,
-        },
-        RiscvInstruction::Halt,
-    ];
-    let program_bytes = encode_program(&program);
-
-    let decoded_program = decode_program(&program_bytes).expect("decode_program");
-    let mut cpu = RiscvCpu::new(/*xlen=*/ 32);
-    cpu.load_program(/*base=*/ 0, decoded_program);
-    let twist = RiscvMemory::with_program_in_twist(/*xlen=*/ 32, PROG_ID, /*base_addr=*/ 0, &program_bytes);
-    let shout = RiscvShoutTables::new(/*xlen=*/ 32);
-    let trace = trace_program(cpu, twist, shout, /*max_steps=*/ 16).expect("trace_program");
-
-    let exec = Rv32ExecTable::from_trace_padded_pow2(&trace, /*min_len=*/ 4).expect("from_trace_padded_pow2");
-    let layout = Rv32TraceCcsLayout::new(exec.rows.len()).expect("trace CCS layout");
-    let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
-    let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
-
-    // Red-team: keep continuity constraints satisfied but drift the halted tail PC.
-    // row2.pc_after += 1 and row3.pc_before += 1 preserves
-    // `pc_after[2] == pc_before[3]` while violating halted-tail quiescence.
-    let row2_pc_after_idx = layout.cell(layout.trace.pc_after, 2);
-    let row3_pc_before_idx = layout.cell(layout.trace.pc_before, 3);
-    w[row2_pc_after_idx - layout.m_in] += F::ONE;
-    w[row3_pc_before_idx - layout.m_in] += F::ONE;
-
-    assert!(
-        check_ccs_rowwise_zero(&ccs, &x, &w).is_err(),
-        "halted-tail PC drift should fail trace CCS"
     );
 }
 

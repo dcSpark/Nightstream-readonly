@@ -1,6 +1,7 @@
 use std::time::{Duration, Instant};
 
-use neo_ccs::MeInstance;
+use neo_ccs::CeClaim;
+use neo_fold::memory_sidecar::claim_plan::RouteATimeClaimPlan;
 use neo_fold::riscv_trace_shard::Rv32TraceWiring;
 use neo_fold::shard::ShardProof;
 use neo_memory::riscv::ccs::{build_rv32_trace_wiring_ccs, Rv32TraceCcsLayout};
@@ -24,9 +25,10 @@ fn compare_single_mixed_metrics_nightstream_only() {
         .expect("Nightstream prove");
 
     let ns_constraints = ns_run.ccs_num_constraints();
-    let ns_witness_cols = ns_run.ccs_num_variables();
+    let ns_witness_cols_physical = ns_run.ccs_num_variables();
+    let ns_witness_cols_uniform = ns_run.uniform_ccs_num_variables();
     let ns_constraints_padded_pow2 = ns_constraints.next_power_of_two();
-    let ns_witness_cols_padded_pow2 = ns_witness_cols.next_power_of_two();
+    let ns_witness_cols_padded_pow2 = ns_witness_cols_physical.next_power_of_two();
     let ns_fold_count = ns_run.fold_count();
     let ns_trace_len = ns_run.trace_len();
     let ns_shout_tables = ns_run.used_shout_table_ids().len();
@@ -36,7 +38,7 @@ fn compare_single_mixed_metrics_nightstream_only() {
         .cloned()
         .expect("Nightstream collected steps");
     let ns_m_in = ns_step0.mcs_inst.m_in;
-    let ns_witness_private = ns_witness_cols.saturating_sub(ns_m_in);
+    let ns_witness_private = ns_witness_cols_physical.saturating_sub(ns_m_in);
     let ns_lut_instances = ns_step0.lut_insts.len();
     let ns_mem_instances = ns_step0.mem_insts.len();
 
@@ -55,7 +57,7 @@ fn compare_single_mixed_metrics_nightstream_only() {
         "- CCS: n={} constraints (padded_pow2_n={}), m={} cols (padded_pow2_m={}) (m_in={} public, w={} private)",
         ns_constraints,
         ns_constraints_padded_pow2,
-        ns_witness_cols,
+        ns_witness_cols_physical,
         ns_witness_cols_padded_pow2,
         ns_m_in,
         ns_witness_private
@@ -95,7 +97,11 @@ fn compare_single_mixed_metrics_nightstream_only() {
         "Total rows (estimate, unpadded)",
         ns_constraints.saturating_mul(ns_trace_len)
     );
-    println!("{:<40} {:>18}", "Cols / vars (raw)", ns_witness_cols);
+    println!(
+        "{:<40} {:>18}",
+        "Cols / vars (raw, physical ccs.m)", ns_witness_cols_physical
+    );
+    println!("{:<40} {:>18}", "Cols / vars (uniform width)", ns_witness_cols_uniform);
     println!(
         "{:<40} {:>18}",
         "Cols / vars (padded pow2)", ns_witness_cols_padded_pow2
@@ -135,8 +141,8 @@ impl OpeningSurfaceBuckets {
     }
 }
 
-fn sum_y_scalars<C, FF, KK>(claims: &[MeInstance<C, FF, KK>]) -> usize {
-    claims.iter().map(|me| me.y_scalars.len()).sum()
+fn sum_y_scalars<C, FF, KK>(claims: &[CeClaim<C, FF, KK>]) -> usize {
+    claims.iter().map(|me| me.ct.len()).sum()
 }
 
 fn opening_surface_from_shard_proof(proof: &ShardProof) -> OpeningSurfaceBuckets {
@@ -270,11 +276,12 @@ fn debug_trace_single_n_mixed_ops() {
     let phases = run.prove_phase_durations();
 
     println!(
-        "TRACE n={} chunk_rows={} ccs_n={} ccs_m={} n_p2={} m_p2={} trace_len={} folds={} prove={} verify={} total={} phases(setup={}, chunk_commit={}, fold={})",
+        "TRACE n={} chunk_rows={} ccs_n={} ccs_m_physical={} ccs_m_uniform={} n_p2={} m_p2={} trace_len={} folds={} prove={} verify={} total={} phases(setup={}, chunk_commit={}, fold={})",
         n,
         chunk_rows,
         run.ccs_num_constraints(),
         run.ccs_num_variables(),
+        run.uniform_ccs_num_variables(),
         run.ccs_num_constraints().next_power_of_two(),
         run.ccs_num_variables().next_power_of_two(),
         run.trace_len(),
@@ -326,10 +333,11 @@ fn debug_chunked_single_n_mixed_ops() {
     let phases = run.prove_phase_durations();
 
     println!(
-        "TRACE_SINGLE_CHUNK n={} ccs_n={} ccs_m={} n_p2={} m_p2={} trace_len={} folds={} prove={} verify={} total={} phases(setup={}, chunk_commit={}, fold={})",
+        "TRACE_SINGLE_CHUNK n={} ccs_n={} ccs_m_physical={} ccs_m_uniform={} n_p2={} m_p2={} trace_len={} folds={} prove={} verify={} total={} phases(setup={}, chunk_commit={}, fold={})",
         n,
         run.ccs_num_constraints(),
         run.ccs_num_variables(),
+        run.uniform_ccs_num_variables(),
         run.ccs_num_constraints().next_power_of_two(),
         run.ccs_num_variables().next_power_of_two(),
         trace_len,
@@ -393,9 +401,11 @@ fn report_track_a_w0_w1_snapshot() {
     let total_time = total_start.elapsed();
     let openings = opening_surface_from_shard_proof(run.proof());
 
-    let layout = Rv32TraceCcsLayout::new(steps).expect("trace layout");
+    let layout = run.layout().clone();
     let core_ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace core ccs");
     let rows_per_cycle = core_ccs.n as f64 / steps as f64;
+    let cpu_trace_cols = layout.trace.cols;
+    let public_input_cols = layout.m_in;
 
     let sep = "=".repeat(80);
     let thin_sep = "-".repeat(80);
@@ -407,11 +417,11 @@ fn report_track_a_w0_w1_snapshot() {
     // ── 1. Main CCS Layer ──
     println!("1. MAIN CCS LAYER (core glue constraints)");
     println!("{thin_sep}");
-    println!("  Trace columns:           {}", layout.trace.cols);
+    println!("  Trace columns:           {cpu_trace_cols}");
     println!("  Core CCS rows (n):       {}", core_ccs.n);
-    println!("  Core CCS cols (m):       {}", core_ccs.m);
+    println!("  Uniform witness cols (m):{}", core_ccs.m);
     println!("  Rows per cycle:          {:.3}", rows_per_cycle);
-    println!("  Public inputs (m_in):    {}", layout.m_in);
+    println!("  Public inputs (m_in):    {public_input_cols}");
     println!();
 
     let col_names = [
@@ -444,24 +454,34 @@ fn report_track_a_w0_w1_snapshot() {
     println!();
 
     // ── 2. Shared CPU Bus (Sidecar) Layer ──
-    println!("2. SHARED CPU BUS LAYER (Shout + Twist bus-tail columns)");
+    println!("2. SHARED CPU BUS LAYER (Shout + Twist named columns)");
     println!("{thin_sep}");
-    let total_ccs_m = run.ccs_num_variables();
+    let total_ccs_m_physical = run.ccs_num_variables();
+    let total_ccs_m_uniform = run.uniform_ccs_num_variables();
     let total_ccs_n = run.ccs_num_constraints();
-    let trace_base_m = layout.m_in + layout.trace.cols * steps;
-    let bus_tail_cols = total_ccs_m.saturating_sub(trace_base_m);
-    println!("  Total CCS m (with bus):  {total_ccs_m}");
+    let cpu_base_m = public_input_cols.saturating_add(cpu_trace_cols);
+    let committed_mem_bus_cols = total_ccs_m_uniform.saturating_sub(cpu_base_m);
+    let bus_tail_cols_physical = total_ccs_m_physical.saturating_sub(total_ccs_m_uniform);
+    println!("  Uniform CCS width proxy: {total_ccs_m_uniform}");
+    println!("  Physical CCS m:          {total_ccs_m_physical}");
     println!("  Total CCS n (with bus):  {total_ccs_n}");
-    println!(
-        "  Trace base m:            {trace_base_m} (m_in={} + {}*{})",
-        layout.m_in, layout.trace.cols, steps
-    );
-    println!("  Bus-tail columns:        {bus_tail_cols}");
+    println!("  CPU base cols (m_in+trace): {cpu_base_m}");
+    println!("  Committed mem/bus cols:  {committed_mem_bus_cols}");
+    println!("  Bus-tail columns (legacy physical): {bus_tail_cols_physical}");
     let bus_reserved_rows = total_ccs_n.saturating_sub(core_ccs.n);
     println!(
         "  Bus reserved rows:       {bus_reserved_rows} (total_n={total_ccs_n} - core_n={})",
         core_ccs.n
     );
+    assert_eq!(
+        total_ccs_m_physical, total_ccs_m_uniform,
+        "route-a width gate: physical ccs.m must equal uniform width proxy"
+    );
+    assert_eq!(
+        bus_tail_cols_physical, 0,
+        "route-a width gate: legacy bus tail must be 0"
+    );
+    assert_eq!(bus_reserved_rows, 0, "route-a rows gate: reserved bus rows must be 0");
     println!();
 
     let step0 = run
@@ -498,6 +518,48 @@ fn report_track_a_w0_w1_snapshot() {
             inst.lanes,
             bus_cols_per_lane * inst.lanes
         );
+    }
+    let shout_gamma_groups = RouteATimeClaimPlan::derive_shout_gamma_groups_for_instances(step0.lut_insts.iter());
+    if !shout_gamma_groups.is_empty() {
+        let mut old_value_width = 0usize;
+        let mut old_adapter_width = 0usize;
+        let mut old_bitness_width = 0usize;
+        let mut new_value_width = 0usize;
+        let mut new_adapter_width = 0usize;
+        let mut new_bitness_width = 0usize;
+        for g in shout_gamma_groups.iter() {
+            let lane_count = g.lanes.len();
+            old_value_width = old_value_width.saturating_add(2usize.saturating_mul(lane_count));
+            old_adapter_width = old_adapter_width.saturating_add((1usize + g.ell_addr).saturating_mul(lane_count));
+            old_bitness_width = old_bitness_width.saturating_add((1usize + g.ell_addr).saturating_mul(lane_count));
+
+            let mut selector_mark: Option<Option<u64>> = None;
+            let mut selector_consistent = true;
+            for lane in g.lanes.iter() {
+                let sel = step0
+                    .lut_insts
+                    .get(lane.inst_idx)
+                    .map(|inst| inst.selector_group)
+                    .unwrap_or(None);
+                if let Some(prev) = selector_mark {
+                    if prev != sel {
+                        selector_consistent = false;
+                        break;
+                    }
+                } else {
+                    selector_mark = Some(sel);
+                }
+            }
+            let has_shared_selector = selector_consistent && selector_mark.flatten().is_some();
+            let has_arity = if has_shared_selector { 1usize } else { lane_count };
+            new_value_width = new_value_width.saturating_add(has_arity.saturating_add(lane_count));
+            new_adapter_width = new_adapter_width.saturating_add(g.ell_addr.saturating_add(has_arity));
+            new_bitness_width = new_bitness_width.saturating_add(g.ell_addr.saturating_add(has_arity));
+        }
+        println!("  Shout grouped fan-in (legacy formula): value={old_value_width} adapter={old_adapter_width} bitness={old_bitness_width} total={}",
+            old_value_width.saturating_add(old_adapter_width).saturating_add(old_bitness_width));
+        println!("  Shout grouped fan-in (shared-aware):   value={new_value_width} adapter={new_adapter_width} bitness={new_bitness_width} total={}",
+            new_value_width.saturating_add(new_adapter_width).saturating_add(new_bitness_width));
     }
     println!();
 
@@ -632,6 +694,16 @@ fn report_track_a_w0_w1_snapshot() {
         step_proof.wp_fold.len(),
         wp_count
     );
+    let stage8_count: usize = step_proof
+        .stage8_fold
+        .iter()
+        .map(|w| w.dec_children.len())
+        .sum();
+    println!(
+        "  Stage-8 fold lanes:      {} (dec children={})",
+        step_proof.stage8_fold.len(),
+        stage8_count
+    );
     println!();
 
     // ── 6. ME Claims (Sidecar Proofs) ──
@@ -641,6 +713,23 @@ fn report_track_a_w0_w1_snapshot() {
     println!("  Val ME @ r_val:          {} claims", mem.val_me_claims.len());
     println!("  WB ME claims:            {} claims", mem.wb_me_claims.len());
     println!("  WP ME claims:            {} claims", mem.wp_me_claims.len());
+    let (open_src_derived, open_src_ccs_tail, open_src_wb_tail, open_src_wp_tail, open_src_committed, open_src_virtual) =
+        step_proof.fold.openings.iter().fold(
+            (0usize, 0usize, 0usize, 0usize, 0usize, 0usize),
+            |(d, c, wb, wp, co, vr), opening| match format!("{:?}", opening.source).as_str() {
+                "TimeColumnsDerived" => (d + 1, c, wb, wp, co, vr),
+                "CcsTail" => (d, c + 1, wb, wp, co, vr),
+                "WbMeTail" => (d, c, wb + 1, wp, co, vr),
+                "WpMeTail" => (d, c, wb, wp + 1, co, vr),
+                "CommittedOpening" => (d, c, wb, wp, co + 1, vr),
+                "VirtualReducedOpening" => (d, c, wb, wp, co, vr + 1),
+                _ => (d, c, wb, wp, co, vr),
+            },
+        );
+    println!(
+        "  Time opening sources:    derived={} ccs_tail={} wb_tail={} wp_tail={} committed={} virtual_reduced={}",
+        open_src_derived, open_src_ccs_tail, open_src_wb_tail, open_src_wp_tail, open_src_committed, open_src_virtual
+    );
     println!();
 
     // ── 7. Used Sets ──
@@ -666,11 +755,17 @@ fn report_track_a_w0_w1_snapshot() {
     println!("9. SUMMARY");
     println!("{sep}");
     println!("  {:<36} {:>10}", "Main trace columns", layout.trace.cols);
-    println!("  {:<36} {:>10}", "Bus-tail columns", bus_tail_cols);
+    println!("  {:<36} {:>10}", "CPU base cols (m_in+trace)", cpu_base_m);
+    println!("  {:<36} {:>10}", "Committed mem/bus cols", committed_mem_bus_cols);
+    println!("  {:<36} {:>10}", "Uniform CCS width proxy", total_ccs_m_uniform);
+    println!(
+        "  {:<36} {:>10}",
+        "Bus-tail columns (legacy physical)", bus_tail_cols_physical
+    );
     println!("  {:<36} {:>10}", "Core CCS rows", core_ccs.n);
     println!("  {:<36} {:>10}", "Bus reserved rows", bus_reserved_rows);
     println!("  {:<36} {:>10}", "Total CCS rows (n)", total_ccs_n);
-    println!("  {:<36} {:>10}", "Total CCS cols (m)", total_ccs_m);
+    println!("  {:<36} {:>10}", "Total CCS cols (m, physical)", total_ccs_m_physical);
     println!("  {:<36} {:>10}", "Route-A batched claims", bt.claimed_sums.len());
     println!("  {:<36} {:>10}", "  of which: CCS", ccs_claims.len());
     println!("  {:<36} {:>10}", "  of which: Shout", shout_claims.len());
@@ -680,7 +775,14 @@ fn report_track_a_w0_w1_snapshot() {
     println!("  {:<36} {:>10}", "  of which: Width", width_claims.len());
     println!("  {:<36} {:>10}", "  of which: Control", control_claims.len());
     println!("  {:<36} {:>10}", "Commit lanes", 1);
-    println!("  {:<36} {:>10}", "Committed sidecars", 0);
+    println!("  {:<36} {:>10}", "Stage-8 fold lanes", step_proof.stage8_fold.len());
+    let committed_sidecars = step_proof
+        .fold
+        .openings
+        .iter()
+        .filter(|o| format!("{:?}", o.source).as_str() == "CommittedOpening")
+        .count();
+    println!("  {:<36} {:>10}", "Committed sidecars", committed_sidecars);
     println!("{sep}");
 }
 
@@ -907,4 +1009,45 @@ fn report_trace_vs_chunked_medians() {
         report_samples("TRACE", &trace_samples);
         report_samples("TRACE_SINGLE_CHUNK", &chunked_samples);
     }
+}
+
+#[test]
+fn acceptance_uniform_ccs_width_independent_of_chunk_rows() {
+    let program = build_mixed_program(64);
+    let steps = program.len();
+    let bytes = encode_program(&program);
+
+    let mut run_small_chunks = Rv32TraceWiring::from_rom(0, &bytes)
+        .min_trace_len(steps)
+        .max_steps(steps)
+        .chunk_rows(8)
+        .prove()
+        .expect("prove with chunk_rows=8");
+    run_small_chunks.verify().expect("verify with chunk_rows=8");
+
+    let mut run_large_chunks = Rv32TraceWiring::from_rom(0, &bytes)
+        .min_trace_len(steps)
+        .max_steps(steps)
+        .chunk_rows(32)
+        .prove()
+        .expect("prove with chunk_rows=32");
+    run_large_chunks
+        .verify()
+        .expect("verify with chunk_rows=32");
+
+    assert_eq!(
+        run_small_chunks.uniform_ccs_num_variables(),
+        run_large_chunks.uniform_ccs_num_variables(),
+        "uniform CCS acceptance: witness width should be independent of shard chunk size"
+    );
+    assert_eq!(
+        run_small_chunks.ccs_num_variables(),
+        run_small_chunks.uniform_ccs_num_variables(),
+        "uniform CCS acceptance: physical ccs.m must equal uniform width proxy (chunk_rows=8)"
+    );
+    assert_eq!(
+        run_large_chunks.ccs_num_variables(),
+        run_large_chunks.uniform_ccs_num_variables(),
+        "uniform CCS acceptance: physical ccs.m must equal uniform width proxy (chunk_rows=32)"
+    );
 }

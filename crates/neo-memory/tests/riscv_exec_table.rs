@@ -1,7 +1,7 @@
 use neo_memory::riscv::exec_table::{Rv32ExecTable, Rv32ShoutEventTable};
+use neo_memory::riscv::instruction::encode_lookup_key;
 use neo_memory::riscv::lookups::{
-    decode_program, encode_program, interleave_bits, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode,
-    RiscvShoutTables, PROG_ID,
+    decode_program, encode_program, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode, RiscvShoutTables, PROG_ID,
 };
 use neo_vm_trace::trace_program;
 
@@ -61,14 +61,14 @@ fn rv32_exec_table_matches_trace_lane_conventions_addi_halt() {
         assert_eq!(w.addr, 1);
         assert_eq!(w.value, 1);
 
-        // ADDI uses one ADD shout lookup: key = interleave(rs1_val, imm_u32), value = rd.
+        // ADDI uses one ADD shout lookup keyed with the active operand-mode encoding.
         let add_id = RiscvShoutTables::new(32).opcode_to_id(RiscvOpcode::Add);
         assert_eq!(row0.shout_events.len(), 1);
         let ev = &row0.shout_events[0];
         assert_eq!(ev.shout_id, add_id);
 
         let imm_u32 = 1u64;
-        let expected_key = interleave_bits(rs1.value, imm_u32) as u64;
+        let expected_key = encode_lookup_key(RiscvOpcode::Add, rs1.value, imm_u32, /*xlen=*/ 32);
         assert_eq!(ev.key, expected_key);
         assert_eq!(ev.value, 1);
     }

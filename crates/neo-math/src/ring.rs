@@ -4,9 +4,10 @@
 
 use crate::norms::{NeoMathError, Norms};
 use crate::Fq;
-use p3_field::{PrimeCharacteristicRing, PrimeField64};
+use p3_field::{Field, PrimeCharacteristicRing, PrimeField64};
 use p3_matrix::dense::DenseMatrix;
 use std::ops::{Add, Mul, Sub};
+use std::sync::OnceLock;
 
 /// Cyclotomic parameter eta and derived dimension d = deg(Phi_eta).
 pub const ETA: usize = 81;
@@ -173,6 +174,58 @@ impl Rq {
     }
 }
 
+/// Constant-term extraction `ct: R_q -> F_q`.
+#[inline]
+pub fn ct(a: &Rq) -> Fq {
+    a.0[0]
+}
+
+/// SuperNeo inner-product transform matrix `M` for `bar(v) = M * v`.
+///
+/// This matrix is built once (deterministically) as the inverse of the constant-term
+/// Gram matrix `G`, where `G[i,j] = ct(X^i * X^j mod Φ_81)`.
+///
+/// The resulting invariant is:
+/// `ct(cf_inv(superneo_bar_block(a)) * cf_inv(b)) == <a, b>`.
+pub fn superneo_bar_matrix() -> &'static [[Fq; D]; D] {
+    static M: OnceLock<[[Fq; D]; D]> = OnceLock::new();
+    M.get_or_init(build_superneo_bar_matrix)
+}
+
+/// Apply the SuperNeo `bar` transform to one `d`-coefficient block.
+#[inline]
+pub fn superneo_bar_block(v: [Fq; D]) -> [Fq; D] {
+    let m = superneo_bar_matrix();
+    let mut out = [Fq::ZERO; D];
+    for row in 0..D {
+        let mut acc = Fq::ZERO;
+        for col in 0..D {
+            acc += m[row][col] * v[col];
+        }
+        out[row] = acc;
+    }
+    out
+}
+
+/// Apply the SuperNeo `bar` transform block-wise over a field vector.
+///
+/// Panics if `v.len()` is not a multiple of `D`.
+pub fn superneo_bar_vec(v: &[Fq]) -> Vec<Fq> {
+    assert!(
+        v.len().is_multiple_of(D),
+        "superneo_bar_vec expects length multiple of D"
+    );
+    let mut out = vec![Fq::ZERO; v.len()];
+    for (blk_idx, chunk) in v.chunks_exact(D).enumerate() {
+        let mut block = [Fq::ZERO; D];
+        block.copy_from_slice(chunk);
+        let transformed = superneo_bar_block(block);
+        let dst = &mut out[blk_idx * D..(blk_idx + 1) * D];
+        dst.copy_from_slice(&transformed);
+    }
+    out
+}
+
 /// Reduce polynomial in-place modulo Φ₈₁(X) = X^54 + X^27 + 1.
 ///
 /// **Internal implementation detail** - not part of the public API.
@@ -200,6 +253,90 @@ pub(crate) fn reduce_mod_phi_81(coeffs: &mut [Fq; 2 * D - 1]) {
             }
         }
     }
+}
+
+fn build_superneo_bar_matrix() -> [[Fq; D]; D] {
+    let g = build_ct_gram_matrix();
+    let m = invert_matrix(g).expect("ct Gram matrix must be invertible");
+
+    // Internal sanity check: M^T G == I.
+    let mut mtg = [[Fq::ZERO; D]; D];
+    for i in 0..D {
+        for j in 0..D {
+            let mut acc = Fq::ZERO;
+            for r in 0..D {
+                acc += m[r][i] * g[r][j];
+            }
+            mtg[i][j] = acc;
+        }
+    }
+    for (i, row) in mtg.iter().enumerate() {
+        for (j, entry) in row.iter().enumerate() {
+            let want = if i == j { Fq::ONE } else { Fq::ZERO };
+            assert_eq!(*entry, want, "SuperNeo bar matrix sanity check failed at ({i},{j})");
+        }
+    }
+
+    m
+}
+
+fn build_ct_gram_matrix() -> [[Fq; D]; D] {
+    let mut g = [[Fq::ZERO; D]; D];
+    for i in 0..D {
+        for j in 0..D {
+            let mut ai = [Fq::ZERO; D];
+            ai[i] = Fq::ONE;
+            let mut bj = [Fq::ZERO; D];
+            bj[j] = Fq::ONE;
+            let prod = Rq::mul(&Rq(ai), &Rq(bj));
+            g[i][j] = ct(&prod);
+        }
+    }
+    g
+}
+
+fn invert_matrix(mut a: [[Fq; D]; D]) -> Option<[[Fq; D]; D]> {
+    let mut inv = [[Fq::ZERO; D]; D];
+    for (i, row) in inv.iter_mut().enumerate() {
+        row[i] = Fq::ONE;
+    }
+
+    for col in 0..D {
+        let mut pivot = None;
+        for (r, row) in a.iter().enumerate().skip(col) {
+            if row[col] != Fq::ZERO {
+                pivot = Some(r);
+                break;
+            }
+        }
+        let pivot = pivot?;
+        if pivot != col {
+            a.swap(pivot, col);
+            inv.swap(pivot, col);
+        }
+
+        let piv_inv = a[col][col].inverse();
+        for c in 0..D {
+            a[col][c] *= piv_inv;
+            inv[col][c] *= piv_inv;
+        }
+
+        for r in 0..D {
+            if r == col {
+                continue;
+            }
+            let factor = a[r][col];
+            if factor == Fq::ZERO {
+                continue;
+            }
+            for c in 0..D {
+                a[r][c] -= factor * a[col][c];
+                inv[r][c] -= factor * inv[col][c];
+            }
+        }
+    }
+
+    Some(inv)
 }
 
 /// Test-only wrapper for reduce_mod_phi_81

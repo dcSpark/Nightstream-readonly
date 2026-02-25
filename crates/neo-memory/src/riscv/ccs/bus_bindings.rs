@@ -246,7 +246,6 @@ fn trace_disabled_twist_binding(_layout: &Rv32TraceCcsLayout) -> TwistCpuBinding
 
 #[derive(Clone, Copy, Debug)]
 struct TraceDecodeSelectorCols {
-    rd_has_write: usize,
     ram_has_read: usize,
     ram_has_write: usize,
 }
@@ -296,7 +295,6 @@ fn trace_decode_selector_cols_from_bus(
     shout_shapes: &[TraceShoutShape],
 ) -> Result<TraceDecodeSelectorCols, String> {
     let decode_layout = Rv32DecodeSidecarLayout::new();
-    let rd_has_write_table_id = rv32_decode_lookup_table_id_for_col(decode_layout.rd_has_write);
     let ram_has_read_table_id = rv32_decode_lookup_table_id_for_col(decode_layout.ram_has_read);
     let ram_has_write_table_id = rv32_decode_lookup_table_id_for_col(decode_layout.ram_has_write);
     let table_val_col = |table_id: u32| -> Result<usize, String> {
@@ -319,7 +317,6 @@ fn trace_decode_selector_cols_from_bus(
             .ok_or_else(|| "RV32 trace shared bus: decode selector column overflow".to_string())
     };
     Ok(TraceDecodeSelectorCols {
-        rd_has_write: table_val_col(rd_has_write_table_id)?,
         ram_has_read: table_val_col(ram_has_read_table_id)?,
         ram_has_write: table_val_col(ram_has_write_table_id)?,
     })
@@ -355,7 +352,7 @@ fn trace_twist_primary_binding(
     } else if mem_id == REG_ID.0 {
         TwistCpuBinding {
             has_read: active,
-            has_write: decode_selectors.rd_has_write,
+            has_write: trace_cpu_col(layout, layout.trace.rd_has_write),
             read_addr: trace_cpu_col(layout, layout.trace.rs1_addr),
             write_addr: trace_cpu_col(layout, layout.trace.rd_addr),
             rv: trace_cpu_col(layout, layout.trace.rs1_val),
@@ -675,8 +672,26 @@ pub fn rv32_trace_shared_bus_extraction_with_specs(
         }
 
         if mem_id == REG_ID.0 {
+            let is_virtual_col_base = trace_cpu_col(layout, layout.trace.is_virtual);
             let lane0 = trace_twist_primary_binding(layout, mem_id, decode_selectors);
             builder.add_twist_instance_bound(&bus, &inst.lanes[0], &lane0);
+            // Cryptographic read-domain split (lane0/rs1):
+            // - non-virtual rows may read only architectural regs (<32)
+            builder.add_twist_read_addr_domain_split_nonvirtual(
+                &bus,
+                &inst.lanes[0],
+                is_virtual_col_base,
+                /*split_bit_idx=*/ 5,
+            );
+            // Cryptographic write-domain split:
+            // - non-virtual rows may write only architectural regs (<32)
+            // - virtual rows may write only virtual regs (>=32)
+            builder.add_twist_write_addr_domain_split(
+                &bus,
+                &inst.lanes[0],
+                is_virtual_col_base,
+                /*split_bit_idx=*/ 5,
+            );
             let lane1 = TwistCpuBinding {
                 has_read: trace_cpu_col(layout, layout.trace.active),
                 has_write: CPU_BUS_COL_DISABLED,
@@ -688,6 +703,14 @@ pub fn rv32_trace_shared_bus_extraction_with_specs(
             };
             if inst.lanes.len() >= 2 {
                 builder.add_twist_instance_bound(&bus, &inst.lanes[1], &lane1);
+                // Cryptographic read-domain split (lane1/rs2):
+                // - non-virtual rows may read only architectural regs (<32)
+                builder.add_twist_read_addr_domain_split_nonvirtual(
+                    &bus,
+                    &inst.lanes[1],
+                    is_virtual_col_base,
+                    /*split_bit_idx=*/ 5,
+                );
             }
             if inst.lanes.len() > 2 {
                 let disabled = trace_disabled_twist_binding(layout);

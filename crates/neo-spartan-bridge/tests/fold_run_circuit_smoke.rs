@@ -5,7 +5,7 @@ use bellpepper_core::test_cs::TestConstraintSystem;
 use neo_ajtai::Commitment as Cmt;
 use neo_ajtai::{set_global_pp, setup as ajtai_setup, AjtaiSModule};
 use neo_ccs::r1cs_to_ccs;
-use neo_ccs::{Mat, MeInstance};
+use neo_ccs::{CeClaim, Mat};
 use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::session::{me_from_z_balanced, Accumulator, FoldingSession, ProveInput};
 use neo_fold::shard::StepLinkingConfig;
@@ -23,7 +23,7 @@ use neo_spartan_bridge::{prove_fold_run, setup_fold_run, verify_fold_run};
 use p3_field::PrimeCharacteristicRing;
 use rand_chacha::rand_core::SeedableRng;
 
-fn dummy_me_instance() -> MeInstance<Cmt, F, K> {
+fn dummy_me_instance() -> CeClaim<Cmt, F, K> {
     // Dummy Ajtai commitment with zeros
     let c = Cmt::zeros(D, 1);
 
@@ -40,7 +40,7 @@ fn dummy_me_instance() -> MeInstance<Cmt, F, K> {
     // y_scalars: one per j; unused by the circuit, but populate with zero.
     let y_scalars = vec![K::ZERO];
 
-    MeInstance::<Cmt, F, K> {
+    CeClaim::<Cmt, F, K> {
         c_step_coords: vec![],
         u_offset: 0,
         u_len: 0,
@@ -48,8 +48,9 @@ fn dummy_me_instance() -> MeInstance<Cmt, F, K> {
         X,
         r,
         s_col: vec![],
-        y,
-        y_scalars,
+        y_ring: y,
+        ct: y_scalars,
+        aux_openings: vec![],
         y_zcol: vec![K::ZERO; D],
         m_in: 1,
         fold_digest: [0u8; 32],
@@ -100,7 +101,10 @@ fn build_trivial_fold_run_and_instance() -> (FoldRunInstance, FoldRunWitness) {
     let me_out = dummy_me_instance();
 
     // RLC: trivial identity mix – parent == child, ρ = I_D.
-    let rlc_rhos_step = vec![Mat::identity(D)];
+    let params = NeoParams::goldilocks_127();
+    let rlc_rhos_step =
+        neo_fold::pi_ccs::rot_rhos_from_mats(&params, &[Mat::identity(D)], "fold_run_circuit_smoke:rhos")
+            .expect("typed identity rho");
     let rlc_parent = me_out.clone();
 
     // DEC: trivial k=1 decomposition – parent == only child.
@@ -116,6 +120,21 @@ fn build_trivial_fold_run_and_instance() -> (FoldRunInstance, FoldRunWitness) {
         rlc_rhos: rlc_rhos_step.clone(),
         rlc_parent: rlc_parent.clone(),
         dec_children: dec_children.clone(),
+        cpu_sumcheck: Default::default(),
+        shift_sumcheck: Default::default(),
+        time_cpu_commitments: Vec::new(),
+        time_mem_commitments: Vec::new(),
+        time_t: 0,
+        time_declared_len: 0,
+        time_col_ids: Vec::new(),
+        memory_time_proofs: Vec::new(),
+        openings: Vec::new(),
+        opening_proofs: Vec::new(),
+        opening_manifest: Default::default(),
+        opening_reduction: Default::default(),
+        opening_unification: Default::default(),
+        joint_opening_lane: Default::default(),
+        folding_lanes: Default::default(),
     };
 
     // FoldRun with one step (final outputs computed from steps).
@@ -138,18 +157,21 @@ fn build_trivial_fold_run_and_instance() -> (FoldRunInstance, FoldRunWitness) {
             val_fold: Vec::new(),
             wb_fold: Vec::new(),
             wp_fold: Vec::new(),
+            compressed_substeps: None,
+            stage8_fold: Vec::new(),
         }],
         output_proof: None,
+        segment_meta: None,
     };
 
     // Public instance: empty initial accumulator, final accumulator = DEC children,
     // and zero-valued Π-CCS challenges for the single step.
-    let initial_accumulator: Vec<MeInstance<Cmt, F, K>> = Vec::new();
+    let initial_accumulator: Vec<CeClaim<Cmt, F, K>> = Vec::new();
     let instance = FoldRunInstance {
         params_digest: [0u8; 32],
         ccs_digest: [0u8; 32],
         initial_accumulator: initial_accumulator.clone(),
-        final_accumulator: run.compute_final_outputs(&initial_accumulator),
+        final_accumulator: run.compute_final_main_children(&initial_accumulator),
         pi_ccs_challenges: vec![dummy_pi_ccs_challenges_zero()],
     };
 
@@ -213,9 +235,9 @@ fn fold_run_circuit_initial_sum_mismatch_unsatisfied() {
     );
 }
 
-fn setup_ajtai_for_dims(m: usize) {
+fn setup_ajtai_for_commit_cols(m_cols: usize) {
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-    let pp = ajtai_setup(&mut rng, D, 4, m).expect("Ajtai setup should succeed");
+    let pp = ajtai_setup(&mut rng, D, 4, m_cols).expect("Ajtai setup should succeed");
     let _ = set_global_pp(pp);
 }
 
@@ -266,8 +288,9 @@ fn fold_run_circuit_optimized_nontrivial_satisfied() {
     let params =
         NeoParams::goldilocks_auto_r1cs_ccs(n_constraints).expect("goldilocks_auto_r1cs_ccs should find valid params");
 
-    setup_ajtai_for_dims(n_vars);
-    let l = AjtaiSModule::from_global_for_dims(D, n_vars).expect("AjtaiSModule init");
+    let commit_cols = n_vars.div_ceil(D);
+    setup_ajtai_for_commit_cols(commit_cols);
+    let l = AjtaiSModule::from_global_for_dims(D, commit_cols).expect("AjtaiSModule init");
 
     let dims = reductions_utils::build_dims_and_policy(&params, &ccs.ensure_identity_first().expect("identity-first"))
         .expect("dims");
@@ -348,7 +371,7 @@ fn fold_run_circuit_optimized_nontrivial_satisfied() {
 
     // --- Build FoldRunWitness for the Spartan bridge (Π-CCS proofs + RLC data) ---
     let steps_len = run.steps.len();
-    let rlc_rhos: Vec<Vec<Mat<F>>> = run.steps.iter().map(|s| s.fold.rlc_rhos.clone()).collect();
+    let rlc_rhos = run.steps.iter().map(|s| s.fold.rlc_rhos.clone()).collect();
     let witnesses: Vec<Vec<Mat<F>>> = vec![Vec::new(); steps_len];
     let dec_children_z: Vec<Vec<Mat<F>>> = vec![Vec::new(); steps_len];
 
@@ -437,7 +460,7 @@ fn fold_run_circuit_optimized_nontrivial_satisfied() {
             params_digest: [0u8; 32],
             ccs_digest: [0u8; 32],
             initial_accumulator: initial_accumulator.clone(),
-            final_accumulator: run.compute_final_outputs(&initial_accumulator),
+            final_accumulator: run.compute_final_main_children(&initial_accumulator),
             pi_ccs_challenges,
         };
 

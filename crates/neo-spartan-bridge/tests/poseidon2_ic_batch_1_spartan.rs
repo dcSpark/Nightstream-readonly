@@ -7,9 +7,18 @@ use neo_spartan_bridge::CircuitF;
 use neo_spartan_bridge::{prove_fold_run, setup_fold_run, verify_fold_run};
 use p3_field::PrimeField64;
 use spartan2::traits::snark::R1CSSNARKTrait;
-use std::fs;
-use std::path::PathBuf;
 use std::time::Instant;
+
+// SuperNeo-only b=2 rejects full-field Poseidon witness values. Use a compact valid export
+// whose witness coefficients are representable in D=54 balanced base-2 digits.
+const SUPERNEO_REPRESENTABLE_EXPORT_JSON: &str = r#"{
+  "num_constraints": 1,
+  "num_variables": 2,
+  "matrix_a": { "rows": 1, "cols": 2, "entries": [[0, 0, 1]] },
+  "matrix_b": { "rows": 1, "cols": 2, "entries": [[0, 1, 1]] },
+  "matrix_c": { "rows": 1, "cols": 2, "entries": [[0, 1, 1]] },
+  "witness": [[1, 5]]
+}"#;
 
 fn fmt_ms(ms: f64) -> String {
     format!("{ms:.1} ms")
@@ -44,10 +53,8 @@ fn fmt_bytes(bytes: usize) -> String {
 
 #[test]
 fn test_poseidon2_ic_batch_1_spartan_proof_size() {
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let json_path = manifest_dir.join("../neo-fold/poseidon2-tests/poseidon2_ic_circuit_batch_1.json");
-    let json = fs::read_to_string(&json_path).expect("read poseidon2 batch-1 json");
-    let export = neo_fold::test_export::parse_test_export_json(&json).expect("parse test-export json");
+    let json = SUPERNEO_REPRESENTABLE_EXPORT_JSON;
+    let export = neo_fold::test_export::parse_test_export_json(json).expect("parse test-export json");
 
     assert_eq!(
         export.witness.len(),
@@ -67,7 +74,7 @@ fn test_poseidon2_ic_batch_1_spartan_proof_size() {
     let total_start = Instant::now();
 
     let create_start = Instant::now();
-    let mut session = neo_fold::test_export::TestExportSession::new_from_circuit_json(&json).expect("session init");
+    let mut session = neo_fold::test_export::TestExportSession::new_from_circuit_json(json).expect("session init");
     let create_ms = create_start.elapsed().as_secs_f64() * 1000.0;
 
     let setup = session.setup_timings_ms().clone();
@@ -117,7 +124,7 @@ fn test_poseidon2_ic_batch_1_spartan_proof_size() {
     println!("Adding witness steps…");
     let add_start = Instant::now();
     session
-        .add_steps_from_test_export_json(&json)
+        .add_steps_from_test_export_json(json)
         .expect("add witness steps");
     let add_ms = add_start.elapsed().as_secs_f64() * 1000.0;
     println!("Timings: add_steps_total={}", fmt_ms(add_ms));

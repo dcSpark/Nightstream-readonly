@@ -92,11 +92,7 @@ fn trace_single_addi_constraint_shapes_are_consistent() {
     let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
 
     assert_eq!(layout.t, 4, "expected power-of-two padded rows for ADDI+HALT");
-    assert_eq!(
-        layout.m,
-        layout.m_in + layout.trace.cols * layout.t,
-        "layout width regression"
-    );
+    assert_eq!(layout.m, layout.m_in + layout.trace.cols, "layout width regression");
     assert_eq!(ccs.m, layout.m, "CCS witness width must match layout");
     assert!(ccs.n > layout.t, "CCS must contain non-trivial constraints");
 }

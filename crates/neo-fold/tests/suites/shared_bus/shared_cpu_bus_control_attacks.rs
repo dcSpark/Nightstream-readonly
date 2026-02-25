@@ -1,9 +1,47 @@
 use neo_fold::riscv_trace_shard::{Rv32TraceWiring, Rv32TraceWiringRun};
-use neo_fold::shard::ShardProof;
+use neo_fold::shard::{ShardProof, StepProof};
 use neo_math::K;
 use neo_memory::riscv::lookups::{encode_program, BranchCondition, RiscvInstruction, RiscvOpcode};
 use neo_memory::riscv::trace::{rv32_decode_lookup_backed_cols, Rv32DecodeSidecarLayout, Rv32TraceLayout};
 use p3_field::PrimeCharacteristicRing;
+
+fn first_materialized_step(proof: &ShardProof) -> &StepProof {
+    let step0 = proof
+        .steps
+        .first()
+        .expect("expected at least one proof step");
+    if step0
+        .compressed_substeps
+        .as_ref()
+        .is_some_and(|sub| !sub.is_empty())
+    {
+        return step0
+            .compressed_substeps
+            .as_ref()
+            .and_then(|sub| sub.first())
+            .expect("expected at least one compressed materialized proof step");
+    }
+    step0
+}
+
+fn first_materialized_step_mut(proof: &mut ShardProof) -> &mut StepProof {
+    let step0 = proof
+        .steps
+        .first_mut()
+        .expect("expected at least one proof step");
+    if step0
+        .compressed_substeps
+        .as_ref()
+        .is_some_and(|sub| !sub.is_empty())
+    {
+        return step0
+            .compressed_substeps
+            .as_mut()
+            .and_then(|sub| sub.first_mut())
+            .expect("expected at least one compressed materialized proof step");
+    }
+    step0
+}
 
 fn prove_control_trace_program(program: Vec<RiscvInstruction>) -> (Rv32TraceWiringRun, ShardProof) {
     let program_bytes = encode_program(&program);
@@ -18,6 +56,8 @@ fn prove_control_trace_program(program: Vec<RiscvInstruction>) -> (Rv32TraceWiri
 fn rv32_wp_opening_cols(layout: &Rv32TraceLayout) -> Vec<usize> {
     vec![
         layout.active,
+        layout.is_virtual,
+        layout.virtual_sequence_remaining,
         layout.instr_word,
         layout.rs1_addr,
         layout.rs1_val,
@@ -25,62 +65,77 @@ fn rv32_wp_opening_cols(layout: &Rv32TraceLayout) -> Vec<usize> {
         layout.rs2_val,
         layout.rd_addr,
         layout.rd_val,
+        layout.rd_has_write,
         layout.ram_addr,
         layout.ram_rv,
         layout.ram_wv,
         layout.shout_has_lookup,
+        layout.shout_table_id,
         layout.shout_val,
         layout.shout_lhs,
         layout.shout_rhs,
+        layout.shout_add_sub_key,
         layout.jalr_drop_bit,
         layout.pc_before,
         layout.pc_after,
     ]
 }
 
+fn tamper_named_wp_opening_scalar(proof: &mut ShardProof, target_col: usize) {
+    let wp_point = {
+        let step = first_materialized_step(proof);
+        assert_eq!(
+            step.mem.wp_me_claims.len(),
+            1,
+            "expected one WP ME claim reused by control stage checks"
+        );
+        step.mem.wp_me_claims[0].r.clone()
+    };
+    let step = first_materialized_step_mut(proof);
+    let wp_open_idx = step
+        .fold
+        .openings
+        .iter()
+        .position(|opening| opening.point == wp_point && opening.col_ids.iter().any(|&c| c == target_col))
+        .or_else(|| {
+            step.fold
+                .openings
+                .iter()
+                .position(|opening| opening.point == wp_point)
+        })
+        .expect("control stage openings must be present in WP named openings");
+    let wp_open = &mut step.fold.openings[wp_open_idx];
+    assert!(!wp_open.evals.is_empty(), "WP named opening evals must be non-empty");
+    let open_idx = wp_open
+        .col_ids
+        .iter()
+        .position(|&c| c == target_col)
+        .unwrap_or(0);
+    assert!(
+        open_idx < wp_open.evals.len(),
+        "control stage opening index must be in-bounds"
+    );
+    wp_open.evals[open_idx] += K::ONE;
+}
+
 fn tamper_control_decode_opening_scalar(proof: &mut ShardProof, decode_col: usize) {
     let layout = Rv32DecodeSidecarLayout::new();
     let decode_open_cols = rv32_decode_lookup_backed_cols(&layout);
-    assert_eq!(
-        proof.steps[0].mem.wp_me_claims.len(),
-        1,
-        "expected one WP ME claim carrying decode openings for control stage checks"
+    assert!(
+        decode_open_cols.contains(&decode_col),
+        "decode col must be present in control stage decode opening set"
     );
-    let me = &mut proof.steps[0].mem.wp_me_claims[0];
-    let decode_start = me
-        .y_scalars
-        .len()
-        .checked_sub(decode_open_cols.len())
-        .expect("control stage decode opening shape in WP ME tail");
-    let open_idx = decode_open_cols
-        .iter()
-        .position(|&c| c == decode_col)
-        .expect("decode col must be present in control stage decode opening set");
-    me.y_scalars[decode_start + open_idx] += K::ONE;
+    tamper_named_wp_opening_scalar(proof, decode_col);
 }
 
 fn tamper_control_wp_opening_scalar(proof: &mut ShardProof, trace_col: usize) {
     let layout = Rv32TraceLayout::new();
     let open_cols = rv32_wp_opening_cols(&layout);
-    let decode_open_cols = rv32_decode_lookup_backed_cols(&Rv32DecodeSidecarLayout::new());
-    let open_idx = open_cols
-        .iter()
-        .position(|&c| c == trace_col)
-        .expect("trace col must be present in control stage WP opening set");
-    assert_eq!(
-        proof.steps[0].mem.wp_me_claims.len(),
-        1,
-        "expected one WP ME claim reused by control stage checks"
+    assert!(
+        open_cols.contains(&trace_col),
+        "trace col must be present in control stage WP opening set"
     );
-    let me = &mut proof.steps[0].mem.wp_me_claims[0];
-    let core_t = me
-        .y_scalars
-        .len()
-        .checked_sub(decode_open_cols.len())
-        .expect("control stage decode opening tail shape")
-        .checked_sub(open_cols.len())
-        .expect("control stage WP opening shape");
-    me.y_scalars[core_t + open_idx] += K::ONE;
+    tamper_named_wp_opening_scalar(proof, trace_col);
 }
 
 #[test]

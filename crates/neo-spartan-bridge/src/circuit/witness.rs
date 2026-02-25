@@ -5,7 +5,8 @@
 //! and neo-reductions, but are tailored for circuit synthesis.
 
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::{Mat, MeInstance};
+use neo_ccs::{CeClaim, Mat};
+use neo_fold::pi_ccs::RotRho;
 use neo_fold::shard::ShardProof as FoldRun;
 use neo_math::{F, K};
 
@@ -19,10 +20,10 @@ pub struct FoldRunInstance {
     pub ccs_digest: [u8; 32],
 
     /// Initial accumulator (public)
-    pub initial_accumulator: Vec<MeInstance<Cmt, F, K>>,
+    pub initial_accumulator: Vec<CeClaim<Cmt, F, K>>,
 
     /// Final accumulator (public claim)
-    pub final_accumulator: Vec<MeInstance<Cmt, F, K>>,
+    pub final_accumulator: Vec<CeClaim<Cmt, F, K>>,
 
     /// Π-CCS challenges (from the Π-CCS Fiat–Shamir transcript).
     ///
@@ -79,7 +80,7 @@ pub struct FoldRunWitness {
     pub witnesses: Vec<Vec<Mat<F>>>,
 
     /// RLC ρ matrices for each step
-    pub rlc_rhos: Vec<Vec<Mat<F>>>,
+    pub rlc_rhos: Vec<Vec<RotRho>>,
 
     /// DEC children Z matrices for each step
     pub dec_children_z: Vec<Vec<Mat<F>>>,
@@ -91,10 +92,10 @@ impl FoldRunInstance {
         run: &FoldRun,
         params_digest: [u8; 32],
         ccs_digest: [u8; 32],
-        initial_accumulator: Vec<MeInstance<Cmt, F, K>>,
+        initial_accumulator: Vec<CeClaim<Cmt, F, K>>,
         pi_ccs_challenges: Vec<PiCcsChallenges>,
     ) -> Self {
-        let final_accumulator = run.compute_final_outputs(&initial_accumulator);
+        let final_accumulator = run.compute_final_main_children(&initial_accumulator);
 
         Self {
             params_digest,
@@ -111,7 +112,7 @@ impl FoldRunWitness {
     pub fn from_fold_run(
         fold_run: FoldRun,
         witnesses: Vec<Vec<Mat<F>>>,
-        rlc_rhos: Vec<Vec<Mat<F>>>,
+        rlc_rhos: Vec<Vec<RotRho>>,
         dec_children_z: Vec<Vec<Mat<F>>>,
     ) -> Self {
         Self {

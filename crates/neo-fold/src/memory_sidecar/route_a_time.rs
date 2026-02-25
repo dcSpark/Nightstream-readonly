@@ -1,7 +1,8 @@
 use neo_ajtai::Commitment as Cmt;
 use neo_math::{F, K};
+use neo_memory::ts_common as ts;
 use neo_memory::witness::{StepInstanceBundle, StepWitnessBundle};
-use neo_reductions::sumcheck::{BatchedClaim, BatchedClaimResult, RoundOracle};
+use neo_reductions::sumcheck::{BatchedClaim, RoundOracle};
 use neo_transcript::Poseidon2Transcript;
 use p3_field::PrimeCharacteristicRing;
 
@@ -15,7 +16,6 @@ use crate::PiCcsError;
 
 pub struct RouteABatchedTimeProverOutput {
     pub r_time: Vec<K>,
-    pub per_claim_results: Vec<BatchedClaimResult>,
     pub proof: BatchedTimeProof,
 }
 
@@ -67,10 +67,7 @@ fn append_optional_claim<'a>(
 pub fn prove_route_a_batched_time(
     tr: &mut Poseidon2Transcript,
     step_idx: usize,
-    ell_n: usize,
-    ccs_time_degree_bound: usize,
-    ccs_initial_sum: K,
-    ccs_oracle: &mut dyn RoundOracle,
+    ell_t: usize,
     mem_oracles: &mut RouteAMemoryOracles,
     step: &StepWitnessBundle<Cmt, F, K>,
     twist_read_claims: Vec<K>,
@@ -96,36 +93,23 @@ pub fn prove_route_a_batched_time(
     let mut claim_is_dynamic: Vec<bool> = Vec::new();
     let mut claims: Vec<BatchedClaim<'_>> = Vec::new();
 
-    // CCS claim (time/row rounds only).
-    let mut ccs_time = RoundOraclePrefix::new(ccs_oracle, ell_n);
-    claimed_sums.push(ccs_initial_sum);
-    degree_bounds.push(ccs_time.degree_bound());
-    labels.push(b"ccs/time");
-    // Keep CCS/time claimed sum in the dynamic-claim registry for transcript consistency.
-    claim_is_dynamic.push(true);
-    claims.push(BatchedClaim {
-        oracle: &mut ccs_time,
-        claimed_sum: ccs_initial_sum,
-        label: b"ccs/time",
-    });
-
     let mut shout_protocol =
-        ShoutRouteAProtocol::new(&mut mem_oracles.shout, &mut mem_oracles.shout_gamma_groups, ell_n);
+        ShoutRouteAProtocol::new(&mut mem_oracles.shout, &mut mem_oracles.shout_gamma_groups, ell_t);
     shout_protocol.append_time_claims(
-        ell_n,
+        ell_t,
         &mut claimed_sums,
         &mut degree_bounds,
         &mut labels,
         &mut claim_is_dynamic,
         &mut claims,
-    );
+    )?;
 
     // Optional: event-table Shout linkage trace hash claim.
     let shout_event_trace_hash_claim = mem_oracles.shout_event_trace_hash.as_ref().map(|o| o.claim);
     let mut shout_event_trace_hash_prefix = mem_oracles
         .shout_event_trace_hash
         .as_mut()
-        .map(|o| RoundOraclePrefix::new(o.oracle.as_mut(), ell_n));
+        .map(|o| RoundOraclePrefix::new(o.oracle.as_mut(), ell_t));
     if let (Some(claim), Some(prefix)) = (shout_event_trace_hash_claim, shout_event_trace_hash_prefix.as_mut()) {
         claimed_sums.push(claim);
         degree_bounds.push(prefix.degree_bound());
@@ -139,15 +123,15 @@ pub fn prove_route_a_batched_time(
     }
 
     let mut twist_protocol =
-        TwistRouteAProtocol::new(&mut mem_oracles.twist, ell_n, twist_read_claims, twist_write_claims);
+        TwistRouteAProtocol::new(&mut mem_oracles.twist, ell_t, twist_read_claims, twist_write_claims)?;
     twist_protocol.append_time_claims(
-        ell_n,
+        ell_t,
         &mut claimed_sums,
         &mut degree_bounds,
         &mut labels,
         &mut claim_is_dynamic,
         &mut claims,
-    );
+    )?;
     macro_rules! append_zero_optional_claim {
         ($claim_opt:ident, $degree_bound:ident, $oracle:ident, $label:ident, $missing_label_msg:literal, $missing_claimed_sum_msg:literal) => {
             let $degree_bound = $claim_opt.as_ref().map(|extra| extra.oracle.degree_bound());
@@ -305,7 +289,6 @@ pub fn prove_route_a_batched_time(
     let metas = RouteATimeClaimPlan::time_claim_metas_for_instances(
         step.lut_instances.iter().map(|(inst, _)| inst),
         step.mem_instances.iter().map(|(inst, _)| inst),
-        ccs_time_degree_bound,
         wb_time_degree_bound.is_some(),
         wp_time_degree_bound.is_some(),
         decode_decode_fields_degree_bound.is_some() || decode_decode_immediates_degree_bound.is_some(),
@@ -334,14 +317,28 @@ pub fn prove_route_a_batched_time(
         return Err(PiCcsError::ProtocolError("batched time dynamic-flag drift".into()));
     }
 
-    // Run batched sum-check prover (shared r_time challenges).
-    bind_batched_dynamic_claims(tr, &claimed_sums, &labels, &degree_bounds, &claim_is_dynamic);
-    let (r_time, per_claim_results) =
-        run_batched_sumcheck_prover_ds(tr, b"shard/batched_time", step_idx, claims.as_mut_slice())?;
+    let (r_time, per_claim_results) = if claims.is_empty() {
+        (
+            ts::sample_ext_point(
+                tr,
+                b"shard/batched_time/empty/r_time",
+                b"shard/batched_time/empty/r_time/0",
+                b"shard/batched_time/empty/r_time/1",
+                ell_t,
+            ),
+            Vec::new(),
+        )
+    } else {
+        // Run batched sum-check prover (shared r_time challenges).
+        bind_batched_dynamic_claims(tr, &claimed_sums, &labels, &degree_bounds, &claim_is_dynamic);
+        let (r_time, per_claim_results) =
+            run_batched_sumcheck_prover_ds(tr, b"shard/batched_time", step_idx, claims.as_mut_slice())?;
+        (r_time, per_claim_results)
+    };
 
-    if r_time.len() != ell_n {
+    if r_time.len() != ell_t {
         return Err(PiCcsError::ProtocolError(format!(
-            "batched sumcheck returned r_time.len()={}, expected ell_n={ell_n}",
+            "batched sumcheck returned r_time.len()={}, expected ell_t={ell_t}",
             r_time.len()
         )));
     }
@@ -351,16 +348,12 @@ pub fn prove_route_a_batched_time(
         degree_bounds: degree_bounds.clone(),
         labels: labels.clone(),
         round_polys: per_claim_results
-            .iter()
-            .map(|r| r.round_polys.clone())
+            .into_iter()
+            .map(|r| r.round_polys)
             .collect(),
     };
 
-    Ok(RouteABatchedTimeProverOutput {
-        r_time,
-        per_claim_results,
-        proof,
-    })
+    Ok(RouteABatchedTimeProverOutput { r_time, proof })
 }
 
 pub struct RouteABatchedTimeVerifyOutput {
@@ -371,9 +364,7 @@ pub struct RouteABatchedTimeVerifyOutput {
 pub fn verify_route_a_batched_time(
     tr: &mut Poseidon2Transcript,
     step_idx: usize,
-    ell_n: usize,
-    ccs_time_degree_bound: usize,
-    claimed_initial_sum: K,
+    ell_t: usize,
     step: &StepInstanceBundle<Cmt, F, K>,
     proof: &BatchedTimeProof,
     wb_enabled: bool,
@@ -385,7 +376,6 @@ pub fn verify_route_a_batched_time(
 ) -> Result<RouteABatchedTimeVerifyOutput, PiCcsError> {
     let metas = RouteATimeClaimPlan::time_claim_metas_for_step(
         step,
-        ccs_time_degree_bound,
         wb_enabled,
         wp_enabled,
         decode_stage_enabled,
@@ -414,21 +404,12 @@ pub fn verify_route_a_batched_time(
             proof.claimed_sums.len()
         )));
     }
-    if proof.claimed_sums.is_empty() || proof.claimed_sums[0] != claimed_initial_sum {
-        return Err(PiCcsError::ProtocolError(format!(
-            "step {}: batched_time claimed_sums[0] (CCS/time) != public initial sum",
-            step_idx
-        )));
-    }
     for (i, (&sum, &dyn_ok)) in proof
         .claimed_sums
         .iter()
         .zip(claim_is_dynamic.iter())
         .enumerate()
     {
-        if i == 0 {
-            continue;
-        }
         if !dyn_ok && sum != K::ZERO {
             return Err(PiCcsError::ProtocolError(format!(
                 "step {}: batched_time claimed_sums[{}] must be 0 (label {:?})",
@@ -457,34 +438,49 @@ pub fn verify_route_a_batched_time(
         }
     }
 
-    // Verify the batched time/row sumcheck rounds (derives shared r_time).
-    bind_batched_dynamic_claims(
-        tr,
-        &proof.claimed_sums,
-        &expected_labels,
-        &expected_degree_bounds,
-        &claim_is_dynamic,
-    );
-    let (r_time, final_values, ok) = verify_batched_sumcheck_rounds_ds(
-        tr,
-        b"shard/batched_time",
-        step_idx,
-        &proof.round_polys,
-        &proof.claimed_sums,
-        &expected_labels,
-        &expected_degree_bounds,
-    );
-    if !ok {
-        return Err(PiCcsError::SumcheckError(
-            "batched time sumcheck verification failed".into(),
-        ));
-    }
-    if r_time.len() != ell_n {
+    let (r_time, final_values) = if expected_claims == 0 {
+        (
+            ts::sample_ext_point(
+                tr,
+                b"shard/batched_time/empty/r_time",
+                b"shard/batched_time/empty/r_time/0",
+                b"shard/batched_time/empty/r_time/1",
+                ell_t,
+            ),
+            Vec::new(),
+        )
+    } else {
+        // Verify the batched time sumcheck rounds (derives shared r_time).
+        bind_batched_dynamic_claims(
+            tr,
+            &proof.claimed_sums,
+            &expected_labels,
+            &expected_degree_bounds,
+            &claim_is_dynamic,
+        );
+        let (r_time, final_values, ok) = verify_batched_sumcheck_rounds_ds(
+            tr,
+            b"shard/batched_time",
+            step_idx,
+            &proof.round_polys,
+            &proof.claimed_sums,
+            &expected_labels,
+            &expected_degree_bounds,
+        );
+        if !ok {
+            return Err(PiCcsError::SumcheckError(
+                "batched time sumcheck verification failed".into(),
+            ));
+        }
+        (r_time, final_values)
+    };
+
+    if r_time.len() != ell_t {
         return Err(PiCcsError::ProtocolError(format!(
-            "step {}: r_time length mismatch (got {}, expected ell_n={})",
+            "step {}: r_time length mismatch (got {}, expected ell_t={})",
             step_idx,
             r_time.len(),
-            ell_n
+            ell_t
         )));
     }
     if final_values.len() != expected_claims {

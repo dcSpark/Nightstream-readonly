@@ -23,7 +23,7 @@
 use std::marker::PhantomData;
 
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::relations::{CcsStructure, McsInstance, McsWitness};
+use neo_ccs::relations::{CcsClaim, CcsStructure, CcsWitness};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::shard::{
@@ -200,12 +200,12 @@ fn has_write_flag_mismatch_wv_nonzero_should_be_rejected() {
     let c = l.commit(&Z);
 
     let mcs = (
-        McsInstance {
+        CcsClaim {
             c,
             x: z[..m_in].to_vec(),
             m_in,
         },
-        McsWitness {
+        CcsWitness {
             w: z[m_in..].to_vec(),
             Z,
         },
@@ -224,12 +224,13 @@ fn has_write_flag_mismatch_wv_nonzero_should_be_rejected() {
 
     let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
-    let steps_witness = vec![StepWitnessBundle {
+    let steps_witness = vec![crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
         mcs,
         lut_instances: vec![],
         mem_instances: vec![(mem_inst, mem_wit)],
+        time_columns: crate::common_setup::empty_time_columns(),
         _phantom: PhantomData::<K>,
-    }];
+    })];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, K>> =
         steps_witness.iter().map(StepInstanceBundle::from).collect();
 
@@ -321,12 +322,12 @@ fn has_write_flag_mismatch_inc_nonzero_should_be_rejected() {
     let c = l.commit(&Z);
 
     let mcs = (
-        McsInstance {
+        CcsClaim {
             c,
             x: z[..m_in].to_vec(),
             m_in,
         },
-        McsWitness {
+        CcsWitness {
             w: z[m_in..].to_vec(),
             Z,
         },
@@ -345,12 +346,13 @@ fn has_write_flag_mismatch_inc_nonzero_should_be_rejected() {
 
     let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
-    let steps_witness = vec![StepWitnessBundle {
+    let steps_witness = vec![crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
         mcs,
         lut_instances: vec![],
         mem_instances: vec![(mem_inst, mem_wit)],
+        time_columns: crate::common_setup::empty_time_columns(),
         _phantom: PhantomData::<K>,
-    }];
+    })];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, K>> =
         steps_witness.iter().map(StepInstanceBundle::from).collect();
 
@@ -442,12 +444,12 @@ fn has_read_flag_mismatch_ra_bits_nonzero_should_be_rejected() {
     let c = l.commit(&Z);
 
     let mcs = (
-        McsInstance {
+        CcsClaim {
             c,
             x: z[..m_in].to_vec(),
             m_in,
         },
-        McsWitness {
+        CcsWitness {
             w: z[m_in..].to_vec(),
             Z,
         },
@@ -466,12 +468,13 @@ fn has_read_flag_mismatch_ra_bits_nonzero_should_be_rejected() {
 
     let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
-    let steps_witness = vec![StepWitnessBundle {
+    let steps_witness = vec![crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
         mcs,
         lut_instances: vec![],
         mem_instances: vec![(mem_inst, mem_wit)],
+        time_columns: crate::common_setup::empty_time_columns(),
         _phantom: PhantomData::<K>,
-    }];
+    })];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, K>> =
         steps_witness.iter().map(StepInstanceBundle::from).collect();
 
@@ -563,12 +566,12 @@ fn has_write_flag_mismatch_wa_bits_nonzero_should_be_rejected() {
     let c = l.commit(&Z);
 
     let mcs = (
-        McsInstance {
+        CcsClaim {
             c,
             x: z[..m_in].to_vec(),
             m_in,
         },
-        McsWitness {
+        CcsWitness {
             w: z[m_in..].to_vec(),
             Z,
         },
@@ -587,12 +590,13 @@ fn has_write_flag_mismatch_wa_bits_nonzero_should_be_rejected() {
 
     let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
-    let steps_witness = vec![StepWitnessBundle {
+    let steps_witness = vec![crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
         mcs,
         lut_instances: vec![],
         mem_instances: vec![(mem_inst, mem_wit)],
+        time_columns: crate::common_setup::empty_time_columns(),
         _phantom: PhantomData::<K>,
-    }];
+    })];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, K>> =
         steps_witness.iter().map(StepInstanceBundle::from).collect();
 
@@ -694,12 +698,12 @@ fn has_lookup_flag_mismatch_val_nonzero_should_be_rejected() {
     let c = l.commit(&Z);
 
     let mcs = (
-        McsInstance {
+        CcsClaim {
             c,
             x: z[..m_in].to_vec(),
             m_in,
         },
-        McsWitness {
+        CcsWitness {
             w: z[m_in..].to_vec(),
             Z,
         },
@@ -732,12 +736,13 @@ fn has_lookup_flag_mismatch_val_nonzero_should_be_rejected() {
     };
     let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
-    let steps_witness = vec![StepWitnessBundle {
+    let steps_witness = vec![crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
         mcs,
         lut_instances: vec![(lut_inst, lut_wit)],
         mem_instances: vec![(mem_inst, mem_wit)],
+        time_columns: crate::common_setup::empty_time_columns(),
         _phantom: PhantomData::<K>,
-    }];
+    })];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, K>> =
         steps_witness.iter().map(StepInstanceBundle::from).collect();
 
@@ -835,12 +840,12 @@ fn has_lookup_flag_mismatch_addr_bits_nonzero_should_be_rejected() {
     let c = l.commit(&Z);
 
     let mcs = (
-        McsInstance {
+        CcsClaim {
             c,
             x: z[..m_in].to_vec(),
             m_in,
         },
-        McsWitness {
+        CcsWitness {
             w: z[m_in..].to_vec(),
             Z,
         },
@@ -873,12 +878,13 @@ fn has_lookup_flag_mismatch_addr_bits_nonzero_should_be_rejected() {
     };
     let (mem_inst, mem_wit) = metadata_only_mem_instance(0, &mem_layout, mem_init, mem_trace.steps);
 
-    let steps_witness = vec![StepWitnessBundle {
+    let steps_witness = vec![crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
         mcs,
         lut_instances: vec![(lut_inst, lut_wit)],
         mem_instances: vec![(mem_inst, mem_wit)],
+        time_columns: crate::common_setup::empty_time_columns(),
         _phantom: PhantomData::<K>,
-    }];
+    })];
     let steps_instance: Vec<StepInstanceBundle<Cmt, F, K>> =
         steps_witness.iter().map(StepInstanceBundle::from).collect();
 

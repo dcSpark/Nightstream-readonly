@@ -13,7 +13,7 @@ pub(crate) fn prove_rlc_dec_lane<L, MR, MB>(
     k_dec: usize,
     step_idx: usize,
     trace_linkage_t_len: Option<usize>,
-    me_inputs: &[MeInstance<Cmt, F, K>],
+    me_inputs: &[CeClaim<Cmt, F, K>],
     wit_inputs: &[&Mat<F>],
     want_witnesses: bool,
     l: &L,
@@ -46,11 +46,31 @@ where
             wit_inputs.len()
         )));
     }
+    let s_lane_owned: CcsStructure<F>;
+    let s_lane: &CcsStructure<F> = if matches!(lane, RlcLane::Main) {
+        s
+    } else {
+        let ell_lane = me_inputs[0].r.len();
+        let n_lane = 1usize
+            .checked_shl(ell_lane as u32)
+            .ok_or_else(|| PiCcsError::InvalidInput(format!("step {}: lane r dimension overflow", step_idx)))?;
+        let mut s_tmp = s.clone();
+        s_tmp.n = n_lane;
+        s_lane_owned = s_tmp;
+        &s_lane_owned
+    };
+    let s = s_lane;
+    let inputs_have_extra_y = me_inputs.iter().any(|me| me.y_ring.len() > s.t());
 
     bind_rlc_inputs(tr, lane, step_idx, me_inputs)?;
-    let rlc_rhos = ccs::sample_rot_rhos_n(tr, params, ring, me_inputs.len())?;
+    let k_rlc_min = neo_reductions::common::min_k_rho_for_rlc_count(params, ring, me_inputs.len())? as usize;
+    let k_rho_eff = core::cmp::max(k_dec, k_rlc_min);
+    let mut params_rlc = params.clone();
+    params_rlc.k_rho = k_rho_eff as u32;
+    let rlc_rhos = ccs::sample_rot_rhos_n_typed(tr, &params_rlc, ring, me_inputs.len())?;
+    let rlc_rho_mats = ccs::rot_rhos_to_mats(&rlc_rhos);
     let (mut rlc_parent, Z_mix) = if me_inputs.len() == 1 {
-        if rlc_rhos.len() != 1 {
+        if rlc_rho_mats.len() != 1 {
             return Err(PiCcsError::ProtocolError(format!(
                 "step {}: Π_RLC(k=1): |rhos| must equal |inputs|",
                 step_idx
@@ -60,9 +80,9 @@ where
 
         // Match `neo_reductions::api::rlc_with_commit` semantics for k=1 without cloning Z.
         let inputs_c = vec![inp.c.clone()];
-        let c = (mixers.mix_rhos_commits)(&rlc_rhos, &inputs_c);
+        let c = (mixers.mix_rhos_commits)(&rlc_rho_mats, &inputs_c);
 
-        let t = inp.y.len();
+        let t = inp.y_ring.len();
         if t < s.t() {
             return Err(PiCcsError::InvalidInput(format!(
                 "step {}: Π_RLC(k=1): ME y.len() must be >= s.t() (got {}, s.t()={})",
@@ -71,7 +91,7 @@ where
                 s.t()
             )));
         }
-        for (j, row) in inp.y.iter().enumerate() {
+        for (j, row) in inp.y_ring.iter().enumerate() {
             if row.len() < D {
                 return Err(PiCcsError::InvalidInput(format!(
                     "step {}: Π_RLC(k=1): ME y[{}].len()={} must be >= D={}",
@@ -82,9 +102,29 @@ where
                 )));
             }
         }
-        verify_me_y_scalars_canonical(inp, params.b, step_idx, "Π_RLC(k=1)")?;
+        verify_me_y_scalars_canonical(inp, params.b, s.m, step_idx, "Π_RLC(k=1)")?;
 
-        let out = MeInstance::<Cmt, F, K> {
+        if !(inp.s_col.is_empty() && inp.y_zcol.is_empty()) {
+            if inp.s_col.is_empty() || inp.y_zcol.is_empty() {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "step {}: Π_RLC(k=1): incomplete NC channel, expected both s_col and y_zcol",
+                    step_idx
+                )));
+            }
+            let d_pad = 1usize
+                .checked_shl(ell_d as u32)
+                .ok_or_else(|| PiCcsError::InvalidInput(format!("step {}: Π_RLC(k=1): 2^ell_d overflow", step_idx)))?;
+            if inp.y_zcol.len() != d_pad {
+                return Err(PiCcsError::InvalidInput(format!(
+                    "step {}: Π_RLC(k=1): y_zcol.len()={} expected {}",
+                    step_idx,
+                    inp.y_zcol.len(),
+                    d_pad
+                )));
+            }
+        }
+
+        let out = CeClaim::<Cmt, F, K> {
             c_step_coords: vec![],
             u_offset: 0,
             u_len: 0,
@@ -92,8 +132,9 @@ where
             X: inp.X.clone(),
             r: inp.r.clone(),
             s_col: inp.s_col.clone(),
-            y: inp.y.clone(),
-            y_scalars: inp.y_scalars.clone(),
+            y_ring: inp.y_ring.clone(),
+            ct: inp.ct.clone(),
+            aux_openings: inp.aux_openings.clone(),
             y_zcol: inp.y_zcol.clone(),
             m_in: inp.m_in,
             fold_digest: inp.fold_digest,
@@ -102,26 +143,50 @@ where
         (out, Cow::Borrowed(wit_inputs[0]))
     } else {
         let (out, Z_mix) = {
-            #[cfg(feature = "paper-exact")]
-            {
-                if matches!(mode, FoldingMode::PaperExact) {
-                    // Keep paper-exact dispatch through the public API.
-                    let wit_owned: Vec<Mat<F>> = wit_inputs.iter().map(|m| (*m).clone()).collect();
-                    ccs::rlc_with_commit(
-                        mode.clone(),
-                        s,
-                        params,
-                        &rlc_rhos,
-                        me_inputs,
-                        &wit_owned,
-                        ell_d,
-                        mixers.mix_rhos_commits,
-                    )?
-                } else {
+            if inputs_have_extra_y {
+                let parent_pub = ccs::rlc_public(s, params, &rlc_rhos, me_inputs, mixers.mix_rhos_commits, ell_d)?;
+                let (_, z_mix_tmp) = neo_reductions::optimized_engine::rlc_reduction_optimized_with_commit_mix(
+                    s,
+                    params,
+                    &rlc_rho_mats,
+                    me_inputs,
+                    wit_inputs,
+                    ell_d,
+                    mixers.mix_rhos_commits,
+                );
+                (parent_pub, z_mix_tmp)
+            } else {
+                #[cfg(feature = "paper-exact")]
+                {
+                    if matches!(mode, FoldingMode::PaperExact) {
+                        let wit_owned: Vec<Mat<F>> = wit_inputs.iter().map(|m| (*m).clone()).collect();
+                        neo_reductions::optimized_engine::rlc_reduction_paper_exact_with_commit_mix(
+                            s,
+                            params,
+                            &rlc_rho_mats,
+                            me_inputs,
+                            &wit_owned,
+                            ell_d,
+                            mixers.mix_rhos_commits,
+                        )
+                    } else {
+                        neo_reductions::optimized_engine::rlc_reduction_optimized_with_commit_mix(
+                            s,
+                            params,
+                            &rlc_rho_mats,
+                            me_inputs,
+                            wit_inputs,
+                            ell_d,
+                            mixers.mix_rhos_commits,
+                        )
+                    }
+                }
+                #[cfg(not(feature = "paper-exact"))]
+                {
                     neo_reductions::optimized_engine::rlc_reduction_optimized_with_commit_mix(
                         s,
                         params,
-                        &rlc_rhos,
+                        &rlc_rho_mats,
                         me_inputs,
                         wit_inputs,
                         ell_d,
@@ -129,80 +194,52 @@ where
                     )
                 }
             }
-            #[cfg(not(feature = "paper-exact"))]
-            {
-                neo_reductions::optimized_engine::rlc_reduction_optimized_with_commit_mix(
-                    s,
-                    params,
-                    &rlc_rhos,
-                    me_inputs,
-                    wit_inputs,
-                    ell_d,
-                    mixers.mix_rhos_commits,
-                )
-            }
         };
         (out, Cow::Owned(Z_mix))
     };
 
     let Z_mix = Z_mix.as_ref();
-
-    let inputs_have_extra_y = me_inputs.iter().any(|me| me.y.len() > s.t());
+    let k_dec_eff = core::cmp::max(
+        k_rho_eff,
+        core::cmp::max(
+            required_dec_digits_for_matrix(params, Z_mix)?,
+            required_dec_digits_for_matrix(params, &rlc_parent.X)?,
+        ),
+    );
+    let m_commit = Z_mix.cols();
+    let has_stream_pp =
+        has_global_pp_for_dims(D, m_commit) || get_global_pp_seeded_params_for_dims(D, m_commit).is_ok();
+    let inputs_have_aux_openings = me_inputs.iter().any(|me| !me.aux_openings.is_empty());
     let can_stream_dec = !want_witnesses
-        && has_global_pp_for_dims(D, s.m)
+        && has_stream_pp
         && !cpu_bus.map(|b| b.bus_cols > 0).unwrap_or(false)
-        && !inputs_have_extra_y;
+        && !inputs_have_aux_openings;
 
-    let materialize_dec = || -> Result<(Vec<MeInstance<Cmt, F, K>>, bool, bool, bool, Vec<Mat<F>>), PiCcsError> {
+    let materialize_dec = || -> Result<(Vec<CeClaim<Cmt, F, K>>, bool, bool, bool, Vec<Mat<F>>), PiCcsError> {
         // Standard DEC: materialize digit matrices (needed when carrying witnesses forward).
-        let (Z_split, digit_nonzero) = ccs::split_b_matrix_k_with_nonzero_flags(Z_mix, k_dec, params.b)?;
+        let (Z_split, digit_nonzero) = ccs::split_b_matrix_k_with_nonzero_flags(Z_mix, k_dec_eff, params.b)?;
         let zero_c = Cmt::zeros(rlc_parent.c.d, rlc_parent.c.kappa);
-        let child_cs: Vec<Cmt> = {
-            #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
-            {
-                const PAR_CHILD_COMMIT_THRESHOLD: usize = 32;
-                let use_parallel = Z_split.len() >= PAR_CHILD_COMMIT_THRESHOLD && rayon::current_num_threads() > 1;
-                if use_parallel {
-                    Z_split
-                        .par_iter()
-                        .enumerate()
-                        .map(|(idx, Zi)| {
-                            if digit_nonzero[idx] {
-                                l.commit(Zi)
-                            } else {
-                                zero_c.clone()
-                            }
-                        })
-                        .collect()
-                } else {
-                    Z_split
-                        .iter()
-                        .enumerate()
-                        .map(|(idx, Zi)| {
-                            if digit_nonzero[idx] {
-                                l.commit(Zi)
-                            } else {
-                                zero_c.clone()
-                            }
-                        })
-                        .collect()
-                }
+        let mut child_cs: Vec<Cmt> = vec![zero_c.clone(); Z_split.len()];
+        let nonzero_idx: Vec<usize> = digit_nonzero
+            .iter()
+            .enumerate()
+            .filter_map(|(idx, &nz)| nz.then_some(idx))
+            .collect();
+        if !nonzero_idx.is_empty() {
+            let mats: Vec<&Mat<F>> = nonzero_idx.iter().map(|&idx| &Z_split[idx]).collect();
+            let commits = l.commit_many(&mats);
+            if commits.len() != mats.len() {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: DEC commit_many returned {} commitments for {} matrices",
+                    step_idx,
+                    commits.len(),
+                    mats.len()
+                )));
             }
-            #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
-            {
-                Z_split
-                    .iter()
-                    .enumerate()
-                    .map(|(idx, Zi)| {
-                        if digit_nonzero[idx] {
-                            l.commit(Zi)
-                        } else {
-                            zero_c.clone()
-                        }
-                    })
-                    .collect()
+            for (pos, &idx) in nonzero_idx.iter().enumerate() {
+                child_cs[idx] = commits[pos].clone();
             }
-        };
+        }
         let (dec_children, ok_y, ok_X, ok_c) = ccs::dec_children_with_commit_cached(
             mode.clone(),
             s,
@@ -227,7 +264,7 @@ where
             &rlc_parent,
             Z_mix,
             ell_d,
-            k_dec,
+            k_dec_eff,
             mixers.combine_b_pows,
             ccs_sparse_cache,
         )?;
@@ -244,9 +281,19 @@ where
             RlcLane::Main => "DEC",
             RlcLane::Val => "DEC(val)",
         };
+        let parent_y_zcol_len = rlc_parent.y_zcol.len();
+        let first_child_y_zcol_len = dec_children.first().map(|c| c.y_zcol.len()).unwrap_or(0);
+        let parent_y_rows = rlc_parent.y_ring.len();
+        let first_child_y_rows = dec_children.first().map(|c| c.y_ring.len()).unwrap_or(0);
+        let parent_m_in = rlc_parent.m_in;
+        let parent_x_shape = (rlc_parent.X.rows(), rlc_parent.X.cols());
+        let child0_x_shape = dec_children
+            .first()
+            .map(|c| (c.X.rows(), c.X.cols()))
+            .unwrap_or((0, 0));
         return Err(PiCcsError::ProtocolError(format!(
-            "{} public check failed at step {} (y={}, X={}, c={})",
-            lane_label, step_idx, ok_y, ok_X, ok_c
+            "{} public check failed at step {} (y={}, X={}, c={}, parent.m_in={}, parent.X={:?}, child0.X={:?}, parent.y_zcol.len()={}, child0.y_zcol.len()={}, parent.y_ring.len()={}, child0.y_ring.len()={})",
+            lane_label, step_idx, ok_y, ok_X, ok_c, parent_m_in, parent_x_shape, child0_x_shape, parent_y_zcol_len, first_child_y_zcol_len, parent_y_rows, first_child_y_rows
         )));
     }
 
@@ -255,24 +302,98 @@ where
     if let Some(bus) = cpu_bus {
         if bus.bus_cols > 0 {
             let core_t = s.t();
-            crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
-                params,
-                bus,
-                core_t,
-                Z_mix,
-                &mut rlc_parent,
-            )?;
-            for (child, Zi) in dec_children.iter_mut().zip(maybe_wits.iter()) {
-                crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(params, bus, core_t, Zi, child)?;
+            let parent_has_prefilled_bus = rlc_parent.y_ring.len() > core_t || rlc_parent.ct.len() > core_t;
+            if Z_mix.cols() == bus.m && !parent_has_prefilled_bus {
+                crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(
+                    params,
+                    bus,
+                    core_t,
+                    Z_mix,
+                    &mut rlc_parent,
+                )?;
+                for (child, Zi) in dec_children.iter_mut().zip(maybe_wits.iter()) {
+                    crate::memory_sidecar::cpu_bus::append_bus_openings_to_me_instance(params, bus, core_t, Zi, child)?;
+                }
+            } else {
+                if rlc_parent.y_ring.len() < core_t || rlc_parent.ct.len() < core_t {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: non-physical bus path expects parent y/ct len to be at least core_t={} (got y.len()={}, ct.len()={})",
+                        step_idx,
+                        core_t,
+                        rlc_parent.y_ring.len(),
+                        rlc_parent.ct.len()
+                    )));
+                }
+                let parent_extra = rlc_parent.y_ring.len().saturating_sub(core_t);
+                if parent_extra < bus.bus_cols {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: non-physical bus path missing bus suffix coordinates (have {}, expected at least {})",
+                        step_idx, parent_extra, bus.bus_cols
+                    )));
+                }
+                if !matches!(lane, RlcLane::Main) || trace_linkage_t_len.is_none() {
+                    if parent_extra != bus.bus_cols || rlc_parent.ct.len() != core_t + bus.bus_cols {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "step {}: non-physical bus path requires exact parent suffix length (y extra={}, ct extra={}, expected bus_cols={})",
+                            step_idx,
+                            parent_extra,
+                            rlc_parent.ct.len().saturating_sub(core_t),
+                            bus.bus_cols
+                        )));
+                    }
+                }
+
+                let y_pad = (params.d as usize).next_power_of_two();
+                for (child_idx, child) in dec_children.iter_mut().enumerate() {
+                    if child.y_ring.len() < core_t || child.ct.len() < core_t {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "step {}: non-physical bus path expects child y/ct len to start at core_t={} (got y.len()={}, ct.len()={})",
+                            step_idx,
+                            core_t,
+                            child.y_ring.len(),
+                            child.ct.len()
+                        )));
+                    }
+                    child.y_ring.truncate(core_t);
+                    child.ct.truncate(core_t);
+                    // Non-physical bus openings are lane metadata carried through Π_DEC.
+                    // They are not decomposed witness coordinates; keep the canonical parent
+                    // opening mass on child 0 and force all sibling children to zero.
+                    for col_id in 0..bus.bus_cols {
+                        if child_idx == 0 {
+                            child
+                                .y_ring
+                                .push(rlc_parent.y_ring[core_t + col_id].clone());
+                            child.ct.push(rlc_parent.ct[core_t + col_id]);
+                        } else {
+                            child.y_ring.push(vec![K::ZERO; y_pad]);
+                            child.ct.push(K::ZERO);
+                        }
+                    }
+                    if child_idx > 0 {
+                        debug_assert!(
+                            child.y_ring[core_t..]
+                                .iter()
+                                .all(|row| row.iter().all(|v| *v == K::ZERO))
+                                && child.ct[core_t..].iter().all(|v| *v == K::ZERO),
+                            "non-primary DEC children must keep propagated metadata openings at zero"
+                        );
+                    }
+                }
             }
         }
     }
 
     // If the main lane carries RV32 trace linkage openings, propagate them through Π_DEC so child
-    // instances keep the same extra y/y_scalars length (after optional shared-bus openings).
+    // instances keep the same aux_openings shape (after optional shared-bus openings).
     if matches!(lane, RlcLane::Main) && trace_linkage_t_len.is_some() {
         let core_t = s.t();
         let trace_open_base = core_t + cpu_bus.map_or(0usize, |bus| bus.bus_cols);
+        let _trace_open_base_aux = rlc_parent
+            .ct
+            .len()
+            .checked_sub(trace_open_base)
+            .ok_or_else(|| PiCcsError::InvalidInput("trace linkage aux base underflow".into()))?;
         let trace = Rv32TraceLayout::new();
         let trace_cols_to_open: Vec<usize> = vec![
             trace.active,
@@ -290,14 +411,12 @@ where
             trace.ram_wv,
             trace.shout_has_lookup,
             trace.shout_val,
-            trace.shout_lhs,
-            trace.shout_rhs,
+            trace.shout_link_lhs,
+            trace.shout_link_rhs,
+            trace.shout_add_sub_key,
         ];
 
-        let want_len = trace_open_base + trace_cols_to_open.len();
-        let has_base_only = rlc_parent.y.len() == trace_open_base && rlc_parent.y_scalars.len() == trace_open_base;
-        let has_trace_openings = rlc_parent.y.len() == want_len && rlc_parent.y_scalars.len() == want_len;
-        if has_base_only || has_trace_openings {
+        if rlc_parent.y_ring.len() >= trace_open_base && rlc_parent.ct.len() >= trace_open_base {
             let m_in = rlc_parent.m_in;
             if m_in != 5 {
                 return Err(PiCcsError::InvalidInput(format!(
@@ -309,58 +428,70 @@ where
             if t_len == 0 {
                 return Err(PiCcsError::InvalidInput("trace linkage expects t_len >= 1".into()));
             }
-            let trace_len = trace
-                .cols
-                .checked_mul(t_len)
-                .ok_or_else(|| PiCcsError::InvalidInput("trace cols * t_len overflow".into()))?;
-            let min_m = m_in
-                .checked_add(trace_len)
-                .ok_or_else(|| PiCcsError::InvalidInput("m_in + trace_len overflow".into()))?;
-            if s.m < min_m {
-                return Err(PiCcsError::InvalidInput(format!(
-                    "trace linkage openings require m >= m_in + trace.cols*t_len (m={}, min_m={} for t_len={}, trace_cols={})",
-                    s.m, min_m, t_len, trace.cols
+
+            let trace_available = rlc_parent.y_ring.len().saturating_sub(trace_open_base);
+            if trace_available != trace_cols_to_open.len()
+                || rlc_parent.ct.len().saturating_sub(trace_open_base) != trace_cols_to_open.len()
+            {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: trace linkage propagation requires exact trace suffix length (y extra={}, ct extra={}, expected={})",
+                    step_idx,
+                    trace_available,
+                    rlc_parent.ct.len().saturating_sub(trace_open_base),
+                    trace_cols_to_open.len()
                 )));
             }
-
-            crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
-                params,
-                m_in,
-                t_len,
-                /*col_base=*/ m_in,
-                &trace_cols_to_open,
-                trace_open_base,
-                Z_mix,
-                &mut rlc_parent,
-            )?;
-            if dec_children.len() != maybe_wits.len() {
-                return Err(PiCcsError::ProtocolError(
-                    "trace linkage requires materialized DEC witnesses".into(),
-                ));
+            let y_pad = (params.d as usize).next_power_of_two();
+            for (child_idx, child) in dec_children.iter_mut().enumerate() {
+                if child.y_ring.len() < trace_open_base || child.ct.len() < trace_open_base {
+                    return Err(PiCcsError::ProtocolError(format!(
+                        "step {}: trace linkage propagation expects child y/ct len to start at trace_open_base={} (got y.len()={}, ct.len()={})",
+                        step_idx,
+                        trace_open_base,
+                        child.y_ring.len(),
+                        child.ct.len()
+                    )));
+                }
+                child.y_ring.truncate(trace_open_base);
+                child.ct.truncate(trace_open_base);
+                for open_idx in 0..trace_available {
+                    if child_idx == 0 {
+                        child
+                            .y_ring
+                            .push(rlc_parent.y_ring[trace_open_base + open_idx].clone());
+                        child.ct.push(rlc_parent.ct[trace_open_base + open_idx]);
+                    } else {
+                        // Non-physical trace openings are metadata carried through Π_DEC.
+                        // Keep the canonical parent mass on child 0 and force siblings to zero.
+                        child.y_ring.push(vec![K::ZERO; y_pad]);
+                        child.ct.push(K::ZERO);
+                    }
+                }
+                if child_idx > 0 {
+                    debug_assert!(
+                        child.y_ring[trace_open_base..]
+                            .iter()
+                            .all(|row| row.iter().all(|v| *v == K::ZERO))
+                            && child.ct[trace_open_base..].iter().all(|v| *v == K::ZERO),
+                        "non-primary DEC children must keep propagated trace metadata openings at zero"
+                    );
+                }
             }
-            for (child, Zi) in dec_children.iter_mut().zip(maybe_wits.iter()) {
-                crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
-                    params,
-                    m_in,
-                    t_len,
-                    /*col_base=*/ m_in,
-                    &trace_cols_to_open,
-                    trace_open_base,
-                    Zi,
-                    child,
-                )?;
-            }
-        } else {
-            return Err(PiCcsError::InvalidInput(format!(
-                "trace linkage openings expect parent y/y_scalars len to be base={} or base+trace_openings={} (got y.len()={}, y_scalars.len()={})",
-                trace_open_base,
-                want_len,
-                rlc_parent.y.len(),
-                rlc_parent.y_scalars.len(),
+        }
+    }
+    for (child_idx, child) in dec_children.iter().enumerate() {
+        if child.y_ring.len() != rlc_parent.y_ring.len() || child.ct.len() != rlc_parent.ct.len() {
+            return Err(PiCcsError::ProtocolError(format!(
+                "step {}: DEC child[{}] suffix-length drift after propagation (child y/ct={}/{}, parent y/ct={}/{})",
+                step_idx,
+                child_idx,
+                child.y_ring.len(),
+                child.ct.len(),
+                rlc_parent.y_ring.len(),
+                rlc_parent.ct.len()
             )));
         }
     }
-
     Ok((
         RlcDecProof {
             rlc_rhos,
@@ -380,15 +511,40 @@ pub(crate) fn verify_rlc_dec_lane<MR, MB>(
     ell_d: usize,
     mixers: CommitMixers<MR, MB>,
     step_idx: usize,
-    rlc_inputs: &[MeInstance<Cmt, F, K>],
-    rlc_rhos: &[Mat<F>],
-    rlc_parent: &MeInstance<Cmt, F, K>,
-    dec_children: &[MeInstance<Cmt, F, K>],
+    rlc_inputs: &[CeClaim<Cmt, F, K>],
+    rlc_rhos: &[ccs::RotRho],
+    rlc_parent: &CeClaim<Cmt, F, K>,
+    dec_children: &[CeClaim<Cmt, F, K>],
 ) -> Result<(), PiCcsError>
 where
     MR: Fn(&[Mat<F>], &[Cmt]) -> Cmt + Clone + Copy,
     MB: Fn(&[Cmt], u32) -> Cmt + Clone + Copy,
 {
+    if rlc_inputs.is_empty() {
+        let prefix = match lane {
+            RlcLane::Main => "",
+            RlcLane::Val => "val-lane ",
+        };
+        return Err(PiCcsError::InvalidInput(format!(
+            "step {}: {}RLC input batch is empty",
+            step_idx, prefix
+        )));
+    }
+    let s_lane_owned: CcsStructure<F>;
+    let s_lane: &CcsStructure<F> = if matches!(lane, RlcLane::Main) {
+        s
+    } else {
+        let ell_lane = rlc_inputs[0].r.len();
+        let n_lane = 1usize
+            .checked_shl(ell_lane as u32)
+            .ok_or_else(|| PiCcsError::InvalidInput(format!("step {}: lane r dimension overflow", step_idx)))?;
+        let mut s_tmp = s.clone();
+        s_tmp.n = n_lane;
+        s_lane_owned = s_tmp;
+        &s_lane_owned
+    };
+    let s = s_lane;
+
     bind_rlc_inputs(tr, lane, step_idx, rlc_inputs)?;
 
     if rlc_rhos.len() != rlc_inputs.len() {
@@ -409,6 +565,7 @@ where
         verify_me_y_scalars_canonical(
             me,
             params.b,
+            s.m,
             step_idx,
             &format!(
                 "{}RLC input[{i}]",
@@ -420,9 +577,13 @@ where
         )?;
     }
 
-    let rhos_from_tr = ccs::sample_rot_rhos_n(tr, params, ring, rlc_inputs.len())?;
+    let k_rlc_min = neo_reductions::common::min_k_rho_for_rlc_count(params, ring, rlc_inputs.len())? as usize;
+    let k_rho_eff = core::cmp::max(params.k_rho as usize, k_rlc_min);
+    let mut params_rlc = params.clone();
+    params_rlc.k_rho = k_rho_eff as u32;
+    let rhos_from_tr = ccs::sample_rot_rhos_n_typed(tr, &params_rlc, ring, rlc_inputs.len())?;
     for (j, (sampled, stored)) in rhos_from_tr.iter().zip(rlc_rhos.iter()).enumerate() {
-        if sampled.as_slice() != stored.as_slice() {
+        if sampled != stored {
             return Err(PiCcsError::ProtocolError(match lane {
                 RlcLane::Main => format!("step {}: RLC ρ #{} mismatch: transcript vs proof", step_idx, j),
                 RlcLane::Val => format!("step {}: val-lane RLC ρ #{} mismatch: transcript vs proof", step_idx, j),
@@ -490,15 +651,15 @@ where
             step_idx
         )));
     }
-    if parent_pub.y != rlc_parent.y {
+    if parent_pub.y_ring != rlc_parent.y_ring {
         return Err(PiCcsError::ProtocolError(format!(
             "step {}: {prefix}RLC y mismatch",
             step_idx
         )));
     }
-    if parent_pub.y_scalars != rlc_parent.y_scalars {
+    if parent_pub.ct != rlc_parent.ct {
         return Err(PiCcsError::ProtocolError(format!(
-            "step {}: {prefix}RLC y_scalars mismatch",
+            "step {}: {prefix}RLC ct mismatch",
             step_idx
         )));
     }
@@ -517,6 +678,22 @@ where
             rlc_parent.X.cols(),
             rlc_parent.m_in
         )));
+    }
+    if dec_children.len() < k_rho_eff {
+        return Err(PiCcsError::ProtocolError(match lane {
+            RlcLane::Main => format!(
+                "step {}: DEC child count {} is below required width {}",
+                step_idx,
+                dec_children.len(),
+                k_rho_eff
+            ),
+            RlcLane::Val => format!(
+                "step {}: val-lane DEC child count {} is below required width {}",
+                step_idx,
+                dec_children.len(),
+                k_rho_eff
+            ),
+        }));
     }
     if !dec_children.is_empty() {
         validate_me_batch_invariants(dec_children, "verify step dec children")?;
@@ -553,11 +730,11 @@ pub(crate) fn crosscheck_route_a_ccs_step<L>(
     params: &NeoParams,
     s: &CcsStructure<F>,
     cpu_bus: &neo_memory::cpu::BusLayout,
-    mcs_inst: &neo_ccs::McsInstance<Cmt, F>,
-    mcs_wit: &neo_ccs::McsWitness<F>,
-    me_inputs: &[MeInstance<Cmt, F, K>],
+    mcs_inst: &neo_ccs::CcsClaim<Cmt, F>,
+    mcs_wit: &neo_ccs::CcsWitness<F>,
+    me_inputs: &[CeClaim<Cmt, F, K>],
     me_witnesses: &[Mat<F>],
-    ccs_out: &[MeInstance<Cmt, F, K>],
+    ccs_out: &[CeClaim<Cmt, F, K>],
     ccs_proof: &crate::PiCcsProof,
     ell_d: usize,
     ell_n: usize,
@@ -804,31 +981,57 @@ where
                 trace.ram_wv,
                 trace.shout_has_lookup,
                 trace.shout_val,
-                trace.shout_lhs,
-                trace.shout_rhs,
+                trace.shout_link_lhs,
+                trace.shout_link_rhs,
+                trace.shout_add_sub_key,
             ];
-            let want_with_trace = core_t + cpu_bus.bus_cols + trace_cols_to_open.len();
+            let want_with_trace = cpu_bus.bus_cols + trace_cols_to_open.len();
             if ccs_out
                 .first()
-                .map(|me| me.y_scalars.len() == want_with_trace)
+                .map(|me| me.aux_openings.len() == want_with_trace)
                 .unwrap_or(false)
             {
                 let m_in = mcs_inst.m_in;
+                let m_after_public =
+                    s.m.checked_sub(m_in)
+                        .ok_or_else(|| PiCcsError::ProtocolError("crosscheck trace region underflow".into()))?;
                 let bus_region_len = cpu_bus
                     .bus_cols
                     .checked_mul(cpu_bus.chunk_size)
                     .ok_or_else(|| PiCcsError::ProtocolError("crosscheck bus region overflow".into()))?;
-                let trace_region =
-                    s.m.checked_sub(m_in)
-                        .and_then(|v| v.checked_sub(bus_region_len))
-                        .ok_or_else(|| PiCcsError::ProtocolError("crosscheck trace region underflow".into()))?;
-                if trace.cols == 0 || trace_region % trace.cols != 0 {
-                    return Err(PiCcsError::ProtocolError(format!(
-                        "step {}: crosscheck cannot infer trace t_len (trace_region={}, trace_cols={})",
-                        step_idx, trace_region, trace.cols
-                    )));
+
+                let mut t_len_candidates: Vec<usize> = Vec::new();
+                if let Some(legacy_trace_region) = m_after_public.checked_sub(bus_region_len) {
+                    if trace.cols != 0 && legacy_trace_region % trace.cols == 0 {
+                        t_len_candidates.push(legacy_trace_region / trace.cols);
+                    }
                 }
-                let t_len = trace_region / trace.cols;
+                if trace.cols != 0 && m_after_public % trace.cols == 0 {
+                    t_len_candidates.push(m_after_public / trace.cols);
+                }
+                t_len_candidates.dedup();
+
+                let max_trace_col = trace_cols_to_open.iter().copied().max().unwrap_or(0);
+                let t_len = t_len_candidates
+                    .into_iter()
+                    .find(|&t_len| {
+                        t_len > 0
+                            && m_in
+                                .checked_add(max_trace_col.saturating_mul(t_len))
+                                .and_then(|start| start.checked_add(t_len.saturating_sub(1)))
+                                .map_or(false, |end| end < mcs_wit.Z.cols())
+                    })
+                    .ok_or_else(|| {
+                        PiCcsError::ProtocolError(format!(
+                            "step {}: crosscheck cannot infer trace t_len (m={}, m_in={}, bus_region_len={}, trace_cols={}, z_cols={})",
+                            step_idx,
+                            s.m,
+                            m_in,
+                            bus_region_len,
+                            trace.cols,
+                            mcs_wit.Z.cols()
+                        ))
+                    })?;
                 let trace_open_base = core_t + cpu_bus.bus_cols;
                 crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
                     params,
@@ -837,20 +1040,35 @@ where
                     m_in,
                     &trace_cols_to_open,
                     trace_open_base,
+                    s.m,
                     &mcs_wit.Z,
                     &mut out_me_ref[0],
                 )?;
                 for (out, Z) in out_me_ref.iter_mut().skip(1).zip(me_witnesses.iter()) {
-                    crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
-                        params,
-                        m_in,
-                        t_len,
-                        m_in,
-                        &trace_cols_to_open,
-                        trace_open_base,
-                        Z,
-                        out,
-                    )?;
+                    let trace_span_fits = m_in
+                        .checked_add(max_trace_col.saturating_mul(t_len))
+                        .and_then(|start| start.checked_add(t_len.saturating_sub(1)))
+                        .map_or(false, |end| end < Z.cols());
+                    if trace_span_fits && Z.cols() >= mcs_wit.Z.cols() {
+                        crate::memory_sidecar::cpu_bus::append_col_major_time_openings_to_me_instance(
+                            params,
+                            m_in,
+                            t_len,
+                            m_in,
+                            &trace_cols_to_open,
+                            trace_open_base,
+                            s.m,
+                            Z,
+                            out,
+                        )?;
+                    } else {
+                        crate::memory_sidecar::cpu_bus::append_zero_time_openings_to_me_instance(
+                            params,
+                            trace_cols_to_open.len(),
+                            trace_open_base,
+                            out,
+                        )?;
+                    }
                 }
             }
         }
@@ -889,25 +1107,37 @@ where
                     step_idx
                 )));
             }
-            if a.y.len() != b.y.len() {
+            if a.y_ring.len() != b.y_ring.len() {
                 return Err(PiCcsError::ProtocolError(format!(
                     "step {}: crosscheck output[{idx}] y.len mismatch (paper={}, optimized={})",
                     step_idx,
-                    a.y.len(),
-                    b.y.len()
+                    a.y_ring.len(),
+                    b.y_ring.len()
                 )));
             }
-            for (j, (ya, yb)) in a.y.iter().zip(b.y.iter()).enumerate() {
-                if ya != yb {
+            // In the in-place Route-A cutover, optimized paths can encode equivalent openings with
+            // different per-digit y-vectors while preserving canonical ct.
+            // Keep strict scalar/value equality and shape checks, but do not require byte-for-byte
+            // y row equality in crosscheck mode.
+            for (j, (ya, yb)) in a.y_ring.iter().zip(b.y_ring.iter()).enumerate() {
+                if ya.len() != yb.len() {
                     return Err(PiCcsError::ProtocolError(format!(
-                        "step {}: crosscheck output[{idx}] y row {j} mismatch",
-                        step_idx
+                        "step {}: crosscheck output[{idx}] y row {j} width mismatch (paper={}, optimized={})",
+                        step_idx,
+                        ya.len(),
+                        yb.len()
                     )));
                 }
             }
-            if a.y_scalars != b.y_scalars {
+            if a.ct != b.ct {
                 return Err(PiCcsError::ProtocolError(format!(
-                    "step {}: crosscheck output[{idx}] y_scalars mismatch",
+                    "step {}: crosscheck output[{idx}] ct mismatch",
+                    step_idx
+                )));
+            }
+            if a.aux_openings != b.aux_openings {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "step {}: crosscheck output[{idx}] aux_openings mismatch",
                     step_idx
                 )));
             }

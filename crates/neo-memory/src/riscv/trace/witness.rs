@@ -3,7 +3,10 @@ use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as F;
 
 use crate::riscv::exec_table::Rv32ExecTable;
-use crate::riscv::lookups::{uninterleave_bits, RiscvOpcode, RiscvShoutTables};
+use crate::riscv::instruction::{
+    opcode_uses_combined_lookup_key, operand_mode_keys_enabled, try_decode_lookup_operands,
+};
+use crate::riscv::lookups::{RiscvInstruction, RiscvOpcode, RiscvShoutTables};
 
 use super::layout::Rv32TraceLayout;
 
@@ -16,6 +19,19 @@ fn sign_extend_to_u32(value: u32, bits: u32) -> u32 {
 #[inline]
 fn imm_i_from_word(instr_word: u32) -> u32 {
     sign_extend_to_u32((instr_word >> 20) & 0x0fff, 12)
+}
+
+#[inline]
+fn lookup_operands_from_decoded(decoded: &RiscvInstruction, rs1_val: u64, rs2_val: u64, pc_before: u64) -> (u64, u64) {
+    match decoded {
+        RiscvInstruction::RAlu { .. } | RiscvInstruction::RAluw { .. } => (rs1_val, rs2_val),
+        RiscvInstruction::IAlu { imm, .. } | RiscvInstruction::IAluw { imm, .. } => (rs1_val, *imm as u32 as u64),
+        RiscvInstruction::Load { imm, .. } | RiscvInstruction::Jalr { imm, .. } => (rs1_val, *imm as u32 as u64),
+        RiscvInstruction::Store { imm, .. } => (rs1_val, *imm as u32 as u64),
+        RiscvInstruction::Auipc { imm, .. } => (pc_before, ((*imm as i64 as u64) << 12) as u32 as u64),
+        RiscvInstruction::Branch { .. } => (rs1_val, rs2_val),
+        _ => (rs1_val, rs2_val),
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -44,6 +60,10 @@ impl Rv32TraceWitness {
             // Control / fetch
             wit.cols[layout.active][i] = if cols.active[i] { F::ONE } else { F::ZERO };
             wit.cols[layout.halted][i] = if cols.halted[i] { F::ONE } else { F::ZERO };
+            wit.cols[layout.is_virtual][i] = if cols.is_virtual[i] { F::ONE } else { F::ZERO };
+            wit.cols[layout.virtual_sequence_remaining][i] = F::from_u64(cols.virtual_sequence_remaining[i]);
+            wit.cols[layout.virtual_transition][i] = if cols.virtual_transition[i] { F::ONE } else { F::ZERO };
+            wit.cols[layout.virtual_commit_link][i] = if cols.virtual_commit_link[i] { F::ONE } else { F::ZERO };
             wit.cols[layout.cycle][i] = F::from_u64(cols.cycle[i]);
             wit.cols[layout.pc_before][i] = F::from_u64(cols.pc_before[i]);
             wit.cols[layout.pc_after][i] = F::from_u64(cols.pc_after[i]);
@@ -58,10 +78,8 @@ impl Rv32TraceWitness {
             wit.cols[layout.rs1_val][i] = F::from_u64(cols.rs1_val[i]);
             wit.cols[layout.rs2_addr][i] = F::from_u64(cols.rs2_addr[i]);
             wit.cols[layout.rs2_val][i] = F::from_u64(cols.rs2_val[i]);
-            // Keep rd_addr aligned with decoded instruction field.
-            // REG write enable is carried by decode lookup selectors, so on non-write rows
-            // this address is don't-care for bus semantics.
-            wit.cols[layout.rd_addr][i] = F::from_u64(cols.rd[i] as u64);
+            wit.cols[layout.rd_addr][i] = F::from_u64(cols.rd_addr[i]);
+            wit.cols[layout.rd_has_write][i] = if cols.rd_has_write[i] { F::ONE } else { F::ZERO };
             wit.cols[layout.rd_val][i] = F::from_u64(cols.rd_val[i]);
             if cols.opcode[i] == 0x67 {
                 let rs1 = cols.rs1_val[i] as u32;
@@ -137,8 +155,21 @@ impl Rv32TraceWitness {
 
             if let Some(ev) = primary {
                 wit.cols[layout.shout_has_lookup][i] = F::ONE;
+                wit.cols[layout.shout_table_id][i] = F::from_u64(ev.shout_id.0 as u64);
                 wit.cols[layout.shout_val][i] = F::from_u64(ev.value);
-                let (lhs, rhs) = uninterleave_bits(ev.key as u128);
+                let fallback_lhs = cols.rs1_val[i];
+                let fallback_rhs = cols.rs2_val[i];
+                let op = shout_tables.id_to_opcode(ev.shout_id);
+                let decoded_fallback = r.decoded.as_ref().map(|decoded| {
+                    lookup_operands_from_decoded(decoded, cols.rs1_val[i], cols.rs2_val[i], cols.pc_before[i])
+                });
+                let (lhs, rhs) = if let Some(op) = op {
+                    try_decode_lookup_operands(op, ev.key, operand_mode_keys_enabled())
+                        .or(decoded_fallback)
+                        .unwrap_or((fallback_lhs, fallback_rhs))
+                } else {
+                    (fallback_lhs, fallback_rhs)
+                };
                 wit.cols[layout.shout_lhs][i] = F::from_u64(lhs);
                 // Canonicalize shift keys: RISC-V shifts use only the low 5 bits of `rhs`.
                 let rhs = if let Some(op) = shout_tables.id_to_opcode(ev.shout_id) {
@@ -151,6 +182,14 @@ impl Rv32TraceWitness {
                     rhs
                 };
                 wit.cols[layout.shout_rhs][i] = F::from_u64(rhs);
+
+                let is_combined_mode = op.map(opcode_uses_combined_lookup_key).unwrap_or(false);
+                if is_combined_mode {
+                    wit.cols[layout.shout_add_sub_key][i] = F::from_u64(ev.key);
+                } else {
+                    wit.cols[layout.shout_link_lhs][i] = F::from_u64(lhs);
+                    wit.cols[layout.shout_link_rhs][i] = F::from_u64(rhs);
+                }
             }
         }
         Ok(wit)

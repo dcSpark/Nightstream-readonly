@@ -37,7 +37,9 @@ pub(crate) fn build_event_table_shout_context(
             )));
         }
         let trace = Rv32TraceLayout::new();
-        let m = step.mcs.1.Z.cols();
+        let m = m_in
+            .checked_add(step.mcs.1.w.len())
+            .ok_or_else(|| PiCcsError::InvalidInput("event-table Shout: witness width overflow".into()))?;
         let t_len = step
             .mem_instances
             .first()
@@ -68,38 +70,14 @@ pub(crate) fn build_event_table_shout_context(
             )));
         }
 
-        let d = neo_math::D;
-        let z = &step.mcs.1.Z;
-        if z.rows() != d {
-            return Err(PiCcsError::InvalidInput(format!(
-                "event-table Shout: CPU witness Z.rows()={} != D={d}",
-                z.rows()
-            )));
-        }
-        if z.cols() != m {
-            return Err(PiCcsError::ProtocolError(
-                "event-table Shout: CPU witness width drift".into(),
-            ));
-        }
-
-        let b_k = K::from(F::from_u64(params.b as u64));
-        let mut pow_b = Vec::with_capacity(d);
-        let mut cur = K::ONE;
-        for _ in 0..d {
-            pow_b.push(cur);
-            cur *= b_k;
-        }
+        let z_logical = crate::memory_sidecar::cpu_bus::decode_cpu_z_to_k(params, &step.mcs.1.Z, m)?;
         let decode_idx = |idx: usize| -> Result<K, PiCcsError> {
             if idx >= m {
                 return Err(PiCcsError::InvalidInput(format!(
                     "event-table Shout: z idx out of range (idx={idx}, m={m})"
                 )));
             }
-            let mut acc = K::ZERO;
-            for rho in 0..d {
-                acc += pow_b[rho] * K::from(z[(rho, idx)]);
-            }
-            Ok(acc)
+            Ok(z_logical[idx])
         };
 
         let trace_base = m_in;

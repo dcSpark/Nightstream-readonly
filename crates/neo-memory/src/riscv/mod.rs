@@ -3,8 +3,10 @@
 //! This module groups RISC-V-specific components under `neo_memory::riscv::*`.
 
 pub mod ccs;
+pub mod decomposition_semantics;
 pub mod elf_loader;
 pub mod exec_table;
+pub mod instruction;
 pub mod lookups;
 pub mod packed;
 pub mod rom_init;
