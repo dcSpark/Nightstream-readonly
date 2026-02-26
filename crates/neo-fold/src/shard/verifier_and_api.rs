@@ -563,12 +563,6 @@ where
                     idx
                 )));
             }
-            if !step_proof.fold.time_t.is_power_of_two() {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "step {}: verify/time_columns time_t {} must be a power of two",
-                    idx, step_proof.fold.time_t
-                )));
-            }
             let observed_declared_len = validate_time_active_mask_and_count(
                 step.time_columns.active_col.as_slice(),
                 step_proof.fold.time_t,

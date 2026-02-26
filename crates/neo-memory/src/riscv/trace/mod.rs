@@ -10,8 +10,10 @@ pub mod witness;
 pub use air::Rv32TraceAir;
 pub use decode_lookup::{
     rv32_decode_lookup_addr_group_for_table_id, rv32_decode_lookup_backed_cols,
-    rv32_decode_lookup_backed_row_from_instr_word, rv32_decode_lookup_table_id_for_col, rv32_is_decode_lookup_table_id,
-    Rv32DecodeSidecarLayout, RV32_TRACE_DECODE_LOOKUP_TABLE_BASE,
+    rv32_decode_lookup_backed_row_from_instr_word, rv32_decode_lookup_table_id_for_col,
+    rv32_decode_lookup_transport_cols, rv32_decode_lookup_transport_n_vals, rv32_decode_lookup_val_slot_for_col,
+    rv32_is_decode_lookup_grouped_table_id, rv32_is_decode_lookup_table_id, Rv32DecodeSidecarLayout,
+    RV32_TRACE_DECODE_LOOKUP_GROUPED_TABLE_ID, RV32_TRACE_DECODE_LOOKUP_TABLE_BASE,
 };
 pub use layout::Rv32TraceLayout;
 pub use sidecar_extract::{
@@ -19,9 +21,10 @@ pub use sidecar_extract::{
     TwistLaneOverTime,
 };
 pub use width_sidecar::{
-    rv32_is_width_lookup_table_id, rv32_width_lookup_addr_group_for_table_id, rv32_width_lookup_backed_cols,
-    rv32_width_lookup_table_id_for_col, rv32_width_sidecar_witness_from_exec_table, Rv32WidthSidecarLayout,
-    Rv32WidthSidecarWitness, RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE,
+    rv32_is_width_lookup_grouped_table_id, rv32_is_width_lookup_table_id, rv32_width_lookup_addr_group_for_table_id,
+    rv32_width_lookup_backed_cols, rv32_width_lookup_table_id_for_col, rv32_width_lookup_transport_n_vals,
+    rv32_width_lookup_val_slot_for_col, rv32_width_sidecar_witness_from_exec_table, Rv32WidthSidecarLayout,
+    Rv32WidthSidecarWitness, RV32_TRACE_WIDTH_LOOKUP_GROUPED_TABLE_ID, RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE,
 };
 pub use witness::Rv32TraceWitness;
 
@@ -42,7 +45,7 @@ pub const RV32_TRACE_WIDTH_SELECTOR_GROUP: u32 = 0x5256_5B00;
 
 #[inline]
 pub fn rv32_trace_uses_combined_operand_key_table_id(table_id: u32) -> bool {
-    operand_mode_keys_enabled() && matches!(table_id, 3 | 4 | 12 | 14)
+    operand_mode_keys_enabled() && matches!(table_id, 3 | 4)
 }
 
 #[inline]
@@ -68,4 +71,16 @@ pub fn rv32_trace_lookup_selector_group_for_table_id(table_id: u32) -> Option<u3
     } else {
         None
     }
+}
+
+#[inline]
+pub fn rv32_trace_lookup_n_vals_for_table_id(table_id: u32) -> usize {
+    let n_vals = if rv32_is_decode_lookup_grouped_table_id(table_id) {
+        rv32_decode_lookup_transport_n_vals()
+    } else if rv32_is_width_lookup_grouped_table_id(table_id) {
+        rv32_width_lookup_transport_n_vals()
+    } else {
+        1
+    };
+    n_vals.max(1)
 }

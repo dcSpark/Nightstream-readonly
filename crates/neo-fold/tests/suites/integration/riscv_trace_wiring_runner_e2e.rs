@@ -7,7 +7,11 @@ use neo_memory::riscv::lookups::{
     REG_ID,
 };
 use neo_memory::riscv::trace::{
-    rv32_decode_lookup_backed_cols, rv32_is_decode_lookup_table_id, Rv32DecodeSidecarLayout, Rv32WidthSidecarLayout,
+    rv32_decode_lookup_backed_row_from_instr_word, rv32_decode_lookup_table_id_for_col,
+    rv32_decode_lookup_transport_cols, rv32_decode_lookup_val_slot_for_col, rv32_is_decode_lookup_table_id,
+    rv32_trace_lookup_n_vals_for_table_id, rv32_width_lookup_backed_cols, rv32_width_lookup_table_id_for_col,
+    rv32_width_lookup_val_slot_for_col, rv32_width_sidecar_witness_from_exec_table, Rv32DecodeSidecarLayout,
+    Rv32WidthSidecarLayout,
 };
 use p3_field::PrimeCharacteristicRing;
 
@@ -88,16 +92,7 @@ fn rv32_trace_wiring_runner_prove_verify() {
         run.layout().t,
         run.exec_table().rows.len()
     );
-    assert!(
-        run.layout().t.is_power_of_two(),
-        "layout.t should stay power-of-two chunk aligned (layout.t={})",
-        run.layout().t
-    );
-    assert_eq!(
-        run.layout().t,
-        4,
-        "layout.t should reflect padded power-of-two proving length"
-    );
+    assert_eq!(run.layout().t, 3, "layout.t should reflect unpadded proving length");
 
     let steps_public = run.steps_public();
     assert_eq!(steps_public.len(), 1, "trace runner should expose one step instance");
@@ -130,10 +125,14 @@ fn rv32_trace_wiring_runner_prove_verify() {
         .copied()
         .filter(|table_id| rv32_is_decode_lookup_table_id(*table_id))
         .count();
+    let expected_decode_lookup_tables = rv32_decode_lookup_transport_cols(&Rv32DecodeSidecarLayout::new())
+        .into_iter()
+        .map(rv32_decode_lookup_table_id_for_col)
+        .collect::<std::collections::BTreeSet<_>>()
+        .len();
     assert_eq!(
-        decode_lookup_count,
-        rv32_decode_lookup_backed_cols(&Rv32DecodeSidecarLayout::new()).len(),
-        "run artifact should include decode lookup families in S_lookup"
+        decode_lookup_count, expected_decode_lookup_tables,
+        "run artifact should include decode lookup table family IDs in S_lookup"
     );
 }
 
@@ -217,6 +216,169 @@ fn rv32_trace_wiring_runner_shared_bus_default_has_expected_layout() {
         run_shared.layout().m,
         "shared-bus trace layout width must match CCS width"
     );
+}
+
+#[test]
+fn rv32_trace_wiring_runner_decode_lookup_table_content_matches_slots() {
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 1,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .min_trace_len(1)
+        .prove()
+        .expect("trace wiring prove");
+
+    let steps_public = run.steps_public();
+    let step = steps_public
+        .first()
+        .expect("trace runner should expose one step instance");
+    let exec_row = run
+        .exec_table()
+        .rows
+        .iter()
+        .find(|r| r.active)
+        .expect("expected one active exec row");
+    let key_idx = usize::try_from(exec_row.pc_before).expect("pc_before should fit usize");
+
+    let decode_layout = Rv32DecodeSidecarLayout::new();
+    let decode_cols = rv32_decode_lookup_transport_cols(&decode_layout);
+    let decode_row =
+        rv32_decode_lookup_backed_row_from_instr_word(&decode_layout, exec_row.instr_word, /*active=*/ true);
+    for &col_id in decode_cols.iter() {
+        let table_id = rv32_decode_lookup_table_id_for_col(col_id);
+        let inst = step
+            .lut_insts
+            .iter()
+            .find(|inst| inst.table_id == table_id)
+            .unwrap_or_else(|| panic!("missing decode lookup table_id={table_id} in step instance"));
+        let n_vals = rv32_trace_lookup_n_vals_for_table_id(table_id).max(1);
+        assert_eq!(
+            inst.table.len(),
+            inst.k * n_vals,
+            "decode lookup table content length must be k*n_vals (table_id={table_id}, k={}, n_vals={n_vals})",
+            inst.k
+        );
+        assert!(
+            key_idx < inst.k,
+            "decode key index out of range: key_idx={key_idx}, k={}, table_id={table_id}",
+            inst.k
+        );
+        let val_slot = if n_vals == 1 {
+            0usize
+        } else {
+            rv32_decode_lookup_val_slot_for_col(col_id)
+                .unwrap_or_else(|| panic!("missing decode val slot for col_id={col_id}"))
+        };
+        let idx = key_idx
+            .checked_mul(n_vals)
+            .and_then(|base| base.checked_add(val_slot))
+            .expect("decode lookup content index overflow");
+        assert!(
+            idx < inst.table.len(),
+            "decode lookup content index out of range: idx={idx}, len={}, table_id={table_id}, n_vals={n_vals}, val_slot={val_slot}",
+            inst.table.len()
+        );
+        assert_eq!(
+            inst.table[idx], decode_row[col_id],
+            "decode lookup content mismatch at table_id={table_id}, key_idx={key_idx}, val_slot={val_slot}, col_id={col_id}"
+        );
+    }
+}
+
+#[test]
+fn rv32_trace_wiring_runner_width_lookup_table_content_matches_slots() {
+    let program = vec![
+        RiscvInstruction::IAlu {
+            op: RiscvOpcode::Add,
+            rd: 1,
+            rs1: 0,
+            imm: 0x1234,
+        },
+        RiscvInstruction::Store {
+            op: RiscvMemOp::Sw,
+            rs1: 0,
+            rs2: 1,
+            imm: 0x100,
+        },
+        RiscvInstruction::Load {
+            op: RiscvMemOp::Lw,
+            rd: 2,
+            rs1: 0,
+            imm: 0x100,
+        },
+        RiscvInstruction::Halt,
+    ];
+    let program_bytes = encode_program(&program);
+
+    let run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
+        .min_trace_len(1)
+        .prove()
+        .expect("trace wiring prove");
+
+    let steps_public = run.steps_public();
+    let step = steps_public
+        .first()
+        .expect("trace runner should expose one step instance");
+    let width_layout = Rv32WidthSidecarLayout::new();
+    let width_cols = rv32_width_lookup_backed_cols(&width_layout);
+    let width_wit = rv32_width_sidecar_witness_from_exec_table(&width_layout, run.exec_table());
+
+    for (row_idx, row) in run
+        .exec_table()
+        .rows
+        .iter()
+        .enumerate()
+        .filter(|(_, r)| r.active)
+    {
+        let key_idx = usize::try_from(row.cycle).expect("cycle should fit usize");
+        for &col_id in width_cols.iter() {
+            let table_id = rv32_width_lookup_table_id_for_col(col_id);
+            let inst = step
+                .lut_insts
+                .iter()
+                .find(|inst| inst.table_id == table_id)
+                .unwrap_or_else(|| panic!("missing width lookup table_id={table_id} in step instance"));
+            let n_vals = rv32_trace_lookup_n_vals_for_table_id(table_id).max(1);
+            assert_eq!(
+                inst.table.len(),
+                inst.k * n_vals,
+                "width lookup table content length must be k*n_vals (table_id={table_id}, k={}, n_vals={n_vals})",
+                inst.k
+            );
+            assert!(
+                key_idx < inst.k,
+                "width key index out of range: key_idx={key_idx}, k={}, table_id={table_id}",
+                inst.k
+            );
+            let val_slot = if n_vals == 1 {
+                0usize
+            } else {
+                rv32_width_lookup_val_slot_for_col(col_id)
+                    .unwrap_or_else(|| panic!("missing width val slot for col_id={col_id}"))
+            };
+            let idx = key_idx
+                .checked_mul(n_vals)
+                .and_then(|base| base.checked_add(val_slot))
+                .expect("width lookup content index overflow");
+            assert!(
+                idx < inst.table.len(),
+                "width lookup content index out of range: idx={idx}, len={}, table_id={table_id}, n_vals={n_vals}, val_slot={val_slot}",
+                inst.table.len()
+            );
+            assert_eq!(
+                inst.table[idx], width_wit.cols[col_id][row_idx],
+                "width lookup content mismatch at table_id={table_id}, cycle={key_idx}, val_slot={val_slot}, col_id={col_id}, row_idx={row_idx}"
+            );
+        }
+    }
 }
 
 #[test]

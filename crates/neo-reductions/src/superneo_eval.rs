@@ -391,7 +391,6 @@ impl SuperneoMatrixCache {
     /// Evaluate `\widetilde{(M z)}(r)` in ring-coefficient form.
     ///
     /// Returns the `D` coefficients of the ring element in `K`.
-    #[inline]
     pub fn eval_mle_ring_with_blocks(&self, z_blocks: &SuperneoZBlocks, chi_r: &[K], n_eff: usize) -> [K; D] {
         debug_assert_eq!(
             self.cols.div_ceil(D),
@@ -399,6 +398,31 @@ impl SuperneoMatrixCache {
             "SuperneoMatrixCache::eval_mle_ring_with_blocks: block count mismatch"
         );
         let row_cap = min(min(self.rows, n_eff), chi_r.len());
+        if z_blocks.imag_all_zero {
+            let mut out_re = [F::ZERO; D];
+            let mut out_im = [F::ZERO; D];
+            let z_re = &z_blocks.re;
+            for (row, &w) in chi_r.iter().take(row_cap).enumerate() {
+                if w == K::ZERO {
+                    continue;
+                }
+                let [w_re, w_im] = w.as_coeffs();
+                for rb in &self.row_blocks[row] {
+                    let prod_re = rb.bar.mul(&z_re[rb.blk]);
+                    for i in 0..D {
+                        let v = prod_re.0[i];
+                        out_re[i] += w_re * v;
+                        out_im[i] += w_im * v;
+                    }
+                }
+            }
+            let mut out = [K::ZERO; D];
+            for i in 0..D {
+                out[i] = K::from_coeffs([out_re[i], out_im[i]]);
+            }
+            return out;
+        }
+
         let mut out = [K::ZERO; D];
         for (row, &w) in chi_r.iter().take(row_cap).enumerate() {
             if w == K::ZERO {

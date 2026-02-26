@@ -1,7 +1,7 @@
 use neo_memory::riscv::exec_table::Rv32ExecTable;
 use neo_memory::riscv::instruction::{
-    encode_lookup_key_with_mode, opcode_operand_mode, try_decode_lookup_operands, DecomposedOp, OperandMode,
-    VirtualRegisterAllocator, VIRTUAL_REG_BASE,
+    encode_lookup_key_with_mode, opcode_operand_mode, opcode_uses_combined_lookup_key, try_decode_lookup_operands,
+    DecomposedOp, OperandMode, VirtualRegisterAllocator, VIRTUAL_REG_BASE,
 };
 use neo_memory::riscv::lookups::{
     compute_op, decode_program, encode_program, interleave_bits, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode,
@@ -148,30 +148,30 @@ fn operand_mode_key_helpers_preserve_compat_and_define_rollout_behavior() {
         Some((lhs, rhs))
     );
 
-    // MUL/MULHU now share a combined product key in rollout mode.
+    // MUL/MULHU stay interleaved in rollout mode.
     let mul_key_rollout =
         encode_lookup_key_with_mode(RiscvOpcode::Mul, lhs, rhs, 32, /*use_operand_mode_keys=*/ true);
-    assert_eq!(mul_key_rollout, lhs.wrapping_mul(rhs));
+    assert_eq!(mul_key_rollout, interleave_bits(lhs, rhs) as u64);
     assert_eq!(
         try_decode_lookup_operands(RiscvOpcode::Mul, mul_key_rollout, /*use_operand_mode_keys=*/ true),
-        None
+        Some((lhs, rhs))
     );
 
     let mulhu_key_rollout =
         encode_lookup_key_with_mode(RiscvOpcode::Mulhu, lhs, rhs, 32, /*use_operand_mode_keys=*/ true);
-    assert_eq!(mulhu_key_rollout, lhs.wrapping_mul(rhs));
+    assert_eq!(mulhu_key_rollout, interleave_bits(lhs, rhs) as u64);
     assert_eq!(
         try_decode_lookup_operands(
             RiscvOpcode::Mulhu,
             mulhu_key_rollout,
             /*use_operand_mode_keys=*/ true
         ),
-        None
+        Some((lhs, rhs))
     );
 }
 
 #[test]
-fn mul_combined_key_lookup_semantics_match_expected_words() {
+fn mul_lookup_semantics_match_expected_words_in_rollout_mode() {
     let lhs = 0xFFFF_FFFFu64;
     let rhs = 0xFFFF_FFFDu64;
     let key = encode_lookup_key_with_mode(RiscvOpcode::Mul, lhs, rhs, 32, /*use_operand_mode_keys=*/ true);
@@ -185,6 +185,35 @@ fn mul_combined_key_lookup_semantics_match_expected_words() {
 
     assert_eq!(mul_out, compute_op(RiscvOpcode::Mul, lhs, rhs, 32));
     assert_eq!(mulhu_out, compute_op(RiscvOpcode::Mulhu, lhs, rhs, 32));
+}
+
+#[test]
+fn combined_lookup_key_opcode_set_is_width_safe() {
+    assert!(opcode_uses_combined_lookup_key(RiscvOpcode::Add));
+    assert!(opcode_uses_combined_lookup_key(RiscvOpcode::Sub));
+
+    for op in [
+        RiscvOpcode::Mul,
+        RiscvOpcode::Mulh,
+        RiscvOpcode::Mulhu,
+        RiscvOpcode::Mulhsu,
+        RiscvOpcode::Mulw,
+        RiscvOpcode::Div,
+        RiscvOpcode::Divu,
+        RiscvOpcode::Rem,
+        RiscvOpcode::Remu,
+        RiscvOpcode::Divw,
+        RiscvOpcode::Divuw,
+        RiscvOpcode::Remw,
+        RiscvOpcode::Remuw,
+        RiscvOpcode::Addw,
+        RiscvOpcode::Subw,
+    ] {
+        assert!(
+            !opcode_uses_combined_lookup_key(op),
+            "unexpected combined key opcode: {op:?}"
+        );
+    }
 }
 
 #[test]

@@ -37,8 +37,9 @@ use neo_memory::riscv::lookups::{
 use neo_memory::riscv::packed::{rv32_packed_d, rv32_packed_rollout_opcode};
 use neo_memory::riscv::rom_init::prog_rom_layout_and_init_words;
 use neo_memory::riscv::trace::{
-    rv32_decode_lookup_backed_cols, rv32_decode_lookup_backed_row_from_instr_word, rv32_decode_lookup_table_id_for_col,
-    rv32_trace_lookup_addr_group_for_table_id, rv32_trace_lookup_selector_group_for_table_id,
+    rv32_decode_lookup_backed_row_from_instr_word, rv32_decode_lookup_table_id_for_col,
+    rv32_decode_lookup_transport_cols, rv32_trace_lookup_addr_group_for_table_id,
+    rv32_trace_lookup_n_vals_for_table_id, rv32_trace_lookup_selector_group_for_table_id,
     rv32_width_lookup_backed_cols, rv32_width_lookup_table_id_for_col, rv32_width_sidecar_witness_from_exec_table,
     Rv32DecodeSidecarLayout, Rv32WidthSidecarLayout, RV32_TRACE_OPCODE_ADDR_GROUP,
     RV32_TRACE_OPCODE_COMBINED_ADDR_GROUP,
@@ -369,8 +370,6 @@ fn rv32_canonical_shout_opcode_families() -> &'static [RiscvOpcode] {
         RiscvOpcode::Sra,
         RiscvOpcode::Eq,
         RiscvOpcode::Neq,
-        RiscvOpcode::Mul,
-        RiscvOpcode::Mulhu,
     ]
 }
 
@@ -508,7 +507,7 @@ fn estimate_route_a_bus_cols(
         shout_shapes.push(ShoutInstanceShape {
             ell_addr,
             lanes,
-            n_vals: 1usize,
+            n_vals: rv32_trace_lookup_n_vals_for_table_id(table_id).max(1),
             addr_group: trace_lookup_addr_group_for_table_shape(table_id, ell_addr),
             selector_group: rv32_trace_lookup_selector_group_for_table_id(table_id).map(|v| v as u64),
         });
@@ -596,8 +595,49 @@ fn build_rv32_decode_lookup_tables(
     prog_init_words: &HashMap<(u32, u64), F>,
 ) -> HashMap<u32, LutTable<F>> {
     let decode_layout = Rv32DecodeSidecarLayout::new();
-    let decode_cols = rv32_decode_lookup_backed_cols(&decode_layout);
+    let decode_cols = rv32_decode_lookup_transport_cols(&decode_layout);
+    if decode_cols.is_empty() {
+        return HashMap::new();
+    }
+    let mut unique_table_ids: Vec<u32> = decode_cols
+        .iter()
+        .map(|&col_id| rv32_decode_lookup_table_id_for_col(col_id))
+        .collect();
+    unique_table_ids.sort_unstable();
+    unique_table_ids.dedup();
     let mut out = HashMap::new();
+    if unique_table_ids.len() == 1 {
+        let table_id = unique_table_ids[0];
+        let n_vals = decode_cols.len().max(1);
+        let content_len = prog_layout
+            .k
+            .checked_mul(n_vals)
+            .expect("decode lookup content length overflow");
+        let mut content = vec![F::ZERO; content_len];
+        for addr in 0..prog_layout.k {
+            let instr_word = prog_init_words
+                .get(&(PROG_ID.0, addr as u64))
+                .copied()
+                .unwrap_or(F::ZERO)
+                .as_canonical_u64() as u32;
+            let row = rv32_decode_lookup_backed_row_from_instr_word(&decode_layout, instr_word, /*active=*/ true);
+            let base = addr * n_vals;
+            for (val_slot, &col_id) in decode_cols.iter().enumerate() {
+                content[base + val_slot] = row[col_id];
+            }
+        }
+        out.insert(
+            table_id,
+            LutTable {
+                table_id,
+                k: prog_layout.k,
+                d: prog_layout.d,
+                n_side: prog_layout.n_side,
+                content,
+            },
+        );
+        return out;
+    }
     for &col_id in decode_cols.iter() {
         let table_id = rv32_decode_lookup_table_id_for_col(col_id);
         let mut content = vec![F::ZERO; prog_layout.k];
@@ -630,7 +670,7 @@ fn inject_rv32_decode_lookup_events_into_trace(
     prog_init_words: &HashMap<(u32, u64), F>,
 ) -> Result<(), PiCcsError> {
     let decode_layout = Rv32DecodeSidecarLayout::new();
-    let decode_cols = rv32_decode_lookup_backed_cols(&decode_layout);
+    let decode_cols = rv32_decode_lookup_transport_cols(&decode_layout);
     for (step_idx, step) in trace.steps.iter_mut().enumerate() {
         let prog_read = step
             .twist_events
@@ -688,7 +728,48 @@ fn build_rv32_width_lookup_tables(
 
     let wit = rv32_width_sidecar_witness_from_exec_table(width_layout, exec);
     let width_cols = rv32_width_lookup_backed_cols(width_layout);
+    if width_cols.is_empty() {
+        return Ok((HashMap::new(), cycle_d));
+    }
+    let mut unique_table_ids: Vec<u32> = width_cols
+        .iter()
+        .map(|&col_id| rv32_width_lookup_table_id_for_col(col_id))
+        .collect();
+    unique_table_ids.sort_unstable();
+    unique_table_ids.dedup();
     let mut out = HashMap::new();
+    if unique_table_ids.len() == 1 {
+        let table_id = unique_table_ids[0];
+        let n_vals = width_cols.len().max(1);
+        let content_len = cycle_k
+            .checked_mul(n_vals)
+            .ok_or_else(|| PiCcsError::InvalidInput("width lookup content length overflow".into()))?;
+        let mut content = vec![F::ZERO; content_len];
+        for (i, row) in exec.rows.iter().enumerate().take(trace_steps) {
+            let cycle = row.cycle as usize;
+            if cycle >= cycle_k {
+                return Err(PiCcsError::ProtocolError(format!(
+                    "width lookup cycle out of range at row {i}: cycle={}, k={cycle_k}",
+                    row.cycle
+                )));
+            }
+            let base = cycle * n_vals;
+            for (val_slot, &col_id) in width_cols.iter().enumerate() {
+                content[base + val_slot] = wit.cols[col_id][i];
+            }
+        }
+        out.insert(
+            table_id,
+            LutTable {
+                table_id,
+                k: cycle_k,
+                d: cycle_d,
+                n_side: 2,
+                content,
+            },
+        );
+        return Ok((out, cycle_d));
+    }
     for &col_id in width_cols.iter() {
         let table_id = rv32_width_lookup_table_id_for_col(col_id);
         let mut content = vec![F::ZERO; cycle_k];
@@ -1051,14 +1132,13 @@ impl Rv32TraceWiring {
         }
         let requested_chunk_rows = requested_chunk_rows_arch.max(max_consecutive_pc_run(&exec));
         let base_step_rows = requested_chunk_rows.min(exec.rows.len().max(1));
-        let mut step_rows = base_step_rows
-            .checked_next_power_of_two()
-            .ok_or_else(|| PiCcsError::InvalidInput(format!("trace chunk_rows overflow: {base_step_rows}")))?;
+        let mut step_rows = base_step_rows;
         while step_rows < exec.rows.len() && boundary_splits_virtual_sequence(&exec, step_rows) {
             step_rows = step_rows
-                .checked_mul(2)
+                .checked_add(base_step_rows)
                 .ok_or_else(|| PiCcsError::InvalidInput(format!("trace chunk_rows overflow: {step_rows}")))?;
         }
+        step_rows = step_rows.min(exec.rows.len().max(1));
         let exec_chunks = split_exec_into_fixed_chunks(&exec, step_rows)?;
 
         let mut layout = Rv32TraceCcsLayout::new_uniform(step_rows)
@@ -1147,28 +1227,56 @@ impl Rv32TraceWiring {
         let decode_layout = Rv32DecodeSidecarLayout::new();
         let decode_lookup_tables = build_rv32_decode_lookup_tables(&prog_layout, &prog_init_words);
         let decode_lookup_bus_specs: Vec<TraceShoutBusSpec> = {
-            let decode_lookup_cols = rv32_decode_lookup_backed_cols(&decode_layout);
-            decode_lookup_cols
+            let decode_lookup_cols = rv32_decode_lookup_transport_cols(&decode_layout);
+            let mut decode_table_ids: Vec<u32> = decode_lookup_cols
                 .iter()
-                .copied()
-                .map(|col_id| TraceShoutBusSpec {
-                    table_id: rv32_decode_lookup_table_id_for_col(col_id),
+                .map(|&col_id| rv32_decode_lookup_table_id_for_col(col_id))
+                .collect();
+            decode_table_ids.sort_unstable();
+            decode_table_ids.dedup();
+            if decode_table_ids.len() == 1 {
+                vec![TraceShoutBusSpec {
+                    table_id: decode_table_ids[0],
                     ell_addr: prog_layout.d,
-                    n_vals: 1usize,
-                })
-                .collect()
+                    n_vals: decode_lookup_cols.len().max(1),
+                }]
+            } else {
+                decode_lookup_cols
+                    .iter()
+                    .copied()
+                    .map(|col_id| TraceShoutBusSpec {
+                        table_id: rv32_decode_lookup_table_id_for_col(col_id),
+                        ell_addr: prog_layout.d,
+                        n_vals: 1usize,
+                    })
+                    .collect()
+            }
         };
         let width_lookup_bus_specs: Vec<TraceShoutBusSpec> = if include_width_lookup {
             let width_lookup_cols = rv32_width_lookup_backed_cols(&width_layout);
-            width_lookup_cols
+            let mut width_table_ids: Vec<u32> = width_lookup_cols
                 .iter()
-                .copied()
-                .map(|col_id| TraceShoutBusSpec {
-                    table_id: rv32_width_lookup_table_id_for_col(col_id),
+                .map(|&col_id| rv32_width_lookup_table_id_for_col(col_id))
+                .collect();
+            width_table_ids.sort_unstable();
+            width_table_ids.dedup();
+            if width_table_ids.len() == 1 {
+                vec![TraceShoutBusSpec {
+                    table_id: width_table_ids[0],
                     ell_addr: width_lookup_addr_d,
-                    n_vals: 1usize,
-                })
-                .collect()
+                    n_vals: width_lookup_cols.len().max(1),
+                }]
+            } else {
+                width_lookup_cols
+                    .iter()
+                    .copied()
+                    .map(|col_id| TraceShoutBusSpec {
+                        table_id: rv32_width_lookup_table_id_for_col(col_id),
+                        ell_addr: width_lookup_addr_d,
+                        n_vals: 1usize,
+                    })
+                    .collect()
+            }
         } else {
             Vec::new()
         };

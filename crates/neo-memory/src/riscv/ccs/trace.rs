@@ -151,10 +151,12 @@ pub fn build_rv32_trace_wiring_ccs_with_reserved_rows(
     build_rv32_trace_uniform_kernel_ccs_with_reserved_rows(layout, reserved_rows)
 }
 
-fn legacy_trace_core_rows(t: usize) -> Result<usize, String> {
-    t.checked_mul(10)
-        .and_then(|v| v.checked_sub(1))
-        .ok_or_else(|| "RV32 trace CCS: core row count overflow".to_string())
+fn trace_core_rows_min(layout: &Rv32TraceCcsLayout, min_rows: usize) -> Result<usize, String> {
+    let time_rows = layout
+        .m_in
+        .checked_add(layout.t)
+        .ok_or_else(|| "RV32 trace CCS: m_in + t overflow".to_string())?;
+    Ok(time_rows.max(min_rows))
 }
 
 fn build_rv32_trace_uniform_kernel_ccs_with_reserved_rows(
@@ -177,7 +179,7 @@ fn build_rv32_trace_uniform_kernel_ccs_with_reserved_rows(
         Constraint::terms(tr(l.shout_has_lookup), true, vec![(tr(l.shout_rhs), F::ONE)]),
     ];
 
-    let n = legacy_trace_core_rows(layout.t)?
+    let n = trace_core_rows_min(layout, cons.len())?
         .checked_add(reserved_rows)
         .ok_or_else(|| "RV32 trace CCS: n overflow".to_string())?;
     build_r1cs_ccs(&cons, n, layout.m, layout.const_one)

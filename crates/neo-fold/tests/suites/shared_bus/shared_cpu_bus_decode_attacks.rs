@@ -2,7 +2,7 @@ use neo_fold::riscv_trace_shard::{Rv32TraceWiring, Rv32TraceWiringRun};
 use neo_fold::shard::{ShardProof, StepProof};
 use neo_math::K;
 use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvOpcode};
-use neo_memory::riscv::trace::{rv32_decode_lookup_backed_cols, Rv32DecodeSidecarLayout};
+use neo_memory::riscv::trace::{rv32_decode_lookup_transport_cols, Rv32DecodeSidecarLayout};
 use p3_field::PrimeCharacteristicRing;
 
 fn first_materialized_step(proof: &ShardProof) -> &StepProof {
@@ -79,7 +79,7 @@ fn prove_decode_trace_program() -> (Rv32TraceWiringRun, ShardProof) {
 
 fn tamper_decode_opening_scalar(proof: &mut ShardProof, decode_col: usize) {
     let layout = Rv32DecodeSidecarLayout::new();
-    let decode_open_cols = rv32_decode_lookup_backed_cols(&layout);
+    let decode_open_cols = rv32_decode_lookup_transport_cols(&layout);
     assert!(
         decode_open_cols.contains(&decode_col),
         "decode col must be present in WP decode opening set"
@@ -121,10 +121,10 @@ fn tamper_decode_opening_scalar(proof: &mut ShardProof, decode_col: usize) {
 fn decode_write_gate_tamper_is_rejected() {
     let (run, mut proof) = prove_decode_trace_program();
     let layout = Rv32DecodeSidecarLayout::new();
-    tamper_decode_opening_scalar(&mut proof, layout.op_alu_imm);
+    tamper_decode_opening_scalar(&mut proof, layout.ram_has_read);
     assert!(
         run.verify_proof(&proof).is_err(),
-        "tampered decode stage opcode-class opening must fail verification"
+        "tampered decode-stage RAM read selector opening must fail verification"
     );
 }
 
@@ -132,9 +132,9 @@ fn decode_write_gate_tamper_is_rejected() {
 fn decode_alu_table_delta_tamper_is_rejected() {
     let (run, mut proof) = prove_decode_trace_program();
     let layout = Rv32DecodeSidecarLayout::new();
-    tamper_decode_opening_scalar(&mut proof, layout.op_alu_reg);
+    tamper_decode_opening_scalar(&mut proof, layout.ram_has_write);
     assert!(
         run.verify_proof(&proof).is_err(),
-        "tampered decode stage ALU-reg selector opening must fail verification"
+        "tampered decode-stage RAM write selector opening must fail verification"
     );
 }

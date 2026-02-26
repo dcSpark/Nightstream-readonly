@@ -51,9 +51,6 @@ fn rot_matrix_to_rq(mat: &Mat<F>) -> RqEl {
 pub fn default_mixers() -> Mixers {
     fn mix_rhos_commits(rhos: &[Mat<F>], cs: &[Cmt]) -> Cmt {
         assert!(!cs.is_empty(), "mix_rhos_commits: empty commitments");
-        if cs.len() == 1 {
-            return cs[0].clone();
-        }
         let rq_els: Vec<RqEl> = rhos.iter().map(rot_matrix_to_rq).collect();
         s_lincomb(&rq_els, cs).expect("s_lincomb should succeed")
     }

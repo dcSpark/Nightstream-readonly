@@ -370,7 +370,13 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
     let add_key_delta = shout_lhs + shout_rhs - shout_add_sub_key;
     let sub_key_delta = shout_lhs - shout_rhs - shout_add_sub_key;
     let mul_key_delta = shout_lhs * shout_rhs - shout_add_sub_key;
-    let add_sub_combined_key_mode = if neo_memory::riscv::instruction::operand_mode_keys_enabled() {
+    let add_sub_combined_key_mode = if neo_memory::riscv::instruction::opcode_uses_combined_lookup_key(RiscvOpcode::Add)
+    {
+        K::ONE
+    } else {
+        K::ZERO
+    };
+    let mul_combined_key_mode = if neo_memory::riscv::instruction::opcode_uses_combined_lookup_key(RiscvOpcode::Mul) {
         K::ONE
     } else {
         K::ZERO
@@ -398,7 +404,7 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
         alu_imm_table_delta - funct7_bits[5] * funct3_is[5],
         add_sub_combined_key_mode * op_add_total * add_key_delta * (add_key_delta - two_pow_32),
         add_sub_combined_key_mode * op_sub_reg * sub_key_delta * (sub_key_delta + two_pow_32),
-        add_sub_combined_key_mode * (op_mul_reg + op_mulhu_reg) * mul_key_delta,
+        mul_combined_key_mode * (op_mul_reg + op_mulhu_reg) * mul_key_delta,
         trace_rs1_addr - decode_rs1_addr,
         trace_rs2_addr - decode_rs2_addr,
         // `rd` field bits are not semantically an architectural destination on opcodes
@@ -502,7 +508,7 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
 
     let add_stage_key = add_sub_combined_key_mode * add_key_delta * (add_key_delta - two_pow_32);
     let sub_stage_key = add_sub_combined_key_mode * sub_key_delta * (sub_key_delta + two_pow_32);
-    let mul_stage_key = add_sub_combined_key_mode * mul_key_delta;
+    let mul_stage_key = mul_combined_key_mode * mul_key_delta;
 
     // MULH virtual rows (remaining = 7..1)
     let mulh_rows = [
@@ -848,7 +854,7 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
             lhs: Some(shout_lhs - rs1_val),
             rhs: Some(shout_rhs - rs2_val),
             rd_val: Some(rd_val - shout_val),
-            extra: Some(add_sub_combined_key_mode * mul_key_delta),
+            extra: Some(mul_combined_key_mode * mul_key_delta),
         },
         VirtualStageSparseRow {
             remaining: 12,
@@ -1091,7 +1097,7 @@ pub(crate) fn w2_alu_branch_lookup_residuals(
             lhs: Some(shout_lhs - rs1_val),
             rhs: Some(shout_rhs - rs2_val),
             rd_val: Some(rd_val - shout_val),
-            extra: Some(add_sub_combined_key_mode * mul_key_delta),
+            extra: Some(mul_combined_key_mode * mul_key_delta),
         },
         VirtualStageSparseRow {
             remaining: 13,

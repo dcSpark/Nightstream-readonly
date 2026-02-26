@@ -2,6 +2,7 @@ pub(crate) use crate::common_setup::{default_mixers, setup_ajtai_committer};
 
 mod cpu_bus_semantics_fork_attack;
 mod cpu_constraints_fix_vulnerabilities;
+mod shared_cpu_bus_combined_key_range_regression;
 mod shared_cpu_bus_comprehensive_attacks;
 mod shared_cpu_bus_control_attacks;
 mod shared_cpu_bus_decode_attacks;

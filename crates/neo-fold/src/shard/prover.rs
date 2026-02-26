@@ -253,12 +253,6 @@ where
         }
 
         let (mcs_inst, mcs_wit) = &step.mcs;
-        if step.time_columns.t > 0 && !step.time_columns.t.is_power_of_two() {
-            return Err(PiCcsError::InvalidInput(format!(
-                "prove/time_columns: time_t={} must be a power of two",
-                step.time_columns.t
-            )));
-        }
         let route_steps = {
             let inst_steps = step
                 .lut_instances
@@ -1010,13 +1004,9 @@ where
                     expected
                 )));
             }
-            let can_reuse_main_lane_dec =
-                ccs_out.len() == 1 && outs_Z.len() == 1 && !Z_split.is_empty() && children.len() == Z_split.len();
-            let shared_val_lane_child_cs: Option<Vec<Cmt>> = if can_reuse_main_lane_dec {
-                Some(children.iter().map(|child| child.c.clone()).collect())
-            } else {
-                None
-            };
+            // Disabled: once Π_RLC(k=1) applies sampled ρ (non-identity),
+            // val-lane parents are no longer compatible with main-lane Z_split reuse.
+            let shared_val_lane_child_cs: Option<Vec<Cmt>> = None;
 
             for (claim_idx, me) in mem_proof.val_me_claims.iter().enumerate() {
                 let (wit, ctx) = match claim_idx {
@@ -1227,52 +1217,12 @@ where
             }
         }
 
-        // Additional WB/WP folding lane(s): CPU ME openings used by wb/booleanity and
-        // wp/quiescence stages. These lanes share the same witness matrix (`mcs_wit.Z`),
-        // so precompute DEC digit witnesses + child commitments once per step.
-        let mut wb_wp_dec_wits: Option<Vec<Mat<F>>> = None;
-        let mut wb_wp_child_cs: Option<Vec<Cmt>> = None;
-        if !mem_proof.wb_me_claims.is_empty() || !mem_proof.wp_me_claims.is_empty() {
-            let k_dec_wb_wp = core::cmp::max(k_dec, required_dec_digits_for_matrix(params, &mcs_wit.Z)?);
-            let (dec_wits, digit_nonzero) =
-                ccs::split_b_matrix_k_with_nonzero_flags(&mcs_wit.Z, k_dec_wb_wp, params.b)?;
-            let zero_c = Cmt::zeros(mcs_inst.c.d, mcs_inst.c.kappa);
-            let mut child_cs: Vec<Cmt> = vec![zero_c.clone(); dec_wits.len()];
-            let nonzero_idx: Vec<usize> = digit_nonzero
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, &nz)| nz.then_some(idx))
-                .collect();
-            if !nonzero_idx.is_empty() {
-                let mats: Vec<&Mat<F>> = nonzero_idx.iter().map(|&idx| &dec_wits[idx]).collect();
-                let commits = l.commit_many(&mats);
-                if commits.len() != mats.len() {
-                    return Err(PiCcsError::ProtocolError(format!(
-                        "WB/WP DEC commit_many returned {} commitments for {} matrices",
-                        commits.len(),
-                        mats.len()
-                    )));
-                }
-                for (pos, &idx) in nonzero_idx.iter().enumerate() {
-                    child_cs[idx] = commits[pos].clone();
-                }
-            }
-            wb_wp_dec_wits = Some(dec_wits);
-            wb_wp_child_cs = Some(child_cs);
-        }
-
         // Additional WB folding lane(s): CPU ME openings used by wb/booleanity stage.
         let mut wb_fold: Vec<RlcDecProof> = Vec::new();
         if !mem_proof.wb_me_claims.is_empty() {
             let trace = Rv32TraceLayout::new();
             let wb_cols = crate::memory_sidecar::memory::rv32_trace_wb_columns(&trace);
             let core_t = s.t();
-            let dec_wits = wb_wp_dec_wits
-                .as_ref()
-                .ok_or_else(|| PiCcsError::ProtocolError("WB fold missing shared DEC witnesses".into()))?;
-            let child_cs = wb_wp_child_cs
-                .as_ref()
-                .ok_or_else(|| PiCcsError::ProtocolError("WB fold missing shared DEC commitments".into()))?;
             tr.append_message(b"fold/wb_lane_start", &(step_idx as u64).to_le_bytes());
             for (claim_idx, me) in mem_proof.wb_me_claims.iter().enumerate() {
                 let n_lane = 1usize
@@ -1291,14 +1241,47 @@ where
                     mixers.mix_rhos_commits,
                     ell_d,
                 )?;
+                let rlc_rho_mats = ccs::rot_rhos_to_mats(&rlc_rhos);
+                let (_, z_mix) = neo_reductions::optimized_engine::rlc_reduction_optimized_with_commit_mix(
+                    &s_lane,
+                    params,
+                    &rlc_rho_mats,
+                    core::slice::from_ref(me),
+                    &[&mcs_wit.Z],
+                    ell_d,
+                    mixers.mix_rhos_commits,
+                );
+                let k_dec_lane = core::cmp::max(k_dec, required_dec_digits_for_matrix(params, &z_mix)?);
+                let (dec_wits, digit_nonzero) = ccs::split_b_matrix_k_with_nonzero_flags(&z_mix, k_dec_lane, params.b)?;
+                let zero_c = Cmt::zeros(mcs_inst.c.d, mcs_inst.c.kappa);
+                let mut child_cs: Vec<Cmt> = vec![zero_c.clone(); dec_wits.len()];
+                let nonzero_idx: Vec<usize> = digit_nonzero
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, &nz)| nz.then_some(idx))
+                    .collect();
+                if !nonzero_idx.is_empty() {
+                    let mats: Vec<&Mat<F>> = nonzero_idx.iter().map(|&idx| &dec_wits[idx]).collect();
+                    let commits = l.commit_many(&mats);
+                    if commits.len() != mats.len() {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "WB DEC commit_many returned {} commitments for {} matrices",
+                            commits.len(),
+                            mats.len()
+                        )));
+                    }
+                    for (pos, &idx) in nonzero_idx.iter().enumerate() {
+                        child_cs[idx] = commits[pos].clone();
+                    }
+                }
                 let (mut dec_children, ok_y, ok_x, ok_c) = ccs::dec_children_with_commit_cached(
                     mode.clone(),
                     &s_lane,
                     params,
                     &rlc_parent,
-                    dec_wits,
+                    &dec_wits,
                     ell_d,
-                    child_cs,
+                    &child_cs,
                     mixers.combine_b_pows,
                     ccs_sparse_cache.as_deref(),
                 );
@@ -1393,7 +1376,7 @@ where
             }
             if decode_required {
                 let decode_layout = Rv32DecodeSidecarLayout::new();
-                let (_decode_open_cols, decode_lut_indices) =
+                let (_decode_open_cols, decode_lut_slots) =
                     crate::memory_sidecar::memory::resolve_shared_decode_lookup_lut_indices(step, &decode_layout)?;
                 let bus = crate::memory_sidecar::memory::build_bus_layout_for_step_witness(step, t_len)?;
                 if bus.shout_cols.len() != step.lut_instances.len() {
@@ -1421,7 +1404,7 @@ where
                         mem_cols_len
                     )));
                 }
-                for &lut_idx in decode_lut_indices.iter() {
+                for &(lut_idx, val_slot) in decode_lut_slots.iter() {
                     let inst_cols = bus.shout_cols.get(lut_idx).ok_or_else(|| {
                         PiCcsError::ProtocolError(
                             "W2(shared): missing shout cols for decode lookup table in WP fold".into(),
@@ -1432,13 +1415,17 @@ where
                             "W2(shared): expected one shout lane for decode lookup table in WP fold".into(),
                         )
                     })?;
-                    let logical_idx = cpu_cols_len
-                        .checked_add(lane0.primary_val())
-                        .ok_or_else(|| {
-                            PiCcsError::InvalidInput(
-                                "W2(shared): cpu_cols + lane primary value overflow in WP fold".into(),
-                            )
-                        })?;
+                    let val_col = lane0.vals.get(val_slot).copied().ok_or_else(|| {
+                        PiCcsError::ProtocolError(format!(
+                            "W2(shared): decode val_slot={} out of range for lut_idx={} in WP fold (n_vals={})",
+                            val_slot,
+                            lut_idx,
+                            lane0.vals.len()
+                        ))
+                    })?;
+                    let logical_idx = cpu_cols_len.checked_add(val_col).ok_or_else(|| {
+                        PiCcsError::InvalidInput("W2(shared): cpu_cols + lane primary value overflow in WP fold".into())
+                    })?;
                     let logical_col = step
                         .time_columns
                         .col_ids
@@ -1447,7 +1434,7 @@ where
                         .ok_or_else(|| {
                             PiCcsError::ProtocolError(format!(
                                 "W2(shared): missing logical id for mem local col {} in WP fold",
-                                lane0.primary_val()
+                                val_col
                             ))
                         })?;
                     wp_open_cols.push(logical_col);
@@ -1459,12 +1446,6 @@ where
                 )?);
             }
             let core_t = s.t();
-            let dec_wits = wb_wp_dec_wits
-                .as_ref()
-                .ok_or_else(|| PiCcsError::ProtocolError("WP fold missing shared DEC witnesses".into()))?;
-            let child_cs = wb_wp_child_cs
-                .as_ref()
-                .ok_or_else(|| PiCcsError::ProtocolError("WP fold missing shared DEC commitments".into()))?;
             tr.append_message(b"fold/wp_lane_start", &(step_idx as u64).to_le_bytes());
             for (claim_idx, me) in mem_proof.wp_me_claims.iter().enumerate() {
                 let n_lane = 1usize
@@ -1483,14 +1464,47 @@ where
                     mixers.mix_rhos_commits,
                     ell_d,
                 )?;
+                let rlc_rho_mats = ccs::rot_rhos_to_mats(&rlc_rhos);
+                let (_, z_mix) = neo_reductions::optimized_engine::rlc_reduction_optimized_with_commit_mix(
+                    &s_lane,
+                    params,
+                    &rlc_rho_mats,
+                    core::slice::from_ref(me),
+                    &[&mcs_wit.Z],
+                    ell_d,
+                    mixers.mix_rhos_commits,
+                );
+                let k_dec_lane = core::cmp::max(k_dec, required_dec_digits_for_matrix(params, &z_mix)?);
+                let (dec_wits, digit_nonzero) = ccs::split_b_matrix_k_with_nonzero_flags(&z_mix, k_dec_lane, params.b)?;
+                let zero_c = Cmt::zeros(mcs_inst.c.d, mcs_inst.c.kappa);
+                let mut child_cs: Vec<Cmt> = vec![zero_c.clone(); dec_wits.len()];
+                let nonzero_idx: Vec<usize> = digit_nonzero
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(idx, &nz)| nz.then_some(idx))
+                    .collect();
+                if !nonzero_idx.is_empty() {
+                    let mats: Vec<&Mat<F>> = nonzero_idx.iter().map(|&idx| &dec_wits[idx]).collect();
+                    let commits = l.commit_many(&mats);
+                    if commits.len() != mats.len() {
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "WP DEC commit_many returned {} commitments for {} matrices",
+                            commits.len(),
+                            mats.len()
+                        )));
+                    }
+                    for (pos, &idx) in nonzero_idx.iter().enumerate() {
+                        child_cs[idx] = commits[pos].clone();
+                    }
+                }
                 let (mut dec_children, ok_y, ok_x, ok_c) = ccs::dec_children_with_commit_cached(
                     mode.clone(),
                     &s_lane,
                     params,
                     &rlc_parent,
-                    dec_wits,
+                    &dec_wits,
                     ell_d,
-                    child_cs,
+                    &child_cs,
                     mixers.combine_b_pows,
                     ccs_sparse_cache.as_deref(),
                 );
@@ -1823,7 +1837,13 @@ where
             let mut out = Vec::new();
             let logical_col_pos = crate::time_opening::me_adapter::build_logical_col_pos(&step.time_columns.col_ids)?;
             let cpu_cols_len = time_cpu_commitments.len();
-            let mut z_col_cache = std::collections::BTreeMap::<usize, neo_ccs::Mat<F>>::new();
+            struct EncodedTimeColCache {
+                z_col: neo_ccs::Mat<F>,
+                row_nz: Vec<Vec<(usize, F)>>,
+            }
+            let mut z_col_cache = std::collections::BTreeMap::<usize, EncodedTimeColCache>::new();
+            let mut point_weight_cache: Vec<(crate::shard_proof_types::OpeningDomain, Vec<K>, Vec<F>, Vec<F>)> =
+                Vec::new();
             for opening in fold_openings.iter() {
                 if opening.source != crate::shard_proof_types::TimeOpeningSource::CommittedOpening {
                     continue;
@@ -1853,24 +1873,41 @@ where
                     &logical_col_pos,
                     cpu_cols_len,
                 )?;
-                let point_chi = crate::time_opening::me_adapter::build_small_chi_table(opening.point.as_slice())?;
-                let point_row_weights = match domain {
-                    crate::shard_proof_types::OpeningDomain::Cpu => {
-                        crate::time_opening::me_adapter::cpu_time_row_weights(
-                            opening.point.as_slice(),
-                            step.mcs.0.m_in,
-                            step.time_columns.t,
-                            point_chi.as_deref(),
-                        )?
-                    }
-                    crate::shard_proof_types::OpeningDomain::Mem => {
-                        crate::time_opening::me_adapter::mem_time_row_weights(
-                            opening.point.as_slice(),
-                            &cpu_bus,
-                            point_chi.as_deref(),
-                        )?
-                    }
+                let cache_idx = if let Some(idx) = point_weight_cache
+                    .iter()
+                    .position(|(d, p, _, _)| *d == domain && p.as_slice() == opening.point.as_slice())
+                {
+                    idx
+                } else {
+                    let point_chi = crate::time_opening::me_adapter::build_small_chi_table(opening.point.as_slice())?;
+                    let point_row_weights = match domain {
+                        crate::shard_proof_types::OpeningDomain::Cpu => {
+                            crate::time_opening::me_adapter::cpu_time_row_weights(
+                                opening.point.as_slice(),
+                                step.mcs.0.m_in,
+                                step.time_columns.t,
+                                point_chi.as_deref(),
+                            )?
+                        }
+                        crate::shard_proof_types::OpeningDomain::Mem => {
+                            crate::time_opening::me_adapter::mem_time_row_weights(
+                                opening.point.as_slice(),
+                                &cpu_bus,
+                                point_chi.as_deref(),
+                            )?
+                        }
+                    };
+                    let (point_row_weights_re, point_row_weights_im) =
+                        crate::time_opening::me_adapter::split_row_weight_coeffs(point_row_weights.as_slice());
+                    point_weight_cache.push((
+                        domain,
+                        opening.point.clone(),
+                        point_row_weights_re,
+                        point_row_weights_im,
+                    ));
+                    point_weight_cache.len() - 1
                 };
+                let (_, _, point_row_weights_re, point_row_weights_im) = &point_weight_cache[cache_idx];
                 let mut digit_evals = Vec::with_capacity(pairs.len());
                 for (col_id, eval) in pairs.into_iter() {
                     col_ids.push(col_id);
@@ -1903,16 +1940,19 @@ where
                             col,
                             crate::time_opening::STAGE8_TIME_DECOMP_BASE,
                         );
-                        z_col_cache.insert(col_id, z_col);
+                        let row_nz = crate::time_opening::me_adapter::mat_row_nonzero_entries(&z_col);
+                        z_col_cache.insert(col_id, EncodedTimeColCache { z_col, row_nz });
                     }
                     let z_col = z_col_cache.get(&col_id).ok_or_else(|| {
                         PiCcsError::ProtocolError(format!(
                             "time/opening proof build: cached column missing for col_id={col_id}",
                         ))
                     })?;
-                    let digits = crate::time_opening::me_adapter::eval_mat_digits_from_row_weights(
-                        point_row_weights.as_slice(),
-                        z_col,
+                    let digits = crate::time_opening::me_adapter::eval_mat_digits_from_sparse_row_weight_coeffs(
+                        point_row_weights_re.as_slice(),
+                        point_row_weights_im.as_slice(),
+                        z_col.row_nz.as_slice(),
+                        z_col.z_col.cols(),
                     )?;
                     let recomposed = crate::time_opening::me_adapter::recompose_digits_to_scalar(
                         digits.as_slice(),

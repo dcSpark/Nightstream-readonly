@@ -9,8 +9,10 @@ use neo_memory::riscv::ccs::{
 use neo_memory::riscv::instruction::operand_mode_keys_enabled;
 use neo_memory::riscv::lookups::{RiscvOpcode, RiscvShoutTables, PROG_ID, RAM_ID, REG_ID};
 use neo_memory::riscv::trace::{
-    rv32_decode_lookup_backed_cols, rv32_decode_lookup_table_id_for_col, rv32_trace_lookup_addr_group_for_table_id,
-    rv32_trace_lookup_selector_group_for_table_id, rv32_width_lookup_backed_cols, rv32_width_lookup_table_id_for_col,
+    rv32_decode_lookup_backed_cols, rv32_decode_lookup_table_id_for_col, rv32_is_decode_lookup_grouped_table_id,
+    rv32_is_width_lookup_grouped_table_id, rv32_trace_lookup_addr_group_for_table_id,
+    rv32_trace_lookup_n_vals_for_table_id, rv32_trace_lookup_selector_group_for_table_id,
+    rv32_trace_uses_combined_operand_key_table_id, rv32_width_lookup_backed_cols, rv32_width_lookup_table_id_for_col,
     Rv32DecodeSidecarLayout, Rv32WidthSidecarLayout,
 };
 use p3_goldilocks::Goldilocks as F;
@@ -51,10 +53,13 @@ fn decode_selector_specs(prog_d: usize) -> Vec<TraceShoutBusSpec> {
     let decode = Rv32DecodeSidecarLayout::new();
     [decode.rd_has_write, decode.ram_has_read, decode.ram_has_write]
         .into_iter()
-        .map(|col| TraceShoutBusSpec {
-            table_id: rv32_decode_lookup_table_id_for_col(col),
-            ell_addr: prog_d,
-            n_vals: 1usize,
+        .map(|col| {
+            let table_id = rv32_decode_lookup_table_id_for_col(col);
+            TraceShoutBusSpec {
+                table_id,
+                ell_addr: prog_d,
+                n_vals: rv32_trace_lookup_n_vals_for_table_id(table_id),
+            }
         })
         .collect()
 }
@@ -63,10 +68,13 @@ fn width_selector_specs(cycle_d: usize) -> Vec<TraceShoutBusSpec> {
     let width = Rv32WidthSidecarLayout::new();
     [width.ram_rv_q16, width.rs2_q16]
         .into_iter()
-        .map(|col| TraceShoutBusSpec {
-            table_id: rv32_width_lookup_table_id_for_col(col),
-            ell_addr: cycle_d,
-            n_vals: 1usize,
+        .map(|col| {
+            let table_id = rv32_width_lookup_table_id_for_col(col);
+            TraceShoutBusSpec {
+                table_id,
+                ell_addr: cycle_d,
+                n_vals: rv32_trace_lookup_n_vals_for_table_id(table_id),
+            }
         })
         .collect()
 }
@@ -368,6 +376,10 @@ fn rv32_trace_lookup_addr_group_splits_add_sub_from_interleaved_opcodes_when_ope
     let add_group = rv32_trace_lookup_addr_group_for_table_id(shout.opcode_to_id(RiscvOpcode::Add).0);
     let sub_group = rv32_trace_lookup_addr_group_for_table_id(shout.opcode_to_id(RiscvOpcode::Sub).0);
     let and_group = rv32_trace_lookup_addr_group_for_table_id(shout.opcode_to_id(RiscvOpcode::And).0);
+    let mul_id = shout.opcode_to_id(RiscvOpcode::Mul).0;
+    let mulhu_id = shout.opcode_to_id(RiscvOpcode::Mulhu).0;
+    let mul_group = rv32_trace_lookup_addr_group_for_table_id(mul_id);
+    let mulhu_group = rv32_trace_lookup_addr_group_for_table_id(mulhu_id);
 
     assert!(add_group.is_some() && sub_group.is_some() && and_group.is_some());
     assert_eq!(
@@ -377,6 +389,22 @@ fn rv32_trace_lookup_addr_group_splits_add_sub_from_interleaved_opcodes_when_ope
     assert_ne!(
         add_group, and_group,
         "ADD/SUB addr group must be distinct from interleaved-key opcode addr group"
+    );
+    assert_eq!(
+        mul_group, and_group,
+        "MUL must remain in the interleaved-key opcode addr group"
+    );
+    assert_eq!(
+        mulhu_group, and_group,
+        "MULHU must remain in the interleaved-key opcode addr group"
+    );
+    assert!(
+        !rv32_trace_uses_combined_operand_key_table_id(mul_id),
+        "MUL table id must not be marked combined-key"
+    );
+    assert!(
+        !rv32_trace_uses_combined_operand_key_table_id(mulhu_id),
+        "MULHU table id must not be marked combined-key"
     );
 }
 
@@ -418,4 +446,61 @@ fn rv32_trace_lookup_selector_group_coalesces_all_width_lookup_tables() {
         1,
         "all width lookup-backed tables should share one selector group"
     );
+}
+
+#[test]
+fn rv32_trace_lookup_grouped_id_predicates_match_family_shape() {
+    let decode = Rv32DecodeSidecarLayout::new();
+    let decode_table_ids: std::collections::BTreeSet<u32> = rv32_decode_lookup_backed_cols(&decode)
+        .into_iter()
+        .map(rv32_decode_lookup_table_id_for_col)
+        .collect();
+    assert!(
+        !decode_table_ids.is_empty(),
+        "decode lookup-backed table family must be non-empty"
+    );
+    if decode_table_ids.len() == 1 {
+        let grouped_id = *decode_table_ids
+            .iter()
+            .next()
+            .expect("single decode grouped id");
+        assert!(
+            rv32_is_decode_lookup_grouped_table_id(grouped_id),
+            "single decode lookup family id should be recognized as grouped (id={grouped_id})"
+        );
+    } else {
+        for table_id in decode_table_ids {
+            assert!(
+                !rv32_is_decode_lookup_grouped_table_id(table_id),
+                "non-grouped decode table family id must not be recognized as grouped (id={table_id})"
+            );
+        }
+    }
+
+    let width = Rv32WidthSidecarLayout::new();
+    let width_table_ids: std::collections::BTreeSet<u32> = rv32_width_lookup_backed_cols(&width)
+        .into_iter()
+        .map(rv32_width_lookup_table_id_for_col)
+        .collect();
+    assert!(
+        !width_table_ids.is_empty(),
+        "width lookup-backed table family must be non-empty"
+    );
+    if width_table_ids.len() == 1 {
+        let grouped_id = *width_table_ids
+            .iter()
+            .next()
+            .expect("single width grouped id");
+        assert!(
+            rv32_is_width_lookup_grouped_table_id(grouped_id),
+            "single width lookup family id should be recognized as grouped (id={grouped_id})"
+        );
+    } else {
+        for table_id in width_table_ids {
+            assert!(
+                !rv32_is_width_lookup_grouped_table_id(table_id),
+                "non-grouped width table family id must not be recognized as grouped (id={table_id})"
+            );
+        }
+    }
 }

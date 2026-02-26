@@ -491,27 +491,7 @@ pub fn verify_route_a_memory_step(
                         }
                         acc
                     };
-                    let key = match packed_opcode {
-                        Some(neo_memory::riscv::lookups::RiscvOpcode::Mul) => {
-                            let hi_bits = lane.addr_bits.get(2..34).ok_or_else(|| {
-                                PiCcsError::InvalidInput(
-                                    "packed MUL combined-key linkage requires addr_bits[2..34]".into(),
-                                )
-                            })?;
-                            let hi = bits_to_scalar(hi_bits);
-                            lane.val + K::from(F::from_u64(1u64 << 32)) * hi
-                        }
-                        Some(neo_memory::riscv::lookups::RiscvOpcode::Mulhu) => {
-                            let lo_bits = lane.addr_bits.get(2..34).ok_or_else(|| {
-                                PiCcsError::InvalidInput(
-                                    "packed MULHU combined-key linkage requires addr_bits[2..34]".into(),
-                                )
-                            })?;
-                            let lo = bits_to_scalar(lo_bits);
-                            lo + K::from(F::from_u64(1u64 << 32)) * lane.val
-                        }
-                        _ => bits_to_scalar(lane.addr_bits.as_slice()),
-                    };
+                    let key = bits_to_scalar(lane.addr_bits.as_slice());
                     let group_size = shout_addr_range_counts_combined
                         .get(&lane.addr_key)
                         .copied()

@@ -2,7 +2,7 @@ use crate::shard_proof_types::{OpeningDomain, TimeOpeningProof};
 use crate::PiCcsError;
 use neo_ajtai::{s_mul, Commitment as Cmt};
 use neo_ccs::Mat;
-use neo_math::{ring::cf_inv, ring::Rq as RqEl, D, F, K};
+use neo_math::{ring::cf_inv, ring::Rq as RqEl, KExtensions, D, F, K};
 use p3_field::PrimeCharacteristicRing;
 
 #[inline]
@@ -76,14 +76,179 @@ pub fn eval_mat_digits_from_row_weights(weights: &[K], z: &Mat<F>) -> Result<Vec
             weights.len()
         )));
     }
-    let mut out = vec![K::ZERO; z.rows()];
-    for (j, &w) in weights.iter().enumerate() {
-        if w == K::ZERO {
-            continue;
+
+    let rows = z.rows();
+    let cols = z.cols();
+    let z_data = z.as_slice();
+    let mut out = vec![K::ZERO; rows];
+
+    // Row-major dot products: keep accumulation in a register-like local and
+    // store once per row instead of repeatedly touching out[rho] in the inner loop.
+    for rho in 0..rows {
+        let row = &z_data[rho * cols..(rho + 1) * cols];
+        let mut acc = K::ZERO;
+        let mut j = 0usize;
+        while j + 3 < cols {
+            let x0 = row[j];
+            let x1 = row[j + 1];
+            let x2 = row[j + 2];
+            let x3 = row[j + 3];
+            if x0 != F::ZERO {
+                acc += weights[j].scale_base(x0);
+            }
+            if x1 != F::ZERO {
+                acc += weights[j + 1].scale_base(x1);
+            }
+            if x2 != F::ZERO {
+                acc += weights[j + 2].scale_base(x2);
+            }
+            if x3 != F::ZERO {
+                acc += weights[j + 3].scale_base(x3);
+            }
+            j += 4;
         }
-        for rho in 0..z.rows() {
-            out[rho] += w * K::from(z[(rho, j)]);
+        while j < cols {
+            let x = row[j];
+            if x != F::ZERO {
+                acc += weights[j].scale_base(x);
+            }
+            j += 1;
         }
+        out[rho] = acc;
+    }
+    Ok(out)
+}
+
+#[inline]
+pub fn split_row_weight_coeffs(weights: &[K]) -> (Vec<F>, Vec<F>) {
+    let mut re = Vec::with_capacity(weights.len());
+    let mut im = Vec::with_capacity(weights.len());
+    for &w in weights {
+        let [wr, wi] = w.as_coeffs();
+        re.push(wr);
+        im.push(wi);
+    }
+    (re, im)
+}
+
+#[inline]
+pub fn eval_mat_digits_from_row_weight_coeffs(
+    weights_re: &[F],
+    weights_im: &[F],
+    z: &Mat<F>,
+) -> Result<Vec<K>, PiCcsError> {
+    if weights_re.len() != weights_im.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "time/opening eval(digits): weights_re.len()={} != weights_im.len()={}",
+            weights_re.len(),
+            weights_im.len()
+        )));
+    }
+    if z.cols() != weights_re.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "time/opening eval(digits): z.cols()={} != weights.len()={}",
+            z.cols(),
+            weights_re.len()
+        )));
+    }
+
+    let rows = z.rows();
+    let cols = z.cols();
+    let z_data = z.as_slice();
+    let mut out = vec![K::ZERO; rows];
+
+    for rho in 0..rows {
+        let row = &z_data[rho * cols..(rho + 1) * cols];
+        let mut acc_re = F::ZERO;
+        let mut acc_im = F::ZERO;
+        let mut j = 0usize;
+        while j + 3 < cols {
+            let x0 = row[j];
+            let x1 = row[j + 1];
+            let x2 = row[j + 2];
+            let x3 = row[j + 3];
+
+            if x0 != F::ZERO {
+                acc_re += weights_re[j] * x0;
+                acc_im += weights_im[j] * x0;
+            }
+            if x1 != F::ZERO {
+                acc_re += weights_re[j + 1] * x1;
+                acc_im += weights_im[j + 1] * x1;
+            }
+            if x2 != F::ZERO {
+                acc_re += weights_re[j + 2] * x2;
+                acc_im += weights_im[j + 2] * x2;
+            }
+            if x3 != F::ZERO {
+                acc_re += weights_re[j + 3] * x3;
+                acc_im += weights_im[j + 3] * x3;
+            }
+            j += 4;
+        }
+        while j < cols {
+            let x = row[j];
+            if x != F::ZERO {
+                acc_re += weights_re[j] * x;
+                acc_im += weights_im[j] * x;
+            }
+            j += 1;
+        }
+        out[rho] = K::from_coeffs([acc_re, acc_im]);
+    }
+    Ok(out)
+}
+
+#[inline]
+pub fn mat_row_nonzero_entries(z: &Mat<F>) -> Vec<Vec<(usize, F)>> {
+    let rows = z.rows();
+    let cols = z.cols();
+    let z_data = z.as_slice();
+    let mut out: Vec<Vec<(usize, F)>> = Vec::with_capacity(rows);
+    for rho in 0..rows {
+        let row = &z_data[rho * cols..(rho + 1) * cols];
+        let mut nz = Vec::new();
+        for (j, &x) in row.iter().enumerate() {
+            if x != F::ZERO {
+                nz.push((j, x));
+            }
+        }
+        out.push(nz);
+    }
+    out
+}
+
+#[inline]
+pub fn eval_mat_digits_from_sparse_row_weight_coeffs(
+    weights_re: &[F],
+    weights_im: &[F],
+    row_nz: &[Vec<(usize, F)>],
+    cols: usize,
+) -> Result<Vec<K>, PiCcsError> {
+    if weights_re.len() != weights_im.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "time/opening eval(digits sparse): weights_re.len()={} != weights_im.len()={}",
+            weights_re.len(),
+            weights_im.len()
+        )));
+    }
+    if cols != weights_re.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "time/opening eval(digits sparse): cols={} != weights.len()={}",
+            cols,
+            weights_re.len()
+        )));
+    }
+
+    let mut out = vec![K::ZERO; row_nz.len()];
+    for (rho, nz) in row_nz.iter().enumerate() {
+        let mut acc_re = F::ZERO;
+        let mut acc_im = F::ZERO;
+        for &(j, x) in nz.iter() {
+            acc_re += weights_re[j] * x;
+            acc_im += weights_im[j] * x;
+        }
+        out[rho] = K::from_coeffs([acc_re, acc_im]);
     }
     Ok(out)
 }
@@ -124,7 +289,7 @@ pub fn eval_cpu_time_vector_at_point(point: &[K], m_in: usize, col: &[F]) -> Res
         } else {
             chi_for_row_index(point, row)
         };
-        acc += w * K::from(v);
+        acc += w.scale_base(v);
     }
     Ok(acc)
 }
@@ -164,7 +329,7 @@ pub fn eval_mem_time_vector_at_point(
         } else {
             chi_for_row_index(point, row)
         };
-        acc += w * K::from(v);
+        acc += w.scale_base(v);
     }
     Ok(acc)
 }
@@ -232,7 +397,7 @@ pub fn apply_rot_to_digits(rho: &Mat<F>, digits: &[K]) -> Result<Vec<K>, PiCcsEr
     for r in 0..D {
         let mut acc = K::ZERO;
         for k in 0..D {
-            acc += K::from(rho[(r, k)]) * digits[k];
+            acc += digits[k].scale_base(rho[(r, k)]);
         }
         out[r] = acc;
     }

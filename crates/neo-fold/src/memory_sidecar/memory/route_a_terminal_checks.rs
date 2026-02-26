@@ -8,11 +8,16 @@ pub(crate) fn decode_lookup_open_map_from_committed_openings(
     label: &str,
 ) -> Result<BTreeMap<usize, K>, PiCcsError> {
     let decode_layout = Rv32DecodeSidecarLayout::new();
-    let decode_open_cols = rv32_decode_lookup_backed_cols(&decode_layout);
+    let decode_open_cols = rv32_decode_lookup_transport_cols(&decode_layout);
     let bus_logical_cols = bus_logical_col_ids_for_step_instance(step, cpu_bus, label)?;
     let mut decode_col_to_logical = Vec::with_capacity(decode_open_cols.len());
     for &col_id in decode_open_cols.iter() {
         let table_id = rv32_decode_lookup_table_id_for_col(col_id);
+        let val_slot = rv32_decode_lookup_val_slot_for_col(col_id).ok_or_else(|| {
+            PiCcsError::ProtocolError(format!(
+                "{label}: decode col_id={col_id} is not part of decode lookup transport slot map"
+            ))
+        })?;
         let lut_idx = step
             .lut_insts
             .iter()
@@ -29,7 +34,14 @@ pub(crate) fn decode_lookup_open_map_from_committed_openings(
         let lane0 = inst_cols.lanes.first().ok_or_else(|| {
             PiCcsError::ProtocolError(format!("{label}: expected one shout lane for lut_idx={lut_idx}"))
         })?;
-        let mem_local_col = lane0.primary_val();
+        let mem_local_col = lane0.vals.get(val_slot).copied().ok_or_else(|| {
+            PiCcsError::ProtocolError(format!(
+                "{label}: decode val_slot={} out of range for lut_idx={} (n_vals={})",
+                val_slot,
+                lut_idx,
+                lane0.vals.len()
+            ))
+        })?;
         let logical_col = bus_logical_cols
             .get(mem_local_col)
             .copied()
@@ -63,6 +75,18 @@ pub(crate) fn decode_lookup_open_map_from_committed_openings(
     Ok(decode_open_map)
 }
 
+fn decode_open_map_from_instr_and_transport(
+    step: &StepInstanceBundle<Cmt, F, K>,
+    cpu_bus: &BusLayout,
+    point: &[K],
+    step_time_openings: &[crate::shard_proof_types::TimePointOpening],
+    _instr_word: K,
+    _active: K,
+    label: &str,
+) -> Result<BTreeMap<usize, K>, PiCcsError> {
+    decode_lookup_open_map_from_committed_openings(step, cpu_bus, point, step_time_openings, label)
+}
+
 fn width_lookup_open_map_from_committed_openings(
     step: &StepInstanceBundle<Cmt, F, K>,
     cpu_bus: &BusLayout,
@@ -76,6 +100,11 @@ fn width_lookup_open_map_from_committed_openings(
     let mut width_col_to_logical = Vec::with_capacity(width_open_cols.len());
     for &col_id in width_open_cols.iter() {
         let table_id = rv32_width_lookup_table_id_for_col(col_id);
+        let val_slot = rv32_width_lookup_val_slot_for_col(col_id).ok_or_else(|| {
+            PiCcsError::ProtocolError(format!(
+                "{label}: width col_id={col_id} is not part of width lookup transport slot map"
+            ))
+        })?;
         let lut_idx = step
             .lut_insts
             .iter()
@@ -92,7 +121,14 @@ fn width_lookup_open_map_from_committed_openings(
         let lane0 = inst_cols.lanes.first().ok_or_else(|| {
             PiCcsError::ProtocolError(format!("{label}: expected one shout lane for lut_idx={lut_idx}"))
         })?;
-        let mem_local_col = lane0.primary_val();
+        let mem_local_col = lane0.vals.get(val_slot).copied().ok_or_else(|| {
+            PiCcsError::ProtocolError(format!(
+                "{label}: width val_slot={} out of range for lut_idx={} (n_vals={})",
+                val_slot,
+                lut_idx,
+                lane0.vals.len()
+            ))
+        })?;
         let logical_col = bus_logical_cols
             .get(mem_local_col)
             .copied()
@@ -147,8 +183,6 @@ pub(crate) fn verify_route_a_decode_terminals(
     }
 
     let decode_layout = Rv32DecodeSidecarLayout::new();
-    let decode_open_map =
-        decode_lookup_open_map_from_committed_openings(step, cpu_bus, r_time, step_time_openings, "W2 decode")?;
     if mem_proof.wp_me_claims.len() != 1 {
         return Err(PiCcsError::ProtocolError(
             "W2 requires WP ME openings for shared main-trace/decode terminals".into(),
@@ -167,8 +201,6 @@ pub(crate) fn verify_route_a_decode_terminals(
         return Err(PiCcsError::ProtocolError("W2 WP ME claim m_in mismatch".into()));
     }
     let trace = Rv32TraceLayout::new();
-    let decode_open_col =
-        |col_id: usize| -> Result<K, PiCcsError> { named_opening(&decode_open_map, col_id, "W2 decode") };
     let wb_me = &mem_proof.wb_me_claims[0];
     let wb_cols = rv32_trace_wb_columns(&trace);
     let wb_open_map = require_time_openings_for_point(step_time_openings, wb_me.r.as_slice(), &wb_cols, "W2 WB")?;
@@ -178,6 +210,17 @@ pub(crate) fn verify_route_a_decode_terminals(
     let (_wp_entry, wp_open_map) =
         require_time_openings_covering_point(step_time_openings, wp_me.r.as_slice(), &wp_cols, "W2 WP")?;
     let wp_open_col = |col_id: usize| -> Result<K, PiCcsError> { named_opening(&wp_open_map, col_id, "W2 WP") };
+    let decode_open_map = decode_open_map_from_instr_and_transport(
+        step,
+        cpu_bus,
+        r_time,
+        step_time_openings,
+        wp_open_col(trace.instr_word)?,
+        wp_open_col(trace.active)?,
+        "W2 decode",
+    )?;
+    let decode_open_col =
+        |col_id: usize| -> Result<K, PiCcsError> { named_opening(&decode_open_map, col_id, "W2 decode") };
 
     if let Some(claim_idx) = claim_plan.decode_fields {
         if claim_idx >= batched_final_values.len() {
@@ -396,8 +439,15 @@ pub(crate) fn verify_route_a_width_terminals(
         require_time_openings_covering_point(step_time_openings, wp_me.r.as_slice(), &wp_cols, "W3 WP")?;
     let wp_open_col = |col_id: usize| -> Result<K, PiCcsError> { named_opening(&wp_open_map, col_id, "W3 WP") };
 
-    let decode_open_map =
-        decode_lookup_open_map_from_committed_openings(step, cpu_bus, r_time, step_time_openings, "W3 decode")?;
+    let decode_open_map = decode_open_map_from_instr_and_transport(
+        step,
+        cpu_bus,
+        r_time,
+        step_time_openings,
+        wp_open_col(trace.instr_word)?,
+        wp_open_col(trace.active)?,
+        "W3 decode",
+    )?;
     let decode_open_col =
         |col_id: usize| -> Result<K, PiCcsError> { named_opening(&decode_open_map, col_id, "W3 decode") };
     let width_open_map =

@@ -424,251 +424,173 @@ pub fn prove_joint_opening_lane_with_witnesses(
         ))
     })?;
     let cpu_cols_len = time_cpu_commitments.len();
+
+    struct GroupWork {
+        point: Vec<K>,
+        domain: OpeningDomain,
+        claim_indices: Vec<usize>,
+        group_digest: [u8; 32],
+        expected_commitment: Cmt,
+        joint_claim_digits: Vec<K>,
+        joint_z: Mat<F>,
+    }
+
+    let build_group = |group_idx: usize,
+                       group: &crate::shard_proof_types::OpeningReductionGroup|
+     -> Result<GroupWork, PiCcsError> {
+        let rhos = group_rhos
+            .get(group_idx)
+            .ok_or_else(|| PiCcsError::ProtocolError("time/opening joint/prove: missing group coefficients".into()))?;
+        if rhos.len() != group.claim_indices.len() {
+            return Err(PiCcsError::ProtocolError(format!(
+                "time/opening joint/prove: group {} rho len {} != claim_indices len {}",
+                group_idx,
+                rhos.len(),
+                group.claim_indices.len()
+            )));
+        }
+
+        let mut joint_z = Mat::zero(D, t, F::ZERO);
+        let mut expected_commitment: Option<Cmt> = None;
+        let mut expected_claim_digits = vec![K::ZERO; D];
+
+        for (local_idx, &claim_idx) in group.claim_indices.iter().enumerate() {
+            let open_pf = opening_proofs.get(claim_idx).ok_or_else(|| {
+                PiCcsError::ProtocolError(format!(
+                    "time/opening joint/prove: claim index {} out of range",
+                    claim_idx
+                ))
+            })?;
+            let eta = claim_eta_coeffs.get(claim_idx).ok_or_else(|| {
+                PiCcsError::ProtocolError(format!(
+                    "time/opening joint/prove: missing eta coeffs for claim {}",
+                    claim_idx
+                ))
+            })?;
+
+            let claim = claim_commitment_and_eval(
+                open_pf,
+                eta,
+                &logical_col_pos,
+                cpu_cols_len,
+                time_cpu_commitments,
+                time_mem_commitments,
+                crate::time_opening::STAGE8_TIME_DECOMP_BASE,
+            )?;
+
+            let rho = &rhos[local_idx];
+            add_rot_scaled_commitment(&mut expected_commitment, &claim.commitment, rho)?;
+            let rotated_digits = apply_rot_to_digits(rho, claim.eval_digits.as_slice())?;
+            for i in 0..D {
+                expected_claim_digits[i] += rotated_digits[i];
+            }
+
+            let claim_z = build_claim_witness_from_step(
+                params,
+                step,
+                open_pf,
+                eta,
+                &logical_col_pos,
+                cpu_cols_len,
+                claim.domain,
+            )?;
+            left_mul_add_into(&mut joint_z, rho, &claim_z)?;
+        }
+
+        let expected_commitment = expected_commitment.ok_or_else(|| {
+            PiCcsError::ProtocolError(format!("time/opening joint/prove: group {} has no claims", group_idx))
+        })?;
+
+        let joint_claim_digits =
+            eval_time_mat_digits_at_point(group.domain, group.point.as_slice(), step.mcs.0.m_in, cpu_bus, &joint_z)?;
+        if joint_claim_digits != expected_claim_digits {
+            return Err(PiCcsError::ProtocolError(format!(
+                "time/opening joint/prove: group {} claim(digits) mismatch",
+                group_idx
+            )));
+        }
+        let joint_claim = recompose_digits_to_scalar(
+            joint_claim_digits.as_slice(),
+            crate::time_opening::STAGE8_TIME_DECOMP_BASE,
+        );
+        let expected_claim = recompose_digits_to_scalar(
+            expected_claim_digits.as_slice(),
+            crate::time_opening::STAGE8_TIME_DECOMP_BASE,
+        );
+        if joint_claim != expected_claim {
+            return Err(PiCcsError::ProtocolError(format!(
+                "time/opening joint/prove: group {} claim(scalar) mismatch",
+                group_idx
+            )));
+        }
+
+        Ok(GroupWork {
+            point: group.point.clone(),
+            domain: group.domain,
+            claim_indices: group.claim_indices.clone(),
+            group_digest: group.group_digest,
+            expected_commitment,
+            joint_claim_digits,
+            joint_z,
+        })
+    };
+
     #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
-    let group_results: Result<Vec<(JointOpeningGroupProof, Mat<F>)>, PiCcsError> = reduction
+    let group_results: Result<Vec<GroupWork>, PiCcsError> = reduction
         .groups
         .par_iter()
         .enumerate()
-        .map(|(group_idx, group)| {
-            let rhos = group_rhos.get(group_idx).ok_or_else(|| {
-                PiCcsError::ProtocolError("time/opening joint/prove: missing group coefficients".into())
-            })?;
-            if rhos.len() != group.claim_indices.len() {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "time/opening joint/prove: group {} rho len {} != claim_indices len {}",
-                    group_idx,
-                    rhos.len(),
-                    group.claim_indices.len()
-                )));
-            }
-
-            let mut joint_z = Mat::zero(D, t, F::ZERO);
-            let mut expected_commitment: Option<Cmt> = None;
-            let mut expected_claim_digits = vec![K::ZERO; D];
-
-            for (local_idx, &claim_idx) in group.claim_indices.iter().enumerate() {
-                let open_pf = opening_proofs.get(claim_idx).ok_or_else(|| {
-                    PiCcsError::ProtocolError(format!(
-                        "time/opening joint/prove: claim index {} out of range",
-                        claim_idx
-                    ))
-                })?;
-                let eta = claim_eta_coeffs.get(claim_idx).ok_or_else(|| {
-                    PiCcsError::ProtocolError(format!(
-                        "time/opening joint/prove: missing eta coeffs for claim {}",
-                        claim_idx
-                    ))
-                })?;
-
-                let claim = claim_commitment_and_eval(
-                    open_pf,
-                    eta,
-                    &logical_col_pos,
-                    cpu_cols_len,
-                    time_cpu_commitments,
-                    time_mem_commitments,
-                    crate::time_opening::STAGE8_TIME_DECOMP_BASE,
-                )?;
-
-                let rho = &rhos[local_idx];
-                add_rot_scaled_commitment(&mut expected_commitment, &claim.commitment, rho)?;
-                let rotated_digits = apply_rot_to_digits(rho, claim.eval_digits.as_slice())?;
-                for i in 0..D {
-                    expected_claim_digits[i] += rotated_digits[i];
-                }
-
-                let claim_z = build_claim_witness_from_step(
-                    params,
-                    step,
-                    open_pf,
-                    eta,
-                    &logical_col_pos,
-                    cpu_cols_len,
-                    claim.domain,
-                )?;
-                left_mul_add_into(&mut joint_z, rho, &claim_z)?;
-            }
-
-            let expected_commitment = expected_commitment.ok_or_else(|| {
-                PiCcsError::ProtocolError(format!("time/opening joint/prove: group {} has no claims", group_idx))
-            })?;
-            let joint_commitment = committer.commit(&joint_z);
-            if joint_commitment != expected_commitment {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "time/opening joint/prove: group {} commitment mismatch",
-                    group_idx
-                )));
-            }
-
-            let joint_claim_digits = eval_time_mat_digits_at_point(
-                group.domain,
-                group.point.as_slice(),
-                step.mcs.0.m_in,
-                cpu_bus,
-                &joint_z,
-            )?;
-            if joint_claim_digits != expected_claim_digits {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "time/opening joint/prove: group {} claim(digits) mismatch",
-                    group_idx
-                )));
-            }
-            let joint_claim = recompose_digits_to_scalar(
-                joint_claim_digits.as_slice(),
-                crate::time_opening::STAGE8_TIME_DECOMP_BASE,
-            );
-            let expected_claim = recompose_digits_to_scalar(
-                expected_claim_digits.as_slice(),
-                crate::time_opening::STAGE8_TIME_DECOMP_BASE,
-            );
-            if joint_claim != expected_claim {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "time/opening joint/prove: group {} claim(scalar) mismatch",
-                    group_idx
-                )));
-            }
-
-            Ok((
-                JointOpeningGroupProof {
-                    point: group.point.clone(),
-                    domain: group.domain,
-                    claim_indices: group.claim_indices.clone(),
-                    group_digest: group.group_digest,
-                    joint_claim_digits,
-                    joint_claim,
-                    joint_commitment,
-                    opening_ccs_proof: None,
-                },
-                joint_z,
-            ))
-        })
+        .map(|(group_idx, group)| build_group(group_idx, group))
         .collect();
     #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
-    let group_results: Result<Vec<(JointOpeningGroupProof, Mat<F>)>, PiCcsError> = reduction
+    let group_results: Result<Vec<GroupWork>, PiCcsError> = reduction
         .groups
         .iter()
         .enumerate()
-        .map(|(group_idx, group)| {
-            let rhos = group_rhos.get(group_idx).ok_or_else(|| {
-                PiCcsError::ProtocolError("time/opening joint/prove: missing group coefficients".into())
-            })?;
-            if rhos.len() != group.claim_indices.len() {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "time/opening joint/prove: group {} rho len {} != claim_indices len {}",
-                    group_idx,
-                    rhos.len(),
-                    group.claim_indices.len()
-                )));
-            }
-
-            let mut joint_z = Mat::zero(D, t, F::ZERO);
-            let mut expected_commitment: Option<Cmt> = None;
-            let mut expected_claim_digits = vec![K::ZERO; D];
-
-            for (local_idx, &claim_idx) in group.claim_indices.iter().enumerate() {
-                let open_pf = opening_proofs.get(claim_idx).ok_or_else(|| {
-                    PiCcsError::ProtocolError(format!(
-                        "time/opening joint/prove: claim index {} out of range",
-                        claim_idx
-                    ))
-                })?;
-                let eta = claim_eta_coeffs.get(claim_idx).ok_or_else(|| {
-                    PiCcsError::ProtocolError(format!(
-                        "time/opening joint/prove: missing eta coeffs for claim {}",
-                        claim_idx
-                    ))
-                })?;
-
-                let claim = claim_commitment_and_eval(
-                    open_pf,
-                    eta,
-                    &logical_col_pos,
-                    cpu_cols_len,
-                    time_cpu_commitments,
-                    time_mem_commitments,
-                    crate::time_opening::STAGE8_TIME_DECOMP_BASE,
-                )?;
-
-                let rho = &rhos[local_idx];
-                add_rot_scaled_commitment(&mut expected_commitment, &claim.commitment, rho)?;
-                let rotated_digits = apply_rot_to_digits(rho, claim.eval_digits.as_slice())?;
-                for i in 0..D {
-                    expected_claim_digits[i] += rotated_digits[i];
-                }
-
-                let claim_z = build_claim_witness_from_step(
-                    params,
-                    step,
-                    open_pf,
-                    eta,
-                    &logical_col_pos,
-                    cpu_cols_len,
-                    claim.domain,
-                )?;
-                left_mul_add_into(&mut joint_z, rho, &claim_z)?;
-            }
-
-            let expected_commitment = expected_commitment.ok_or_else(|| {
-                PiCcsError::ProtocolError(format!("time/opening joint/prove: group {} has no claims", group_idx))
-            })?;
-            let joint_commitment = committer.commit(&joint_z);
-            if joint_commitment != expected_commitment {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "time/opening joint/prove: group {} commitment mismatch",
-                    group_idx
-                )));
-            }
-
-            let joint_claim_digits = eval_time_mat_digits_at_point(
-                group.domain,
-                group.point.as_slice(),
-                step.mcs.0.m_in,
-                cpu_bus,
-                &joint_z,
-            )?;
-            if joint_claim_digits != expected_claim_digits {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "time/opening joint/prove: group {} claim(digits) mismatch",
-                    group_idx
-                )));
-            }
-            let joint_claim = recompose_digits_to_scalar(
-                joint_claim_digits.as_slice(),
-                crate::time_opening::STAGE8_TIME_DECOMP_BASE,
-            );
-            let expected_claim = recompose_digits_to_scalar(
-                expected_claim_digits.as_slice(),
-                crate::time_opening::STAGE8_TIME_DECOMP_BASE,
-            );
-            if joint_claim != expected_claim {
-                return Err(PiCcsError::ProtocolError(format!(
-                    "time/opening joint/prove: group {} claim(scalar) mismatch",
-                    group_idx
-                )));
-            }
-
-            Ok((
-                JointOpeningGroupProof {
-                    point: group.point.clone(),
-                    domain: group.domain,
-                    claim_indices: group.claim_indices.clone(),
-                    group_digest: group.group_digest,
-                    joint_claim_digits,
-                    joint_claim,
-                    joint_commitment,
-                    opening_ccs_proof: None,
-                },
-                joint_z,
-            ))
-        })
+        .map(|(group_idx, group)| build_group(group_idx, group))
         .collect();
 
     let group_results = group_results?;
+    let joint_refs: Vec<&Mat<F>> = group_results.iter().map(|g| &g.joint_z).collect();
+    let joint_commitments = committer.commit_many(&joint_refs);
+    if joint_commitments.len() != group_results.len() {
+        return Err(PiCcsError::ProtocolError(format!(
+            "time/opening joint/prove: joint commitment count mismatch (got {}, expected {})",
+            joint_commitments.len(),
+            group_results.len()
+        )));
+    }
+
     let mut out_groups = Vec::with_capacity(group_results.len());
     let mut out_wits = Vec::with_capacity(group_results.len());
-    for (group_proof, joint_z) in group_results {
-        out_groups.push(group_proof);
-        out_wits.push(joint_z);
+    for (group_idx, (group_work, joint_commitment)) in group_results
+        .into_iter()
+        .zip(joint_commitments.into_iter())
+        .enumerate()
+    {
+        if joint_commitment != group_work.expected_commitment {
+            return Err(PiCcsError::ProtocolError(format!(
+                "time/opening joint/prove: group {} commitment mismatch",
+                group_idx
+            )));
+        }
+
+        let joint_claim = recompose_digits_to_scalar(
+            group_work.joint_claim_digits.as_slice(),
+            crate::time_opening::STAGE8_TIME_DECOMP_BASE,
+        );
+
+        out_groups.push(JointOpeningGroupProof {
+            point: group_work.point,
+            domain: group_work.domain,
+            claim_indices: group_work.claim_indices,
+            group_digest: group_work.group_digest,
+            joint_claim_digits: group_work.joint_claim_digits,
+            joint_claim,
+            joint_commitment,
+            opening_ccs_proof: None,
+        });
+        out_wits.push(group_work.joint_z);
     }
 
     let mut unified_fold: Option<JointOpeningGroupProof> = None;

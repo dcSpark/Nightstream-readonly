@@ -17,6 +17,7 @@ use crate::plain::LutTable;
 use crate::plain::PlainMemLayout;
 use crate::riscv::lookups::uninterleave_bits;
 use crate::riscv::packed::{build_rv32_packed_cols, rv32_packed_d};
+use crate::riscv::trace::rv32_trace_lookup_n_vals_for_table_id;
 use crate::witness::{LutInstance, LutTableSpec, MemInstance};
 use neo_ccs::relations::{CcsClaim, CcsStructure, CcsWitness};
 use neo_ccs::traits::SModuleHomomorphism;
@@ -232,7 +233,7 @@ where
             shout_shapes.push(ShoutInstanceShape {
                 ell_addr,
                 lanes,
-                n_vals: 1usize,
+                n_vals: rv32_trace_lookup_n_vals_for_table_id(*table_id),
                 addr_group: bus.shout_addr_groups.get(table_id).copied(),
                 selector_group: bus.shout_selector_groups.get(table_id).copied(),
             });
@@ -594,7 +595,12 @@ where
                 }
 
                 // Scratch buffers for per-step event lookup (avoid per-step HashMap allocation).
-                let mut shout_events: Vec<Vec<Option<(u64, Goldilocks)>>> = shared
+                #[derive(Clone)]
+                struct ShoutLaneEvent {
+                    key: u64,
+                    vals: Vec<Option<Goldilocks>>,
+                }
+                let mut shout_events: Vec<Vec<Option<ShoutLaneEvent>>> = shared
                     .layout
                     .shout_cols
                     .iter()
@@ -633,13 +639,41 @@ where
                             format!("unexpected shout_id={id} in one step (chunk_start={chunk_start}, j={j})")
                         })?;
                         let lanes = shout_events[idx].len();
-                        let lane_idx = used_shout[idx];
-                        if lane_idx >= lanes {
+                        let n_vals = shared
+                            .layout
+                            .shout_cols
+                            .get(idx)
+                            .and_then(|inst_cols| inst_cols.lanes.first())
+                            .map(|lane| lane.vals.len())
+                            .unwrap_or(1)
+                            .max(1);
+                        let slot_idx = used_shout[idx];
+                        let total_slots = lanes.checked_mul(n_vals).ok_or_else(|| {
+                            format!("shout slot overflow for shout_id={id} (lanes={lanes}, n_vals={n_vals})")
+                        })?;
+                        if slot_idx >= total_slots {
                             return Err(format!(
-                                "too many shout events for shout_id={id} in one step (chunk_start={chunk_start}, j={j}): lanes={lanes}"
+                                "too many shout events for shout_id={id} in one step (chunk_start={chunk_start}, j={j}): lanes={lanes}, n_vals={n_vals}, total_slots={total_slots}"
                             ));
                         }
-                        shout_events[idx][lane_idx] = Some((ev.key, Goldilocks::from_u64(ev.value)));
+                        let lane_idx = slot_idx / n_vals;
+                        let val_slot = slot_idx % n_vals;
+                        let lane_entry = shout_events[idx][lane_idx].get_or_insert_with(|| ShoutLaneEvent {
+                            key: ev.key,
+                            vals: vec![None; n_vals],
+                        });
+                        if lane_entry.key != ev.key {
+                            return Err(format!(
+                                "mixed shout keys for shout_id={id} in one step (chunk_start={chunk_start}, j={j}, lane={lane_idx}): first_key={}, new_key={}",
+                                lane_entry.key, ev.key
+                            ));
+                        }
+                        if lane_entry.vals[val_slot].is_some() {
+                            return Err(format!(
+                                "duplicate shout value slot for shout_id={id} in one step (chunk_start={chunk_start}, j={j}, lane={lane_idx}, val_slot={val_slot})"
+                            ));
+                        }
+                        lane_entry.vals[val_slot] = Some(Goldilocks::from_u64(ev.value));
                         used_shout[idx] += 1;
                     }
 
@@ -743,7 +777,7 @@ where
                             Some((lhs, rhs))
                         });
 
-                    // Shout lanes: addr_bits, has_lookup, vals[0].
+                    // Shout lanes: addr_bits, has_lookup, vals[0..n_vals).
                     for (i, table_id) in shared.table_ids.iter().enumerate() {
                         let inst_cols = &shared.layout.shout_cols[i];
                         let (d, n_side) = self
@@ -754,7 +788,17 @@ where
                         let ell = n_side.trailing_zeros() as usize;
 
                         for (lane_idx, shout_cols) in inst_cols.lanes.iter().enumerate() {
-                            if let Some((key, val)) = shout_events[i][lane_idx] {
+                            if let Some(ref lane_event) = shout_events[i][lane_idx] {
+                                let key = lane_event.key;
+                                let primary_val = lane_event
+                                    .vals
+                                    .first()
+                                    .and_then(|slot| *slot)
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "missing primary shout value for table_id={table_id} at step j={j}, lane={lane_idx}"
+                                        )
+                                    })?;
                                 match self.shout_specs.get(table_id) {
                                     Some(LutTableSpec::RiscvOpcodePacked { opcode, xlen }) => {
                                         if *xlen != 32 {
@@ -768,7 +812,7 @@ where
                                             let (lhs_raw, rhs_raw) = uninterleave_bits(key as u128);
                                             (lhs_raw as u32, rhs_raw as u32)
                                         });
-                                        let val_u64 = val.as_canonical_u64();
+                                        let val_u64 = primary_val.as_canonical_u64();
                                         if val_u64 > u32::MAX as u64 {
                                             return Err(format!(
                                                 "packed shout value out of u32 range for table_id={table_id} at step j={j}: val={val_u64}"
@@ -811,7 +855,21 @@ where
                                     }
                                 }
                                 z_vec[shared.layout.bus_cell(shout_cols.has_lookup, j)] = Goldilocks::ONE;
-                                z_vec[shared.layout.bus_cell(shout_cols.primary_val(), j)] = val;
+                                if lane_event.vals.len() != shout_cols.vals.len() {
+                                    return Err(format!(
+                                        "shared-bus shout value slot mismatch for table_id={table_id} at step j={j}, lane={lane_idx}: event_slots={} bus_slots={}",
+                                        lane_event.vals.len(),
+                                        shout_cols.vals.len()
+                                    ));
+                                }
+                                for (val_slot, &col_id) in shout_cols.vals.iter().enumerate() {
+                                    let slot_val = lane_event.vals[val_slot].ok_or_else(|| {
+                                        format!(
+                                            "missing shout value for table_id={table_id} at step j={j}, lane={lane_idx}, val_slot={val_slot}"
+                                        )
+                                    })?;
+                                    z_vec[shared.layout.bus_cell(col_id, j)] = slot_val;
+                                }
                             }
                         }
                     }

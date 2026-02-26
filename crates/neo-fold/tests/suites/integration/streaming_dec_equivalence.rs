@@ -85,7 +85,7 @@ fn assert_step_fold_eq(a: &neo_fold::shard::FoldStep, b: &neo_fold::shard::FoldS
 #[test]
 fn streaming_dec_matches_materialized_dec_with_loaded_pp() {
     let mut selected: Option<(usize, NeoParams, CcsStructure<F>)> = None;
-    for n in 32usize..256usize {
+    for n in 32usize..1024usize {
         let params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
         let ccs = create_identity_ccs(n);
         let m_commit = commit_cols_for_ccs_m(ccs.m);
@@ -282,7 +282,7 @@ fn streaming_dec_matches_materialized_dec_with_loaded_pp_superneo_packed() {
 #[test]
 fn streaming_dec_matches_materialized_dec_with_seeded_pp() {
     let mut selected: Option<(usize, NeoParams, CcsStructure<F>, [u8; 32])> = None;
-    for n in 17usize..256usize {
+    for n in 17usize..1024usize {
         let params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
         let ccs = create_identity_ccs(n);
         let m_commit = commit_cols_for_ccs_m(ccs.m);

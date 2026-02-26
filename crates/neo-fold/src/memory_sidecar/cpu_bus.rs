@@ -5,7 +5,9 @@ use neo_memory::cpu::{
     build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, BusLayout, ShoutInstanceShape,
 };
 use neo_memory::riscv::lookups::{PROG_ID, REG_ID};
-use neo_memory::riscv::trace::{rv32_is_decode_lookup_table_id, rv32_is_width_lookup_table_id};
+use neo_memory::riscv::trace::{
+    rv32_is_decode_lookup_table_id, rv32_is_width_lookup_table_id, rv32_trace_lookup_n_vals_for_table_id,
+};
 use neo_memory::sparse_time::SparseIdxVec;
 use neo_memory::witness::{LutInstance, MemInstance, StepInstanceBundle, StepWitnessBundle};
 use neo_params::NeoParams;
@@ -153,6 +155,9 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
             inst.lanes
         })
         .collect();
+    let base_shout_n_vals: Vec<usize> = (0..steps[0].lut_insts_len())
+        .map(|i| rv32_trace_lookup_n_vals_for_table_id(steps[0].lut_inst(i).table_id))
+        .collect();
     let base_shout_addr_groups: Vec<Option<u64>> = (0..steps[0].lut_insts_len())
         .map(|i| steps[0].lut_inst(i).addr_group)
         .collect();
@@ -185,6 +190,9 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
                 inst.lanes
             })
             .collect();
+        let cur_shout_n_vals: Vec<usize> = (0..step.lut_insts_len())
+            .map(|j| rv32_trace_lookup_n_vals_for_table_id(step.lut_inst(j).table_id))
+            .collect();
         let cur_shout_addr_groups: Vec<Option<u64>> = (0..step.lut_insts_len())
             .map(|j| step.lut_inst(j).addr_group)
             .collect();
@@ -205,6 +213,7 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
             .collect();
         if cur_shout != base_shout_ell_addrs
             || cur_shout_lanes != base_shout_lanes
+            || cur_shout_n_vals != base_shout_n_vals
             || cur_shout_addr_groups != base_shout_addr_groups
             || cur_shout_selector_groups != base_shout_selector_groups
             || cur_twist != base_twist_ell_addrs
@@ -220,15 +229,18 @@ fn infer_bus_layout_for_steps<Cmt, S: BusStepView<Cmt>>(
         .iter()
         .copied()
         .zip(base_shout_lanes.iter().copied())
+        .zip(base_shout_n_vals.iter().copied())
         .zip(base_shout_addr_groups.iter().copied())
         .zip(base_shout_selector_groups.iter().copied())
-        .map(|(((ell_addr, lanes), addr_group), selector_group)| ShoutInstanceShape {
-            ell_addr,
-            lanes,
-            n_vals: 1usize,
-            addr_group,
-            selector_group,
-        });
+        .map(
+            |((((ell_addr, lanes), n_vals), addr_group), selector_group)| ShoutInstanceShape {
+                ell_addr,
+                lanes,
+                n_vals,
+                addr_group,
+                selector_group,
+            },
+        );
     let twist_ell_addrs_and_lanes = base_twist_ell_addrs
         .iter()
         .copied()
@@ -1535,10 +1547,12 @@ fn required_bus_cols_for_layout(layout: &BusLayout) -> Vec<BusColLabel> {
                 col_id: shout.has_lookup,
                 label: format!("shout[{lut_idx}].lane[{lane_idx}].has_lookup"),
             });
-            out.push(BusColLabel {
-                col_id: shout.primary_val(),
-                label: format!("shout[{lut_idx}].lane[{lane_idx}].val"),
-            });
+            for (v_idx, &val_col) in shout.vals.iter().enumerate() {
+                out.push(BusColLabel {
+                    col_id: val_col,
+                    label: format!("shout[{lut_idx}].lane[{lane_idx}].val[{v_idx}]"),
+                });
+            }
         }
     }
 
@@ -1615,9 +1629,12 @@ fn required_bus_binding_cols_for_layout<Cmt, S: BusStepView<Cmt>>(layout: &BusLa
         .shout_cols
         .iter()
         .flat_map(|inst| {
-            inst.lanes
-                .iter()
-                .flat_map(|s| [s.has_lookup, s.primary_val()])
+            inst.lanes.iter().flat_map(|s| {
+                let mut cols = Vec::with_capacity(1 + s.vals.len());
+                cols.push(s.has_lookup);
+                cols.extend_from_slice(&s.vals);
+                cols
+            })
         })
         .collect();
 

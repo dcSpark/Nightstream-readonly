@@ -11,6 +11,7 @@ use neo_math::ring::{cf_inv, Rq as RqEl};
 use neo_math::{D, F};
 use neo_memory::ajtai::commit_cols_for_ccs_m;
 use neo_memory::cpu::{build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, ShoutInstanceShape};
+use neo_memory::riscv::trace::rv32_trace_lookup_n_vals_for_table_id;
 use neo_memory::witness::{StepWitnessBundle, TimeColumns};
 use neo_params::NeoParams;
 use p3_field::PrimeCharacteristicRing;
@@ -40,9 +41,6 @@ pub fn rot_matrix_to_rq(mat: &Mat<F>) -> RqEl {
 pub fn default_mixers() -> Mixers {
     fn mix_rhos_commits(rhos: &[Mat<F>], cs: &[Cmt]) -> Cmt {
         assert!(!cs.is_empty(), "mix_rhos_commits: empty commitments");
-        if cs.len() == 1 {
-            return cs[0].clone();
-        }
         let rq_els: Vec<RqEl> = rhos.iter().map(rot_matrix_to_rq).collect();
         s_lincomb(&rq_els, cs).expect("s_lincomb should succeed")
     }
@@ -134,7 +132,7 @@ fn derive_time_columns_from_step_witness<Cmt, K>(step: &StepWitnessBundle<Cmt, F
         .map(|(inst, _)| ShoutInstanceShape {
             ell_addr: inst.d * inst.ell,
             lanes: inst.lanes,
-            n_vals: 1usize,
+            n_vals: rv32_trace_lookup_n_vals_for_table_id(inst.table_id),
             addr_group: inst.addr_group,
             selector_group: inst.selector_group,
         });

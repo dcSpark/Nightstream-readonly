@@ -131,8 +131,8 @@ where
     Ff: Field + PrimeCharacteristicRing + PrimeField64 + Copy + Send + Sync,
     K: From<Ff>,
 {
-    let y_ring = crate::superneo_eval::eval_all_mats_ring_cached(superneo_cache, z, chi_r, n_eff);
-    y_ring.into_iter().map(|coeffs| coeffs[0]).collect()
+    // This path only needs ct(M_j z) scalars; avoid full ring coefficient evaluation.
+    crate::superneo_eval::eval_all_mats_cached(superneo_cache, z, chi_r, n_eff)
 }
 
 /// --- Core, literal formulas from the paper --------------------------------

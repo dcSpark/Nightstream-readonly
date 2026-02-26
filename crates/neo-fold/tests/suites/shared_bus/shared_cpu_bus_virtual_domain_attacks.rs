@@ -237,7 +237,7 @@ fn prove_nonvirtual_trace_program() -> (Rv32TraceWiringRun, ShardProof) {
     (run, proof)
 }
 
-fn prove_mulhu_combined_key_trace_program() -> (Rv32TraceWiringRun, ShardProof) {
+fn prove_mulhu_trace_program() -> (Rv32TraceWiringRun, ShardProof) {
     let program = vec![
         RiscvInstruction::Lui { rd: 1, imm: 16 },
         RiscvInstruction::Lui { rd: 2, imm: 16 },
@@ -259,7 +259,7 @@ fn prove_mulhu_combined_key_trace_program() -> (Rv32TraceWiringRun, ShardProof) 
     (run, proof)
 }
 
-fn prove_mul_combined_key_trace_program() -> (Rv32TraceWiringRun, ShardProof) {
+fn prove_mul_trace_program() -> (Rv32TraceWiringRun, ShardProof) {
     let program = vec![
         RiscvInstruction::IAlu {
             op: RiscvOpcode::Add,
@@ -379,24 +379,24 @@ fn virtual_sequence_remaining_tamper_is_rejected() {
 }
 
 #[test]
-fn mulhu_combined_key_tamper_is_rejected() {
-    let (run, mut proof) = prove_mulhu_combined_key_trace_program();
+fn mulhu_add_sub_key_opening_tamper_is_rejected() {
+    let (run, mut proof) = prove_mulhu_trace_program();
     let trace = Rv32TraceLayout::new();
     tamper_trace_wp_opening_scalar(&mut proof, trace.shout_add_sub_key);
     assert!(
         run.verify_proof(&proof).is_err(),
-        "tampered MULHU combined key opening must fail verification"
+        "tampered MULHU shout_add_sub_key opening must fail verification"
     );
 }
 
 #[test]
-fn mul_combined_key_tamper_is_rejected() {
-    let (run, mut proof) = prove_mul_combined_key_trace_program();
+fn mul_add_sub_key_opening_tamper_is_rejected() {
+    let (run, mut proof) = prove_mul_trace_program();
     let trace = Rv32TraceLayout::new();
     tamper_trace_wp_opening_scalar(&mut proof, trace.shout_add_sub_key);
     assert!(
         run.verify_proof(&proof).is_err(),
-        "tampered MUL combined key opening must fail verification"
+        "tampered MUL shout_add_sub_key opening must fail verification"
     );
 }
 

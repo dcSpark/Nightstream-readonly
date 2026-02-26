@@ -21,9 +21,6 @@ use super::lookups::{compute_op, evaluate_opcode_mle, uninterleave_bits, RiscvOp
 #[inline]
 fn implicit_table_eval_at_addr(opcode: RiscvOpcode, addr: u64, xlen: usize) -> u64 {
     if opcode_uses_combined_lookup_key(opcode) {
-        if matches!(opcode, RiscvOpcode::Mulhu) && xlen <= 32 {
-            return mask_to_xlen(addr >> xlen, xlen);
-        }
         return mask_to_xlen(addr, xlen);
     }
 

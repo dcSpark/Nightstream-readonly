@@ -53,7 +53,7 @@ pub use crate::riscv::lookups::{BranchCondition, RiscvInstruction, RiscvMemOp};
 
 /// Rollout switch for operand-mode lookup keying.
 ///
-/// `true` enables combined operand keying for selected opcodes (ADD/SUB/MUL/MULHU).
+/// `true` enables combined operand keying for selected opcodes (ADD/SUB).
 /// `false` falls back to canonical interleaved `(lhs, rhs)` keys for all opcodes.
 pub const ENABLE_OPERAND_MODE_KEYS: bool = true;
 
@@ -329,19 +329,6 @@ pub fn compute_op(op: RiscvOpcode, x: u64, y: u64, xlen: usize) -> u64 {
     result & mask
 }
 
-#[inline]
-fn encode_multiply_product_key(lhs: u64, rhs: u64, xlen: usize) -> Option<u64> {
-    if xlen > 32 {
-        // RV64 multiply key cutover is deferred (2*xlen no longer fits in u64 key space).
-        return None;
-    }
-    let lhs = mask_to_xlen(lhs, xlen) as u128;
-    let rhs = mask_to_xlen(rhs, xlen) as u128;
-    let bits = 2 * xlen;
-    let mask = if bits == 128 { u128::MAX } else { (1u128 << bits) - 1 };
-    Some(((lhs * rhs) & mask) as u64)
-}
-
 /// Architectural register count (`x0..x31`).
 pub const ARCH_REG_COUNT: u64 = 32;
 /// First virtual register address used by decomposition plans.
@@ -597,13 +584,7 @@ pub fn encode_lookup_key_with_mode(
         OperandMode::Interleaved => interleave_bits(lhs, rhs) as u64,
         OperandMode::AddOperands => mask_to_xlen(lhs.wrapping_add(rhs), xlen),
         OperandMode::SubtractOperands => mask_to_xlen(lhs.wrapping_sub(rhs), xlen),
-        OperandMode::MultiplyOperands => {
-            if matches!(op, RiscvOpcode::Mul | RiscvOpcode::Mulhu) {
-                encode_multiply_product_key(lhs, rhs, xlen).unwrap_or_else(|| interleave_bits(lhs, rhs) as u64)
-            } else {
-                interleave_bits(lhs, rhs) as u64
-            }
-        }
+        OperandMode::MultiplyOperands => interleave_bits(lhs, rhs) as u64,
         OperandMode::Advice => interleave_bits(lhs, rhs) as u64,
     }
 }
@@ -622,13 +603,7 @@ pub fn try_decode_lookup_operands(op: RiscvOpcode, key: u64, use_operand_mode_ke
 
     match opcode_operand_mode(op) {
         OperandMode::Interleaved => Some(decode_interleaved_lookup_key(key)),
-        OperandMode::MultiplyOperands => {
-            if matches!(op, RiscvOpcode::Mul | RiscvOpcode::Mulhu) {
-                None
-            } else {
-                Some(decode_interleaved_lookup_key(key))
-            }
-        }
+        OperandMode::MultiplyOperands => Some(decode_interleaved_lookup_key(key)),
         OperandMode::AddOperands | OperandMode::SubtractOperands | OperandMode::Advice => None,
     }
 }
@@ -638,8 +613,5 @@ pub fn opcode_uses_combined_lookup_key(op: RiscvOpcode) -> bool {
     if !operand_mode_keys_enabled() {
         return false;
     }
-    matches!(
-        op,
-        RiscvOpcode::Add | RiscvOpcode::Sub | RiscvOpcode::Mul | RiscvOpcode::Mulhu
-    )
+    matches!(op, RiscvOpcode::Add | RiscvOpcode::Sub)
 }

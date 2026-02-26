@@ -24,14 +24,6 @@ fn combined_key_lookup_result(op: RiscvOpcode, key: u64, xlen: usize) -> Option<
             // ADD/SUB combined-key mode: table behaves as low-word identity.
             Some(mask_to_xlen(key, xlen))
         }
-        OperandMode::MultiplyOperands if xlen <= 32 && matches!(op, RiscvOpcode::Mul) => {
-            // MUL combined-key mode: key is full product; output is low word.
-            Some(mask_to_xlen(key, xlen))
-        }
-        OperandMode::MultiplyOperands if xlen <= 32 && matches!(op, RiscvOpcode::Mulhu) => {
-            // MULHU combined-key mode: key is full product; output is upper word.
-            Some(mask_to_xlen(key >> xlen, xlen))
-        }
         _ => None,
     }
 }

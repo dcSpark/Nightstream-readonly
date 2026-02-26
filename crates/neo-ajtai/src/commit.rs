@@ -49,7 +49,7 @@ fn sample_uniform_rq_coeffs<R: RngCore + CryptoRng>(rng: &mut R) -> [Fq; D] {
 /// Turns column t into column t+1 in O(d) (no ring multiply).
 /// For Φ₈₁, the step is: next[0] = -v_{d-1}, next[27] = v_{26} - v_{d-1},
 /// next[k] = v_{k-1} for k ∈ {1,...,d-1}\{27}.
-#[inline]
+#[inline(always)]
 fn rot_step_phi_81(cur: &[Fq; D], next: &mut [Fq; D]) {
     let last = cur[D - 1];
     // shift: next[k] = cur[k-1] for k>=1; next[0] = 0
@@ -62,7 +62,7 @@ fn rot_step_phi_81(cur: &[Fq; D], next: &mut [Fq; D]) {
 
 /// Rotation step for internal use by commit implementations
 /// This implementation is specialized for η=81 (D=54) as enforced by compile-time assertions.
-#[inline]
+#[inline(always)]
 #[cfg(not(feature = "testing"))]
 pub(crate) fn rot_step(cur: &[Fq; D], next: &mut [Fq; D]) {
     // Note: ETA == 81 is guaranteed at compile-time by const assertions at module top
@@ -71,14 +71,14 @@ pub(crate) fn rot_step(cur: &[Fq; D], next: &mut [Fq; D]) {
 
 /// Rotation step for internal use by commit implementations
 /// This implementation is specialized for η=81 (D=54) as enforced by compile-time assertions.
-#[inline]
+#[inline(always)]
 #[cfg(feature = "testing")]
 pub fn rot_step(cur: &[Fq; D], next: &mut [Fq; D]) {
     // Note: ETA == 81 is guaranteed at compile-time by const assertions at module top
     rot_step_phi_81(cur, next)
 }
 
-#[inline]
+#[inline(always)]
 fn acc_mul_add_inplace(acc: &mut [Fq; D], col: &[Fq; D], scalar: Fq) {
     // Fast paths for the common balanced-digit case (b ∈ {2,3} ⇒ scalar ∈ {-1,0,1}).
     //
@@ -466,23 +466,44 @@ pub fn commit_row_major_seeded_many(
         .map(|z| (0..d).map(|r| z.row(r)).collect())
         .collect();
 
+    #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+    let allow_parallel = rayon::current_num_threads() > 1 && rayon::current_thread_index().is_none();
+
     // Per-(matrix,column) sparsity metadata.
     #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
-    let last_nonzero_all: Vec<Vec<usize>> = z_rows_all
-        .par_iter()
-        .map(|z_rows| {
-            let mut last_nonzero_by_col = vec![usize::MAX; m];
-            for col_idx in 0..m {
-                for t in (0..d).rev() {
-                    if z_rows[t][col_idx] != Fq::ZERO {
-                        last_nonzero_by_col[col_idx] = t;
-                        break;
+    let last_nonzero_all: Vec<Vec<usize>> = if allow_parallel && n >= 4 {
+        z_rows_all
+            .par_iter()
+            .map(|z_rows| {
+                let mut last_nonzero_by_col = vec![usize::MAX; m];
+                for col_idx in 0..m {
+                    for t in (0..d).rev() {
+                        if z_rows[t][col_idx] != Fq::ZERO {
+                            last_nonzero_by_col[col_idx] = t;
+                            break;
+                        }
                     }
                 }
-            }
-            last_nonzero_by_col
-        })
-        .collect();
+                last_nonzero_by_col
+            })
+            .collect()
+    } else {
+        z_rows_all
+            .iter()
+            .map(|z_rows| {
+                let mut last_nonzero_by_col = vec![usize::MAX; m];
+                for col_idx in 0..m {
+                    for t in (0..d).rev() {
+                        if z_rows[t][col_idx] != Fq::ZERO {
+                            last_nonzero_by_col[col_idx] = t;
+                            break;
+                        }
+                    }
+                }
+                last_nonzero_by_col
+            })
+            .collect()
+    };
     #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
     let last_nonzero_all: Vec<Vec<usize>> = z_rows_all
         .iter()
@@ -514,7 +535,7 @@ pub fn commit_row_major_seeded_many(
                         *col = sample_uniform_rq_coeffs(&mut rng);
                     }
 
-                    if n > 1 && rayon::current_num_threads() > 1 {
+                    if allow_parallel && n > 1 {
                         (0..n)
                             .into_par_iter()
                             .map(|z_idx| {
@@ -572,7 +593,7 @@ pub fn commit_row_major_seeded_many(
                         }
                         local
                     }
-                } else {
+                } else if allow_parallel {
                     (0..chunk_seeds.len())
                         .into_par_iter()
                         .fold(
@@ -619,6 +640,38 @@ pub fn commit_row_major_seeded_many(
                                 a
                             },
                         )
+                } else {
+                    let mut local = vec![[Fq::ZERO; D]; n];
+                    for (chunk_idx, seed) in chunk_seeds.iter().copied().enumerate() {
+                        let start = chunk_idx * chunk_size;
+                        let end = core::cmp::min(m, start + chunk_size);
+                        let mut rng = ChaCha8Rng::from_seed(seed);
+                        let mut nxt = [Fq::ZERO; D];
+                        for col_idx in start..end {
+                            let base_col = sample_uniform_rq_coeffs(&mut rng);
+                            for z_idx in 0..n {
+                                let mut rot_col = base_col;
+                                let last_t = last_nonzero_all[z_idx][col_idx];
+                                if last_t == usize::MAX {
+                                    continue;
+                                }
+                                let z_rows = &z_rows_all[z_idx];
+                                for t in 0..last_t {
+                                    let mask = z_rows[t][col_idx];
+                                    if mask != Fq::ZERO {
+                                        acc_mul_add_inplace(&mut local[z_idx], &rot_col, mask);
+                                    }
+                                    rot_step(&rot_col, &mut nxt);
+                                    core::mem::swap(&mut rot_col, &mut nxt);
+                                }
+                                let mask = z_rows[last_t][col_idx];
+                                if mask != Fq::ZERO {
+                                    acc_mul_add_inplace(&mut local[z_idx], &rot_col, mask);
+                                }
+                            }
+                        }
+                    }
+                    local
                 }
             }
             #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]

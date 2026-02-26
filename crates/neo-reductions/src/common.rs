@@ -67,6 +67,21 @@ fn balanced_divrem_i64(v: i64, b: i64) -> (i64, i64) {
     (r, q)
 }
 
+#[inline]
+fn build_balanced_digit_lut(b: u32) -> (i64, Vec<F>) {
+    let half = (b as i64) / 2;
+    let mut lut = Vec::with_capacity((2 * half + 1) as usize);
+    for d in -half..=half {
+        let f = if d >= 0 {
+            F::from_u64(d as u64)
+        } else {
+            F::ZERO - F::from_u64((-d) as u64)
+        };
+        lut.push(f);
+    }
+    (half, lut)
+}
+
 /// Split Z into **balanced base-b digits** Z = Σ_{i=0}^{k-1} b^i · Z_i, entrywise.
 /// Each digit lies in [-floor(b/2), +floor(b/2)] for even b (inclusive upper bound),
 /// and the analogous balanced range for odd b.
@@ -90,7 +105,7 @@ pub fn split_b_matrix_k_with_nonzero_flags(
     for _ in 0..k {
         B = B.saturating_mul(b_i);
     } // b^k
-    let neg_one = F::ZERO - F::ONE;
+    let (digit_half, digit_lut) = build_balanced_digit_lut(b);
 
     // Helpers to interpret field element as a small signed integer in (-(B-1), B-1)
     let p: u128 = F::ORDER_U64 as u128; // Goldilocks prime fits in u64
@@ -105,7 +120,11 @@ pub fn split_b_matrix_k_with_nonzero_flags(
         if B_u <= i64::MAX as u128 {
             let b_i64 = b as i64;
             for idx in 0..total {
-                let u = z_data[idx].as_canonical_u64() as u128;
+                let z_entry = z_data[idx];
+                if z_entry == F::ZERO {
+                    continue;
+                }
+                let u = z_entry.as_canonical_u64() as u128;
                 // Map to a small signed integer if within the DEC budget.
                 let val_opt: Option<i64> = {
                     let neg_mag = p.saturating_sub(u);
@@ -149,18 +168,8 @@ pub fn split_b_matrix_k_with_nonzero_flags(
                     }
                     let (r_i, q) = balanced_divrem_i64(v, b_i64);
                     if r_i != 0 {
-                        let digit_f = match r_i {
-                            1 => F::ONE,
-                            -1 => neg_one,
-                            _ => {
-                                if r_i >= 0 {
-                                    F::from_u64(r_i as u64)
-                                } else {
-                                    let abs = (-r_i) as u64;
-                                    F::ZERO - F::from_u64(abs)
-                                }
-                            }
-                        };
+                        debug_assert!(r_i >= -digit_half && r_i <= digit_half);
+                        let digit_f = digit_lut[(r_i + digit_half) as usize];
                         out_slices[i][idx] = digit_f;
                         digit_nonzero[i] = true;
                     }
@@ -193,8 +202,13 @@ pub fn split_b_matrix_k_with_nonzero_flags(
                 }
             }
         } else {
+            let b_i64 = b as i64;
             for idx in 0..total {
-                let u = z_data[idx].as_canonical_u64() as u128;
+                let z_entry = z_data[idx];
+                if z_entry == F::ZERO {
+                    continue;
+                }
+                let u = z_entry.as_canonical_u64() as u128;
                 // Map to a small signed integer if within the DEC budget.
                 let val_opt: Option<i128> = {
                     let neg_mag = p.saturating_sub(u);
@@ -215,7 +229,7 @@ pub fn split_b_matrix_k_with_nonzero_flags(
                     }
                 };
 
-                let mut v = match val_opt {
+                let v = match val_opt {
                     Some(v) => v,
                     None => {
                         let r = idx / Z_cols;
@@ -231,6 +245,52 @@ pub fn split_b_matrix_k_with_nonzero_flags(
                     }
                 };
 
+                // Even when B is large, the selected balanced representative is often small.
+                // Prefer i64 extraction in that common case to avoid expensive i128 division.
+                if v >= i64::MIN as i128 && v <= i64::MAX as i128 {
+                    let mut v64 = v as i64;
+                    for i in 0..k {
+                        if v64 == 0 {
+                            break;
+                        }
+                        let (r_i, q) = balanced_divrem_i64(v64, b_i64);
+                        if r_i != 0 {
+                            debug_assert!(r_i >= -digit_half && r_i <= digit_half);
+                            let digit_f = digit_lut[(r_i + digit_half) as usize];
+                            out_slices[i][idx] = digit_f;
+                            digit_nonzero[i] = true;
+                        }
+                        v64 = q;
+                    }
+
+                    if v64 != 0 {
+                        let r = idx / Z_cols;
+                        let c = idx % Z_cols;
+                        return Err(PiCcsError::ProtocolError(format!(
+                            "DEC split: Z[{},{}] needs more than k_rho={} digits in base b={}\n\
+                             Matrix Z is {}×{}\n\
+                             After extracting {} digits, remainder v={} (should be 0)\n\
+                             Original value exceeded the range [{}, {}) for B = {}^{} = {}\n\
+                             This typically means witness values grew too large during RLC (expansion factor T=216 for rotation matrices)",
+                            r,
+                            c,
+                            k,
+                            b,
+                            Z_rows,
+                            Z_cols,
+                            k,
+                            v64,
+                            -(B_u as i128),
+                            B_u as i128,
+                            b,
+                            k,
+                            B_u
+                        )));
+                    }
+                    continue;
+                }
+
+                let mut v = v;
                 // Balanced digit extraction: r_i ∈ [-floor(b/2), ..., ceil(b/2)-1], v ← q
                 for i in 0..k {
                     if v == 0 {
@@ -238,18 +298,9 @@ pub fn split_b_matrix_k_with_nonzero_flags(
                     }
                     let (r_i, q) = balanced_divrem(v, b_i);
                     if r_i != 0 {
-                        let digit_f = match r_i {
-                            1 => F::ONE,
-                            -1 => neg_one,
-                            _ => {
-                                if r_i >= 0 {
-                                    F::from_u64(r_i as u64)
-                                } else {
-                                    let abs = (-r_i) as u64;
-                                    F::ZERO - F::from_u64(abs)
-                                }
-                            }
-                        };
+                        let r_i64 = r_i as i64;
+                        debug_assert!(r_i64 >= -digit_half && r_i64 <= digit_half);
+                        let digit_f = digit_lut[(r_i64 + digit_half) as usize];
                         out_slices[i][idx] = digit_f;
                         digit_nonzero[i] = true;
                     }
@@ -690,13 +741,6 @@ pub fn sample_rot_rhos_n(
         // Draw D coefficients from the small alphabet (unbiased rejection sampling)
         let coeffs_i8 = draw_alphabet_vector(tr, D, ring.alphabet, b"rlc/rot/chunk", i as u64);
 
-        // For k=1 there is nothing to mix, so Π_RLC can be the identity without affecting soundness.
-        // We still consume transcript randomness above to keep Fiat–Shamir behavior consistent.
-        if count == 1 {
-            out.push(Mat::identity(D));
-            continue;
-        }
-
         // Lift to field F
         let a_coeffs_f: Vec<F> = coeffs_i8.iter().map(|&c| f_from_i64(c as i64)).collect();
 
@@ -928,6 +972,43 @@ where
     }
 }
 
+/// Check whether one value is representable in exactly `D` balanced base-`b` digits.
+#[inline]
+fn is_representable_balanced_fixed_d_digits<Ff>(val: Ff, b: u32) -> Result<bool, PiCcsError>
+where
+    Ff: PrimeField64 + PrimeCharacteristicRing + Copy,
+{
+    if b < 2 {
+        return Err(PiCcsError::InvalidInput(format!(
+            "is_representable_balanced_fixed_d_digits: invalid base b={b}"
+        )));
+    }
+
+    let b_i = b as i128;
+    let mut rem = to_balanced_i128(val);
+    if rem >= i64::MIN as i128 && rem <= i64::MAX as i128 {
+        let mut rem64 = rem as i64;
+        let b_i64 = b as i64;
+        for _ in 0..D {
+            if rem64 == 0 {
+                return Ok(true);
+            }
+            let (_, q) = balanced_divrem_i64(rem64, b_i64);
+            rem64 = q;
+        }
+        return Ok(rem64 == 0);
+    }
+
+    for _ in 0..D {
+        if rem == 0 {
+            return Ok(true);
+        }
+        let (_, q) = balanced_divrem(rem, b_i);
+        rem = q;
+    }
+    Ok(rem == 0)
+}
+
 /// Balanced base-`b` decomposition of one field value into exactly `D` digits.
 ///
 /// Returns an error when the value is not representable with `D` balanced digits for this base.
@@ -1067,14 +1148,13 @@ where
     for col in 0..expected_m {
         let off = col % D;
         let v = witness_mat_get_f(Z, layout, expected_m, off, col);
-        if let Err(e) = decompose_balanced_fixed_d_digits_k(v, params.b) {
+        if !is_representable_balanced_fixed_d_digits(v, params.b)? {
             let x = to_balanced_i128(v);
             return Err(PiCcsError::InvalidInput(format!(
-                "{label}: witness logical_col={col} is not representable in D={} balanced base-{} digits (centered value {}). cause: {}",
+                "{label}: witness logical_col={col} is not representable in D={} balanced base-{} digits (centered value {})",
                 D,
                 params.b,
                 x,
-                e
             )));
         }
     }

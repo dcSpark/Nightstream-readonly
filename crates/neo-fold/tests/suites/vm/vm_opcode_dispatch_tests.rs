@@ -16,7 +16,6 @@
 #![allow(deprecated)]
 
 use std::marker::PhantomData;
-use std::sync::Arc;
 
 use neo_ajtai::{set_global_pp, setup as ajtai_setup, AjtaiSModule, Commitment as Cmt};
 use neo_ccs::poly::SparsePoly;
@@ -49,14 +48,21 @@ const OP_HALT: u64 = 4;
 fn setup_ajtai_pp(m: usize, seed: u64) -> AjtaiSModule {
     let d = D;
     let m_commit = neo_memory::ajtai::commit_cols_for_ccs_m(m);
+    if neo_ajtai::has_global_pp_for_dims(d, m_commit) {
+        return AjtaiSModule::from_global_for_dims(d, m_commit).expect("from_global_for_dims");
+    }
     let kappa = neo_params::NeoParams::goldilocks_auto_r1cs_ccs(m_commit)
         .expect("params")
         .kappa as usize;
 
     let mut rng = ChaCha20Rng::seed_from_u64(seed);
     let pp = ajtai_setup(&mut rng, d, kappa, m_commit).expect("Ajtai setup should succeed");
-    set_global_pp(pp.clone()).expect("set_global_pp");
-    AjtaiSModule::new(Arc::new(pp))
+    if let Err(e) = set_global_pp(pp) {
+        if !neo_ajtai::has_global_pp_for_dims(d, m_commit) {
+            panic!("set_global_pp: {e}");
+        }
+    }
+    AjtaiSModule::from_global_for_dims(d, m_commit).expect("from_global_for_dims")
 }
 
 fn default_mixers() -> Mixers {

@@ -69,83 +69,34 @@ where
     params_rlc.k_rho = k_rho_eff as u32;
     let rlc_rhos = ccs::sample_rot_rhos_n_typed(tr, &params_rlc, ring, me_inputs.len())?;
     let rlc_rho_mats = ccs::rot_rhos_to_mats(&rlc_rhos);
-    let (mut rlc_parent, Z_mix) = if me_inputs.len() == 1 {
-        if rlc_rho_mats.len() != 1 {
-            return Err(PiCcsError::ProtocolError(format!(
-                "step {}: Π_RLC(k=1): |rhos| must equal |inputs|",
-                step_idx
-            )));
-        }
-        let inp = &me_inputs[0];
-
-        // Match `neo_reductions::api::rlc_with_commit` semantics for k=1 without cloning Z.
-        let inputs_c = vec![inp.c.clone()];
-        let c = (mixers.mix_rhos_commits)(&rlc_rho_mats, &inputs_c);
-
-        let t = inp.y_ring.len();
-        if t < s.t() {
-            return Err(PiCcsError::InvalidInput(format!(
-                "step {}: Π_RLC(k=1): ME y.len() must be >= s.t() (got {}, s.t()={})",
-                step_idx,
-                t,
-                s.t()
-            )));
-        }
-        for (j, row) in inp.y_ring.iter().enumerate() {
-            if row.len() < D {
-                return Err(PiCcsError::InvalidInput(format!(
-                    "step {}: Π_RLC(k=1): ME y[{}].len()={} must be >= D={}",
-                    step_idx,
-                    j,
-                    row.len(),
-                    D
-                )));
-            }
-        }
-        verify_me_y_scalars_canonical(inp, params.b, s.m, step_idx, "Π_RLC(k=1)")?;
-
-        if !(inp.s_col.is_empty() && inp.y_zcol.is_empty()) {
-            if inp.s_col.is_empty() || inp.y_zcol.is_empty() {
-                return Err(PiCcsError::InvalidInput(format!(
-                    "step {}: Π_RLC(k=1): incomplete NC channel, expected both s_col and y_zcol",
-                    step_idx
-                )));
-            }
-            let d_pad = 1usize
-                .checked_shl(ell_d as u32)
-                .ok_or_else(|| PiCcsError::InvalidInput(format!("step {}: Π_RLC(k=1): 2^ell_d overflow", step_idx)))?;
-            if inp.y_zcol.len() != d_pad {
-                return Err(PiCcsError::InvalidInput(format!(
-                    "step {}: Π_RLC(k=1): y_zcol.len()={} expected {}",
-                    step_idx,
-                    inp.y_zcol.len(),
-                    d_pad
-                )));
-            }
-        }
-
-        let out = CeClaim::<Cmt, F, K> {
-            c_step_coords: vec![],
-            u_offset: 0,
-            u_len: 0,
-            c,
-            X: inp.X.clone(),
-            r: inp.r.clone(),
-            s_col: inp.s_col.clone(),
-            y_ring: inp.y_ring.clone(),
-            ct: inp.ct.clone(),
-            aux_openings: inp.aux_openings.clone(),
-            y_zcol: inp.y_zcol.clone(),
-            m_in: inp.m_in,
-            fold_digest: inp.fold_digest,
-        };
-
-        (out, Cow::Borrowed(wit_inputs[0]))
+    let (mut rlc_parent, Z_mix) = if inputs_have_extra_y {
+        let parent_pub = ccs::rlc_public(s, params, &rlc_rhos, me_inputs, mixers.mix_rhos_commits, ell_d)?;
+        let (_, z_mix_tmp) = neo_reductions::optimized_engine::rlc_reduction_optimized_with_commit_mix(
+            s,
+            params,
+            &rlc_rho_mats,
+            me_inputs,
+            wit_inputs,
+            ell_d,
+            mixers.mix_rhos_commits,
+        );
+        (parent_pub, z_mix_tmp)
     } else {
-        let (out, Z_mix) = {
-            if inputs_have_extra_y {
-                let parent_pub = ccs::rlc_public(s, params, &rlc_rhos, me_inputs, mixers.mix_rhos_commits, ell_d)?;
-                let (_, z_mix_tmp) = neo_reductions::optimized_engine::rlc_reduction_optimized_with_commit_mix(
+        #[cfg(feature = "paper-exact")]
+        {
+            if matches!(mode, FoldingMode::PaperExact) {
+                let wit_owned: Vec<Mat<F>> = wit_inputs.iter().map(|m| (*m).clone()).collect();
+                neo_reductions::optimized_engine::rlc_reduction_paper_exact_with_commit_mix(
+                    s,
+                    params,
+                    &rlc_rho_mats,
+                    me_inputs,
+                    &wit_owned,
+                    ell_d,
+                    mixers.mix_rhos_commits,
+                )
+            } else {
+                neo_reductions::optimized_engine::rlc_reduction_optimized_with_commit_mix(
                     s,
                     params,
                     &rlc_rho_mats,
@@ -153,52 +104,24 @@ where
                     wit_inputs,
                     ell_d,
                     mixers.mix_rhos_commits,
-                );
-                (parent_pub, z_mix_tmp)
-            } else {
-                #[cfg(feature = "paper-exact")]
-                {
-                    if matches!(mode, FoldingMode::PaperExact) {
-                        let wit_owned: Vec<Mat<F>> = wit_inputs.iter().map(|m| (*m).clone()).collect();
-                        neo_reductions::optimized_engine::rlc_reduction_paper_exact_with_commit_mix(
-                            s,
-                            params,
-                            &rlc_rho_mats,
-                            me_inputs,
-                            &wit_owned,
-                            ell_d,
-                            mixers.mix_rhos_commits,
-                        )
-                    } else {
-                        neo_reductions::optimized_engine::rlc_reduction_optimized_with_commit_mix(
-                            s,
-                            params,
-                            &rlc_rho_mats,
-                            me_inputs,
-                            wit_inputs,
-                            ell_d,
-                            mixers.mix_rhos_commits,
-                        )
-                    }
-                }
-                #[cfg(not(feature = "paper-exact"))]
-                {
-                    neo_reductions::optimized_engine::rlc_reduction_optimized_with_commit_mix(
-                        s,
-                        params,
-                        &rlc_rho_mats,
-                        me_inputs,
-                        wit_inputs,
-                        ell_d,
-                        mixers.mix_rhos_commits,
-                    )
-                }
+                )
             }
-        };
-        (out, Cow::Owned(Z_mix))
+        }
+        #[cfg(not(feature = "paper-exact"))]
+        {
+            neo_reductions::optimized_engine::rlc_reduction_optimized_with_commit_mix(
+                s,
+                params,
+                &rlc_rho_mats,
+                me_inputs,
+                wit_inputs,
+                ell_d,
+                mixers.mix_rhos_commits,
+            )
+        }
     };
 
-    let Z_mix = Z_mix.as_ref();
+    let Z_mix = &Z_mix;
     let k_dec_eff = core::cmp::max(
         k_rho_eff,
         core::cmp::max(
@@ -258,7 +181,7 @@ where
         // Memory-optimized DEC: compute children + commitments without materializing Z_split.
         // If public consistency checks fail (e.g. global PP mismatch vs local committer),
         // fall back to the materialized path for correctness.
-        let (children, _child_cs, ok_y, ok_X, ok_c) = dec_stream_no_witness(
+        match dec_stream_no_witness(
             params,
             s,
             &rlc_parent,
@@ -267,11 +190,11 @@ where
             k_dec_eff,
             mixers.combine_b_pows,
             ccs_sparse_cache,
-        )?;
-        if ok_y && ok_X && ok_c {
-            (children, ok_y, ok_X, ok_c, Vec::new())
-        } else {
-            materialize_dec()?
+        ) {
+            Ok((children, _child_cs, ok_y, ok_X, ok_c)) if ok_y && ok_X && ok_c => {
+                (children, ok_y, ok_X, ok_c, Vec::new())
+            }
+            Ok(_) | Err(_) => materialize_dec()?,
         }
     } else {
         materialize_dec()?
@@ -660,6 +583,12 @@ where
     if parent_pub.ct != rlc_parent.ct {
         return Err(PiCcsError::ProtocolError(format!(
             "step {}: {prefix}RLC ct mismatch",
+            step_idx
+        )));
+    }
+    if parent_pub.aux_openings != rlc_parent.aux_openings {
+        return Err(PiCcsError::ProtocolError(format!(
+            "step {}: {prefix}RLC aux_openings mismatch",
             step_idx
         )));
     }

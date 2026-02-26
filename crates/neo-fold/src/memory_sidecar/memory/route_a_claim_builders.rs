@@ -81,7 +81,7 @@ pub(crate) fn width_lookup_bus_val_cols_witness(
     t_len: usize,
 ) -> Result<Vec<usize>, PiCcsError> {
     let width = Rv32WidthSidecarLayout::new();
-    let width_cols = rv32_width_lookup_backed_cols(&width);
+    let (width_cols, width_lut_slots) = resolve_shared_width_lookup_lut_indices(step, &width)?;
     let mut width_bus_col_by_col: BTreeMap<usize, usize> = BTreeMap::new();
     if step.time_columns.t != t_len || step.time_columns.cpu_cols.is_empty() {
         return Err(PiCcsError::ProtocolError(format!(
@@ -96,20 +96,7 @@ pub(crate) fn width_lookup_bus_val_cols_witness(
             "W3(shared): bus shout lane count drift while resolving width lookup columns".into(),
         ));
     }
-    for (lut_idx, (inst, _)) in step.lut_instances.iter().enumerate() {
-        if !rv32_is_width_lookup_table_id(inst.table_id) {
-            continue;
-        }
-        let width_col_id = width_cols
-            .iter()
-            .copied()
-            .find(|&col_id| rv32_width_lookup_table_id_for_col(col_id) == inst.table_id)
-            .ok_or_else(|| {
-                PiCcsError::ProtocolError(format!(
-                    "W3(shared): width lookup table_id={} does not map to a known width column",
-                    inst.table_id
-                ))
-            })?;
+    for (&width_col_id, &(lut_idx, val_slot)) in width_cols.iter().zip(width_lut_slots.iter()) {
         let inst_cols = bus
             .shout_cols
             .get(lut_idx)
@@ -117,7 +104,15 @@ pub(crate) fn width_lookup_bus_val_cols_witness(
         let lane0 = inst_cols.lanes.get(0).ok_or_else(|| {
             PiCcsError::ProtocolError("W3(shared): expected one shout lane for width lookup table".into())
         })?;
-        let logical_bus_col = time_mem_logical_col_id_for_step(step, lane0.primary_val(), "W3(shared)")?;
+        let val_col = lane0.vals.get(val_slot).copied().ok_or_else(|| {
+            PiCcsError::ProtocolError(format!(
+                "W3(shared): width val_slot={} out of range for lut_idx={} (n_vals={})",
+                val_slot,
+                lut_idx,
+                lane0.vals.len()
+            ))
+        })?;
+        let logical_bus_col = time_mem_logical_col_id_for_step(step, val_col, "W3(shared)")?;
         width_bus_col_by_col.insert(width_col_id, logical_bus_col);
     }
     let mut out = Vec::with_capacity(width_cols.len());
@@ -1300,21 +1295,29 @@ pub(crate) fn emit_route_a_wb_wp_me_claims(
     }
     if decode_stage_required_for_step_witness(step) {
         let decode_layout = Rv32DecodeSidecarLayout::new();
-        let (_decode_open_cols, decode_lut_indices) = resolve_shared_decode_lookup_lut_indices(step, &decode_layout)?;
+        let (_decode_open_cols, decode_lut_slots) = resolve_shared_decode_lookup_lut_indices(step, &decode_layout)?;
         let bus = build_bus_layout_for_step_witness(step, t_len)?;
         if bus.shout_cols.len() != step.lut_instances.len() {
             return Err(PiCcsError::ProtocolError(
                 "W2(shared): bus layout shout lane count drift".into(),
             ));
         }
-        for &lut_idx in decode_lut_indices.iter() {
+        for &(lut_idx, val_slot) in decode_lut_slots.iter() {
             let inst_cols = bus.shout_cols.get(lut_idx).ok_or_else(|| {
                 PiCcsError::ProtocolError("W2(shared): missing shout cols for decode lookup table".into())
             })?;
             let lane0 = inst_cols.lanes.get(0).ok_or_else(|| {
                 PiCcsError::ProtocolError("W2(shared): expected one shout lane for decode lookup table".into())
             })?;
-            let logical_bus_col = time_mem_logical_col_id_for_step(step, lane0.primary_val(), "W2(shared)")?;
+            let val_col = lane0.vals.get(val_slot).copied().ok_or_else(|| {
+                PiCcsError::ProtocolError(format!(
+                    "W2(shared): decode val_slot={} out of range for lut_idx={} (n_vals={})",
+                    val_slot,
+                    lut_idx,
+                    lane0.vals.len()
+                ))
+            })?;
+            let logical_bus_col = time_mem_logical_col_id_for_step(step, val_col, "W2(shared)")?;
             wp_cols.push(logical_bus_col);
         }
     }

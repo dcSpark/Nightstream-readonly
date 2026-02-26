@@ -148,8 +148,8 @@ where
     Ff: Field + PrimeCharacteristicRing + PrimeField64 + Copy + Send + Sync,
     K: From<Ff>,
 {
-    let y_ring = crate::superneo_eval::eval_all_mats_ring_cached(superneo_cache, z, chi_r, n_eff);
-    y_ring.into_iter().map(|coeffs| coeffs[0]).collect()
+    // This path only needs ct(M_j z) scalars; avoid full ring coefficient evaluation.
+    crate::superneo_eval::eval_all_mats_cached(superneo_cache, z, chi_r, n_eff)
 }
 
 /// --- Core, literal formulas from the paper --------------------------------
@@ -1099,8 +1099,7 @@ where
 /// Optimized Random Linear Combination for the prover path.
 ///
 /// Semantics match `rlc_reduction_paper_exact`, but this implementation:
-/// - Fast-paths the common `k=1` case (no mixing) to avoid a D×D by D×m multiply.
-/// - Uses cache-friendly row-major loops for the large witness matrix `Z` when k>1.
+/// - Uses cache-friendly row-major loops for the large witness matrix `Z`.
 fn rlc_reduction_optimized_from_refs<Ff>(
     s: &CcsStructure<Ff>,
     params: &NeoParams,
@@ -1134,15 +1133,6 @@ where
     // beyond `s.t()`. Π_RLC in this module mixes only the core CCS outputs; the sidecar
     // outputs are recomputed later from `Z_mix` and appended once.
     let t_core = s.t();
-
-    // k=1: no mixing needed (common for the first step and for CCS-only flows).
-    // We still return only the core CCS outputs to preserve the "append sidecar once" invariant.
-    if k1 == 1 {
-        let mut out = me_inputs[0].clone();
-        out.y_ring.truncate(t_core);
-        out.ct.truncate(t_core);
-        return (out, (*Zs[0]).clone());
-    }
 
     let d = D;
     let d_pad = 1usize << ell_d;

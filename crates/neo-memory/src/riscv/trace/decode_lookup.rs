@@ -5,8 +5,14 @@ use p3_goldilocks::Goldilocks as F;
 ///
 /// Table id for decode column `c` is `RV32_TRACE_DECODE_LOOKUP_TABLE_BASE + c`.
 pub const RV32_TRACE_DECODE_LOOKUP_TABLE_BASE: u32 = 0x5256_4400;
+/// Grouped decode lookup table id used in shared-bus trace mode.
+///
+/// In grouped mode, all decode transport columns share one `table_id` and use
+/// value slots (`n_vals`) to carry per-column values.
+pub const RV32_TRACE_DECODE_LOOKUP_GROUPED_TABLE_ID: u32 = RV32_TRACE_DECODE_LOOKUP_TABLE_BASE;
 /// Base address-group id for decode lookup lanes.
 pub const RV32_TRACE_DECODE_ADDR_GROUP_BASE: u32 = 0x5256_4A00;
+const RV32_TRACE_DECODE_LOOKUP_GROUPED: bool = true;
 
 #[derive(Clone, Debug)]
 pub struct Rv32DecodeSidecarLayout {
@@ -250,14 +256,46 @@ pub fn rv32_decode_lookup_backed_cols(layout: &Rv32DecodeSidecarLayout) -> Vec<u
     out
 }
 
+/// Decode lookup columns transported on the shared Shout bus in trace mode.
+///
+/// This currently aliases the full decode-backed set. The dedicated entrypoint keeps
+/// call sites explicit and allows future reduction work without touching all users.
+#[inline]
+pub fn rv32_decode_lookup_transport_cols(layout: &Rv32DecodeSidecarLayout) -> Vec<usize> {
+    rv32_decode_lookup_backed_cols(layout)
+}
+
 #[inline]
 pub const fn rv32_decode_lookup_table_id_for_col(col: usize) -> u32 {
-    RV32_TRACE_DECODE_LOOKUP_TABLE_BASE + col as u32
+    if RV32_TRACE_DECODE_LOOKUP_GROUPED {
+        RV32_TRACE_DECODE_LOOKUP_GROUPED_TABLE_ID
+    } else {
+        RV32_TRACE_DECODE_LOOKUP_TABLE_BASE + col as u32
+    }
 }
 
 #[inline]
 pub const fn rv32_is_decode_lookup_table_id(table_id: u32) -> bool {
-    table_id >= RV32_TRACE_DECODE_LOOKUP_TABLE_BASE && table_id < RV32_TRACE_DECODE_LOOKUP_TABLE_BASE + 77
+    (table_id >= RV32_TRACE_DECODE_LOOKUP_TABLE_BASE && table_id < RV32_TRACE_DECODE_LOOKUP_TABLE_BASE + 77)
+        || table_id == RV32_TRACE_DECODE_LOOKUP_GROUPED_TABLE_ID
+}
+
+#[inline]
+pub const fn rv32_is_decode_lookup_grouped_table_id(table_id: u32) -> bool {
+    RV32_TRACE_DECODE_LOOKUP_GROUPED && table_id == RV32_TRACE_DECODE_LOOKUP_GROUPED_TABLE_ID
+}
+
+#[inline]
+pub fn rv32_decode_lookup_transport_n_vals() -> usize {
+    let layout = Rv32DecodeSidecarLayout::new();
+    rv32_decode_lookup_transport_cols(&layout).len().max(1)
+}
+
+#[inline]
+pub fn rv32_decode_lookup_val_slot_for_col(col: usize) -> Option<usize> {
+    let layout = Rv32DecodeSidecarLayout::new();
+    let cols = rv32_decode_lookup_transport_cols(&layout);
+    cols.iter().position(|&c| c == col)
 }
 
 #[inline]

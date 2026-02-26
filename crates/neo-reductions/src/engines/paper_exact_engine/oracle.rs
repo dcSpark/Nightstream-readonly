@@ -104,8 +104,8 @@ where
 
     #[inline]
     fn eval_all_mats_ct_only(&self, z: &[K], chi_r: &[K]) -> Vec<K> {
-        let y_ring = crate::superneo_eval::eval_all_mats_ring_cached(&self.superneo_cache, z, chi_r, self.s.n);
-        y_ring.into_iter().map(|coeffs| coeffs[0]).collect()
+        // FE channel uses only ct(M_j z); full ring rows are unnecessary here.
+        crate::superneo_eval::eval_all_mats_cached(&self.superneo_cache, z, chi_r, self.s.n)
     }
 
     /// Evaluate FE-only Q at extension point (α′, r′), including Eval block.

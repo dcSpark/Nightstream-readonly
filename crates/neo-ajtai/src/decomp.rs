@@ -123,20 +123,38 @@ pub fn decomp_b_row_major(z: &[Fq], b: u32, d: usize, style: DecompStyle) -> Vec
         let mut Z = Vec::with_capacity(d * m);
         match style {
             DecompStyle::NonNegative => {
-                for _row in 0..d {
+                for row in 0..d {
+                    let mut any_next_nonzero = false;
                     for a in a_vals.iter_mut() {
+                        if *a == 0 {
+                            Z.push(Fq::ZERO);
+                            continue;
+                        }
                         let digit = (*a & 1) as u64;
                         Z.push(Fq::from_u64(digit));
                         *a >>= 1;
+                        any_next_nonzero |= *a != 0;
+                    }
+                    if !any_next_nonzero {
+                        let rem_rows = d - row - 1;
+                        if rem_rows > 0 {
+                            Z.resize(Z.len() + rem_rows * m, Fq::ZERO);
+                        }
+                        break;
                     }
                 }
             }
             DecompStyle::Balanced => {
                 let one = Fq::ONE;
                 let neg_one = Fq::ZERO - one;
-                for _row in 0..d {
+                for row in 0..d {
+                    let mut any_next_nonzero = false;
                     for a in a_vals.iter_mut() {
                         let a0 = *a;
+                        if a0 == 0 {
+                            Z.push(Fq::ZERO);
+                            continue;
+                        }
                         let digit = if (a0 & 1) == 0 {
                             0i64
                         } else if a0 >= 0 {
@@ -151,6 +169,14 @@ pub fn decomp_b_row_major(z: &[Fq], b: u32, d: usize, style: DecompStyle) -> Vec
                             _ => unreachable!("b=2 digit must be -1/0/1"),
                         });
                         *a = (a0 - digit) >> 1;
+                        any_next_nonzero |= *a != 0;
+                    }
+                    if !any_next_nonzero {
+                        let rem_rows = d - row - 1;
+                        if rem_rows > 0 {
+                            Z.resize(Z.len() + rem_rows * m, Fq::ZERO);
+                        }
+                        break;
                     }
                 }
             }
@@ -164,8 +190,13 @@ pub fn decomp_b_row_major(z: &[Fq], b: u32, d: usize, style: DecompStyle) -> Vec
         match style {
             DecompStyle::NonNegative => {
                 let two = Fq::from_u64(2);
-                for _row in 0..d {
+                for row in 0..d {
+                    let mut any_next_nonzero = false;
                     for a in a_vals.iter_mut() {
+                        if *a == 0 {
+                            Z.push(Fq::ZERO);
+                            continue;
+                        }
                         let r = a.rem_euclid(3);
                         Z.push(match r {
                             0 => Fq::ZERO,
@@ -174,14 +205,27 @@ pub fn decomp_b_row_major(z: &[Fq], b: u32, d: usize, style: DecompStyle) -> Vec
                             _ => unreachable!("rem_euclid(3) must be in 0..=2"),
                         });
                         *a = a.div_euclid(3);
+                        any_next_nonzero |= *a != 0;
+                    }
+                    if !any_next_nonzero {
+                        let rem_rows = d - row - 1;
+                        if rem_rows > 0 {
+                            Z.resize(Z.len() + rem_rows * m, Fq::ZERO);
+                        }
+                        break;
                     }
                 }
             }
             DecompStyle::Balanced => {
                 let one = Fq::ONE;
                 let neg_one = Fq::ZERO - one;
-                for _row in 0..d {
+                for row in 0..d {
+                    let mut any_next_nonzero = false;
                     for a in a_vals.iter_mut() {
+                        if *a == 0 {
+                            Z.push(Fq::ZERO);
+                            continue;
+                        }
                         let mut r = *a % 3;
                         if r > 1 {
                             r -= 3;
@@ -196,6 +240,14 @@ pub fn decomp_b_row_major(z: &[Fq], b: u32, d: usize, style: DecompStyle) -> Vec
                             _ => unreachable!("balanced mod 3 digit must be -1/0/1"),
                         });
                         *a = (*a - r) / 3;
+                        any_next_nonzero |= *a != 0;
+                    }
+                    if !any_next_nonzero {
+                        let rem_rows = d - row - 1;
+                        if rem_rows > 0 {
+                            Z.resize(Z.len() + rem_rows * m, Fq::ZERO);
+                        }
+                        break;
                     }
                 }
             }
@@ -210,9 +262,13 @@ pub fn decomp_b_row_major(z: &[Fq], b: u32, d: usize, style: DecompStyle) -> Vec
     let mut Z = Vec::with_capacity(d * m);
     match style {
         DecompStyle::NonNegative => {
-            for _row in 0..d {
+            for row in 0..d {
+                let mut any_next_nonzero = false;
                 for a in a_vals.iter_mut() {
-                    // Constant-time: always compute digit even if a == 0 to prevent timing side-channel
+                    if *a == 0 {
+                        Z.push(Fq::ZERO);
+                        continue;
+                    }
                     let r = a.rem_euclid(b_i64);
                     let q = a.div_euclid(b_i64);
                     let digit = r as i32;
@@ -221,16 +277,28 @@ pub fn decomp_b_row_major(z: &[Fq], b: u32, d: usize, style: DecompStyle) -> Vec
                     } else {
                         Fq::ZERO - Fq::from_u64((-digit) as u64)
                     });
-                    *a = q; // if a was 0 this just propagates zeros
+                    *a = q;
+                    any_next_nonzero |= *a != 0;
+                }
+                if !any_next_nonzero {
+                    let rem_rows = d - row - 1;
+                    if rem_rows > 0 {
+                        Z.resize(Z.len() + rem_rows * m, Fq::ZERO);
+                    }
+                    break;
                 }
             }
         }
         DecompStyle::Balanced => {
             // Balanced in [-(b-1)..(b-1)]; choose residue with smallest absolute value.
             let half = b_i64 / 2;
-            for _row in 0..d {
+            for row in 0..d {
+                let mut any_next_nonzero = false;
                 for a in a_vals.iter_mut() {
-                    // Constant-time: always compute digit even if a == 0 to prevent timing side-channel
+                    if *a == 0 {
+                        Z.push(Fq::ZERO);
+                        continue;
+                    }
                     let mut r = *a % b_i64;
                     if r > half {
                         r -= b_i64;
@@ -244,7 +312,15 @@ pub fn decomp_b_row_major(z: &[Fq], b: u32, d: usize, style: DecompStyle) -> Vec
                     } else {
                         Fq::ZERO - Fq::from_u64((-digit) as u64)
                     });
-                    *a = (*a - r) / b_i64; // if a was 0 this just propagates zeros
+                    *a = (*a - r) / b_i64;
+                    any_next_nonzero |= *a != 0;
+                }
+                if !any_next_nonzero {
+                    let rem_rows = d - row - 1;
+                    if rem_rows > 0 {
+                        Z.resize(Z.len() + rem_rows * m, Fq::ZERO);
+                    }
+                    break;
                 }
             }
         }

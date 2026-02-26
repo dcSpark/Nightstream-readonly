@@ -556,9 +556,9 @@ fn report_track_a_w0_w1_snapshot() {
             new_adapter_width = new_adapter_width.saturating_add(g.ell_addr.saturating_add(has_arity));
             new_bitness_width = new_bitness_width.saturating_add(g.ell_addr.saturating_add(has_arity));
         }
-        println!("  Shout grouped fan-in (legacy formula): value={old_value_width} adapter={old_adapter_width} bitness={old_bitness_width} total={}",
+        println!("  Shout grouped fan-in (legacy reference-only): value={old_value_width} adapter={old_adapter_width} bitness={old_bitness_width} total={}",
             old_value_width.saturating_add(old_adapter_width).saturating_add(old_bitness_width));
-        println!("  Shout grouped fan-in (shared-aware):   value={new_value_width} adapter={new_adapter_width} bitness={new_bitness_width} total={}",
+        println!("  Shout grouped fan-in (shared-aware, active): value={new_value_width} adapter={new_adapter_width} bitness={new_bitness_width} total={}",
             new_value_width.saturating_add(new_adapter_width).saturating_add(new_bitness_width));
     }
     println!();
@@ -752,8 +752,22 @@ fn report_track_a_w0_w1_snapshot() {
     println!();
 
     // ── 9. Summary ──
+    let instr_count = n as f64;
+    let prove_ms_per_instr = prove_time.as_secs_f64() * 1000.0 / instr_count;
+    let verify_ms_per_instr = verify_time.as_secs_f64() * 1000.0 / instr_count;
+    let fold_ms_per_instr = phases.fold_and_prove.as_secs_f64() * 1000.0 / instr_count;
+    let total_ms_per_instr = total_time.as_secs_f64() * 1000.0 / instr_count;
     println!("9. SUMMARY");
     println!("{sep}");
+    println!("  {:<36} {:>10}", "Instruction count (non-halt)", n);
+    println!("  {:<36} {:>10}", "Trace steps (incl halt)", steps);
+    println!("  {:<36} {:>9.3} ms", "Prove time / instruction", prove_ms_per_instr);
+    println!(
+        "  {:<36} {:>9.3} ms",
+        "Fold+prove time / instruction", fold_ms_per_instr
+    );
+    println!("  {:<36} {:>9.3} ms", "Verify time / instruction", verify_ms_per_instr);
+    println!("  {:<36} {:>9.3} ms", "Total time / instruction", total_ms_per_instr);
     println!("  {:<36} {:>10}", "Main trace columns", layout.trace.cols);
     println!("  {:<36} {:>10}", "CPU base cols (m_in+trace)", cpu_base_m);
     println!("  {:<36} {:>10}", "Committed mem/bus cols", committed_mem_bus_cols);

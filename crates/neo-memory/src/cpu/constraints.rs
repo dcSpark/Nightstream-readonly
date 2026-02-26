@@ -44,6 +44,7 @@ use crate::cpu::bus_layout::{
     build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, BusLayout, ShoutCols, ShoutInstanceShape,
     TwistCols,
 };
+use crate::riscv::trace::rv32_trace_lookup_n_vals_for_table_id;
 use crate::witness::{LutInstance, LutTableSpec, MemInstance};
 
 /// CPU column layout for binding to the bus.
@@ -745,12 +746,14 @@ impl<F: Field> CpuConstraintBuilder<F> {
             }
 
             if add_value_padding {
-                let bus_val = layout.bus_cell(shout.primary_val(), j);
-                self.constraints.push(CpuConstraint::new_zero_negated(
-                    CpuConstraintLabel::LookupValueZeroPadding,
-                    bus_has_lookup,
-                    bus_val,
-                ));
+                for &val_col in shout.vals.iter() {
+                    let bus_val = layout.bus_cell(val_col, j);
+                    self.constraints.push(CpuConstraint::new_zero_negated(
+                        CpuConstraintLabel::LookupValueZeroPadding,
+                        bus_has_lookup,
+                        bus_val,
+                    ));
+                }
             }
 
             if add_gated_addr_bitness {
@@ -1155,7 +1158,7 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints_optional_shout<
         lut_insts.iter().map(|inst| ShoutInstanceShape {
             ell_addr: inst.d * inst.ell,
             lanes: inst.lanes.max(1),
-            n_vals: 1usize,
+            n_vals: rv32_trace_lookup_n_vals_for_table_id(inst.table_id),
             addr_group: shout_addr_groups.get(&inst.table_id).copied(),
             selector_group: shout_selector_groups.get(&inst.table_id).copied(),
         }),
@@ -1379,14 +1382,16 @@ pub fn create_shout_padding_constraints<F: Field>(layout: &BusLayout, shout: &Sh
     let mut constraints = Vec::new();
     for j in 0..layout.chunk_size {
         let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
-        let bus_val = layout.bus_cell(shout.primary_val(), j);
+        for &val_col in shout.vals.iter() {
+            let bus_val = layout.bus_cell(val_col, j);
 
-        // (1 - has_lookup) * val = 0
-        constraints.push(CpuConstraint::new_zero_negated(
-            CpuConstraintLabel::LookupValueZeroPadding,
-            bus_has_lookup,
-            bus_val,
-        ));
+            // (1 - has_lookup) * val = 0
+            constraints.push(CpuConstraint::new_zero_negated(
+                CpuConstraintLabel::LookupValueZeroPadding,
+                bus_has_lookup,
+                bus_val,
+            ));
+        }
 
         // (1 - has_lookup) * addr_bits[i] = 0 for all i
         for col_id in shout.addr_bits.clone() {

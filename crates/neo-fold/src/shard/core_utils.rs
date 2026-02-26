@@ -193,28 +193,53 @@ pub(crate) fn commit_time_column_sets(
 
     // Reuse one seeded PP stream across small batches of columns to avoid regenerating
     // the same Ajtai row stream independently for every single column commitment.
-    const TIME_COMMIT_BATCH: usize = 32;
-    let commit_cols = |cols: &[Vec<F>]| -> Vec<Cmt> {
-        let mut out = Vec::with_capacity(cols.len());
-        for chunk in cols.chunks(TIME_COMMIT_BATCH) {
-            let mats: Vec<Mat<F>> = chunk
+    const TIME_COMMIT_BATCH: usize = 512;
+    let mut all_cols: Vec<&Vec<F>> = Vec::with_capacity(cpu_cols.len() + mem_cols.len());
+    all_cols.extend(cpu_cols.iter());
+    all_cols.extend(mem_cols.iter());
+    let mut all_comms = Vec::with_capacity(all_cols.len());
+    for chunk in all_cols.chunks(TIME_COMMIT_BATCH) {
+        #[cfg(any(not(target_arch = "wasm32"), feature = "wasm-threads"))]
+        let mats: Vec<Mat<F>> = if chunk.len() >= 32 {
+            chunk
+                .par_iter()
+                .map(|col| {
+                    neo_memory::ajtai::encode_vector_balanced_to_mat_with_base(
+                        params,
+                        *col,
+                        crate::time_opening::STAGE8_TIME_DECOMP_BASE,
+                    )
+                })
+                .collect()
+        } else {
+            chunk
                 .iter()
                 .map(|col| {
                     neo_memory::ajtai::encode_vector_balanced_to_mat_with_base(
                         params,
-                        col,
+                        *col,
                         crate::time_opening::STAGE8_TIME_DECOMP_BASE,
                     )
                 })
-                .collect();
-            let refs: Vec<&Mat<F>> = mats.iter().collect();
-            out.extend(committer.commit_many(&refs));
-        }
-        out
-    };
+                .collect()
+        };
+        #[cfg(all(target_arch = "wasm32", not(feature = "wasm-threads")))]
+        let mats: Vec<Mat<F>> = chunk
+            .iter()
+            .map(|col| {
+                neo_memory::ajtai::encode_vector_balanced_to_mat_with_base(
+                    params,
+                    *col,
+                    crate::time_opening::STAGE8_TIME_DECOMP_BASE,
+                )
+            })
+            .collect();
+        let refs: Vec<&Mat<F>> = mats.iter().collect();
+        all_comms.extend(committer.commit_many(&refs));
+    }
 
-    let cpu_comms = commit_cols(cpu_cols);
-    let mem_comms = commit_cols(mem_cols);
+    let mem_comms = all_comms.split_off(cpu_cols.len());
+    let cpu_comms = all_comms;
 
     Ok((cpu_comms, mem_comms))
 }
@@ -314,36 +339,47 @@ pub(crate) fn bind_time_opening_batches_and_sample_coeffs(
     opening_proofs: &[crate::shard_proof_types::TimeOpeningProof],
 ) -> Result<Vec<Vec<Mat<F>>>, PiCcsError> {
     #[inline]
-    fn mat_identity() -> Mat<F> {
-        let mut out = Mat::zero(D, D, F::ZERO);
-        for i in 0..D {
-            out[(i, i)] = F::ONE;
+    fn f_from_i64(x: i64) -> F {
+        if x >= 0 {
+            F::from_u64(x as u64)
+        } else {
+            F::ZERO - F::from_u64((-x) as u64)
         }
-        out
     }
 
     #[inline]
-    fn mat_mul(a: &Mat<F>, b: &Mat<F>) -> Result<Mat<F>, PiCcsError> {
-        if a.rows() != D || a.cols() != D || b.rows() != D || b.cols() != D {
+    fn rot_matrix_to_rq(mat: &Mat<F>) -> Result<neo_math::ring::Rq, PiCcsError> {
+        if mat.rows() != D || mat.cols() != D {
             return Err(PiCcsError::InvalidInput(format!(
-                "time_openings/batch_bind: matrix multiply requires {D}x{D} inputs (got {}x{} and {}x{})",
-                a.rows(),
-                a.cols(),
-                b.rows(),
-                b.cols()
+                "time_openings/batch_bind: sampled rho must be {D}x{D} (got {}x{})",
+                mat.rows(),
+                mat.cols()
             )));
         }
-        let mut out = Mat::zero(D, D, F::ZERO);
-        for r in 0..D {
-            for c in 0..D {
-                let mut acc = F::ZERO;
-                for k in 0..D {
-                    acc += a[(r, k)] * b[(k, c)];
-                }
-                out[(r, c)] = acc;
-            }
+        let mut coeffs = [F::ZERO; D];
+        for i in 0..D {
+            coeffs[i] = mat[(i, 0)];
         }
-        Ok(out)
+        Ok(neo_math::ring::Rq(coeffs))
+    }
+
+    #[inline]
+    fn rot_from_coeffs(coeffs: &[F; D], neg_phi_coeffs: &[F; D]) -> Mat<F> {
+        let mut out = Mat::zero(D, D, F::ZERO);
+        let mut col = *coeffs;
+        for j in 0..D {
+            for r in 0..D {
+                out[(r, j)] = col[r];
+            }
+            let last = col[D - 1];
+            let mut next = [F::ZERO; D];
+            next[0] = last * neg_phi_coeffs[0];
+            for r in 1..D {
+                next[r] = col[r - 1] + last * neg_phi_coeffs[r];
+            }
+            col = next;
+        }
+        out
     }
 
     tr.append_message(b"time_openings/batch_bind/v1", &[]);
@@ -352,6 +388,10 @@ pub(crate) fn bind_time_opening_batches_and_sample_coeffs(
 
     let mut all_coeffs = Vec::with_capacity(opening_proofs.len());
     let ring = ccs::RotRing::goldilocks();
+    let mut neg_phi_coeffs = [F::ZERO; D];
+    for (i, &c) in ring.phi_coeffs.iter().enumerate() {
+        neg_phi_coeffs[i] = f_from_i64(-(c as i64));
+    }
     for (proof_idx, pf) in opening_proofs.iter().enumerate() {
         if pf.col_ids.len() != pf.evals.len() || pf.col_ids.len() != pf.digit_evals.len() {
             return Err(PiCcsError::ProtocolError(format!(
@@ -417,11 +457,12 @@ pub(crate) fn bind_time_opening_batches_and_sample_coeffs(
         let base = ccs::sample_rot_rhos_n(tr, params, &ring, 1)?
             .pop()
             .ok_or_else(|| PiCcsError::ProtocolError("time_openings/batch_bind: missing sampled rho".into()))?;
+        let base_rq = rot_matrix_to_rq(&base)?;
         let mut coeffs = Vec::with_capacity(pf.col_ids.len());
-        let mut cur = mat_identity();
+        let mut cur_rq = neo_math::ring::Rq::one();
         for _ in 0..pf.col_ids.len() {
-            coeffs.push(cur.clone());
-            cur = mat_mul(&cur, &base)?;
+            coeffs.push(rot_from_coeffs(&cur_rq.0, &neg_phi_coeffs));
+            cur_rq = cur_rq.mul(&base_rq);
         }
         all_coeffs.push(coeffs);
     }

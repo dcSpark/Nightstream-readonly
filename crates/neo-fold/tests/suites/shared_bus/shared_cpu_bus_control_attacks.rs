@@ -2,7 +2,7 @@ use neo_fold::riscv_trace_shard::{Rv32TraceWiring, Rv32TraceWiringRun};
 use neo_fold::shard::{ShardProof, StepProof};
 use neo_math::K;
 use neo_memory::riscv::lookups::{encode_program, BranchCondition, RiscvInstruction, RiscvOpcode};
-use neo_memory::riscv::trace::{rv32_decode_lookup_backed_cols, Rv32DecodeSidecarLayout, Rv32TraceLayout};
+use neo_memory::riscv::trace::Rv32TraceLayout;
 use p3_field::PrimeCharacteristicRing;
 
 fn first_materialized_step(proof: &ShardProof) -> &StepProof {
@@ -118,16 +118,6 @@ fn tamper_named_wp_opening_scalar(proof: &mut ShardProof, target_col: usize) {
     wp_open.evals[open_idx] += K::ONE;
 }
 
-fn tamper_control_decode_opening_scalar(proof: &mut ShardProof, decode_col: usize) {
-    let layout = Rv32DecodeSidecarLayout::new();
-    let decode_open_cols = rv32_decode_lookup_backed_cols(&layout);
-    assert!(
-        decode_open_cols.contains(&decode_col),
-        "decode col must be present in control stage decode opening set"
-    );
-    tamper_named_wp_opening_scalar(proof, decode_col);
-}
-
 fn tamper_control_wp_opening_scalar(proof: &mut ShardProof, trace_col: usize) {
     let layout = Rv32TraceLayout::new();
     let open_cols = rv32_wp_opening_cols(&layout);
@@ -151,11 +141,11 @@ fn control_jal_target_tamper_is_rejected() {
         RiscvInstruction::Halt,
     ];
     let (run, mut proof) = prove_control_trace_program(program);
-    let decode = Rv32DecodeSidecarLayout::new();
-    tamper_control_decode_opening_scalar(&mut proof, decode.imm_j);
+    let trace = Rv32TraceLayout::new();
+    tamper_control_wp_opening_scalar(&mut proof, trace.instr_word);
     assert!(
         run.verify_proof(&proof).is_err(),
-        "tampered control stage JAL target opening must fail verification"
+        "tampered control stage instr_word opening must fail verification"
     );
 }
 
@@ -172,11 +162,11 @@ fn control_jalr_target_tamper_is_rejected() {
         RiscvInstruction::Halt,
     ];
     let (run, mut proof) = prove_control_trace_program(program);
-    let decode = Rv32DecodeSidecarLayout::new();
-    tamper_control_decode_opening_scalar(&mut proof, decode.imm_i);
+    let trace = Rv32TraceLayout::new();
+    tamper_control_wp_opening_scalar(&mut proof, trace.instr_word);
     assert!(
         run.verify_proof(&proof).is_err(),
-        "tampered control stage JALR target opening must fail verification"
+        "tampered control stage instr_word opening must fail verification"
     );
 }
 
@@ -198,11 +188,11 @@ fn control_branch_decision_target_tamper_is_rejected() {
         RiscvInstruction::Halt,
     ];
     let (run, mut proof) = prove_control_trace_program(program);
-    let decode = Rv32DecodeSidecarLayout::new();
-    tamper_control_decode_opening_scalar(&mut proof, decode.funct3_bit[0]);
+    let trace = Rv32TraceLayout::new();
+    tamper_control_wp_opening_scalar(&mut proof, trace.instr_word);
     assert!(
         run.verify_proof(&proof).is_err(),
-        "tampered control stage branch decision/target opening must fail verification"
+        "tampered control stage instr_word opening must fail verification"
     );
 }
 

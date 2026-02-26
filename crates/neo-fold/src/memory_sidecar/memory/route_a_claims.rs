@@ -509,7 +509,7 @@ pub(crate) fn build_bus_layout_for_step_witness(
         .map(|(inst, _)| ShoutInstanceShape {
             ell_addr: inst.d * inst.ell,
             lanes: inst.lanes.max(1),
-            n_vals: 1usize,
+            n_vals: neo_memory::riscv::trace::rv32_trace_lookup_n_vals_for_table_id(inst.table_id),
             addr_group: inst.addr_group,
             selector_group: inst.selector_group,
         })
@@ -713,7 +713,7 @@ pub(crate) fn build_route_a_decode_time_claims(
         // In shared lookup-backed mode, overwrite lookup-backed decode columns with the values
         // actually committed on the shared Shout bus so prover oracles and verifier terminals
         // are sourced from identical openings.
-        let (decode_open_cols, decode_lut_indices) = resolve_shared_decode_lookup_lut_indices(step, &decode)?;
+        let (decode_open_cols, decode_lut_slots) = resolve_shared_decode_lookup_lut_indices(step, &decode)?;
         let bus = build_bus_layout_for_step_witness(step, t_len)?;
         if bus.shout_cols.len() != step.lut_instances.len() {
             return Err(PiCcsError::ProtocolError(
@@ -721,14 +721,22 @@ pub(crate) fn build_route_a_decode_time_claims(
             ));
         }
         let mut bus_val_cols = Vec::with_capacity(decode_open_cols.len());
-        for &lut_idx in decode_lut_indices.iter() {
+        for &(lut_idx, val_slot) in decode_lut_slots.iter() {
             let inst_cols = bus.shout_cols.get(lut_idx).ok_or_else(|| {
                 PiCcsError::ProtocolError("W2(shared): missing shout cols for decode lookup table".into())
             })?;
             let lane0 = inst_cols.lanes.get(0).ok_or_else(|| {
                 PiCcsError::ProtocolError("W2(shared): expected one shout lane for decode lookup table".into())
             })?;
-            bus_val_cols.push(lane0.primary_val());
+            let val_col = lane0.vals.get(val_slot).copied().ok_or_else(|| {
+                PiCcsError::ProtocolError(format!(
+                    "W2(shared): decode val_slot={} out of range for lut_idx={} (n_vals={})",
+                    val_slot,
+                    lut_idx,
+                    lane0.vals.len()
+                ))
+            })?;
+            bus_val_cols.push(val_col);
         }
         let lookup_vals = decode_lookup_backed_col_values_batch(
             t_len,

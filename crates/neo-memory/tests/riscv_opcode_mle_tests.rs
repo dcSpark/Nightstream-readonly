@@ -47,14 +47,6 @@ fn eval_low_word_identity(r: &[Goldilocks], xlen: usize) -> Goldilocks {
     out
 }
 
-fn eval_high_word_identity(r: &[Goldilocks], xlen: usize) -> Goldilocks {
-    let mut out = Goldilocks::ZERO;
-    for (i, bit) in r.iter().skip(xlen).take(xlen).enumerate() {
-        out += Goldilocks::from_u64(1u64 << i) * *bit;
-    }
-    out
-}
-
 #[test]
 fn opcode_mle_matches_naive_for_small_xlen() {
     let xlen = 8usize;
@@ -75,8 +67,7 @@ fn opcode_mle_matches_naive_for_small_xlen() {
             let got = evaluate_opcode_mle::<Goldilocks>(op, &r, xlen);
             let expected = if operand_mode_keys_enabled() {
                 match op {
-                    RiscvOpcode::Sub | RiscvOpcode::Mul => eval_low_word_identity(&r, xlen),
-                    RiscvOpcode::Mulhu => eval_high_word_identity(&r, xlen),
+                    RiscvOpcode::Sub => eval_low_word_identity(&r, xlen),
                     _ => eval_mle_naive(op, &r, xlen),
                 }
             } else {

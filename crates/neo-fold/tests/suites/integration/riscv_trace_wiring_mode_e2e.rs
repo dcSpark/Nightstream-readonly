@@ -48,7 +48,7 @@ fn rv32_trace_wiring_mode_prove_verify() {
 }
 
 #[test]
-fn rv32_trace_wiring_mode_keeps_exec_unpadded_with_pow2_layout() {
+fn rv32_trace_wiring_mode_keeps_exec_unpadded_layout() {
     let program_bytes = trace_mode_program_bytes();
 
     let mut run = Rv32TraceWiring::from_rom(/*program_base=*/ 0, &program_bytes)
@@ -70,12 +70,7 @@ fn rv32_trace_wiring_mode_keeps_exec_unpadded_with_pow2_layout() {
         run.layout().t,
         run.exec_table().rows.len()
     );
-    assert!(
-        run.layout().t.is_power_of_two(),
-        "layout.t should remain power-of-two aligned for chunking (layout.t={})",
-        run.layout().t
-    );
-    assert_eq!(run.layout().t, 4, "layout.t should match padded power-of-two length");
+    assert_eq!(run.layout().t, 3, "layout.t should match unpadded trace length");
 }
 
 #[test]

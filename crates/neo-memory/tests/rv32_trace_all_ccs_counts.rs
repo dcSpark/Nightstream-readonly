@@ -10,7 +10,9 @@ use neo_memory::riscv::lookups::{
     decode_program, encode_program, RiscvCpu, RiscvInstruction, RiscvMemory, RiscvOpcode, RiscvShoutTables, PROG_ID,
     RAM_ID, REG_ID,
 };
-use neo_memory::riscv::trace::{rv32_decode_lookup_table_id_for_col, Rv32DecodeSidecarLayout};
+use neo_memory::riscv::trace::{
+    rv32_decode_lookup_table_id_for_col, rv32_trace_lookup_n_vals_for_table_id, Rv32DecodeSidecarLayout,
+};
 use neo_vm_trace::trace_program;
 
 fn sample_mem_layouts() -> HashMap<u32, PlainMemLayout> {
@@ -49,10 +51,13 @@ fn decode_selector_specs(prog_d: usize) -> Vec<TraceShoutBusSpec> {
     let decode = Rv32DecodeSidecarLayout::new();
     [decode.rd_has_write, decode.ram_has_read, decode.ram_has_write]
         .into_iter()
-        .map(|col| TraceShoutBusSpec {
-            table_id: rv32_decode_lookup_table_id_for_col(col),
-            ell_addr: prog_d,
-            n_vals: 1usize,
+        .map(|col| {
+            let table_id = rv32_decode_lookup_table_id_for_col(col);
+            TraceShoutBusSpec {
+                table_id,
+                ell_addr: prog_d,
+                n_vals: rv32_trace_lookup_n_vals_for_table_id(table_id),
+            }
         })
         .collect()
 }

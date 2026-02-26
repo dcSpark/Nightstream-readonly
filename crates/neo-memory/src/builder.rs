@@ -7,7 +7,7 @@ use crate::riscv::packed::build_rv32_packed_cols;
 use crate::witness::{LutInstance, LutTableSpec, LutWitness, MemInstance, MemWitness, StepWitnessBundle, TimeColumns};
 use crate::{
     cpu::{build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, ShoutInstanceShape},
-    riscv::trace::{Rv32TraceLayout, Rv32TraceWitness},
+    riscv::trace::{rv32_trace_lookup_n_vals_for_table_id, Rv32TraceLayout, Rv32TraceWitness},
 };
 use neo_vm_trace::{StepTrace, TwistOpKind, VmTrace};
 
@@ -98,9 +98,7 @@ fn validate_chunk_size(chunk_size: usize) -> Result<(), ShardBuildError> {
 #[inline]
 fn canonical_chunk_size_pow2(chunk_size: usize) -> Result<usize, ShardBuildError> {
     validate_chunk_size(chunk_size)?;
-    chunk_size
-        .checked_next_power_of_two()
-        .ok_or_else(|| ShardBuildError::InvalidChunkSize("chunk_size next_power_of_two overflow".into()))
+    Ok(chunk_size)
 }
 
 fn bundles_only<Cmt, K>(
@@ -132,6 +130,11 @@ fn write_addr_bits_into_mem_cols(
     Ok(())
 }
 
+#[inline]
+fn shout_n_vals_for_table_id(table_id: u32) -> usize {
+    rv32_trace_lookup_n_vals_for_table_id(table_id).max(1)
+}
+
 fn build_shared_bus_layout_for_time_columns<Cmt>(
     chunk_size: usize,
     lut_instances: &[(LutInstance<Cmt, Goldilocks>, LutWitness<Goldilocks>)],
@@ -142,7 +145,7 @@ fn build_shared_bus_layout_for_time_columns<Cmt>(
         .map(|(inst, _)| ShoutInstanceShape {
             ell_addr: inst.d * inst.ell,
             lanes: inst.lanes.max(1),
-            n_vals: 1usize,
+            n_vals: shout_n_vals_for_table_id(inst.table_id),
             addr_group: inst.addr_group,
             selector_group: inst.selector_group,
         })
@@ -254,7 +257,13 @@ fn build_mem_time_columns_for_step<Cmt>(
         mem_states.push(st);
     }
 
-    let mut shout_events: Vec<Vec<Option<(u64, Goldilocks)>>> = bus
+    #[derive(Clone)]
+    struct ShoutLaneEvent {
+        key: u64,
+        vals: Vec<Option<Goldilocks>>,
+    }
+
+    let mut shout_events: Vec<Vec<Option<ShoutLaneEvent>>> = bus
         .shout_cols
         .iter()
         .map(|inst| vec![None; inst.lanes.len()])
@@ -289,13 +298,42 @@ fn build_mem_time_columns_for_step<Cmt>(
                 ShardBuildError::MissingTable(format!("trace shout event references unknown table_id={table_id}"))
             })?;
             let lanes = shout_events[idx].len();
-            let lane_idx = used_shout[idx];
-            if lane_idx >= lanes {
+            let n_vals = bus
+                .shout_cols
+                .get(idx)
+                .and_then(|inst_cols| inst_cols.lanes.first())
+                .map(|lane| lane.vals.len())
+                .unwrap_or(1)
+                .max(1);
+            let slot_idx = used_shout[idx];
+            let total_slots = lanes.checked_mul(n_vals).ok_or_else(|| {
+                ShardBuildError::InvalidChunkSize(format!(
+                    "shout slot overflow for table_id={table_id}: lanes={lanes}, n_vals={n_vals}"
+                ))
+            })?;
+            if slot_idx >= total_slots {
                 return Err(ShardBuildError::InvalidChunkSize(format!(
-                    "too many shout events for table_id={table_id} at chunk row j={j}: lanes={lanes}"
+                    "too many shout events for table_id={table_id} at chunk row j={j}: lanes={lanes}, n_vals={n_vals}, total_slots={total_slots}"
                 )));
             }
-            shout_events[idx][lane_idx] = Some((ev.key, Goldilocks::from_u64(ev.value)));
+            let lane_idx = slot_idx / n_vals;
+            let val_idx = slot_idx % n_vals;
+            let lane_entry = shout_events[idx][lane_idx].get_or_insert_with(|| ShoutLaneEvent {
+                key: ev.key,
+                vals: vec![None; n_vals],
+            });
+            if lane_entry.key != ev.key {
+                return Err(ShardBuildError::InvalidChunkSize(format!(
+                    "mixed shout keys for table_id={table_id} at chunk row j={j}, lane={lane_idx}: first_key={}, new_key={}",
+                    lane_entry.key, ev.key
+                )));
+            }
+            if lane_entry.vals[val_idx].is_some() {
+                return Err(ShardBuildError::InvalidChunkSize(format!(
+                    "duplicate shout value slot for table_id={table_id} at chunk row j={j}, lane={lane_idx}, val_slot={val_idx}"
+                )));
+            }
+            lane_entry.vals[val_idx] = Some(Goldilocks::from_u64(ev.value));
             used_shout[idx] += 1;
         }
 
@@ -387,7 +425,22 @@ fn build_mem_time_columns_for_step<Cmt>(
             let ell = inst.ell;
 
             for (lane_idx, shout_cols) in inst_cols.lanes.iter().enumerate() {
-                if let Some((key, val)) = shout_events[inst_idx][lane_idx] {
+                if let Some(lane_event) = shout_events[inst_idx][lane_idx].as_ref() {
+                    let key = lane_event.key;
+                    if lane_event.vals.len() != shout_cols.vals.len() {
+                        return Err(ShardBuildError::CcsError(format!(
+                            "shared-bus shout value slot mismatch for table_id={}: event_slots={} bus_slots={}",
+                            inst.table_id,
+                            lane_event.vals.len(),
+                            shout_cols.vals.len()
+                        )));
+                    }
+                    let primary_val = lane_event.vals.first().and_then(|v| *v).ok_or_else(|| {
+                        ShardBuildError::InvalidChunkSize(format!(
+                            "missing primary shout value for table_id={} at chunk row j={j}, lane={lane_idx}",
+                            inst.table_id
+                        ))
+                    })?;
                     match &inst.table_spec {
                         Some(LutTableSpec::RiscvOpcodePacked { opcode, xlen }) => {
                             if *xlen != 32 {
@@ -399,7 +452,7 @@ fn build_mem_time_columns_for_step<Cmt>(
                             let (lhs_raw, rhs_raw) = uninterleave_bits(key as u128);
                             let lhs = lhs_raw as u32;
                             let rhs = rhs_raw as u32;
-                            let val_u64 = val.as_canonical_u64();
+                            let val_u64 = primary_val.as_canonical_u64();
                             if val_u64 > u32::MAX as u64 {
                                 return Err(ShardBuildError::InvalidChunkSize(format!(
                                     "packed shout value out of u32 range for table_id={}: {}",
@@ -439,7 +492,15 @@ fn build_mem_time_columns_for_step<Cmt>(
                         }
                     }
                     mem_cols[shout_cols.has_lookup][j] = Goldilocks::ONE;
-                    mem_cols[shout_cols.primary_val()][j] = val;
+                    for (val_slot, &col_id) in shout_cols.vals.iter().enumerate() {
+                        let slot_val = lane_event.vals[val_slot].ok_or_else(|| {
+                            ShardBuildError::InvalidChunkSize(format!(
+                                "missing shout value for table_id={} at chunk row j={j}, lane={lane_idx}, val_slot={val_slot}",
+                                inst.table_id
+                            ))
+                        })?;
+                        mem_cols[col_id][j] = slot_val;
+                    }
                 }
             }
         }

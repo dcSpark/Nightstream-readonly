@@ -1435,56 +1435,18 @@ pub(crate) fn build_route_a_memory_oracles(
             shared_addr_cols.ok_or_else(|| PiCcsError::ProtocolError("empty shout gamma group".into()))?;
 
         let value_oracle: Box<dyn RoundOracle> = if has_shared {
-            let mut value_cols: Vec<SparseIdxVec<K>> = Vec::with_capacity(1 + value_val_cols.len());
-            value_cols.push(shared_has_col.clone());
-            value_cols.extend(value_val_cols.iter().cloned());
-            let value_weights = weights.clone();
-            let value_width = 1 + value_weights.len();
-            Box::new(FormulaOracleSparseTime::new(
-                value_cols,
-                3,
+            Box::new(ShoutGammaValueSharedOracleSparseTime::new(
+                shared_has_col.clone(),
+                value_val_cols.clone(),
+                weights.clone(),
                 r_cycle,
-                move |vals: &[K]| {
-                    let has = vals[0];
-                    if has == K::ZERO {
-                        return K::ZERO;
-                    }
-                    let mut out = K::ZERO;
-                    for (&val, w) in vals[1..].iter().zip(value_weights.iter()) {
-                        if val == K::ZERO {
-                            continue;
-                        }
-                        out += *w * has * val;
-                    }
-                    debug_assert_eq!(vals.len(), value_width);
-                    out
-                },
             ))
         } else {
-            let mut value_cols: Vec<SparseIdxVec<K>> = Vec::with_capacity(value_val_cols.len() * 2);
-            for (has, val) in value_has_cols.iter().zip(value_val_cols.iter()) {
-                value_cols.push(has.clone());
-                value_cols.push(val.clone());
-            }
-            let value_weights = weights.clone();
-            let value_width = value_weights.len() * 2;
-            Box::new(FormulaOracleSparseTime::new(
-                value_cols,
-                3,
+            Box::new(ShoutGammaValueOracleSparseTime::new(
+                value_has_cols.clone(),
+                value_val_cols.clone(),
+                weights.clone(),
                 r_cycle,
-                move |vals: &[K]| {
-                    let mut out = K::ZERO;
-                    for (chunk, w) in vals.chunks_exact(2).zip(value_weights.iter()) {
-                        let has = chunk[0];
-                        let val = chunk[1];
-                        if has == K::ZERO || val == K::ZERO {
-                            continue;
-                        }
-                        out += *w * has * val;
-                    }
-                    debug_assert_eq!(vals.len(), value_width);
-                    out
-                },
             ))
         };
 
@@ -1494,62 +1456,26 @@ pub(crate) fn build_route_a_memory_oracles(
         let adapter_eq_alpha: Vec<K> = adapter_r_addr.iter().map(|&u| u + u - K::ONE).collect();
         let adapter_eq_beta: Vec<K> = adapter_r_addr.iter().map(|&u| K::ONE - u).collect();
         let adapter_oracle: Box<dyn RoundOracle> = if has_shared {
-            let mut adapter_cols: Vec<SparseIdxVec<K>> = Vec::with_capacity(1 + ell_addr);
-            adapter_cols.push(shared_has_col.clone());
-            adapter_cols.extend(shared_addr_cols.iter().cloned());
             let coeff_sum = adapter_coeffs
                 .iter()
                 .copied()
                 .fold(K::ZERO, |acc, c| acc + c);
-            let adapter_width = 1 + ell_addr;
-            Box::new(FormulaOracleSparseTime::new(
-                adapter_cols,
-                2 + ell_addr,
+            Box::new(ShoutGammaAdapterSharedOracleSparseTime::new(
+                shared_has_col.clone(),
+                shared_addr_cols.clone(),
+                coeff_sum,
+                adapter_eq_alpha,
+                adapter_eq_beta,
                 r_cycle,
-                move |vals: &[K]| {
-                    let has = vals[0];
-                    if has == K::ZERO {
-                        return K::ZERO;
-                    }
-                    let mut eq = K::ONE;
-                    for (i, &bit) in vals[1..].iter().enumerate() {
-                        let alpha = adapter_eq_alpha[i];
-                        let beta = adapter_eq_beta[i];
-                        eq *= bit * alpha + beta;
-                    }
-                    debug_assert_eq!(vals.len(), adapter_width);
-                    coeff_sum * has * eq
-                },
             ))
         } else {
-            let mut adapter_cols: Vec<SparseIdxVec<K>> = Vec::with_capacity(ell_addr + value_has_cols.len());
-            adapter_cols.extend(shared_addr_cols.iter().cloned());
-            adapter_cols.extend(value_has_cols.iter().cloned());
-            let adapter_width = ell_addr + adapter_coeffs.len();
-            Box::new(FormulaOracleSparseTime::new(
-                adapter_cols,
-                2 + ell_addr,
+            Box::new(ShoutGammaAdapterOracleSparseTime::new(
+                shared_addr_cols.clone(),
+                value_has_cols.clone(),
+                adapter_coeffs,
+                adapter_eq_alpha,
+                adapter_eq_beta,
                 r_cycle,
-                move |vals: &[K]| {
-                    let mut eq = K::ONE;
-                    for (i, &bit) in vals[..ell_addr].iter().enumerate() {
-                        let alpha = adapter_eq_alpha[i];
-                        let beta = adapter_eq_beta[i];
-                        eq *= bit * alpha + beta;
-                    }
-                    if eq == K::ZERO {
-                        return K::ZERO;
-                    }
-                    let mut out = K::ZERO;
-                    for (&has, coeff) in vals[ell_addr..].iter().zip(adapter_coeffs.iter()) {
-                        if has == K::ZERO {
-                            continue;
-                        }
-                        out += *coeff * has * eq;
-                    }
-                    debug_assert_eq!(vals.len(), adapter_width);
-                    out
-                },
             ))
         };
         let mut bitness_cols: Vec<SparseIdxVec<K>> = Vec::with_capacity(ell_addr + value_has_cols.len());

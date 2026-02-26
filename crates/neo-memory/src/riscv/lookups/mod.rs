@@ -14,8 +14,7 @@
 //!
 //! Note: Shout operand keys are `u64` and use operand-mode encoding:
 //! - interleaved `(lhs, rhs)` for interleaved-key opcodes
-//! - combined keys for ADD/SUB/MUL/MULHU rollout paths
-//! RV64 proving still requires wider-key rollout work for combined multiply domains.
+//! - combined keys for ADD/SUB rollout paths
 //!
 //! # Architecture
 //!
