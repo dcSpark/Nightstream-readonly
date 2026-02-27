@@ -523,7 +523,7 @@ pub fn verify_route_a_batched_time(
         )));
     }
     for (i, (got, exp)) in proof.labels.iter().zip(expected_labels.iter()).enumerate() {
-        if (*got as &[u8]) != *exp {
+        if *got != *exp {
             return Err(PiCcsError::ProtocolError(format!(
                 "step {}: batched_time label mismatch at claim {}",
                 step_idx, i
@@ -766,7 +766,7 @@ pub fn verify_poseidon_local_time(
         )));
     }
     for (i, (got, exp)) in proof.labels.iter().zip(expected_labels.iter()).enumerate() {
-        if (*got as &[u8]) != *exp {
+        if *got != *exp {
             return Err(PiCcsError::ProtocolError(format!(
                 "step {}: poseidon_local_time label mismatch at claim {}",
                 step_idx, i
