@@ -90,6 +90,13 @@ def _find_repo_root(start: Path) -> Path:
     raise FileNotFoundError(f"failed to find repo root from {start}")
 
 
+def _try_extract(data: bytes, section_name: str) -> tuple[int, bytes] | None:
+    try:
+        return _extract_elf32_section(data, section_name)
+    except ValueError:
+        return None
+
+
 def main() -> int:
     guest_dir = Path(__file__).resolve().parent
     repo_root = _find_repo_root(guest_dir)
@@ -109,8 +116,25 @@ def main() -> int:
         raise ValueError(f".neo_start length must be multiple of 4, got {len(text)}")
 
     sha256_hex = hashlib.sha256(text).hexdigest()
+
+    parts = [_format_u8_array("CIRCUIT_L2_TRANSFER_ROM", base, text, sha256_hex)]
+
+    # Also extract .rodata and .data — these must be loaded into RAM by the host.
+    rodata_content = b""
+    for sect in (".rodata", ".data"):
+        result = _try_extract(data, sect)
+        if result is not None:
+            sect_base, sect_bytes = result
+            if len(sect_bytes) > 0:
+                rodata_content += b""  # just track presence
+                tag = sect.lstrip(".").upper()
+                name = f"CIRCUIT_L2_TRANSFER_{tag}"
+                sect_sha = hashlib.sha256(sect_bytes).hexdigest()
+                parts.append(_format_u8_array(name, sect_base, sect_bytes, sect_sha))
+                print(f"  {sect}: base=0x{sect_base:x} len={len(sect_bytes)}")
+
     out_rs.parent.mkdir(parents=True, exist_ok=True)
-    out_rs.write_text(_format_u8_array("CIRCUIT_L2_TRANSFER_ROM", base, text, sha256_hex), encoding="utf-8")
+    out_rs.write_text("\n".join(parts), encoding="utf-8")
 
     rel = out_rs.relative_to(repo_root)
     print(f"Wrote {rel} (len={len(text)} sha256={sha256_hex})")

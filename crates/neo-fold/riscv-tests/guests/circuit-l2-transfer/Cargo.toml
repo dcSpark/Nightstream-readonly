@@ -13,11 +13,8 @@ path = "src/main.rs"
 
 [profile.release]
 panic = "abort"
+opt-level = "s"
+lto = true
 
 [dependencies]
 nightstream-sdk = { path = "../../../../nightstream-sdk", default-features = false }
-
-[patch.crates-io]
-p3-field = { path = "vendor/p3-field" }
-p3-matrix = { path = "vendor/p3-matrix" }
-p3-dft = { path = "vendor/p3-dft" }
