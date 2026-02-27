@@ -4,7 +4,7 @@ use bellpepper_core::test_cs::TestConstraintSystem;
 use neo_ajtai::Commitment as Cmt;
 use neo_ccs::poly::{SparsePoly, Term as PolyTerm};
 use neo_ccs::relations::CcsStructure;
-use neo_ccs::{Mat, MeInstance};
+use neo_ccs::{CeClaim, Mat};
 use neo_fold::shard::ShardProof as FoldRun;
 use neo_math::{D, F as NeoF, K as NeoK};
 use neo_reductions::optimized_engine::PiCcsProofVariant;
@@ -22,7 +22,7 @@ fn tiny_ccs() -> CcsStructure<NeoF> {
 }
 
 /// Construct a single ME input with nontrivial y-digits so that T != 0 in general.
-fn tiny_me_instance() -> MeInstance<Cmt, NeoF, NeoK> {
+fn tiny_me_instance() -> CeClaim<Cmt, NeoF, NeoK> {
     // Dummy Ajtai commitment with zeros
     let c = Cmt::zeros(D, 1);
 
@@ -41,13 +41,14 @@ fn tiny_me_instance() -> MeInstance<Cmt, NeoF, NeoK> {
     // y_scalars: one per j; unused here, but populate with zero.
     let y_scalars = vec![NeoK::ZERO];
 
-    MeInstance::<Cmt, NeoF, NeoK> {
+    CeClaim::<Cmt, NeoF, NeoK> {
         c,
         X,
         r,
         s_col: Vec::new(),
-        y,
-        y_scalars,
+        y_ring: y,
+        ct: y_scalars,
+        aux_openings: Vec::new(),
         y_zcol: Vec::new(),
         m_in: 1,
         fold_digest: [0u8; 32],
@@ -79,8 +80,12 @@ fn claimed_initial_sum_gadget_matches_paper_exact_for_tiny_instance() {
     };
 
     // Native T from the paper-exact engine.
-    let T_native =
-        neo_reductions::paper_exact_engine::claimed_initial_sum_from_inputs(&ccs, &native_challenges, &me_inputs);
+    let T_native = neo_reductions::paper_exact_engine::claimed_initial_sum_from_inputs_with_k_mcs(
+        &ccs,
+        &native_challenges,
+        1,
+        &me_inputs,
+    );
 
     // Bridge-side Π-CCS challenges (circuit view).
     let pi_ccs_challenges = PiCcsChallenges {
@@ -110,6 +115,7 @@ fn claimed_initial_sum_gadget_matches_paper_exact_for_tiny_instance() {
     let fold_run = FoldRun {
         steps: Vec::new(),
         output_proof: None,
+        segment_meta: None,
     };
     let witness = FoldRunWitness {
         fold_run,
@@ -166,10 +172,10 @@ fn claimed_initial_sum_gadget_matches_paper_exact_for_tiny_instance() {
         println!("[initial-sum-test] alpha = {:?}", alpha);
         println!("[initial-sum-test] gamma = {:?}", gamma);
         println!("[initial-sum-test] T_native = {:?}", T_native);
-        let y_row0 = &me_inputs[0].y[0];
+        let y_row0 = &me_inputs[0].y_ring[0];
         let upto = min(4, y_row0.len());
         println!(
-            "[initial-sum-test] me_inputs[0].y[0][..{}] = {:?}",
+            "[initial-sum-test] me_inputs[0].y_ring[0][..{}] = {:?}",
             upto,
             &y_row0[..upto]
         );

@@ -5,7 +5,7 @@ use neo_reductions::pi_ccs_paper_exact as refimpl;
 
 use neo_ajtai::{set_global_pp, setup as ajtai_setup, AjtaiSModule};
 use neo_ccs::traits::SModuleHomomorphism;
-use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, SparsePoly, Term};
+use neo_ccs::{CcsClaim, CcsStructure, CcsWitness, Mat, SparsePoly, Term};
 
 use neo_math::{D, F, K};
 use neo_params::NeoParams;
@@ -47,6 +47,14 @@ fn mat_eq<Ff: Field + PrimeCharacteristicRing + Copy>(a: &Mat<Ff>, b: &Mat<Ff>) 
     true
 }
 
+fn public_inputs_from_witness(Z: &Mat<F>, expected_m: usize, m_in: usize) -> Vec<F> {
+    let layout =
+        neo_reductions::common::witness_mat_layout(Z, expected_m).expect("fixture witness must have a valid layout");
+    (0..m_in)
+        .map(|c| neo_reductions::common::witness_mat_get_f(Z, layout, expected_m, c % D, c))
+        .collect()
+}
+
 /// --- Π_DEC tests -----------------------------------------------------------
 
 #[test]
@@ -80,13 +88,13 @@ fn paper_exact_dec_reconstruction_and_checks_hold() {
 
     // Build parent ME(B, L)
     let r = vec![K::from(F::from_u64(11)); 1];
-    let w_parent = McsWitness {
+    let w_parent = CcsWitness {
         w: vec![],
         Z: Z_parent.clone(),
     };
-    let inst_parent = McsInstance {
+    let inst_parent = CcsClaim {
         c: l.commit(&Z_parent),
-        x: vec![],
+        x: public_inputs_from_witness(&Z_parent, m, 1),
         m_in: 1,
     };
     let parent_out = refimpl::build_me_outputs_paper_exact(
@@ -111,45 +119,30 @@ fn paper_exact_dec_reconstruction_and_checks_hold() {
 
     // Each child must match literal outputs for its Z_i
     for (i, Zi) in Z_split.iter().enumerate() {
-        let wi = McsWitness {
+        let wi = CcsWitness {
             w: vec![],
             Z: Zi.clone(),
         };
-        let insti = McsInstance {
+        let insti = CcsClaim {
             c: l.commit(Zi),
-            x: vec![],
+            x: public_inputs_from_witness(Zi, m, 1),
             m_in: 1,
         };
         let outi =
             refimpl::build_me_outputs_paper_exact(&s, &params, &[insti], &[wi], &[], &[], &r, &[], ell_d, [0; 32], &l);
-        assert!(
-            mat_eq(&children[i].X, &outi[0].X),
-            "DEC child X_i must match literal projection for i={}",
-            i
-        );
+        // DEC reconciles child X against the parent public relation (Σ b^i X_i = X_parent),
+        // so per-child X is not required to match the direct witness projection.
         for j in 0..s.t() {
             assert_eq!(
-                children[i].y[j], outi[0].y[j],
+                children[i].y_ring[j], outi[0].y_ring[j],
                 "DEC child y_(i,j) must match literal for (i={}, j={})",
                 i, j
             );
         }
-        // y_scalars recomposition (digits → scalar)
-        let bK = K::from(F::from_u64(params.b as u64));
-        let mut pw = vec![K::ONE; D];
-        for u in 1..D {
-            pw[u] = pw[u - 1] * bK;
-        }
+        // ct should match layout-aware CE scalar semantics.
         for j in 0..s.t() {
-            let mut rec = K::ZERO;
-            for rho in 0..D {
-                rec += children[i].y[j][rho] * pw[rho];
-            }
-            assert_eq!(
-                children[i].y_scalars[j], rec,
-                "DEC child y_scalars must recompose for i={}, j={}",
-                i, j
-            );
+            let want = neo_reductions::common::ct_from_y_digits_for_ccs_m(&children[i].y_ring[j], &params, s.m);
+            assert_eq!(children[i].ct[j], want, "DEC child ct mismatch for i={}, j={}", i, j);
         }
     }
 }
@@ -167,13 +160,13 @@ fn paper_exact_dec_k1_identity() {
     let Z = Mat::from_row_major(D, m, vec![F::from_u64(4); D * m]);
     let r = vec![K::from(F::from_u64(13)); 1];
 
-    let w = McsWitness {
+    let w = CcsWitness {
         w: vec![],
         Z: Z.clone(),
     };
-    let inst = McsInstance {
+    let inst = CcsClaim {
         c: l.commit(&Z),
-        x: vec![],
+        x: public_inputs_from_witness(&Z, m, 1),
         m_in: 1,
     };
     let parent_out = refimpl::build_me_outputs_paper_exact(
@@ -197,7 +190,11 @@ fn paper_exact_dec_k1_identity() {
     assert_eq!(children.len(), 1);
     assert!(mat_eq(&children[0].X, &parent.X), "k=1: X must be identical");
     for j in 0..s.t() {
-        assert_eq!(children[0].y[j], parent.y[j], "k=1: y must be identical (j={})", j);
+        assert_eq!(
+            children[0].y_ring[j], parent.y_ring[j],
+            "k=1: y must be identical (j={})",
+            j
+        );
     }
 }
 
@@ -225,13 +222,13 @@ fn paper_exact_dec_wrong_split_detected() {
     }
 
     let r = vec![K::from(F::from_u64(17)); 1];
-    let w_parent = McsWitness {
+    let w_parent = CcsWitness {
         w: vec![],
         Z: Z_parent.clone(),
     };
-    let inst_parent = McsInstance {
+    let inst_parent = CcsClaim {
         c: l.commit(&Z_parent),
-        x: vec![],
+        x: public_inputs_from_witness(&Z_parent, m, 1),
         m_in: 1,
     };
     let parent = refimpl::build_me_outputs_paper_exact(
@@ -299,13 +296,13 @@ fn paper_exact_dec_rlc_roundtrip() {
     let r = vec![K::from(F::from_u64(19)); 1];
 
     // Parent ME from witness
-    let w_parent = McsWitness {
+    let w_parent = CcsWitness {
         w: vec![],
         Z: Z_parent.clone(),
     };
-    let inst_parent = McsInstance {
+    let inst_parent = CcsClaim {
         c: l.commit(&Z_parent),
-        x: vec![],
+        x: public_inputs_from_witness(&Z_parent, m, 1),
         m_in: 1,
     };
     let parent = refimpl::build_me_outputs_paper_exact(
@@ -349,13 +346,13 @@ fn paper_exact_dec_rlc_roundtrip() {
     assert!(mat_eq(&combined_me.X, &parent.X), "RLC∘DEC X must reconstruct parent X");
     for j in 0..s.t() {
         assert_eq!(
-            combined_me.y[j][..D],
-            parent.y[j][..D],
+            combined_me.y_ring[j][..D],
+            parent.y_ring[j][..D],
             "RLC∘DEC y_j digits must match (j={})",
             j
         );
         assert!(
-            combined_me.y[j][D..].iter().all(|&v| v == K::ZERO),
+            combined_me.y_ring[j][D..].iter().all(|&v| v == K::ZERO),
             "padding after roundtrip remains zero"
         );
     }

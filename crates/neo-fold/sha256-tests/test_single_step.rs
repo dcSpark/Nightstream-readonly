@@ -275,10 +275,11 @@ fn pad_witness_to_m(mut z: Vec<F>, m_target: usize) -> Vec<F> {
 }
 
 fn setup_ajtai_for_dims(m: usize) {
+    let m_commit = m.div_ceil(D);
     // Deterministic, reloadable PP: allows unloading the multi-GB Ajtai matrix between phases.
     let mut seed = [0u8; 32];
     seed[..8].copy_from_slice(&42u64.to_le_bytes());
-    set_global_pp_seeded(D, 4, m, seed).expect("set_global_pp_seeded");
+    set_global_pp_seeded(D, 4, m_commit, seed).expect("set_global_pp_seeded");
 }
 
 fn fp_to_u64(x: &FpGoldilocks) -> u64 {
@@ -295,6 +296,20 @@ fn sha256_preimage_for_len(preimage_len_bytes: usize) -> Vec<u8> {
     preimage
 }
 
+fn pack_bits_to_u64_chunks(bits: &[bool]) -> Vec<u64> {
+    bits.chunks(DIGEST_PACK_CHUNK_BITS)
+        .map(|chunk| {
+            let mut limb = 0u64;
+            for (bit_idx, bit) in chunk.iter().enumerate() {
+                if *bit {
+                    limb |= 1u64 << bit_idx;
+                }
+            }
+            limb
+        })
+        .collect()
+}
+
 // Bellpepper's TestConstraintSystem is optimized for debuggability (names, hashing, storage),
 // which is extremely expensive for million-constraint circuits. For performance tests we only need:
 // - variable assignments (inputs + aux) to build the witness, and
@@ -303,6 +318,7 @@ fn sha256_preimage_for_len(preimage_len_bytes: usize) -> Vec<u8> {
 // This constraint system skips all namespace/annotation closures and streams constraints directly
 // into triplet lists without ever storing full constraints.
 const AUX_FLAG: u32 = 1 << 31;
+const DIGEST_PACK_CHUNK_BITS: usize = 32;
 
 struct TripletConstraintSystem {
     inputs: Vec<F>, // includes input[0] = ONE
@@ -439,7 +455,10 @@ fn test_sha256_circuit_is_satisfied() {
     // Verify that the packed public inputs match the SHA256 digest of the preimage.
     let digest = Sha256::digest(&preimage);
     let digest_bits = bellpepper::gadgets::multipack::bytes_to_bits(digest.as_ref());
-    let expected_inputs = bellpepper::gadgets::multipack::compute_multipacking::<FpGoldilocks>(&digest_bits);
+    let expected_inputs: Vec<FpGoldilocks> = pack_bits_to_u64_chunks(&digest_bits)
+        .into_iter()
+        .map(FpGoldilocks::from)
+        .collect();
     assert!(cs.verify(&expected_inputs));
 }
 
@@ -482,21 +501,18 @@ fn test_sha256_preimage_len_bytes(preimage_len_bytes: usize) {
     let preimage = sha256_preimage_for_len(preimage_len_bytes);
     let digest = Sha256::digest(&preimage);
     let digest_bits = bellpepper::gadgets::multipack::bytes_to_bits(digest.as_ref());
-    let expected_inputs_fp = bellpepper::gadgets::multipack::compute_multipacking::<FpGoldilocks>(&digest_bits);
-    let expected_inputs: Vec<F> = expected_inputs_fp
-        .iter()
-        .map(|x| F::from_u64(fp_to_u64(x)))
+    let expected_inputs: Vec<F> = pack_bits_to_u64_chunks(&digest_bits)
+        .into_iter()
+        .map(F::from_u64)
         .collect();
 
     let (step_ccs, witness) = cached_bellpepper_sha256_circuit(preimage_len_bytes);
 
-    let mut params =
+    let params =
         NeoParams::goldilocks_auto_r1cs_ccs(step_ccs.n).expect("goldilocks_auto_r1cs_ccs should find valid params");
 
-    params.b = 3;
-
     setup_ajtai_for_dims(step_ccs.m);
-    let l = AjtaiSModule::from_global_for_dims(D, step_ccs.m).expect("AjtaiSModule init");
+    let l = AjtaiSModule::from_global_for_dims(D, step_ccs.m.div_ceil(D)).expect("AjtaiSModule init");
 
     let m_in = 1 + expected_inputs.len();
 
@@ -589,8 +605,13 @@ impl Circuit<FpGoldilocks> for Sha256Circuit {
         // it doesn't matter right now though
         let hash_bits = bellpepper::gadgets::sha256::sha256(cs.namespace(|| "sha256"), &preimage_bits)?;
 
-        // Bind the SHA256 digest as compact public inputs.
-        bellpepper::gadgets::multipack::pack_into_inputs(cs.namespace(|| "hash_out"), &hash_bits)?;
+        // Bind the SHA256 digest as compact public inputs with b=2-safe chunk size.
+        for (chunk_idx, chunk_bits) in hash_bits.chunks(DIGEST_PACK_CHUNK_BITS).enumerate() {
+            bellpepper::gadgets::multipack::pack_into_inputs(
+                cs.namespace(|| format!("hash_out_chunk_{chunk_idx}")),
+                chunk_bits,
+            )?;
+        }
 
         Ok(())
     }

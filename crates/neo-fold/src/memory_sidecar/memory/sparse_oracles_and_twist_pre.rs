@@ -51,12 +51,12 @@ pub(crate) fn decode_k_to_u32(v: K, ctx: &str) -> Result<u32, PiCcsError> {
 pub(crate) fn resolve_shared_decode_lookup_lut_indices(
     step: &StepWitnessBundle<Cmt, F, K>,
     decode_layout: &Rv32DecodeSidecarLayout,
-) -> Result<(Vec<usize>, Vec<usize>), PiCcsError> {
-    let decode_open_cols = rv32_decode_lookup_backed_cols(decode_layout);
-    let mut decode_lut_indices = Vec::with_capacity(decode_open_cols.len());
+) -> Result<(Vec<usize>, Vec<(usize, usize)>), PiCcsError> {
+    let decode_open_cols = rv32_decode_lookup_transport_cols(decode_layout);
+    let mut decode_lut_slots = Vec::with_capacity(decode_open_cols.len());
     for &col_id in decode_open_cols.iter() {
         let table_id = rv32_decode_lookup_table_id_for_col(col_id);
-        let idx = step
+        let lut_idx = step
             .lut_instances
             .iter()
             .position(|(inst, _)| inst.table_id == table_id)
@@ -65,10 +65,43 @@ pub(crate) fn resolve_shared_decode_lookup_lut_indices(
                     "W2(shared): missing decode lookup table_id={table_id} for col_id={col_id}"
                 ))
             })?;
-        decode_lut_indices.push(idx);
+        let val_slot = rv32_decode_lookup_val_slot_for_col(col_id).ok_or_else(|| {
+            PiCcsError::ProtocolError(format!(
+                "W2(shared): decode col_id={col_id} is not part of decode lookup transport slot map"
+            ))
+        })?;
+        decode_lut_slots.push((lut_idx, val_slot));
     }
 
-    Ok((decode_open_cols, decode_lut_indices))
+    Ok((decode_open_cols, decode_lut_slots))
+}
+
+pub(crate) fn resolve_shared_width_lookup_lut_indices(
+    step: &StepWitnessBundle<Cmt, F, K>,
+    width_layout: &Rv32WidthSidecarLayout,
+) -> Result<(Vec<usize>, Vec<(usize, usize)>), PiCcsError> {
+    let width_open_cols = rv32_width_lookup_backed_cols(width_layout);
+    let mut width_lut_slots = Vec::with_capacity(width_open_cols.len());
+    for &col_id in width_open_cols.iter() {
+        let table_id = rv32_width_lookup_table_id_for_col(col_id);
+        let lut_idx = step
+            .lut_instances
+            .iter()
+            .position(|(inst, _)| inst.table_id == table_id)
+            .ok_or_else(|| {
+                PiCcsError::ProtocolError(format!(
+                    "W3(shared): missing width lookup table_id={table_id} for col_id={col_id}"
+                ))
+            })?;
+        let val_slot = rv32_width_lookup_val_slot_for_col(col_id).ok_or_else(|| {
+            PiCcsError::ProtocolError(format!(
+                "W3(shared): width col_id={col_id} is not part of width lookup transport slot map"
+            ))
+        })?;
+        width_lut_slots.push((lut_idx, val_slot));
+    }
+
+    Ok((width_open_cols, width_lut_slots))
 }
 
 pub(crate) struct WeightedMaskOracleSparseTime {
@@ -77,18 +110,24 @@ pub(crate) struct WeightedMaskOracleSparseTime {
     prefix_eq: K,
     active: SparseIdxVec<K>,
     cols: Vec<SparseIdxVec<K>>,
+    support: SparseIdxVec<K>,
     weights: Vec<K>,
 }
 
 impl WeightedMaskOracleSparseTime {
     pub(crate) fn new(active: SparseIdxVec<K>, cols: Vec<SparseIdxVec<K>>, weights: Vec<K>, r_cycle: &[K]) -> Self {
         debug_assert_eq!(cols.len(), weights.len());
+        let mut support_cols = Vec::with_capacity(cols.len() + 1);
+        support_cols.push(active.clone());
+        support_cols.extend(cols.iter().cloned());
+        let support = sparse_union_support(&support_cols);
         Self {
             bit_idx: 0,
             r_cycle: r_cycle.to_vec(),
             prefix_eq: K::ONE,
             active,
             cols,
+            support,
             weights,
         }
     }
@@ -109,14 +148,14 @@ impl RoundOracle for WeightedMaskOracleSparseTime {
             return vec![self.prefix_eq * gate * acc; points.len()];
         }
 
-        let mut pairs = gather_pairs_from_sparse(self.active.entries());
-        for col in self.cols.iter() {
-            pairs.extend(gather_pairs_from_sparse(col.entries()));
-        }
-        pairs.sort_unstable();
-        pairs.dedup();
         let mut ys = vec![K::ZERO; points.len()];
-        for &pair in pairs.iter() {
+        let mut prev_pair = usize::MAX;
+        for &(idx, _v) in self.support.entries() {
+            let pair = idx >> 1;
+            if pair == prev_pair {
+                continue;
+            }
+            prev_pair = pair;
             let child0 = 2 * pair;
             let child1 = child0 + 1;
 
@@ -168,65 +207,137 @@ impl RoundOracle for WeightedMaskOracleSparseTime {
         for col in self.cols.iter_mut() {
             col.fold_round_in_place(r);
         }
+        self.support.fold_round_in_place(r);
         self.bit_idx += 1;
     }
 }
 
-pub(crate) struct FormulaOracleSparseTime {
+pub(crate) struct FormulaOracleSparseTime<EF>
+where
+    EF: Fn(&[K]) -> K,
+{
     bit_idx: usize,
     r_cycle: Vec<K>,
     prefix_eq: K,
     cols: Vec<SparseIdxVec<K>>,
+    support: SparseIdxVec<K>,
     degree_bound: usize,
-    eval_fn: Box<dyn Fn(&[K]) -> K>,
+    eval_fn: EF,
+    pair_marks: Vec<u32>,
+    pair_epoch: u32,
+    pair_scratch: Vec<usize>,
+    col_child0: Vec<K>,
+    col_child1: Vec<K>,
+    eval_vals: Vec<K>,
 }
 
-impl FormulaOracleSparseTime {
-    pub(crate) fn new(
-        cols: Vec<SparseIdxVec<K>>,
-        degree_bound: usize,
-        r_cycle: &[K],
-        eval_fn: Box<dyn Fn(&[K]) -> K>,
-    ) -> Self {
+#[inline]
+fn sparse_union_support(cols: &[SparseIdxVec<K>]) -> SparseIdxVec<K> {
+    if cols.is_empty() {
+        return SparseIdxVec::new(1);
+    }
+    let len = cols[0].len();
+    let mut seen = vec![false; len];
+    for col in cols {
+        debug_assert_eq!(col.len(), len);
+        for &(idx, _v) in col.entries() {
+            seen[idx] = true;
+        }
+    }
+    let mut entries = Vec::new();
+    for (idx, hit) in seen.into_iter().enumerate() {
+        if hit {
+            entries.push((idx, K::ONE));
+        }
+    }
+    SparseIdxVec::from_entries(len, entries)
+}
+
+impl<EF> FormulaOracleSparseTime<EF>
+where
+    EF: Fn(&[K]) -> K,
+{
+    pub(crate) fn new(cols: Vec<SparseIdxVec<K>>, degree_bound: usize, r_cycle: &[K], eval_fn: EF) -> Self {
+        let col_count = cols.len();
+        let support = sparse_union_support(&cols);
         Self {
             bit_idx: 0,
             r_cycle: r_cycle.to_vec(),
             prefix_eq: K::ONE,
             cols,
+            support,
             degree_bound,
             eval_fn,
+            pair_marks: Vec::new(),
+            pair_epoch: 1,
+            pair_scratch: Vec::new(),
+            col_child0: vec![K::ZERO; col_count],
+            col_child1: vec![K::ZERO; col_count],
+            eval_vals: vec![K::ZERO; col_count],
         }
     }
 }
 
-impl RoundOracle for FormulaOracleSparseTime {
+impl<EF> RoundOracle for FormulaOracleSparseTime<EF>
+where
+    EF: Fn(&[K]) -> K,
+{
     fn evals_at(&mut self, points: &[K]) -> Vec<K> {
         if self.cols.is_empty() {
             return vec![K::ZERO; points.len()];
         }
-
-        let mut pairs = Vec::new();
-        for col in self.cols.iter() {
-            pairs.extend(gather_pairs_from_sparse(col.entries()));
+        if self.cols[0].len() == 1 {
+            for (j, col) in self.cols.iter().enumerate() {
+                self.eval_vals[j] = col.singleton_value();
+            }
+            let v = self.prefix_eq * (self.eval_fn)(&self.eval_vals[..self.cols.len()]);
+            return vec![v; points.len()];
         }
-        pairs.sort_unstable();
-        pairs.dedup();
+
+        let pair_domain = self.support.len() >> 1;
+        if self.pair_marks.len() < pair_domain {
+            self.pair_marks.resize(pair_domain, 0);
+        }
+        self.pair_epoch = self.pair_epoch.wrapping_add(1);
+        if self.pair_epoch == 0 {
+            self.pair_marks.fill(0);
+            self.pair_epoch = 1;
+        }
+
+        self.pair_scratch.clear();
+        let epoch = self.pair_epoch;
+        for &(idx, _v) in self.support.entries() {
+            let pair = idx >> 1;
+            if self.pair_marks[pair] != epoch {
+                self.pair_marks[pair] = epoch;
+                self.pair_scratch.push(pair);
+            }
+        }
 
         let mut ys = vec![K::ZERO; points.len()];
-        let mut vals = vec![K::ZERO; self.cols.len()];
-        for &pair in pairs.iter() {
+        for &pair in self.pair_scratch.iter() {
             let child0 = 2 * pair;
             let child1 = child0 + 1;
+            for (j, col) in self.cols.iter().enumerate() {
+                self.col_child0[j] = col.get(child0);
+                self.col_child1[j] = col.get(child1);
+            }
             let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
             for (i, &x) in points.iter().enumerate() {
                 let chi_x = interp(chi0, chi1, x);
                 if chi_x == K::ZERO {
                     continue;
                 }
-                for (j, col) in self.cols.iter().enumerate() {
-                    vals[j] = interp(col.get(child0), col.get(child1), x);
+                for j in 0..self.cols.len() {
+                    let v0 = self.col_child0[j];
+                    let v1 = self.col_child1[j];
+                    if v0 == K::ZERO && v1 == K::ZERO {
+                        self.eval_vals[j] = K::ZERO;
+                        continue;
+                    }
+                    self.eval_vals[j] = interp(v0, v1, x);
                 }
-                let f_x = (self.eval_fn)(&vals);
+                let f_x = (self.eval_fn)(&self.eval_vals[..self.cols.len()]);
                 if f_x == K::ZERO {
                     continue;
                 }
@@ -252,7 +363,814 @@ impl RoundOracle for FormulaOracleSparseTime {
         for col in self.cols.iter_mut() {
             col.fold_round_in_place(r);
         }
+        self.support.fold_round_in_place(r);
         self.bit_idx += 1;
+    }
+}
+
+pub(crate) struct ShoutGammaValueSharedOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_col: SparseIdxVec<K>,
+    val_cols: Vec<SparseIdxVec<K>>,
+    weights: Vec<K>,
+    support: SparseIdxVec<K>,
+    pair_marks: Vec<u32>,
+    pair_epoch: u32,
+    pair_scratch: Vec<usize>,
+    val_child0: Vec<K>,
+    val_child1: Vec<K>,
+}
+
+impl ShoutGammaValueSharedOracleSparseTime {
+    pub(crate) fn new(
+        has_col: SparseIdxVec<K>,
+        val_cols: Vec<SparseIdxVec<K>>,
+        weights: Vec<K>,
+        r_cycle: &[K],
+    ) -> Self {
+        debug_assert_eq!(val_cols.len(), weights.len());
+        let mut support_cols = Vec::with_capacity(1 + val_cols.len());
+        support_cols.push(has_col.clone());
+        support_cols.extend(val_cols.iter().cloned());
+        let support = sparse_union_support(&support_cols);
+        let lane_count = val_cols.len();
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_col,
+            val_cols,
+            weights,
+            support,
+            pair_marks: Vec::new(),
+            pair_epoch: 1,
+            pair_scratch: Vec::new(),
+            val_child0: vec![K::ZERO; lane_count],
+            val_child1: vec![K::ZERO; lane_count],
+        }
+    }
+}
+
+impl RoundOracle for ShoutGammaValueSharedOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.val_cols.is_empty() {
+            return vec![K::ZERO; points.len()];
+        }
+        if self.has_col.len() == 1 {
+            let has = self.has_col.singleton_value();
+            if has == K::ZERO {
+                return vec![K::ZERO; points.len()];
+            }
+            let mut weighted_vals = K::ZERO;
+            for (col, w) in self.val_cols.iter().zip(self.weights.iter()) {
+                let v = col.singleton_value();
+                if v != K::ZERO {
+                    weighted_vals += *w * v;
+                }
+            }
+            let out = self.prefix_eq * has * weighted_vals;
+            return vec![out; points.len()];
+        }
+
+        let pair_domain = self.support.len() >> 1;
+        if self.pair_marks.len() < pair_domain {
+            self.pair_marks.resize(pair_domain, 0);
+        }
+        self.pair_epoch = self.pair_epoch.wrapping_add(1);
+        if self.pair_epoch == 0 {
+            self.pair_marks.fill(0);
+            self.pair_epoch = 1;
+        }
+        self.pair_scratch.clear();
+        let epoch = self.pair_epoch;
+        for &(idx, _v) in self.support.entries() {
+            let pair = idx >> 1;
+            if self.pair_marks[pair] != epoch {
+                self.pair_marks[pair] = epoch;
+                self.pair_scratch.push(pair);
+            }
+        }
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in self.pair_scratch.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+            let has0 = self.has_col.get(child0);
+            let has1 = self.has_col.get(child1);
+            if has0 == K::ZERO && has1 == K::ZERO {
+                continue;
+            }
+            for (j, col) in self.val_cols.iter().enumerate() {
+                self.val_child0[j] = col.get(child0);
+                self.val_child1[j] = col.get(child1);
+            }
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+            for (i, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let has_x = interp(has0, has1, x);
+                if has_x == K::ZERO {
+                    continue;
+                }
+                let mut weighted_vals = K::ZERO;
+                for j in 0..self.val_cols.len() {
+                    let v0 = self.val_child0[j];
+                    let v1 = self.val_child1[j];
+                    if v0 == K::ZERO && v1 == K::ZERO {
+                        continue;
+                    }
+                    weighted_vals += self.weights[j] * interp(v0, v1, x);
+                }
+                if weighted_vals == K::ZERO {
+                    continue;
+                }
+                ys[i] += chi_x * has_x * weighted_vals;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        3
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single_k(r, self.r_cycle[self.bit_idx]);
+        self.has_col.fold_round_in_place(r);
+        for col in self.val_cols.iter_mut() {
+            col.fold_round_in_place(r);
+        }
+        self.support.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+pub(crate) struct ShoutGammaValueOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_cols: Vec<SparseIdxVec<K>>,
+    val_cols: Vec<SparseIdxVec<K>>,
+    weights: Vec<K>,
+    support: SparseIdxVec<K>,
+    pair_marks: Vec<u32>,
+    pair_epoch: u32,
+    pair_scratch: Vec<usize>,
+    has_child0: Vec<K>,
+    has_child1: Vec<K>,
+    val_child0: Vec<K>,
+    val_child1: Vec<K>,
+}
+
+impl ShoutGammaValueOracleSparseTime {
+    pub(crate) fn new(
+        has_cols: Vec<SparseIdxVec<K>>,
+        val_cols: Vec<SparseIdxVec<K>>,
+        weights: Vec<K>,
+        r_cycle: &[K],
+    ) -> Self {
+        debug_assert_eq!(has_cols.len(), val_cols.len());
+        debug_assert_eq!(has_cols.len(), weights.len());
+        let mut support_cols = Vec::with_capacity(has_cols.len() + val_cols.len());
+        support_cols.extend(has_cols.iter().cloned());
+        support_cols.extend(val_cols.iter().cloned());
+        let support = sparse_union_support(&support_cols);
+        let lane_count = has_cols.len();
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_cols,
+            val_cols,
+            weights,
+            support,
+            pair_marks: Vec::new(),
+            pair_epoch: 1,
+            pair_scratch: Vec::new(),
+            has_child0: vec![K::ZERO; lane_count],
+            has_child1: vec![K::ZERO; lane_count],
+            val_child0: vec![K::ZERO; lane_count],
+            val_child1: vec![K::ZERO; lane_count],
+        }
+    }
+}
+
+impl RoundOracle for ShoutGammaValueOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.has_cols.is_empty() {
+            return vec![K::ZERO; points.len()];
+        }
+        if self.has_cols[0].len() == 1 {
+            let mut acc = K::ZERO;
+            for i in 0..self.has_cols.len() {
+                let has = self.has_cols[i].singleton_value();
+                let val = self.val_cols[i].singleton_value();
+                if has == K::ZERO || val == K::ZERO {
+                    continue;
+                }
+                acc += self.weights[i] * has * val;
+            }
+            let out = self.prefix_eq * acc;
+            return vec![out; points.len()];
+        }
+
+        let pair_domain = self.support.len() >> 1;
+        if self.pair_marks.len() < pair_domain {
+            self.pair_marks.resize(pair_domain, 0);
+        }
+        self.pair_epoch = self.pair_epoch.wrapping_add(1);
+        if self.pair_epoch == 0 {
+            self.pair_marks.fill(0);
+            self.pair_epoch = 1;
+        }
+        self.pair_scratch.clear();
+        let epoch = self.pair_epoch;
+        for &(idx, _v) in self.support.entries() {
+            let pair = idx >> 1;
+            if self.pair_marks[pair] != epoch {
+                self.pair_marks[pair] = epoch;
+                self.pair_scratch.push(pair);
+            }
+        }
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in self.pair_scratch.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+            for i in 0..self.has_cols.len() {
+                self.has_child0[i] = self.has_cols[i].get(child0);
+                self.has_child1[i] = self.has_cols[i].get(child1);
+                self.val_child0[i] = self.val_cols[i].get(child0);
+                self.val_child1[i] = self.val_cols[i].get(child1);
+            }
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+            for (pi, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let mut acc = K::ZERO;
+                for i in 0..self.has_cols.len() {
+                    let h0 = self.has_child0[i];
+                    let h1 = self.has_child1[i];
+                    if h0 == K::ZERO && h1 == K::ZERO {
+                        continue;
+                    }
+                    let has = interp(h0, h1, x);
+                    if has == K::ZERO {
+                        continue;
+                    }
+                    let v0 = self.val_child0[i];
+                    let v1 = self.val_child1[i];
+                    if v0 == K::ZERO && v1 == K::ZERO {
+                        continue;
+                    }
+                    let val = interp(v0, v1, x);
+                    if val == K::ZERO {
+                        continue;
+                    }
+                    acc += self.weights[i] * has * val;
+                }
+                if acc == K::ZERO {
+                    continue;
+                }
+                ys[pi] += chi_x * acc;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        3
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single_k(r, self.r_cycle[self.bit_idx]);
+        for col in self.has_cols.iter_mut() {
+            col.fold_round_in_place(r);
+        }
+        for col in self.val_cols.iter_mut() {
+            col.fold_round_in_place(r);
+        }
+        self.support.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+pub(crate) struct ShoutGammaAdapterSharedOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    has_col: SparseIdxVec<K>,
+    addr_cols: Vec<SparseIdxVec<K>>,
+    coeff_sum: K,
+    eq_alpha: Vec<K>,
+    eq_beta: Vec<K>,
+    support: SparseIdxVec<K>,
+    pair_marks: Vec<u32>,
+    pair_epoch: u32,
+    pair_scratch: Vec<usize>,
+    addr_child0: Vec<K>,
+    addr_child1: Vec<K>,
+}
+
+impl ShoutGammaAdapterSharedOracleSparseTime {
+    pub(crate) fn new(
+        has_col: SparseIdxVec<K>,
+        addr_cols: Vec<SparseIdxVec<K>>,
+        coeff_sum: K,
+        eq_alpha: Vec<K>,
+        eq_beta: Vec<K>,
+        r_cycle: &[K],
+    ) -> Self {
+        debug_assert_eq!(addr_cols.len(), eq_alpha.len());
+        debug_assert_eq!(addr_cols.len(), eq_beta.len());
+        let mut support_cols = Vec::with_capacity(1 + addr_cols.len());
+        support_cols.push(has_col.clone());
+        support_cols.extend(addr_cols.iter().cloned());
+        let support = sparse_union_support(&support_cols);
+        let ell = addr_cols.len();
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            has_col,
+            addr_cols,
+            coeff_sum,
+            eq_alpha,
+            eq_beta,
+            support,
+            pair_marks: Vec::new(),
+            pair_epoch: 1,
+            pair_scratch: Vec::new(),
+            addr_child0: vec![K::ZERO; ell],
+            addr_child1: vec![K::ZERO; ell],
+        }
+    }
+}
+
+impl RoundOracle for ShoutGammaAdapterSharedOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.addr_cols.is_empty() {
+            return vec![K::ZERO; points.len()];
+        }
+        if self.has_col.len() == 1 {
+            let has = self.has_col.singleton_value();
+            if has == K::ZERO {
+                return vec![K::ZERO; points.len()];
+            }
+            let mut eq = K::ONE;
+            for i in 0..self.addr_cols.len() {
+                let bit = self.addr_cols[i].singleton_value();
+                eq *= bit * self.eq_alpha[i] + self.eq_beta[i];
+            }
+            let out = self.prefix_eq * self.coeff_sum * has * eq;
+            return vec![out; points.len()];
+        }
+
+        let pair_domain = self.support.len() >> 1;
+        if self.pair_marks.len() < pair_domain {
+            self.pair_marks.resize(pair_domain, 0);
+        }
+        self.pair_epoch = self.pair_epoch.wrapping_add(1);
+        if self.pair_epoch == 0 {
+            self.pair_marks.fill(0);
+            self.pair_epoch = 1;
+        }
+        self.pair_scratch.clear();
+        let epoch = self.pair_epoch;
+        for &(idx, _v) in self.support.entries() {
+            let pair = idx >> 1;
+            if self.pair_marks[pair] != epoch {
+                self.pair_marks[pair] = epoch;
+                self.pair_scratch.push(pair);
+            }
+        }
+
+        let mut ys = vec![K::ZERO; points.len()];
+        for &pair in self.pair_scratch.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+            let has0 = self.has_col.get(child0);
+            let has1 = self.has_col.get(child1);
+            if has0 == K::ZERO && has1 == K::ZERO {
+                continue;
+            }
+            for i in 0..self.addr_cols.len() {
+                self.addr_child0[i] = self.addr_cols[i].get(child0);
+                self.addr_child1[i] = self.addr_cols[i].get(child1);
+            }
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+            for (pi, &x) in points.iter().enumerate() {
+                let chi_x = interp(chi0, chi1, x);
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let has = interp(has0, has1, x);
+                if has == K::ZERO {
+                    continue;
+                }
+                let mut eq = K::ONE;
+                for i in 0..self.addr_cols.len() {
+                    let b0 = self.addr_child0[i];
+                    let b1 = self.addr_child1[i];
+                    let bit = if b0 == K::ZERO && b1 == K::ZERO {
+                        K::ZERO
+                    } else {
+                        interp(b0, b1, x)
+                    };
+                    eq *= bit * self.eq_alpha[i] + self.eq_beta[i];
+                    if eq == K::ZERO {
+                        break;
+                    }
+                }
+                if eq == K::ZERO {
+                    continue;
+                }
+                ys[pi] += chi_x * self.coeff_sum * has * eq;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        2 + self.addr_cols.len()
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single_k(r, self.r_cycle[self.bit_idx]);
+        self.has_col.fold_round_in_place(r);
+        for col in self.addr_cols.iter_mut() {
+            col.fold_round_in_place(r);
+        }
+        self.support.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+pub(crate) struct ShoutGammaAdapterOracleSparseTime {
+    bit_idx: usize,
+    r_cycle: Vec<K>,
+    prefix_eq: K,
+    addr_cols: Vec<SparseIdxVec<K>>,
+    has_cols: Vec<SparseIdxVec<K>>,
+    coeffs: Vec<K>,
+    eq_alpha: Vec<K>,
+    eq_beta: Vec<K>,
+    support: SparseIdxVec<K>,
+    pair_marks: Vec<u32>,
+    pair_epoch: u32,
+    pair_scratch: Vec<usize>,
+    addr_child0: Vec<K>,
+    addr_child1: Vec<K>,
+    has_child0: Vec<K>,
+    has_child1: Vec<K>,
+    eq_scratch: Vec<K>,
+    weighted_has_scratch: Vec<K>,
+    chi_scratch: Vec<K>,
+}
+
+impl ShoutGammaAdapterOracleSparseTime {
+    pub(crate) fn new(
+        addr_cols: Vec<SparseIdxVec<K>>,
+        has_cols: Vec<SparseIdxVec<K>>,
+        coeffs: Vec<K>,
+        eq_alpha: Vec<K>,
+        eq_beta: Vec<K>,
+        r_cycle: &[K],
+    ) -> Self {
+        debug_assert_eq!(addr_cols.len(), eq_alpha.len());
+        debug_assert_eq!(addr_cols.len(), eq_beta.len());
+        debug_assert_eq!(has_cols.len(), coeffs.len());
+        let mut support_cols = Vec::with_capacity(addr_cols.len() + has_cols.len());
+        support_cols.extend(addr_cols.iter().cloned());
+        support_cols.extend(has_cols.iter().cloned());
+        let support = sparse_union_support(&support_cols);
+        let ell = addr_cols.len();
+        let lanes = has_cols.len();
+        Self {
+            bit_idx: 0,
+            r_cycle: r_cycle.to_vec(),
+            prefix_eq: K::ONE,
+            addr_cols,
+            has_cols,
+            coeffs,
+            eq_alpha,
+            eq_beta,
+            support,
+            pair_marks: Vec::new(),
+            pair_epoch: 1,
+            pair_scratch: Vec::new(),
+            addr_child0: vec![K::ZERO; ell],
+            addr_child1: vec![K::ZERO; ell],
+            has_child0: vec![K::ZERO; lanes],
+            has_child1: vec![K::ZERO; lanes],
+            eq_scratch: Vec::new(),
+            weighted_has_scratch: Vec::new(),
+            chi_scratch: Vec::new(),
+        }
+    }
+}
+
+impl RoundOracle for ShoutGammaAdapterOracleSparseTime {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.addr_cols.is_empty() {
+            return vec![K::ZERO; points.len()];
+        }
+        if self.addr_cols[0].len() == 1 {
+            let mut eq = K::ONE;
+            for i in 0..self.addr_cols.len() {
+                let bit = self.addr_cols[i].singleton_value();
+                eq *= bit * self.eq_alpha[i] + self.eq_beta[i];
+            }
+            if eq == K::ZERO {
+                return vec![K::ZERO; points.len()];
+            }
+            let mut weighted_has = K::ZERO;
+            for i in 0..self.has_cols.len() {
+                let has = self.has_cols[i].singleton_value();
+                if has != K::ZERO {
+                    weighted_has += self.coeffs[i] * has;
+                }
+            }
+            let out = self.prefix_eq * eq * weighted_has;
+            return vec![out; points.len()];
+        }
+
+        let pair_domain = self.support.len() >> 1;
+        if self.pair_marks.len() < pair_domain {
+            self.pair_marks.resize(pair_domain, 0);
+        }
+        self.pair_epoch = self.pair_epoch.wrapping_add(1);
+        if self.pair_epoch == 0 {
+            self.pair_marks.fill(0);
+            self.pair_epoch = 1;
+        }
+        self.pair_scratch.clear();
+        let epoch = self.pair_epoch;
+        for &(idx, _v) in self.support.entries() {
+            let pair = idx >> 1;
+            if self.pair_marks[pair] != epoch {
+                self.pair_marks[pair] = epoch;
+                self.pair_scratch.push(pair);
+            }
+        }
+
+        let point_len = points.len();
+        if self.eq_scratch.len() < point_len {
+            self.eq_scratch.resize(point_len, K::ZERO);
+        }
+        if self.weighted_has_scratch.len() < point_len {
+            self.weighted_has_scratch.resize(point_len, K::ZERO);
+        }
+        if self.chi_scratch.len() < point_len {
+            self.chi_scratch.resize(point_len, K::ZERO);
+        }
+
+        let mut ys = vec![K::ZERO; point_len];
+        for &pair in self.pair_scratch.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+            for i in 0..self.addr_cols.len() {
+                self.addr_child0[i] = self.addr_cols[i].get(child0);
+                self.addr_child1[i] = self.addr_cols[i].get(child1);
+            }
+            for i in 0..self.has_cols.len() {
+                self.has_child0[i] = self.has_cols[i].get(child0);
+                self.has_child1[i] = self.has_cols[i].get(child1);
+            }
+
+            let (chi0, chi1) = chi_cycle_children(&self.r_cycle, self.bit_idx, self.prefix_eq, pair);
+            for (pi, &x) in points.iter().enumerate() {
+                self.chi_scratch[pi] = interp(chi0, chi1, x);
+                self.eq_scratch[pi] = K::ONE;
+                self.weighted_has_scratch[pi] = K::ZERO;
+            }
+
+            for i in 0..self.addr_cols.len() {
+                let b0 = self.addr_child0[i];
+                let b1 = self.addr_child1[i];
+                let alpha = self.eq_alpha[i];
+                let beta = self.eq_beta[i];
+
+                if b0 == K::ZERO && b1 == K::ZERO {
+                    if beta == K::ZERO {
+                        for pi in 0..point_len {
+                            self.eq_scratch[pi] = K::ZERO;
+                        }
+                        break;
+                    }
+                    for pi in 0..point_len {
+                        if self.chi_scratch[pi] != K::ZERO && self.eq_scratch[pi] != K::ZERO {
+                            self.eq_scratch[pi] *= beta;
+                        }
+                    }
+                    continue;
+                }
+
+                if b0 == b1 {
+                    let factor = b0 * alpha + beta;
+                    if factor == K::ZERO {
+                        for pi in 0..point_len {
+                            self.eq_scratch[pi] = K::ZERO;
+                        }
+                        break;
+                    }
+                    for pi in 0..point_len {
+                        if self.chi_scratch[pi] != K::ZERO && self.eq_scratch[pi] != K::ZERO {
+                            self.eq_scratch[pi] *= factor;
+                        }
+                    }
+                    continue;
+                }
+
+                for (pi, &x) in points.iter().enumerate() {
+                    if self.chi_scratch[pi] == K::ZERO || self.eq_scratch[pi] == K::ZERO {
+                        continue;
+                    }
+                    let bit = interp(b0, b1, x);
+                    self.eq_scratch[pi] *= bit * alpha + beta;
+                }
+            }
+
+            let mut any_active = false;
+            for pi in 0..point_len {
+                if self.chi_scratch[pi] != K::ZERO && self.eq_scratch[pi] != K::ZERO {
+                    any_active = true;
+                    break;
+                }
+            }
+            if !any_active {
+                continue;
+            }
+
+            for i in 0..self.has_cols.len() {
+                let h0 = self.has_child0[i];
+                let h1 = self.has_child1[i];
+                let coeff = self.coeffs[i];
+                if coeff == K::ZERO || (h0 == K::ZERO && h1 == K::ZERO) {
+                    continue;
+                }
+
+                if h0 == h1 {
+                    let term = coeff * h0;
+                    if term == K::ZERO {
+                        continue;
+                    }
+                    for pi in 0..point_len {
+                        if self.chi_scratch[pi] != K::ZERO && self.eq_scratch[pi] != K::ZERO {
+                            self.weighted_has_scratch[pi] += term;
+                        }
+                    }
+                    continue;
+                }
+
+                for (pi, &x) in points.iter().enumerate() {
+                    if self.chi_scratch[pi] == K::ZERO || self.eq_scratch[pi] == K::ZERO {
+                        continue;
+                    }
+                    self.weighted_has_scratch[pi] += coeff * interp(h0, h1, x);
+                }
+            }
+
+            for pi in 0..point_len {
+                let chi_x = self.chi_scratch[pi];
+                if chi_x == K::ZERO {
+                    continue;
+                }
+                let eq = self.eq_scratch[pi];
+                if eq == K::ZERO {
+                    continue;
+                }
+                let weighted_has = self.weighted_has_scratch[pi];
+                if weighted_has == K::ZERO {
+                    continue;
+                }
+                ys[pi] += chi_x * eq * weighted_has;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.r_cycle.len().saturating_sub(self.bit_idx)
+    }
+
+    fn degree_bound(&self) -> usize {
+        2 + self.addr_cols.len()
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        self.prefix_eq *= eq_single_k(r, self.r_cycle[self.bit_idx]);
+        for col in self.addr_cols.iter_mut() {
+            col.fold_round_in_place(r);
+        }
+        for col in self.has_cols.iter_mut() {
+            col.fold_round_in_place(r);
+        }
+        self.support.fold_round_in_place(r);
+        self.bit_idx += 1;
+    }
+}
+
+/// Sparse-formula oracle over the full hypercube sum (no anchor chi weighting).
+///
+/// This is used for compressed-domain multiset/link claims where we need true
+/// \sum_j f(j), not f(r_anchor).
+pub(crate) struct FormulaOracleSparseSum {
+    cols: Vec<SparseIdxVec<K>>,
+    degree_bound: usize,
+    eval_fn: Box<dyn Fn(&[K]) -> K>,
+}
+
+impl FormulaOracleSparseSum {
+    pub(crate) fn new(cols: Vec<SparseIdxVec<K>>, degree_bound: usize, eval_fn: Box<dyn Fn(&[K]) -> K>) -> Self {
+        Self {
+            cols,
+            degree_bound,
+            eval_fn,
+        }
+    }
+}
+
+impl RoundOracle for FormulaOracleSparseSum {
+    fn evals_at(&mut self, points: &[K]) -> Vec<K> {
+        if self.cols.is_empty() {
+            return vec![K::ZERO; points.len()];
+        }
+
+        let mut pairs = Vec::new();
+        for col in self.cols.iter() {
+            pairs.extend(gather_pairs_from_sparse(col.entries()));
+        }
+        pairs.sort_unstable();
+        pairs.dedup();
+
+        let mut ys = vec![K::ZERO; points.len()];
+        let mut vals = vec![K::ZERO; self.cols.len()];
+        for &pair in pairs.iter() {
+            let child0 = 2 * pair;
+            let child1 = child0 + 1;
+            for (i, &x) in points.iter().enumerate() {
+                for (j, col) in self.cols.iter().enumerate() {
+                    vals[j] = interp(col.get(child0), col.get(child1), x);
+                }
+                let f_x = (self.eval_fn)(&vals);
+                if f_x == K::ZERO {
+                    continue;
+                }
+                ys[i] += f_x;
+            }
+        }
+        ys
+    }
+
+    fn num_rounds(&self) -> usize {
+        self.cols
+            .first()
+            .map(|c| c.len().ilog2() as usize)
+            .unwrap_or(0)
+    }
+
+    fn degree_bound(&self) -> usize {
+        self.degree_bound
+    }
+
+    fn fold(&mut self, r: K) {
+        if self.num_rounds() == 0 {
+            return;
+        }
+        for col in self.cols.iter_mut() {
+            col.fold_round_in_place(r);
+        }
     }
 }
 
@@ -278,11 +1196,13 @@ pub(crate) fn unpack_interleaved_halves_lsb(addr_bits: &[K]) -> Result<(K, K), P
 }
 
 pub(crate) fn extract_trace_cpu_link_openings(
-    m: usize,
-    core_t: usize,
-    y_prefix_cols: usize,
+    _m: usize,
+    _core_t: usize,
+    _y_prefix_cols: usize,
     step: &StepInstanceBundle<Cmt, F, K>,
-    ccs_out0: &MeInstance<Cmt, F, K>,
+    _ccs_out0: &CeClaim<Cmt, F, K>,
+    step_time_openings: &[crate::shard_proof_types::TimePointOpening],
+    r_time: &[K],
 ) -> Result<Option<TraceCpuLinkOpenings>, PiCcsError> {
     if step.mem_insts.is_empty() && step.lut_insts.is_empty() {
         return Ok(None);
@@ -308,34 +1228,14 @@ pub(crate) fn extract_trace_cpu_link_openings(
         trace.ram_wv,
         trace.shout_has_lookup,
         trace.shout_val,
-        trace.shout_lhs,
-        trace.shout_rhs,
+        trace.shout_link_lhs,
+        trace.shout_link_rhs,
+        trace.shout_add_sub_key,
     ];
 
-    let m_in = step.mcs_inst.m_in;
-    let t_len = step
-        .mem_insts
-        .first()
-        .map(|inst| inst.steps)
-        .or_else(|| {
-            // Shout event-table instances may have `steps != t_len`; prefer a non-event-table
-            // instance if present, otherwise fall back to inferring from the trace layout.
-            step.lut_insts
-                .iter()
-                .find(|inst| !matches!(inst.table_spec, Some(LutTableSpec::RiscvOpcodeEventTablePacked { .. })))
-                .map(|inst| inst.steps)
-        })
-        .or_else(|| {
-            // Trace CCS layout inference: z = [x (m_in) | trace_cols * t_len]
-            let w = m.checked_sub(m_in)?;
-            if trace.cols == 0 || w % trace.cols != 0 {
-                return None;
-            }
-            Some(w / trace.cols)
-        })
-        .ok_or_else(|| PiCcsError::InvalidInput("missing mem/lut instances".into()))?;
+    let t_len = step.time_columns.t;
     if t_len == 0 {
-        return Err(PiCcsError::InvalidInput("trace linkage requires steps>=1".into()));
+        return Err(PiCcsError::InvalidInput("trace linkage requires time_t > 0".into()));
     }
     for (i, inst) in step.mem_insts.iter().enumerate() {
         if inst.steps != t_len {
@@ -345,53 +1245,27 @@ pub(crate) fn extract_trace_cpu_link_openings(
             )));
         }
     }
-    let trace_len = trace
-        .cols
-        .checked_mul(t_len)
-        .ok_or_else(|| PiCcsError::InvalidInput("trace cols * t_len overflow".into()))?;
-    let expected_m = m_in
-        .checked_add(trace_len)
-        .ok_or_else(|| PiCcsError::InvalidInput("m_in + trace_len overflow".into()))?;
-    if m < expected_m {
-        return Err(PiCcsError::InvalidInput(format!(
-            "trace linkage expects m >= m_in + trace.cols*t_len (m={}; min_m={expected_m} for t_len={t_len}, trace_cols={})",
-            m, trace.cols
-        )));
-    }
-    let expected_y_len = core_t
-        .checked_add(y_prefix_cols)
-        .and_then(|v| v.checked_add(trace_cols_to_open.len()))
-        .ok_or_else(|| PiCcsError::InvalidInput("core_t + y_prefix_cols + trace_openings overflow".into()))?;
-    if ccs_out0.y_scalars.len() != expected_y_len {
-        return Err(PiCcsError::InvalidInput(format!(
-            "trace linkage expects CPU ME output to contain exactly core_t + y_prefix_cols + trace_openings y_scalars (have {}, expected {expected_y_len})",
-            ccs_out0.y_scalars.len(),
-        )));
-    }
-    let cpu_open = |idx: usize| -> Result<K, PiCcsError> {
-        ccs_out0
-            .y_scalars
-            .get(core_t + y_prefix_cols + idx)
-            .copied()
-            .ok_or_else(|| PiCcsError::ProtocolError("missing CPU trace linkage opening".into()))
-    };
+    let trace_open_map =
+        require_time_openings_for_point(step_time_openings, r_time, &trace_cols_to_open, "trace linkage")?;
 
     Ok(Some(TraceCpuLinkOpenings {
-        shout_has_lookup: cpu_open(13)?,
-        shout_val: cpu_open(14)?,
-        shout_lhs: cpu_open(15)?,
-        shout_rhs: cpu_open(16)?,
+        shout_has_lookup: named_opening(&trace_open_map, trace.shout_has_lookup, "trace linkage")?,
+        shout_val: named_opening(&trace_open_map, trace.shout_val, "trace linkage")?,
+        shout_link_lhs: named_opening(&trace_open_map, trace.shout_link_lhs, "trace linkage")?,
+        shout_link_rhs: named_opening(&trace_open_map, trace.shout_link_rhs, "trace linkage")?,
+        shout_add_sub_key: named_opening(&trace_open_map, trace.shout_add_sub_key, "trace linkage")?,
     }))
 }
 
 pub(crate) fn expected_trace_shout_table_id_from_openings(
-    core_t: usize,
     step: &StepInstanceBundle<Cmt, F, K>,
+    _cpu_bus: &BusLayout,
     mem_proof: &MemSidecarProof<Cmt, F, K>,
+    step_time_openings: &[crate::shard_proof_types::TimePointOpening],
     r_time: &[K],
-) -> Result<K, PiCcsError> {
+) -> Result<Option<K>, PiCcsError> {
     if !decode_stage_required_for_step_instance(step) {
-        return Ok(K::ZERO);
+        return Ok(None);
     }
 
     if mem_proof.wp_me_claims.len() != 1 {
@@ -416,48 +1290,26 @@ pub(crate) fn expected_trace_shout_table_id_from_openings(
         ));
     }
 
-    let trace = Rv32TraceLayout::new();
-    let decode_layout = Rv32DecodeSidecarLayout::new();
-    let wp_cols = rv32_trace_wp_opening_columns(&trace);
-    let control_extra_cols = if control_stage_required_for_step_instance(step) {
-        rv32_trace_control_extra_opening_columns(&trace)
-    } else {
-        Vec::new()
-    };
-    let decode_open_cols = rv32_decode_lookup_backed_cols(&decode_layout);
-
-    let decode_open_start = core_t
-        .checked_add(wp_cols.len())
-        .and_then(|v| v.checked_add(control_extra_cols.len()))
-        .ok_or_else(|| {
-            PiCcsError::InvalidInput("decode-linked Shout table_id check: decode_open_start overflow".into())
-        })?;
-    let decode_open_end = decode_open_start
-        .checked_add(decode_open_cols.len())
-        .ok_or_else(|| {
-            PiCcsError::InvalidInput("decode-linked Shout table_id check: decode_open_end overflow".into())
-        })?;
-    if wp_me.y_scalars.len() < decode_open_end {
+    let trace_layout = Rv32TraceLayout::new();
+    let wp_cols = rv32_trace_wp_opening_columns(&trace_layout);
+    let (wp_entry, wp_open_map) = require_time_openings_covering_point(
+        step_time_openings,
+        r_time,
+        &wp_cols,
+        "decode-linked Shout table_id check/WP",
+    )?;
+    if wp_entry.source != crate::shard_proof_types::TimeOpeningSource::CommittedOpening {
         return Err(PiCcsError::ProtocolError(format!(
-            "decode-linked Shout table_id check: missing decode openings (got {}, need at least {decode_open_end})",
-            wp_me.y_scalars.len()
+            "decode-linked Shout table_id check/WP requires CommittedOpening source (got {:?})",
+            wp_entry.source
         )));
     }
-
-    let decode_open = &wp_me.y_scalars[decode_open_start..decode_open_end];
-    let decode_open_col = |col_id: usize| -> Result<K, PiCcsError> {
-        let idx = decode_open_cols
-            .iter()
-            .position(|&c| c == col_id)
-            .ok_or_else(|| {
-                PiCcsError::ProtocolError(format!(
-                    "decode-linked Shout table_id check: missing decode opening col {col_id}"
-                ))
-            })?;
-        Ok(decode_open[idx])
-    };
-
-    Ok(decode_open_col(decode_layout.shout_table_id)?)
+    let shout_table_id = named_opening(
+        &wp_open_map,
+        trace_layout.shout_table_id,
+        "decode-linked Shout table_id check",
+    )?;
+    Ok(Some(shout_table_id))
 }
 
 pub(crate) fn prove_twist_addr_pre_time(
@@ -473,7 +1325,19 @@ pub(crate) fn prove_twist_addr_pre_time(
     }
     let mut out = Vec::with_capacity(step.mem_instances.len());
 
-    let cpu_z_k = crate::memory_sidecar::cpu_bus::decode_cpu_z_to_k(params, &step.mcs.1.Z);
+    let use_time_mem_cols =
+        step.time_columns.t == cpu_bus.chunk_size && step.time_columns.mem_cols.len() == cpu_bus.bus_cols;
+    let expected_m = step
+        .mcs
+        .0
+        .m_in
+        .checked_add(step.mcs.1.w.len())
+        .ok_or_else(|| PiCcsError::InvalidInput("shared_cpu_bus witness width overflow".into()))?;
+    let cpu_z_k = if use_time_mem_cols {
+        Vec::new()
+    } else {
+        crate::memory_sidecar::cpu_bus::decode_cpu_z_to_k(params, &step.mcs.1.Z, expected_m)?
+    };
     if cpu_bus.shout_cols.len() != step.lut_instances.len() || cpu_bus.twist_cols.len() != step.mem_instances.len() {
         return Err(PiCcsError::InvalidInput(
             "shared_cpu_bus layout mismatch for step (instance counts)".into(),
@@ -519,61 +1383,131 @@ pub(crate) fn prove_twist_addr_pre_time(
 
             let mut ra_bits = Vec::with_capacity(ell_addr);
             for col_id in twist_cols.ra_bits.clone() {
-                ra_bits.push(crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
-                    &z,
-                    &bus,
-                    col_id,
-                    mem_inst.steps,
-                    pow2_cycle,
-                )?);
+                ra_bits.push(if use_time_mem_cols {
+                    crate::memory_sidecar::cpu_bus::build_time_sparse_from_mem_cols(
+                        &step.time_columns.mem_cols,
+                        &bus,
+                        col_id,
+                        mem_inst.steps,
+                        pow2_cycle,
+                    )?
+                } else {
+                    crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
+                        &z,
+                        &bus,
+                        col_id,
+                        mem_inst.steps,
+                        pow2_cycle,
+                    )?
+                });
             }
 
             let mut wa_bits = Vec::with_capacity(ell_addr);
             for col_id in twist_cols.wa_bits.clone() {
-                wa_bits.push(crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
-                    &z,
-                    &bus,
-                    col_id,
-                    mem_inst.steps,
-                    pow2_cycle,
-                )?);
+                wa_bits.push(if use_time_mem_cols {
+                    crate::memory_sidecar::cpu_bus::build_time_sparse_from_mem_cols(
+                        &step.time_columns.mem_cols,
+                        &bus,
+                        col_id,
+                        mem_inst.steps,
+                        pow2_cycle,
+                    )?
+                } else {
+                    crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
+                        &z,
+                        &bus,
+                        col_id,
+                        mem_inst.steps,
+                        pow2_cycle,
+                    )?
+                });
             }
 
-            let has_read = crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
-                &z,
-                &bus,
-                twist_cols.has_read,
-                mem_inst.steps,
-                pow2_cycle,
-            )?;
-            let has_write = crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
-                &z,
-                &bus,
-                twist_cols.has_write,
-                mem_inst.steps,
-                pow2_cycle,
-            )?;
-            let wv = crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
-                &z,
-                &bus,
-                twist_cols.wv,
-                mem_inst.steps,
-                pow2_cycle,
-            )?;
-            let rv = crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
-                &z,
-                &bus,
-                twist_cols.rv,
-                mem_inst.steps,
-                pow2_cycle,
-            )?;
-            let inc_at_write_addr = crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
-                &z,
-                &bus,
-                twist_cols.inc,
-                mem_inst.steps,
-                pow2_cycle,
-            )?;
+            let has_read = if use_time_mem_cols {
+                crate::memory_sidecar::cpu_bus::build_time_sparse_from_mem_cols(
+                    &step.time_columns.mem_cols,
+                    &bus,
+                    twist_cols.has_read,
+                    mem_inst.steps,
+                    pow2_cycle,
+                )?
+            } else {
+                crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
+                    &z,
+                    &bus,
+                    twist_cols.has_read,
+                    mem_inst.steps,
+                    pow2_cycle,
+                )?
+            };
+            let has_write = if use_time_mem_cols {
+                crate::memory_sidecar::cpu_bus::build_time_sparse_from_mem_cols(
+                    &step.time_columns.mem_cols,
+                    &bus,
+                    twist_cols.has_write,
+                    mem_inst.steps,
+                    pow2_cycle,
+                )?
+            } else {
+                crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
+                    &z,
+                    &bus,
+                    twist_cols.has_write,
+                    mem_inst.steps,
+                    pow2_cycle,
+                )?
+            };
+            let wv = if use_time_mem_cols {
+                crate::memory_sidecar::cpu_bus::build_time_sparse_from_mem_cols(
+                    &step.time_columns.mem_cols,
+                    &bus,
+                    twist_cols.wv,
+                    mem_inst.steps,
+                    pow2_cycle,
+                )?
+            } else {
+                crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
+                    &z,
+                    &bus,
+                    twist_cols.wv,
+                    mem_inst.steps,
+                    pow2_cycle,
+                )?
+            };
+            let rv = if use_time_mem_cols {
+                crate::memory_sidecar::cpu_bus::build_time_sparse_from_mem_cols(
+                    &step.time_columns.mem_cols,
+                    &bus,
+                    twist_cols.rv,
+                    mem_inst.steps,
+                    pow2_cycle,
+                )?
+            } else {
+                crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
+                    &z,
+                    &bus,
+                    twist_cols.rv,
+                    mem_inst.steps,
+                    pow2_cycle,
+                )?
+            };
+            let inc_at_write_addr = if use_time_mem_cols {
+                crate::memory_sidecar::cpu_bus::build_time_sparse_from_mem_cols(
+                    &step.time_columns.mem_cols,
+                    &bus,
+                    twist_cols.inc,
+                    mem_inst.steps,
+                    pow2_cycle,
+                )?
+            } else {
+                crate::memory_sidecar::cpu_bus::build_time_sparse_from_bus_col(
+                    &z,
+                    &bus,
+                    twist_cols.inc,
+                    mem_inst.steps,
+                    pow2_cycle,
+                )?
+            };
 
             lanes.push(TwistLaneSparseCols {
                 ra_bits,
@@ -630,21 +1564,21 @@ pub(crate) fn prove_twist_addr_pre_time(
             },
         ];
 
-        let (r_addr, per_claim_results) = run_batched_sumcheck_prover_ds(tr, b"twist/addr_pre_time", idx, &mut claims)?;
+        let (r_addr, mut per_claim_results) =
+            run_batched_sumcheck_prover_ds(tr, b"twist/addr_pre_time", idx, &mut claims)?;
         if per_claim_results.len() != 2 {
             return Err(PiCcsError::ProtocolError(format!(
                 "twist addr-pre per-claim results len()={}, expected 2",
                 per_claim_results.len()
             )));
         }
+        let read_rounds = std::mem::take(&mut per_claim_results[0].round_polys);
+        let write_rounds = std::mem::take(&mut per_claim_results[1].round_polys);
 
         out.push(TwistAddrPreProverData {
             addr_pre: BatchedAddrProof {
                 claimed_sums,
-                round_polys: vec![
-                    per_claim_results[0].round_polys.clone(),
-                    per_claim_results[1].round_polys.clone(),
-                ],
+                round_polys: vec![read_rounds, write_rounds],
                 r_addr: r_addr.clone(),
             },
             decoded,

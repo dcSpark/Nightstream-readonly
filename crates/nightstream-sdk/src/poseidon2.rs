@@ -1,111 +1,258 @@
-//! Poseidon2-Goldilocks hash via ECALL precompile.
-//!
-//! Provides the guest-side API for computing Poseidon2 hashes over Goldilocks
-//! field elements. On RISC-V targets, this issues ECALLs to the host:
-//! 1. A "compute" ECALL that reads inputs (via untraced loads) and computes the
-//!    Poseidon2 hash, storing the digest in host-side CPU state.
-//! 2. Eight "read" ECALLs that each return one u32 word of the digest in
-//!    register a0.
-//!
-//! On non-RISC-V targets, a stub panics.
+//! Poseidon2 precompile helpers for Nightstream RISC-V guests.
 
-use crate::goldilocks::GlDigest;
+/// Poseidon2 digest over Goldilocks field elements.
+pub type GlDigest = [u64; 4];
 
-/// Poseidon2 compute ECALL number (must match neo-memory's POSEIDON2_ECALL_NUM).
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-const POSEIDON2_ECALL_NUM: u32 = 0x504F53;
-
-/// Poseidon2 read ECALL number (must match neo-memory's POSEIDON2_READ_ECALL_NUM).
+const CUSTOM0_OPCODE: u32 = 0x0B;
 #[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-const POSEIDON2_READ_ECALL_NUM: u32 = 0x80504F53;
+const P2_ABSORB_FUNCT7: u32 = 0x00;
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const P2_FINALIZE_FUNCT7: u32 = 0x01;
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const P2_SQUEEZE_FUNCT7: u32 = 0x02;
 
-/// Digest length in Goldilocks elements (matches neo-params DIGEST_LEN).
-const DIGEST_LEN: usize = 4;
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const REG_X0: u32 = 0;
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const REG_A0: u32 = 10;
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const REG_A1: u32 = 11;
 
-/// Scratch buffer size: supports hashing up to 64 Goldilocks elements per call.
-/// Each element occupies 2 u32 words (8 bytes).
-const MAX_INPUT_ELEMENTS: usize = 64;
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const fn encode_r(funct7: u32, rs2: u32, rs1: u32, funct3: u32, rd: u32, opcode: u32) -> u32 {
+    ((funct7 & 0x7f) << 25)
+        | ((rs2 & 0x1f) << 20)
+        | ((rs1 & 0x1f) << 15)
+        | ((funct3 & 0x7) << 12)
+        | ((rd & 0x1f) << 7)
+        | (opcode & 0x7f)
+}
 
-/// Hash an arbitrary-length slice of Goldilocks field elements.
-///
-/// Packs elements to a stack-allocated scratch buffer, issues the Poseidon2
-/// compute ECALL, then retrieves the 4-element digest via 8 read ECALLs
-/// (each returning one u32 word in register a0).
-///
-/// # Panics
-///
-/// Panics if `input.len() > MAX_INPUT_ELEMENTS` (64).
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const P2_ABSORB_A0_A1: u32 = encode_r(P2_ABSORB_FUNCT7, REG_A1, REG_A0, 0, REG_X0, CUSTOM0_OPCODE);
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const P2_FINALIZE: u32 = encode_r(P2_FINALIZE_FUNCT7, REG_X0, REG_X0, 0, REG_X0, CUSTOM0_OPCODE);
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const P2_SQUEEZE_IDX0_A0: u32 = encode_r(P2_SQUEEZE_FUNCT7, REG_X0, REG_X0, 0, REG_A0, CUSTOM0_OPCODE);
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const P2_SQUEEZE_IDX1_A0: u32 = encode_r(P2_SQUEEZE_FUNCT7, REG_X0, REG_X0, 1, REG_A0, CUSTOM0_OPCODE);
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const P2_SQUEEZE_IDX2_A0: u32 = encode_r(P2_SQUEEZE_FUNCT7, REG_X0, REG_X0, 2, REG_A0, CUSTOM0_OPCODE);
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const P2_SQUEEZE_IDX3_A0: u32 = encode_r(P2_SQUEEZE_FUNCT7, REG_X0, REG_X0, 3, REG_A0, CUSTOM0_OPCODE);
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const P2_SQUEEZE_IDX4_A0: u32 = encode_r(P2_SQUEEZE_FUNCT7, REG_X0, REG_X0, 4, REG_A0, CUSTOM0_OPCODE);
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const P2_SQUEEZE_IDX5_A0: u32 = encode_r(P2_SQUEEZE_FUNCT7, REG_X0, REG_X0, 5, REG_A0, CUSTOM0_OPCODE);
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const P2_SQUEEZE_IDX6_A0: u32 = encode_r(P2_SQUEEZE_FUNCT7, REG_X0, REG_X0, 6, REG_A0, CUSTOM0_OPCODE);
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+const P2_SQUEEZE_IDX7_A0: u32 = encode_r(P2_SQUEEZE_FUNCT7, REG_X0, REG_X0, 7, REG_A0, CUSTOM0_OPCODE);
+
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[inline]
+pub fn poseidon2_absorb_elem(elem: u64) {
+    let lo = elem as u32;
+    let hi = (elem >> 32) as u32;
+    unsafe {
+        core::arch::asm!(
+            ".word {insn}",
+            insn = const P2_ABSORB_A0_A1,
+            in("a0") lo,
+            in("a1") hi,
+            options(nostack),
+        );
+    }
+}
+
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[inline]
+pub fn poseidon2_finalize() {
+    unsafe {
+        core::arch::asm!(
+            ".word {insn}",
+            insn = const P2_FINALIZE,
+            options(nostack),
+        );
+    }
+}
+
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[inline]
+fn squeeze_idx0() -> u32 {
+    let out: u32;
+    unsafe {
+        core::arch::asm!(
+            ".word {insn}",
+            insn = const P2_SQUEEZE_IDX0_A0,
+            lateout("a0") out,
+            options(nostack),
+        );
+    }
+    out
+}
+
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[inline]
+fn squeeze_idx1() -> u32 {
+    let out: u32;
+    unsafe {
+        core::arch::asm!(
+            ".word {insn}",
+            insn = const P2_SQUEEZE_IDX1_A0,
+            lateout("a0") out,
+            options(nostack),
+        );
+    }
+    out
+}
+
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[inline]
+fn squeeze_idx2() -> u32 {
+    let out: u32;
+    unsafe {
+        core::arch::asm!(
+            ".word {insn}",
+            insn = const P2_SQUEEZE_IDX2_A0,
+            lateout("a0") out,
+            options(nostack),
+        );
+    }
+    out
+}
+
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[inline]
+fn squeeze_idx3() -> u32 {
+    let out: u32;
+    unsafe {
+        core::arch::asm!(
+            ".word {insn}",
+            insn = const P2_SQUEEZE_IDX3_A0,
+            lateout("a0") out,
+            options(nostack),
+        );
+    }
+    out
+}
+
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[inline]
+fn squeeze_idx4() -> u32 {
+    let out: u32;
+    unsafe {
+        core::arch::asm!(
+            ".word {insn}",
+            insn = const P2_SQUEEZE_IDX4_A0,
+            lateout("a0") out,
+            options(nostack),
+        );
+    }
+    out
+}
+
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[inline]
+fn squeeze_idx5() -> u32 {
+    let out: u32;
+    unsafe {
+        core::arch::asm!(
+            ".word {insn}",
+            insn = const P2_SQUEEZE_IDX5_A0,
+            lateout("a0") out,
+            options(nostack),
+        );
+    }
+    out
+}
+
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[inline]
+fn squeeze_idx6() -> u32 {
+    let out: u32;
+    unsafe {
+        core::arch::asm!(
+            ".word {insn}",
+            insn = const P2_SQUEEZE_IDX6_A0,
+            lateout("a0") out,
+            options(nostack),
+        );
+    }
+    out
+}
+
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[inline]
+fn squeeze_idx7() -> u32 {
+    let out: u32;
+    unsafe {
+        core::arch::asm!(
+            ".word {insn}",
+            insn = const P2_SQUEEZE_IDX7_A0,
+            lateout("a0") out,
+            options(nostack),
+        );
+    }
+    out
+}
+
+/// Return one digest word (`idx` in 0..=7) from the finalized Poseidon2 state.
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
+#[inline]
+pub fn poseidon2_squeeze_word(idx: u8) -> u32 {
+    match idx {
+        0 => squeeze_idx0(),
+        1 => squeeze_idx1(),
+        2 => squeeze_idx2(),
+        3 => squeeze_idx3(),
+        4 => squeeze_idx4(),
+        5 => squeeze_idx5(),
+        6 => squeeze_idx6(),
+        7 => squeeze_idx7(),
+        _ => panic!("poseidon2_squeeze_word: idx out of range"),
+    }
+}
+
+/// Hash a variable-length list of Goldilocks elements via precompile instructions.
+#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
 pub fn poseidon2_hash(input: &[u64]) -> GlDigest {
-    assert!(
-        input.len() <= MAX_INPUT_ELEMENTS,
-        "poseidon2_hash: too many input elements"
-    );
-
-    // Scratch buffer for input (as u32 words).
-    let mut input_buf: [u32; MAX_INPUT_ELEMENTS * 2] = [0; MAX_INPUT_ELEMENTS * 2];
-
-    // Pack Goldilocks elements as pairs of u32 words (little-endian).
-    for (i, &elem) in input.iter().enumerate() {
-        input_buf[i * 2] = elem as u32;
-        input_buf[i * 2 + 1] = (elem >> 32) as u32;
+    for &elem in input {
+        poseidon2_absorb_elem(elem);
     }
-
-    // Compute ECALL: host reads inputs via untraced loads and stores digest in CPU state.
-    poseidon2_ecall_compute(input.len() as u32, input_buf.as_ptr() as u32);
-
-    // Read 8 u32 words of the digest via register a0.
-    let d: [u32; 8] = core::array::from_fn(|_| poseidon2_ecall_read());
-
-    // Unpack into 4 Goldilocks elements.
-    let mut digest = [0u64; DIGEST_LEN];
-    for i in 0..DIGEST_LEN {
-        digest[i] = (d[i * 2] as u64) | ((d[i * 2 + 1] as u64) << 32);
+    poseidon2_finalize();
+    let mut words = [0u32; 8];
+    for (idx, slot) in words.iter_mut().enumerate() {
+        *slot = poseidon2_squeeze_word(idx as u8);
     }
-    digest
+    [
+        (words[0] as u64) | ((words[1] as u64) << 32),
+        (words[2] as u64) | ((words[3] as u64) << 32),
+        (words[4] as u64) | ((words[5] as u64) << 32),
+        (words[6] as u64) | ((words[7] as u64) << 32),
+    ]
 }
 
-/// Issue the Poseidon2 compute ECALL.
-///
-/// Registers: a0 = ECALL ID, a1 = element count, a2 = input addr.
-/// No output via registers; digest is stored in host CPU state.
-#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-fn poseidon2_ecall_compute(n_elements: u32, input_addr: u32) {
-    unsafe {
-        core::arch::asm!(
-            "ecall",
-            in("a0") POSEIDON2_ECALL_NUM,
-            in("a1") n_elements,
-            in("a2") input_addr,
-            options(nostack),
-        );
-    }
-}
-
-/// Issue the Poseidon2 read ECALL and return the next digest word.
-///
-/// The ECALL number is passed in a0, and the host returns the next u32 word
-/// of the pending digest in a0.
-#[cfg(any(target_arch = "riscv32", target_arch = "riscv64"))]
-fn poseidon2_ecall_read() -> u32 {
-    let result: u32;
-    unsafe {
-        core::arch::asm!(
-            "ecall",
-            inout("a0") POSEIDON2_READ_ECALL_NUM => result,
-            options(nostack),
-        );
-    }
-    result
-}
-
-/// Stub for non-RISC-V targets (used in native tests via the reference impl).
 #[cfg(not(any(target_arch = "riscv32", target_arch = "riscv64")))]
-fn poseidon2_ecall_compute(_n_elements: u32, _input_addr: u32) {
-    unimplemented!("poseidon2_ecall_compute is only available on RISC-V targets")
+#[inline]
+pub fn poseidon2_absorb_elem(_elem: u64) {
+    unimplemented!("poseidon2 precompile is only available on RISC-V targets");
 }
 
-/// Stub for non-RISC-V targets.
 #[cfg(not(any(target_arch = "riscv32", target_arch = "riscv64")))]
-fn poseidon2_ecall_read() -> u32 {
-    unimplemented!("poseidon2_ecall_read is only available on RISC-V targets")
+#[inline]
+pub fn poseidon2_finalize() {
+    unimplemented!("poseidon2 precompile is only available on RISC-V targets");
+}
+
+#[cfg(not(any(target_arch = "riscv32", target_arch = "riscv64")))]
+#[inline]
+pub fn poseidon2_squeeze_word(_idx: u8) -> u32 {
+    unimplemented!("poseidon2 precompile is only available on RISC-V targets");
+}
+
+#[cfg(not(any(target_arch = "riscv32", target_arch = "riscv64")))]
+pub fn poseidon2_hash(_input: &[u64]) -> GlDigest {
+    unimplemented!("poseidon2 precompile is only available on RISC-V targets");
 }

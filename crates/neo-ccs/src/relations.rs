@@ -1,14 +1,15 @@
-use p3_field::Field;
+use p3_field::{Field, PrimeCharacteristicRing};
 
 use neo_math::D;
+use neo_params::NeoParams;
 
 use crate::{
     error::{CcsError, RelationError},
-    matrix::{Mat, MatRef},
+    matrix::Mat,
     poly::SparsePoly,
     sparse::{CcsMatrix, CscMat},
     traits::SModuleHomomorphism,
-    utils::{mat_vec_mul_fk, tensor_point},
+    utils::tensor_point,
 };
 
 /// CCS structure: matrices {M_j} and a sparse polynomial `f` in `t` variables.
@@ -209,9 +210,92 @@ impl<F: Field> CcsStructure<F> {
     }
 }
 
-/// MCS instance: (c, x) with public inputs x ⊂ z (see Def. 17).
+impl CcsStructure<neo_math::Fq> {
+    /// SuperNeo matrix transform `M -> bar(M)` applied row-wise.
+    ///
+    /// The field-column dimension `m` must be divisible by `D` so rows can be partitioned
+    /// into `d`-coefficient ring blocks.
+    pub fn transform_matrices_superneo(&self) -> Result<Self, RelationError> {
+        if !self.m.is_multiple_of(D) {
+            return Err(RelationError::Message(format!(
+                "superneo matrix transform requires m multiple of D={}, got m={}",
+                D, self.m
+            )));
+        }
+
+        let bar = neo_math::superneo_bar_matrix();
+        let mut out = Vec::with_capacity(self.matrices.len());
+        for mj in &self.matrices {
+            out.push(transform_ccs_matrix_superneo(mj, bar)?);
+        }
+        CcsStructure::new_sparse(out, self.f.clone())
+    }
+}
+
+fn transform_ccs_matrix_superneo(
+    src: &CcsMatrix<neo_math::Fq>,
+    bar: &[[neo_math::Fq; D]; D],
+) -> Result<CcsMatrix<neo_math::Fq>, RelationError> {
+    use neo_math::Fq;
+
+    let nrows = src.rows();
+    let ncols = src.cols();
+    if !ncols.is_multiple_of(D) {
+        return Err(RelationError::Message(format!(
+            "superneo matrix transform requires ncols multiple of D={}, got ncols={}",
+            D, ncols
+        )));
+    }
+
+    let mut triplets: Vec<(usize, usize, Fq)> = Vec::new();
+    match src {
+        CcsMatrix::Identity { n } => {
+            if *n != ncols {
+                return Err(RelationError::Message(
+                    "identity sentinel must be square before superneo transform".into(),
+                ));
+            }
+            triplets.reserve(nrows * D);
+            for r in 0..nrows {
+                let block = r / D;
+                let local = r % D;
+                let base = block * D;
+                for i in 0..D {
+                    let coeff = bar[i][local];
+                    if coeff != Fq::ZERO {
+                        triplets.push((r, base + i, coeff));
+                    }
+                }
+            }
+        }
+        CcsMatrix::Csc(m) => {
+            triplets.reserve(m.vals.len() * D);
+            for c in 0..m.ncols {
+                let block = c / D;
+                let local = c % D;
+                let base = block * D;
+                let s = m.col_ptr[c];
+                let e = m.col_ptr[c + 1];
+                for k in s..e {
+                    let r = m.row_idx[k];
+                    let v = m.vals[k];
+                    for i in 0..D {
+                        let coeff = v * bar[i][local];
+                        if coeff != Fq::ZERO {
+                            triplets.push((r, base + i, coeff));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    Ok(CcsMatrix::Csc(CscMat::from_triplets(triplets, nrows, ncols)))
+}
+
+/// CCS claim: (c, x) with public inputs x ⊂ z.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
-pub struct McsInstance<C, F> {
+pub struct CcsClaim<C, F> {
     /// Commitment to Z (Ajtai over decomposition).
     pub c: C,
     /// Public inputs x ∈ F^{m_in}; z = x || w.
@@ -220,20 +304,20 @@ pub struct McsInstance<C, F> {
     pub m_in: usize,
 }
 
-/// MCS witness: w and its decomposition Z = Decomp_b(z) (we need Z for consistency checks).
+/// CCS witness: w and its decomposition Z = Decomp_b(z).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[allow(non_snake_case)]
-pub struct McsWitness<F> {
+pub struct CcsWitness<F> {
     /// Private witness w ∈ F^{m - m_in}.
     pub w: Vec<F>,
     /// Z ∈ F^{d×m}: decomposition matrix of z = x || w.
     pub Z: Mat<F>,
 }
 
-/// ME instance: (c, X, r, {y_j}). See Def. 18.
+/// CE claim: (c, X, r, {y_ring_j}, ct, aux_openings).
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
 #[allow(non_snake_case)]
-pub struct MeInstance<C, F, K> {
+pub struct CeClaim<C, F, K> {
     /// Commitment to Z.
     pub c: C,
     /// X = L_x(Z) ∈ F^{d×m_in}
@@ -245,16 +329,23 @@ pub struct MeInstance<C, F, K> {
     /// Legacy (square/identity-first) pipelines may leave this empty.
     #[serde(default)]
     pub s_col: Vec<K>,
-    /// y_j digit rows for j=0..t-1.
+    /// Ring-digit rows per CCS matrix output (j=0..t-1).
     ///
     /// Callers may store either:
     /// - the unpadded length `d` (= `Z.rows()`), or
     /// - the Ajtai-padded length `2^{ell_d}` (typically `D.next_power_of_two()`),
     ///   in which case the tail must be all zeros.
-    pub y: Vec<Vec<K>>,
-    /// **SECURITY**: Y_j(r) = ⟨(M_j z), χ_r⟩ ∈ K scalars for CCS terminal verification
-    /// These are the CORRECT values needed for sum-check terminal check, not sums of y vector components
-    pub y_scalars: Vec<K>,
+    pub y_ring: Vec<Vec<K>>,
+    /// Scalar view of `y_ring`.
+    ///
+    /// In SuperNeo embedding, core entries are constant terms of each `y_ring[j]`.
+    /// Existing pipelines may append additional scalar openings to this vector.
+    pub ct: Vec<K>,
+    /// Additional scalar openings that are not core CCS matrix outputs.
+    ///
+    /// This field is the CE-native home for sidecar/Route-A openings.
+    #[serde(default)]
+    pub aux_openings: Vec<K>,
     /// y_zcol := Z · χ_{s_col} ∈ K^{d} (digit rows, typically padded to 2^{ell_d}).
     ///
     /// Legacy (square/identity-first) pipelines may leave this empty.
@@ -274,34 +365,98 @@ pub struct MeInstance<C, F, K> {
     pub u_len: usize,
 }
 
-/// ME witness: Z.
+/// CE witness: Z.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[allow(non_snake_case)]
-pub struct MeWitness<F> {
+pub struct CeWitness<F> {
     /// Z ∈ F^{d×m}
     pub Z: Mat<F>,
 }
 
-/// Check `c == L(Z)` for MCS.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WitnessLayout {
+    SuperneoPacked,
+}
+
+fn witness_layout_for_expected_m<F: Field>(z: &Mat<F>, expected_m: usize) -> Result<WitnessLayout, CcsError> {
+    if z.rows() != D {
+        return Err(CcsError::Dim {
+            context: "Z rows (expected D)",
+            expected: (D, expected_m),
+            got: (z.rows(), z.cols()),
+        });
+    }
+    if expected_m == 0 {
+        return Err(CcsError::Relation("expected_m must be > 0".into()));
+    }
+    let want_cols = expected_m.div_ceil(D);
+    if z.cols() == want_cols {
+        let pad_end = want_cols
+            .checked_mul(D)
+            .ok_or_else(|| CcsError::Relation("witness padding overflow".into()))?;
+        for c in expected_m..pad_end {
+            let blk = c / D;
+            let off = c % D;
+            if z[(off, blk)] != F::ZERO {
+                return Err(CcsError::Relation(
+                    format!("non-zero padded coefficient at logical index {c} (blk={blk}, off={off})").into(),
+                ));
+            }
+        }
+        return Ok(WitnessLayout::SuperneoPacked);
+    }
+    Err(CcsError::Dim {
+        context: "Z shape vs SuperNeo packed width",
+        expected: (D, want_cols),
+        got: (z.rows(), z.cols()),
+    })
+}
+
+#[inline]
+fn witness_get<F: Field + Copy>(z: &Mat<F>, layout: WitnessLayout, rho: usize, col: usize) -> F {
+    match layout {
+        WitnessLayout::SuperneoPacked => {
+            let blk = col / D;
+            let off = col % D;
+            if off == rho {
+                z[(rho, blk)]
+            } else {
+                F::ZERO
+            }
+        }
+    }
+}
+
+fn project_x_from_witness_layout<F: Field + Copy>(z: &Mat<F>, layout: WitnessLayout, m_in: usize) -> Mat<F> {
+    let mut x = Mat::zero(D, m_in, F::ZERO);
+    for rho in 0..D {
+        for c in 0..m_in {
+            x[(rho, c)] = witness_get(z, layout, rho, c);
+        }
+    }
+    x
+}
+
+#[inline]
+fn ct_from_y_digits_for_ccs_m<Kf: Field>(y_digits: &[Kf], expected_m: usize) -> Kf {
+    debug_assert!(expected_m > 0);
+    y_digits.first().copied().unwrap_or(Kf::ZERO)
+}
+
+/// Check `c == L(Z)` for CCS claim.
 /// Note: The critical Z == Decomp_b(z) check is now handled in the folding pipeline
 /// where both neo-ccs and neo-ajtai dependencies are available.
-pub fn check_mcs_opening<F: Field, C, L: SModuleHomomorphism<F, C>>(
+pub fn check_ccs_claim_opening<F: Field, C, L: SModuleHomomorphism<F, C>>(
     l: &L,
-    inst: &McsInstance<C, F>,
-    wit: &McsWitness<F>,
+    inst: &CcsClaim<C, F>,
+    wit: &CcsWitness<F>,
 ) -> Result<Vec<F>, CcsError>
 where
     C: PartialEq,
 {
     // shape sanity
     let m = inst.m_in + wit.w.len();
-    if wit.Z.cols() != m {
-        return Err(CcsError::Dim {
-            context: "Z (cols) vs m_in + |w|",
-            expected: (wit.Z.rows(), m),
-            got: (wit.Z.rows(), wit.Z.cols()),
-        });
-    }
+    let _layout = witness_layout_for_expected_m(&wit.Z, m)?;
     // z = x || w
     if inst.x.len() != inst.m_in {
         return Err(CcsError::Len {
@@ -322,18 +477,21 @@ where
     Ok(z)
 }
 
-/// Check `X == L_x(Z)` and `y_j == Z M_j^T r^b` for ME (Def. 18).
-pub fn check_me_consistency<F: Field, K: Field + From<F>, C, L: SModuleHomomorphism<F, C>>(
+/// Check `X == L_x(Z)` and CE output consistency.
+pub fn check_ce_consistency<F: Field, K: Field + From<F>, C, L: SModuleHomomorphism<F, C>>(
+    _params: &NeoParams,
     s: &CcsStructure<F>,
     l: &L,
-    inst: &MeInstance<C, F, K>,
-    wit: &MeWitness<F>,
+    inst: &CeClaim<C, F, K>,
+    wit: &CeWitness<F>,
 ) -> Result<(), CcsError>
 where
     C: PartialEq,
 {
+    let z_layout = witness_layout_for_expected_m(&wit.Z, s.m)?;
+
     // X = L_x(Z)
-    let x_star = l.project_x(&wit.Z, inst.m_in);
+    let x_star = project_x_from_witness_layout(&wit.Z, z_layout, inst.m_in);
     if x_star.as_slice() != inst.X.as_slice() {
         return Err(CcsError::Relation("X != L_x(Z)".into()));
     }
@@ -392,9 +550,14 @@ where
 
         // Compute y_zcol = Z · χ_{s_col}.
         let chi_s = crate::utils::tensor_point::<K>(&inst.s_col);
-        // Consume only the first `m` entries (outside-of-range are implicitly zero).
-        use crate::utils::mat_vec_mul_fk;
-        let mut y_star = mat_vec_mul_fk::<F, K>(wit.Z.as_slice(), wit.Z.rows(), wit.Z.cols(), &chi_s[..s.m]);
+        let mut y_star = vec![K::ZERO; D];
+        for rho in 0..D {
+            let mut acc = K::ZERO;
+            for c in 0..s.m {
+                acc += K::from(witness_get(&wit.Z, z_layout, rho, c)) * chi_s[c];
+            }
+            y_star[rho] = acc;
+        }
         y_star.resize(d_pad, K::ZERO);
 
         if y_star.as_slice() != inst.y_zcol.as_slice() {
@@ -404,11 +567,11 @@ where
     let rb = tensor_point::<K>(&inst.r); // K^n
 
     // for each j: v := M_j^T r^b ∈ K^m; then y_j = Z v ∈ K^d
-    if inst.y.len() != s.t() {
+    if inst.y_ring.len() != s.t() {
         return Err(CcsError::Len {
-            context: "|y|",
+            context: "|y_ring|",
             expected: s.t(),
-            got: inst.y.len(),
+            got: inst.y_ring.len(),
         });
     }
 
@@ -420,20 +583,26 @@ where
         let mut v_k_m = vec![K::ZERO; s.m];
         mj.add_mul_transpose_into(&rb, &mut v_k_m, s.n);
         // y*_j = Z v_k_m
-        let z_ref = MatRef::from_mat(&wit.Z);
-        let y_star = mat_vec_mul_fk::<F, K>(z_ref.data, z_ref.rows, z_ref.cols, &v_k_m);
-        let yj = &inst.y[j];
+        let mut y_star = vec![K::ZERO; D];
+        for rho in 0..D {
+            let mut acc = K::ZERO;
+            for c in 0..s.m {
+                acc += K::from(witness_get(&wit.Z, z_layout, rho, c)) * v_k_m[c];
+            }
+            y_star[rho] = acc;
+        }
+        let yj = &inst.y_ring[j];
         let d = y_star.len();
         if yj.len() < d {
             return Err(CcsError::Len {
-                context: "y[j] (digit row)",
+                context: "y_ring[j] (digit row)",
                 expected: d,
                 got: yj.len(),
             });
         }
         if yj.len() != d && yj.len() != d_pad {
             return Err(CcsError::Len {
-                context: "y[j] (digit row)",
+                context: "y_ring[j] (digit row)",
                 expected: d_pad,
                 got: yj.len(),
             });
@@ -445,6 +614,22 @@ where
             return Err(CcsError::Relation("y_j != Z M_j^T r^b".into()));
         }
     }
+
+    // Core CE invariant (SuperNeo-only): `ct[j] == y_ring[j][0]`.
+    if inst.ct.len() < s.t() {
+        return Err(CcsError::Len {
+            context: "ct (core entries)",
+            expected: s.t(),
+            got: inst.ct.len(),
+        });
+    }
+    for j in 0..s.t() {
+        let want = ct_from_y_digits_for_ccs_m(&inst.y_ring[j], s.m);
+        if inst.ct[j] != want {
+            return Err(CcsError::Relation("ct[j] != y_ring[j][0]".into()));
+        }
+    }
+
     Ok(())
 }
 

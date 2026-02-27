@@ -69,6 +69,55 @@ filter_test_files() {
     fi
 }
 
+# Return modified files against the selected base/path filters, one per line.
+collect_modified_files() {
+    local base="$1"
+    local files
+    if [ ${#paths[@]} -gt 0 ]; then
+        files=$(git diff "$base" --name-only -- "${paths[@]}")
+    else
+        files=$(git diff "$base" --name-only)
+    fi
+    if [ "$no_tests" = true ] && [ -n "$files" ]; then
+        files=$(filter_test_files "$files")
+    fi
+    echo "$files" | sed '/^$/d'
+}
+
+# Count non-empty newline-separated entries.
+count_nonempty_lines() {
+    local lines="$1"
+    if [ -z "$lines" ]; then
+        echo 0
+    else
+        echo "$lines" | sed '/^$/d' | wc -l | tr -d ' '
+    fi
+}
+
+# Compute total added/deleted lines for a newline-separated file list.
+# Outputs: "<adds> <deletes>"
+compute_add_delete_totals() {
+    local base="$1"
+    local files="$2"
+    local total_add=0
+    local total_del=0
+
+    if [ -n "$files" ]; then
+        while IFS= read -r file; do
+            [ -z "$file" ] && continue
+            while IFS=$'\t' read -r added deleted _; do
+                [ -z "$added" ] && continue
+                [ "$added" = "-" ] && added=0
+                [ "$deleted" = "-" ] && deleted=0
+                total_add=$((total_add + added))
+                total_del=$((total_del + deleted))
+            done <<< "$(git diff --numstat "$base" -- "$file")"
+        done <<< "$files"
+    fi
+
+    echo "$total_add $total_del"
+}
+
 # Remove existing output file
 rm -f "$output_file"
 touch "$output_file"
@@ -90,6 +139,11 @@ fi
 if [ "$no_tests" = true ]; then
     echo "Excluding test files (--no-tests flag active)"
 fi
+
+# Collect modified files/stats once so all sections are consistent.
+modified_files=$(collect_modified_files "$base_commit")
+modified_count=$(count_nonempty_lines "$modified_files")
+read -r total_added_lines total_deleted_lines <<< "$(compute_add_delete_totals "$base_commit" "$modified_files")"
 
 # Header
 {
@@ -124,36 +178,14 @@ fi
     echo "=============================================="
     echo "Diff of Modified Files (against $base_commit)"
     echo "=============================================="
-    if [ ${#paths[@]} -gt 0 ]; then
-        if [ "$no_tests" = true ]; then
-            # Get list of modified files, filter out test files, then get diff for remaining files
-            modified_files=$(git diff $base_commit --name-only -- "${paths[@]}")
-            filtered_files=$(filter_test_files "$modified_files")
-            if [ -n "$filtered_files" ]; then
-                echo "$filtered_files" | while IFS= read -r file; do
-                    if [ -n "$file" ]; then
-                        git diff $base_commit -- "$file"
-                    fi
-                done
+    if [ -n "$modified_files" ]; then
+        echo "$modified_files" | while IFS= read -r file; do
+            if [ -n "$file" ]; then
+                git diff "$base_commit" -- "$file"
             fi
-        else
-            git diff $base_commit -- "${paths[@]}"
-        fi
+        done
     else
-        if [ "$no_tests" = true ]; then
-            # Get list of all modified files, filter out test files, then get diff for remaining files
-            modified_files=$(git diff $base_commit --name-only)
-            filtered_files=$(filter_test_files "$modified_files")
-            if [ -n "$filtered_files" ]; then
-                echo "$filtered_files" | while IFS= read -r file; do
-                    if [ -n "$file" ]; then
-                        git diff $base_commit -- "$file"
-                    fi
-                done
-            fi
-        else
-            git diff $base_commit
-        fi
+        echo "No modified files found."
     fi
     echo ""
 } >> "$output_file"
@@ -226,24 +258,6 @@ fi
     echo "=============================================="
     echo "Summary"
     echo "=============================================="
-    if [ ${#paths[@]} -gt 0 ]; then
-        if [ "$no_tests" = true ]; then
-            modified_files=$(git diff $base_commit --name-only -- "${paths[@]}")
-            filtered_files=$(filter_test_files "$modified_files")
-            modified_count=$(echo "$filtered_files" | grep -c '^' 2>/dev/null || echo 0)
-        else
-            modified_count=$(git diff $base_commit --name-only -- "${paths[@]}" | wc -l)
-        fi
-    else
-        if [ "$no_tests" = true ]; then
-            modified_files=$(git diff $base_commit --name-only)
-            filtered_files=$(filter_test_files "$modified_files")
-            modified_count=$(echo "$filtered_files" | grep -c '^' 2>/dev/null || echo 0)
-        else
-            modified_count=$(git diff $base_commit --name-only | wc -l)
-        fi
-    fi
-    
     untracked_count=0
     if [ -n "$untracked_files" ]; then
         untracked_count=$(echo "$untracked_files" | wc -l)
@@ -264,6 +278,8 @@ fi
     fi
     
     echo "Modified files: $modified_count"
+    echo "Lines added (+): $total_added_lines"
+    echo "Lines deleted (-): $total_deleted_lines"
     echo "Untracked files: $untracked_count"
     if [ ${#paths[@]} -gt 0 ]; then
         echo "Filtered paths: ${paths[*]}"
@@ -289,6 +305,8 @@ if [ -f "$output_file" ]; then
     echo
     echo "=== Diff Report Generated ==="
     echo "Output file: $output_file"
+    echo "Lines added (+): ${total_added_lines}"
+    echo "Lines deleted (-): ${total_deleted_lines}"
     echo "Total size: ${final_size} bytes"
     echo "Total lines: ${final_lines}"
     echo "Total words: ${final_words}"

@@ -11,6 +11,7 @@ use p3_field::PrimeCharacteristicRing;
 // Common types and utility functions shared across engines
 mod common;
 mod sparse;
+mod terminal_identities;
 
 pub mod oracle;
 pub mod prove;
@@ -32,7 +33,7 @@ pub use common::{
 
     chi_row_at_bool_point,
     // Public claimed sum for sumcheck
-    claimed_initial_sum_from_inputs,
+    claimed_initial_sum_from_inputs_with_k_mcs,
 
     dec_reduction_paper_exact,
     dec_reduction_paper_exact_with_commit_check,
@@ -53,6 +54,9 @@ pub use common::{
     rlc_reduction_paper_exact,
     rlc_reduction_paper_exact_with_commit_mix,
     sum_q_over_hypercube_paper_exact,
+};
+pub use terminal_identities::{
+    rhs_terminal_identity_fe, rhs_terminal_identity_fe_with_k_mcs, rhs_terminal_identity_nc,
 };
 
 /// Proof structure for the Π_CCS protocol
@@ -121,9 +125,9 @@ impl PiCcsProof {
     }
 }
 
-// Re-export the paper-exact prove/verify functions as the main interface
+// Re-export optimized prove/verify entrypoints as the main interface
 pub use prove::optimized_prove as pi_ccs_prove;
-pub use verify::paper_exact_verify as pi_ccs_verify;
+pub use verify::optimized_verify as pi_ccs_verify;
 
 /// Wrapper for simple case (k=1, no ME inputs)
 pub use prove::optimized_prove_simple as pi_ccs_prove_simple;

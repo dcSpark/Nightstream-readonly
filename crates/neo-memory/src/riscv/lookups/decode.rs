@@ -1,4 +1,5 @@
 use super::isa::{BranchCondition, RiscvInstruction, RiscvMemOp, RiscvOpcode};
+use super::{POSEIDON2_ABSORB_FUNCT7, POSEIDON2_CUSTOM_OPCODE, POSEIDON2_FINALIZE_FUNCT7, POSEIDON2_SQUEEZE_FUNCT7};
 
 /// RISC-V instruction format types.
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -181,6 +182,67 @@ pub fn decode_instruction(instr: u32) -> Result<RiscvInstruction, String> {
             Ok(RiscvInstruction::Auipc { rd, imm })
         }
 
+        // CUSTOM-0 (0001011) - Poseidon2 precompile instruction family
+        POSEIDON2_CUSTOM_OPCODE => {
+            if !cfg!(feature = "poseidon-precompile") {
+                return Err("Unsupported CUSTOM-0 instruction: poseidon-precompile feature is disabled".into());
+            }
+            match funct7 {
+                // P2_ABSORB_ELEM: funct7=0x00, funct3=0, rd=x0
+                POSEIDON2_ABSORB_FUNCT7 => {
+                    if funct3 != 0 {
+                        return Err(format!(
+                            "Invalid P2_ABSORB_ELEM encoding: funct3 must be 0 (got {:#x}, instr={:#x})",
+                            funct3, instr
+                        ));
+                    }
+                    if rd != 0 {
+                        return Err(format!(
+                            "Invalid P2_ABSORB_ELEM encoding: rd must be x0 (got x{}, instr={:#x})",
+                            rd, instr
+                        ));
+                    }
+                    Ok(RiscvInstruction::Poseidon2AbsorbElem { rs1, rs2 })
+                }
+                // P2_FINALIZE: funct7=0x01, funct3=0, rd=x0
+                POSEIDON2_FINALIZE_FUNCT7 => {
+                    if funct3 != 0 {
+                        return Err(format!(
+                            "Invalid P2_FINALIZE encoding: funct3 must be 0 (got {:#x}, instr={:#x})",
+                            funct3, instr
+                        ));
+                    }
+                    if rd != 0 {
+                        return Err(format!(
+                            "Invalid P2_FINALIZE encoding: rd must be x0 (got x{}, instr={:#x})",
+                            rd, instr
+                        ));
+                    }
+                    if rs1 != 0 || rs2 != 0 {
+                        return Err(format!(
+                            "Invalid P2_FINALIZE encoding: rs1/rs2 must be x0 (got rs1=x{}, rs2=x{}, instr={:#x})",
+                            rs1, rs2, instr
+                        ));
+                    }
+                    Ok(RiscvInstruction::Poseidon2Finalize)
+                }
+                // P2_SQUEEZE_WORD: funct7=0x02, funct3=idx[2:0], rd=destination
+                POSEIDON2_SQUEEZE_FUNCT7 => {
+                    if rs1 != 0 || rs2 != 0 {
+                        return Err(format!(
+                            "Invalid P2_SQUEEZE_WORD encoding: rs1/rs2 must be x0 (got rs1=x{}, rs2=x{}, instr={:#x})",
+                            rs1, rs2, instr
+                        ));
+                    }
+                    Ok(RiscvInstruction::Poseidon2SqueezeWord { rd, idx: funct3 as u8 })
+                }
+                _ => Err(format!(
+                    "Unsupported CUSTOM-0 instruction: funct7={:#x}, funct3={:#x}, instr={:#x}",
+                    funct7, funct3, instr
+                )),
+            }
+        }
+
         // SYSTEM (1110011) - ECALL (trap/terminate in this VM)
         0b1110011 => {
             if instr == 0x0000_0073 {
@@ -190,15 +252,29 @@ pub fn decode_instruction(instr: u32) -> Result<RiscvInstruction, String> {
             }
         }
 
-        // MISC-MEM (0001111) - FENCE (FENCE.I unsupported)
-        0b0001111 => {
-            if funct3 != 0b000 {
-                return Err(format!("Unsupported MISC-MEM instruction: funct3={:#x}", funct3));
+        // MISC-MEM (0001111) - FENCE / FENCE.I
+        0b0001111 => match funct3 {
+            // FENCE: rd/rs1 are reserved and must be x0.
+            0b000 => {
+                if rd != 0 || rs1 != 0 {
+                    return Err(format!(
+                        "Invalid FENCE encoding: rd/rs1 must be x0 (rd={}, rs1={}, instr={:#x})",
+                        rd, rs1, instr
+                    ));
+                }
+                let pred = ((instr >> 24) & 0xF) as u8;
+                let succ = ((instr >> 20) & 0xF) as u8;
+                Ok(RiscvInstruction::Fence { pred, succ })
             }
-            let pred = ((instr >> 24) & 0xF) as u8;
-            let succ = ((instr >> 20) & 0xF) as u8;
-            Ok(RiscvInstruction::Fence { pred, succ })
-        }
+            // FENCE.I: imm[11:0], rd and rs1 are reserved and must be zero.
+            0b001 => {
+                if rd != 0 || rs1 != 0 || (instr >> 20) != 0 {
+                    return Err(format!("Invalid FENCE.I encoding: instr={:#x}", instr));
+                }
+                Ok(RiscvInstruction::FenceI)
+            }
+            _ => Err(format!("Unsupported MISC-MEM instruction: funct3={:#x}", funct3)),
+        },
 
         // OP-32 (0111011) - RV64 W-suffix R-type operations
         0b0111011 => {

@@ -129,8 +129,9 @@ fn load_test_export() -> TestExport {
 }
 
 fn setup_ajtai_for_dims(m: usize) {
+    let m_commit = m.div_ceil(D);
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-    let pp = ajtai_setup(&mut rng, D, 4, m).expect("Ajtai setup should succeed");
+    let pp = ajtai_setup(&mut rng, D, 4, m_commit).expect("Ajtai setup should succeed");
     let _ = set_global_pp(pp);
 }
 
@@ -187,7 +188,7 @@ fn test_starstream_tx_valid_crosscheck() {
 
     // Ajtai commitment is over Z ∈ F^{D×m}, so set it up for m_padded (after slack variable padding)
     setup_ajtai_for_dims(m_padded);
-    let l = AjtaiSModule::from_global_for_dims(D, m_padded).expect("AjtaiSModule init");
+    let l = AjtaiSModule::from_global_for_dims(D, m_padded.div_ceil(D)).expect("AjtaiSModule init");
 
     let step_spec = StepSpec {
         y_len: export.ivc_params.step_spec.y_len,
@@ -227,10 +228,9 @@ fn test_starstream_tx_valid_crosscheck() {
         .fold_and_prove(step_ccs.as_ref())
         .expect("fold_and_prove should produce a FoldRun");
 
-    assert_eq!(
-        run.steps.len(),
-        export.steps.len(),
-        "should have correct number of steps"
+    assert!(
+        !run.steps.is_empty() && run.steps.len() <= export.steps.len(),
+        "batched proof step count must be in [1, public_steps]"
     );
 
     let mcss_public = session.mcss_public();

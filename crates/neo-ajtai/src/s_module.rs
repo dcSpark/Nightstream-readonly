@@ -364,6 +364,45 @@ impl SModuleHomomorphism<Fq, Commitment> for AjtaiSModule {
         }
     }
 
+    fn commit_many(&self, zs: &[&Mat<Fq>]) -> Vec<Commitment> {
+        if zs.is_empty() {
+            return Vec::new();
+        }
+        match &self.pp {
+            PpSource::Owned(pp) => zs
+                .iter()
+                .map(|z| ajtai_commit::commit_row_major(pp, z))
+                .collect(),
+            PpSource::Global { d, m } => {
+                let want_d = *d;
+                let want_m = *m;
+                for (idx, z) in zs.iter().enumerate() {
+                    assert_eq!(z.rows(), want_d, "AjtaiSModule: Zs[{idx}].rows != d");
+                    assert_eq!(z.cols(), want_m, "AjtaiSModule: Zs[{idx}].cols != m");
+                }
+
+                if let Ok(r) = registry().read() {
+                    if let Some(entry) = r.get(&(want_d, want_m)) {
+                        if let Some(pp) = entry.pp.as_ref() {
+                            return zs
+                                .iter()
+                                .map(|z| ajtai_commit::commit_row_major(pp, z))
+                                .collect();
+                        }
+                        if let Some(seed) = entry.seed {
+                            return ajtai_commit::commit_row_major_seeded_many(seed, want_d, entry.kappa, want_m, zs);
+                        }
+                    }
+                }
+
+                let pp = get_or_load_global_pp_for_dims(want_d, want_m).expect("Ajtai PP load should succeed");
+                zs.iter()
+                    .map(|z| ajtai_commit::commit_row_major(&pp, z))
+                    .collect()
+            }
+        }
+    }
+
     fn project_x(&self, z: &Mat<Fq>, min: usize) -> Mat<Fq> {
         let rows = z.rows();
         let cols = min.min(z.cols());

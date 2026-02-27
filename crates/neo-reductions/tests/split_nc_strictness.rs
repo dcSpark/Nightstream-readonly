@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use neo_ajtai::{setup as ajtai_setup, AjtaiSModule};
 use neo_ccs::traits::SModuleHomomorphism;
-use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, SparsePoly};
+use neo_ccs::{CcsClaim, CcsStructure, CcsWitness, Mat, SparsePoly};
 use neo_math::{D, F, K};
 use neo_params::NeoParams;
 use neo_reductions::api::FoldingMode;
@@ -32,22 +32,22 @@ fn build_fixture(
     NeoParams,
     CcsStructure<F>,
     AjtaiSModule,
-    McsInstance<neo_ajtai::Commitment, F>,
-    McsWitness<F>,
+    CcsClaim<neo_ajtai::Commitment, F>,
+    CcsWitness<F>,
     Poseidon2Transcript,
 ) {
     let params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("params");
     let s = CcsStructure::new(vec![identity_left(n, m)], zero_poly(1)).expect("ccs");
 
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(123);
-    let pp = ajtai_setup(&mut rng, D, params.kappa as usize, m).expect("ajtai setup");
+    let pp = ajtai_setup(&mut rng, D, params.kappa as usize, m / D).expect("ajtai setup");
     let l = AjtaiSModule::new(Arc::new(pp));
 
     // Z entries are all zero digits (in-range for any b>=2).
-    let z = Mat::from_row_major(D, m, vec![F::ZERO; D * m]);
+    let z = Mat::from_row_major(D, m / D, vec![F::ZERO; D * (m / D)]);
     let c = l.commit(&z);
-    let mcs_inst = McsInstance { c, x: vec![], m_in: 0 };
-    let mcs_wit = McsWitness {
+    let mcs_inst = CcsClaim { c, x: vec![], m_in: 0 };
+    let mcs_wit = CcsWitness {
         w: vec![F::ZERO; m],
         Z: z,
     };
@@ -58,7 +58,7 @@ fn build_fixture(
 
 #[test]
 fn split_nc_rejects_missing_y_zcol() {
-    let (params, s, l, mcs_inst, mcs_wit, mut tr_p) = build_fixture(b"test/split_nc/missing_y_zcol", 4, 8);
+    let (params, s, l, mcs_inst, mcs_wit, mut tr_p) = build_fixture(b"test/split_nc/missing_y_zcol", 4, D);
 
     let (mut out_me, proof) = neo_reductions::api::prove(
         FoldingMode::Optimized,
@@ -95,7 +95,7 @@ fn split_nc_rejects_missing_y_zcol() {
 
 #[test]
 fn split_nc_rejects_s_col_mismatch() {
-    let (params, s, l, mcs_inst, mcs_wit, mut tr_p) = build_fixture(b"test/split_nc/s_col_mismatch", 4, 8);
+    let (params, s, l, mcs_inst, mcs_wit, mut tr_p) = build_fixture(b"test/split_nc/s_col_mismatch", 4, D);
 
     let (mut out_me, proof) = neo_reductions::api::prove(
         FoldingMode::Optimized,
@@ -130,7 +130,7 @@ fn split_nc_rejects_s_col_mismatch() {
 
 #[test]
 fn split_nc_rejects_missing_nc_sumcheck_rounds() {
-    let (params, s, l, mcs_inst, mcs_wit, mut tr_p) = build_fixture(b"test/split_nc/missing_nc_rounds", 4, 8);
+    let (params, s, l, mcs_inst, mcs_wit, mut tr_p) = build_fixture(b"test/split_nc/missing_nc_rounds", 4, D);
 
     let (out_me, mut proof) = neo_reductions::api::prove(
         FoldingMode::Optimized,
@@ -164,7 +164,7 @@ fn split_nc_rejects_missing_nc_sumcheck_rounds() {
 
 #[test]
 fn split_nc_uses_ell_m_for_s_col_when_rectangular() {
-    let (params, s, l, mcs_inst, mcs_wit, mut tr_p) = build_fixture(b"test/split_nc/ell_m", 4, 8);
+    let (params, s, l, mcs_inst, mcs_wit, mut tr_p) = build_fixture(b"test/split_nc/ell_m", 4, D);
     let dims = neo_reductions::engines::utils::build_dims_and_policy(&params, &s).expect("dims");
     assert_ne!(dims.ell_n, dims.ell_m, "test requires ell_n != ell_m");
 
@@ -225,7 +225,7 @@ fn split_nc_tampered_y_zcol_is_rejected() {
     ];
 
     for &label in LABELS.iter() {
-        let (params, s, l, mcs_inst, mcs_wit, mut tr_p) = build_fixture(label, 4, 8);
+        let (params, s, l, mcs_inst, mcs_wit, mut tr_p) = build_fixture(label, 4, D);
         let (mut out_me, proof) = neo_reductions::api::prove(
             FoldingMode::Optimized,
             &mut tr_p,

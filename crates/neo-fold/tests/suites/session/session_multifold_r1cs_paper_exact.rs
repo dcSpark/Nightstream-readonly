@@ -6,13 +6,15 @@ use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::session::{me_from_z_balanced, Accumulator, FoldingSession};
 use neo_fold::shard::StepLinkingConfig;
 use neo_math::{D, F, K};
+use neo_memory::ajtai::commit_cols_for_ccs_m;
 use neo_params::NeoParams;
 use p3_field::PrimeCharacteristicRing;
 use rand_chacha::rand_core::SeedableRng;
 
 fn setup_ajtai_for_dims(m: usize) {
+    let m_commit = commit_cols_for_ccs_m(m);
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-    let pp = ajtai_setup(&mut rng, D, 4, m).expect("Ajtai setup should succeed");
+    let pp = ajtai_setup(&mut rng, D, 4, m_commit).expect("Ajtai setup should succeed");
     set_global_pp(pp).expect("set_global_pp");
 }
 
@@ -28,7 +30,7 @@ fn test_session_multifold_k3_three_steps_r1cs_paper_exact() {
     let params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("goldilocks_auto_r1cs_ccs should find valid params");
 
     setup_ajtai_for_dims(n);
-    let l = AjtaiSModule::from_global_for_dims(D, n).expect("AjtaiSModule init");
+    let l = AjtaiSModule::from_global_for_dims(D, commit_cols_for_ccs_m(n)).expect("AjtaiSModule init");
 
     let dims = neo_reductions::engines::utils::build_dims_and_policy(&params, &ccs).expect("dims");
     let ell_n = dims.ell_n;
@@ -74,8 +76,12 @@ fn test_session_multifold_k3_three_steps_r1cs_paper_exact() {
         .fold_and_prove(&ccs)
         .expect("fold_and_prove should produce a FoldRun");
 
-    // Test has k=3 fold fan-in, but params.k_rho=12 (DEC produces 12 children, not 3)
-    assert_eq!(run.steps.len(), 3, "should have three fold steps");
+    // PaperExact path keeps CCS-only proving unbatched for deterministic reference behavior.
+    assert_eq!(
+        run.steps.len(),
+        3,
+        "paper-exact ccs-only flow should keep one proof step per public step"
+    );
     for (i, step) in run.steps.iter().enumerate() {
         assert_eq!(
             step.fold.dec_children.len(),

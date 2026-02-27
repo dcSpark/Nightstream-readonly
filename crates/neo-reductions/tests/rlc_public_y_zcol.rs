@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 
 use neo_ajtai::Commitment;
-use neo_ccs::{CcsStructure, Mat, MeInstance};
+use neo_ccs::{CcsStructure, CeClaim, Mat};
 use neo_math::{D, F, K};
 use neo_params::NeoParams;
 use p3_field::PrimeCharacteristicRing;
@@ -12,8 +12,8 @@ fn rlc_public_mixes_y_zcol_when_present() {
     let ell_d = D.next_power_of_two().trailing_zeros() as usize;
     let d_pad = 1usize << ell_d;
 
-    // Minimal CCS structure: only `t` matters for Π_RLC public mixing.
-    let s = CcsStructure::new(vec![Mat::identity(1)], neo_ccs::poly::SparsePoly::new(1, vec![])).unwrap();
+    // Minimal SuperNeo-compatible CCS structure: only `t` matters for Π_RLC public mixing.
+    let s = CcsStructure::new(vec![Mat::identity(D)], neo_ccs::poly::SparsePoly::new(1, vec![])).unwrap();
 
     let m_in = 1usize;
     let r = vec![K::from(F::from_u64(3)), K::from(F::from_u64(5))];
@@ -29,21 +29,25 @@ fn rlc_public_mixes_y_zcol_when_present() {
     y0[0][0] = K::from(F::from_u64(17));
     y1[0][0] = K::from(F::from_u64(19));
 
-    let y_scalars0 = vec![K::ZERO];
-    let y_scalars1 = vec![K::ZERO];
+    let y_scalars0 = vec![y0[0][0]];
+    let y_scalars1 = vec![y1[0][0]];
 
     let mut y_zcol0 = vec![K::ZERO; d_pad];
     let mut y_zcol1 = vec![K::ZERO; d_pad];
     y_zcol0[0] = K::from(F::from_u64(23));
     y_zcol1[0] = K::from(F::from_u64(29));
 
-    let inst0 = MeInstance::<Commitment, F, K> {
+    let aux0 = vec![K::from(F::from_u64(31)), K::from(F::from_u64(37))];
+    let aux1 = vec![K::from(F::from_u64(41)), K::from(F::from_u64(43))];
+
+    let inst0 = CeClaim::<Commitment, F, K> {
         c: Commitment::zeros(params.d as usize, 1),
         X: X0,
         r: r.clone(),
         s_col: s_col.clone(),
-        y: y0,
-        y_scalars: y_scalars0,
+        y_ring: y0,
+        ct: y_scalars0,
+        aux_openings: aux0.clone(),
         y_zcol: y_zcol0.clone(),
         m_in,
         fold_digest: [0u8; 32],
@@ -51,13 +55,14 @@ fn rlc_public_mixes_y_zcol_when_present() {
         u_offset: 0,
         u_len: 0,
     };
-    let inst1 = MeInstance::<Commitment, F, K> {
+    let inst1 = CeClaim::<Commitment, F, K> {
         c: Commitment::zeros(params.d as usize, 1),
         X: X1,
         r,
         s_col,
-        y: y1,
-        y_scalars: y_scalars1,
+        y_ring: y1,
+        ct: y_scalars1,
+        aux_openings: aux1.clone(),
         y_zcol: y_zcol1.clone(),
         m_in,
         fold_digest: [0u8; 32],
@@ -73,11 +78,13 @@ fn rlc_public_mixes_y_zcol_when_present() {
         rho1.set(i, i, F::from_u64(2));
     }
     let rhos = vec![rho0, rho1];
+    let rhos_typed =
+        neo_reductions::api::rot_rhos_from_mats(&params, &rhos, "rlc_public_y_zcol:test rhos").expect("typed rhos");
 
     let out = neo_reductions::api::rlc_public(
         &s,
         &params,
-        &rhos,
+        &rhos_typed,
         &[inst0, inst1],
         |_rhos, _cs| Commitment::zeros(params.d as usize, 1),
         ell_d,
@@ -90,5 +97,12 @@ fn rlc_public_mixes_y_zcol_when_present() {
         expected[rho] = y_zcol0[rho] + K::from(F::from_u64(2)) * y_zcol1[rho];
     }
     assert_eq!(out.y_zcol, expected);
+    assert_eq!(
+        out.aux_openings,
+        vec![
+            aux0[0] + K::from(F::from_u64(2)) * aux1[0],
+            aux0[1] + K::from(F::from_u64(2)) * aux1[1]
+        ]
+    );
     assert_eq!(out.s_col.len(), 1);
 }

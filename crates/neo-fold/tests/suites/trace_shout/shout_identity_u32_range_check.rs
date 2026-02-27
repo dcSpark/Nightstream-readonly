@@ -13,7 +13,7 @@ use std::marker::PhantomData;
 
 use neo_ajtai::{AjtaiSModule, Commitment as Cmt};
 use neo_ccs::poly::SparsePoly;
-use neo_ccs::relations::{CcsStructure, McsInstance, McsWitness};
+use neo_ccs::relations::{CcsClaim, CcsStructure, CcsWitness};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_ccs::Mat;
 use neo_fold::pi_ccs::FoldingMode;
@@ -38,13 +38,13 @@ fn create_mcs_from_z(
     l: &impl SModuleHomomorphism<F, Cmt>,
     m_in: usize,
     z: Vec<F>,
-) -> (McsInstance<Cmt, F>, McsWitness<F>) {
+) -> (CcsClaim<Cmt, F>, CcsWitness<F>) {
     let x = z[..m_in].to_vec();
     let w = z[m_in..].to_vec();
     let z_mat = neo_memory::ajtai::encode_vector_balanced_to_mat(params, &z);
     let c = l.commit(&z_mat);
 
-    (McsInstance { c, x, m_in }, McsWitness { w, Z: z_mat })
+    (CcsClaim { c, x, m_in }, CcsWitness { w, Z: z_mat })
 }
 
 /// Write one Shout lane row into the shared CPU bus tail at `bus_base`.
@@ -122,12 +122,13 @@ fn route_a_shout_identity_u32_range_check_two_lanes_same_value_verifies() {
     }
 
     let (mcs, mcs_wit) = create_mcs_from_z(&params, session.committer(), M_IN, z);
-    let step_bundle = StepWitnessBundle {
+    let step_bundle = crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
         mcs: (mcs, mcs_wit),
         lut_instances: vec![(inst, wit)],
         mem_instances: vec![],
+        time_columns: crate::common_setup::empty_time_columns(),
         _phantom: PhantomData::<K>,
-    };
+    });
 
     session.add_step_bundle(step_bundle);
     let _run = session
@@ -169,12 +170,13 @@ fn route_a_shout_identity_u32_range_check_rejects_wrong_val() {
     write_shout_lane_row(&mut z, bus_base, 1, 0, &inst, x, F::from_u64(bad), F::ONE);
 
     let (mcs, mcs_wit) = create_mcs_from_z(&params, session.committer(), M_IN, z);
-    let step_bundle = StepWitnessBundle {
+    let step_bundle = crate::common_setup::canonicalize_step_time_columns(StepWitnessBundle {
         mcs: (mcs, mcs_wit),
         lut_instances: vec![(inst, wit)],
         mem_instances: vec![],
+        time_columns: crate::common_setup::empty_time_columns(),
         _phantom: PhantomData::<K>,
-    };
+    });
 
     session.add_step_bundle(step_bundle);
     let _ = session

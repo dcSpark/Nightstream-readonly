@@ -3,10 +3,11 @@
 
 use neo_ajtai::{commit as ajtai_commit, setup as ajtai_setup, PP};
 use neo_ccs::{
-    poly::SparsePoly, poly::Term, relations::check_me_consistency, traits::SModuleHomomorphism, CcsStructure, Mat,
-    MeInstance, MeWitness,
+    poly::SparsePoly, poly::Term, relations::check_ce_consistency, traits::SModuleHomomorphism, CcsStructure, CeClaim,
+    CeWitness, Mat,
 };
 use neo_math::ring::D;
+use neo_params::NeoParams;
 use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as Fq;
 use rand::SeedableRng;
@@ -42,27 +43,15 @@ impl SModuleHomomorphism<Fq, neo_ajtai::Commitment> for AjtaiL {
 
 #[test]
 fn me_consistency_rejects_tamper() {
-    // CCS: n=4 (power of two), m=3, t=1, f(y)=y0 (linear)
+    let params = NeoParams::goldilocks_127();
+
+    // CCS: n=4 (power of two), SuperNeo-compatible m=D, t=1, f(y)=y0 (linear)
     let n = 4usize;
-    let m = 3usize;
-    let m0 = Mat::from_row_major(
-        n,
-        m,
-        vec![
-            Fq::ONE,
-            Fq::ZERO,
-            Fq::ZERO,
-            Fq::ZERO,
-            Fq::ONE,
-            Fq::ZERO,
-            Fq::ZERO,
-            Fq::ZERO,
-            Fq::ONE,
-            Fq::ONE,
-            Fq::ONE,
-            Fq::ONE,
-        ],
-    );
+    let m = D;
+    let mut m0 = Mat::zero(n, m, Fq::ZERO);
+    for i in 0..n {
+        m0[(i, i)] = Fq::ONE;
+    }
     let f = SparsePoly::new(
         1,
         vec![Term {
@@ -72,17 +61,15 @@ fn me_consistency_rejects_tamper() {
     );
     let s = CcsStructure::new(vec![m0.clone()], f).unwrap();
 
-    // Construct Z (d×m) with small entries
+    // Construct packed SuperNeo witness Z ∈ F^{D×(m/D)} = F^{D×1}.
     let d = D;
-    let mut Z = Mat::zero(d, m, Fq::ZERO);
-    for c in 0..m {
-        for r in 0..d {
-            Z[(r, c)] = Fq::from_u64(((r + c) % 5) as u64);
-        }
+    let mut Z = Mat::zero(d, m / D, Fq::ZERO);
+    for r in 0..d {
+        Z[(r, 0)] = Fq::from_u64(((r % 5) + 1) as u64);
     }
 
     // Ajtai map
-    let pp = ajtai_setup(&mut rand::rngs::StdRng::from_seed([11u8; 32]), d, 8, m);
+    let pp = ajtai_setup(&mut rand::rngs::StdRng::from_seed([11u8; 32]), d, 8, Z.cols());
     let L = AjtaiL {
         pp: pp.expect("Setup should succeed"),
     };
@@ -90,7 +77,9 @@ fn me_consistency_rejects_tamper() {
     // Instance: c, X (first m_in columns), r, y
     let m_in = 1usize;
     let c = L.commit(&Z);
-    let X = L.project_x(&Z, m_in);
+    // SuperNeo packed projection for the first field column: only row 0 contributes.
+    let mut X = Mat::zero(d, m_in, Fq::ZERO);
+    X[(0, 0)] = Z[(0, 0)];
 
     // Choose r ∈ K^ell with ell=log2(n)=2
     use neo_math::K;
@@ -110,10 +99,18 @@ fn me_consistency_rejects_tamper() {
         v
     };
 
-    // y = Z * v (in K^d)
-    let y0 = neo_ccs::utils::mat_vec_mul_fk::<Fq, K>(Z.as_slice(), d, m, &v_k);
+    // y = Z * v in packed SuperNeo layout for m=D:
+    // y[rho] = Z[rho,0] * v[rho].
+    let mut y0 = vec![K::ZERO; d];
+    for rho in 0..d {
+        y0[rho] = K::from(Z[(rho, 0)]) * v_k[rho];
+    }
+    // Pad y to Ajtai digit length (2^ell_d) expected by CE checks.
+    let mut y0_padded = y0.clone();
+    y0_padded.resize(D.next_power_of_two(), K::ZERO);
+    let ct0 = y0_padded[0];
 
-    let inst = MeInstance::<_, Fq, K> {
+    let inst = CeClaim::<_, Fq, K> {
         c_step_coords: vec![],
         u_offset: 0,
         u_len: 0,
@@ -121,43 +118,52 @@ fn me_consistency_rejects_tamper() {
         X: X.clone(),
         r: r.clone(),
         s_col: vec![],
-        y: vec![y0.clone()],
-        y_scalars: vec![K::ZERO],
+        y_ring: vec![y0_padded.clone()],
+        ct: vec![ct0],
+        aux_openings: vec![],
         y_zcol: vec![],
         m_in,
         fold_digest: [0u8; 32],
     };
-    let wit = MeWitness::<Fq> { Z: Z.clone() };
+    let wit = CeWitness::<Fq> { Z: Z.clone() };
 
     // Baseline must succeed
-    assert!(check_me_consistency(&s, &L, &inst, &wit).is_ok());
+    assert!(check_ce_consistency(&params, &s, &L, &inst, &wit).is_ok());
 
     // Tamper y → fail
     let mut inst_bad = inst.clone();
-    inst_bad.y[0][0] += K::ONE;
+    inst_bad.y_ring[0][0] += K::ONE;
     assert!(
-        check_me_consistency(&s, &L, &inst_bad, &wit).is_err(),
+        check_ce_consistency(&params, &s, &L, &inst_bad, &wit).is_err(),
         "tampered y must be rejected"
+    );
+
+    // Tamper ct (constant term) -> fail
+    let mut inst_bad_ct = inst.clone();
+    inst_bad_ct.ct[0] += K::ONE;
+    assert!(
+        check_ce_consistency(&params, &s, &L, &inst_bad_ct, &wit).is_err(),
+        "tampered ct must be rejected"
     );
 
     // Tamper X → fail
     let mut X_bad = X.clone();
     X_bad[(0, 0)] += Fq::ONE;
-    let inst_bad2 = MeInstance {
+    let inst_bad2 = CeClaim {
         X: X_bad,
         ..inst.clone()
     };
     assert!(
-        check_me_consistency(&s, &L, &inst_bad2, &wit).is_err(),
+        check_ce_consistency(&params, &s, &L, &inst_bad2, &wit).is_err(),
         "tampered X must be rejected"
     );
 
     // Tamper c → fail
     let mut c_bad = c.clone();
     c_bad.data[0] += Fq::ONE;
-    let inst_bad3 = MeInstance { c: c_bad, ..inst };
+    let inst_bad3 = CeClaim { c: c_bad, ..inst };
     assert!(
-        check_me_consistency(&s, &L, &inst_bad3, &wit).is_err(),
+        check_ce_consistency(&params, &s, &L, &inst_bad3, &wit).is_err(),
         "tampered Ajtai commitment must be rejected"
     );
 }

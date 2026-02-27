@@ -9,6 +9,14 @@ pub trait SModuleHomomorphism<F, C> {
     /// Commit to a `d × m` matrix `Z`.
     fn commit(&self, z: &Mat<F>) -> C;
 
+    /// Commit to many `d × m` matrices.
+    ///
+    /// Default implementation commits one-by-one. Backends can override to batch
+    /// work when many matrices share the same commitment parameters.
+    fn commit_many(&self, zs: &[&Mat<F>]) -> Vec<C> {
+        zs.iter().map(|z| self.commit(z)).collect()
+    }
+
     /// Project the first `min` columns of `Z`.
     fn project_x(&self, z: &Mat<F>, min: usize) -> Mat<F>;
 }

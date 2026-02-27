@@ -1,9 +1,9 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
-//! CCS frontend for Neo: structures, relations (MCS/ME), and row-wise checks.
+//! CCS frontend for Neo: structures, relations (CCS/CE), and row-wise checks.
 //!
 //! Implements the MUST and SHOULD in the Neo spec, matching the paper's §4.1 relations
-//! (MCS & ME), the row-wise CCS check, and the consistency equalities used by Π_CCS/Π_RLC/Π_DEC.
+//! (CCS & CE), the row-wise CCS check, and the consistency equalities used by Π_CCS/Π_RLC/Π_DEC.
 
 // Audit-ready core modules
 /// Production cryptographic primitives (Poseidon2 implementation).
@@ -40,8 +40,8 @@ pub use sparse::{CcsMatrix, CscMat, SparseCache};
 pub use utils::direct_sum_transcript_mixed;
 // Main CCS types and functions (audit-ready)
 pub use relations::{
-    check_ccs_rowwise_relaxed, check_ccs_rowwise_zero, check_mcs_opening, check_me_consistency, CcsStructure,
-    McsInstance, McsWitness, MeInstance, MeWitness,
+    check_ccs_claim_opening, check_ccs_rowwise_relaxed, check_ccs_rowwise_zero, check_ce_consistency, CcsClaim,
+    CcsStructure, CcsWitness, CeClaim, CeWitness,
 };
 pub use traits::SModuleHomomorphism;
 pub use utils::{direct_sum, direct_sum_mixed, mat_vec_mul_ff, mat_vec_mul_fk, tensor_point, validate_power_of_two};

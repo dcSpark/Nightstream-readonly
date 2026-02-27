@@ -1,8 +1,7 @@
-//! Paper-exact prove implementation for PiCcsEngine.
+//! Optimized prove implementation for PiCcsEngine.
 //!
-//! This module contains the prove logic for the paper-exact engine,
-//! which runs the sumcheck protocol using the paper-exact oracle
-//! to evaluate true per-round polynomials.
+//! This module contains the prove logic for the optimized engine, using
+//! sparse/oracle optimizations while preserving paper-equivalent semantics.
 
 #![allow(non_snake_case)]
 
@@ -10,7 +9,7 @@ use crate::error::PiCcsError;
 use crate::optimized_engine::{PiCcsProof, PiCcsProofVariant};
 use crate::sumcheck::RoundOracle;
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
+use neo_ccs::{CcsClaim, CcsStructure, CcsWitness, CeClaim, Mat};
 use neo_math::KExtensions;
 use neo_math::{F, K};
 use neo_params::NeoParams;
@@ -21,21 +20,35 @@ use std::sync::Arc;
 
 use crate::engines::utils;
 
-/// Paper-exact prove implementation.
-///
-/// This function runs the sumcheck protocol using the paper-exact oracle,
-/// which directly evaluates the polynomial Q over the Boolean hypercube
-/// without optimizations.
+/// Optimized prove implementation.
 pub fn optimized_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
     s: &CcsStructure<F>,
-    mcs_list: &[McsInstance<Cmt, F>],
-    mcs_witnesses: &[McsWitness<F>],
-    me_inputs: &[MeInstance<Cmt, F, K>],
+    mcs_list: &[CcsClaim<Cmt, F>],
+    mcs_witnesses: &[CcsWitness<F>],
+    me_inputs: &[CeClaim<Cmt, F, K>],
     me_witnesses: &[Mat<F>],
     log: &L,
-) -> Result<(Vec<MeInstance<Cmt, F, K>>, PiCcsProof), PiCcsError> {
+) -> Result<(Vec<CeClaim<Cmt, F, K>>, PiCcsProof), PiCcsError> {
+    if mcs_list.is_empty() {
+        return Err(PiCcsError::InvalidInput("optimized_prove: empty mcs_list".into()));
+    }
+    if mcs_list.len() != mcs_witnesses.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "optimized_prove: |mcs_list| mismatch (expected {}, got {})",
+            mcs_list.len(),
+            mcs_witnesses.len()
+        )));
+    }
+    if me_inputs.len() != me_witnesses.len() {
+        return Err(PiCcsError::InvalidInput(format!(
+            "optimized_prove: |me_inputs| mismatch (expected {}, got {})",
+            me_inputs.len(),
+            me_witnesses.len()
+        )));
+    }
+
     // Dims + transcript binding
     let dims = utils::build_dims_and_policy(params, s)?;
     utils::bind_header_and_instances(tr, params, s, mcs_list, dims)?;
@@ -45,26 +58,16 @@ pub fn optimized_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     let mut ch = utils::sample_challenges(tr, dims.ell_d, dims.ell)?;
     ch.beta_m = utils::sample_beta_m(tr, dims.ell_m)?;
 
-    // Validate ME input r (if provided)
-    for (idx, me) in me_inputs.iter().enumerate() {
-        if me.r.len() != dims.ell_n {
-            return Err(PiCcsError::InvalidInput(format!(
-                "ME input r length mismatch at accumulator #{}: expected ell_n = {}, got {}",
-                idx,
-                dims.ell_n,
-                me.r.len()
-            )));
-        }
-    }
+    let r_inputs = utils::shared_me_input_r(me_inputs, dims.ell_n)?;
 
     // Initial sum: use the public T computed from ME inputs and α
     // (not the full hypercube sum Q, which includes MCS/NC terms).
     // This ensures invalid witnesses fail the first sumcheck invariant.
-    let initial_sum = crate::paper_exact_engine::claimed_initial_sum_from_inputs(s, &ch, me_inputs);
+    let initial_sum = super::claimed_initial_sum_from_inputs_with_k_mcs(s, &ch, mcs_witnesses.len(), me_inputs);
 
     #[cfg(feature = "debug-logs")]
     {
-        eprintln!("\n========== PAPER-EXACT PROVE ==========");
+        eprintln!("\n========== OPTIMIZED PROVE ==========");
         eprintln!(
             "[prove] k_total = {} (mcs_witnesses={}, me_witnesses={}, me_inputs={})",
             mcs_witnesses.len() + me_witnesses.len(),
@@ -80,7 +83,7 @@ pub fn optimized_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         eprintln!("[prove] initial_sum (public T) = {:?}", initial_sum);
 
         // For debugging: compute the full hypercube sum to compare
-        let full_sum = crate::paper_exact_engine::sum_q_over_hypercube_paper_exact(
+        let full_sum = super::sum_q_over_hypercube_paper_exact(
             s,
             params,
             mcs_witnesses,
@@ -88,7 +91,7 @@ pub fn optimized_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
             &ch,
             dims.ell_d,
             dims.ell_n,
-            me_inputs.first().map(|mi| mi.r.as_slice()),
+            r_inputs,
         );
         let diff = full_sum - initial_sum;
         eprintln!("[prove] full Q sum = {:?}", full_sum);
@@ -116,12 +119,12 @@ pub fn optimized_prove<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
         dims.ell_d,
         dims.ell_n,
         dims.d_sc,
-        me_inputs.first().map(|mi| mi.r.as_slice()),
+        r_inputs,
         sparse,
     );
 
     // ---------------------------------------------------------------------
-    // FE sumcheck (legacy/full in Phase 1; FE-only in Phase 2)
+    // FE sumcheck channel (SplitNcV1).
     // ---------------------------------------------------------------------
     tr.append_message(b"sumcheck/fe", b"");
     tr.append_fields(b"sumcheck/initial_sum", &initial_sum.as_coeffs());
@@ -260,9 +263,9 @@ pub fn optimized_prove_simple<L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>>(
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
     s: &CcsStructure<F>,
-    mcs_list: &[McsInstance<Cmt, F>],
-    mcs_witnesses: &[McsWitness<F>],
+    mcs_list: &[CcsClaim<Cmt, F>],
+    mcs_witnesses: &[CcsWitness<F>],
     log: &L,
-) -> Result<(Vec<MeInstance<Cmt, F, K>>, PiCcsProof), PiCcsError> {
+) -> Result<(Vec<CeClaim<Cmt, F, K>>, PiCcsProof), PiCcsError> {
     optimized_prove(tr, params, s, mcs_list, mcs_witnesses, &[], &[], log)
 }

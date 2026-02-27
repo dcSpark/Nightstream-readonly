@@ -38,7 +38,7 @@ fn tamper_any_claim_scalar(proof: &mut ShardProof) {
             &mut step.mem.wp_me_claims,
         ] {
             for claim in claims.iter_mut() {
-                if let Some(first) = claim.y_scalars.first_mut() {
+                if let Some(first) = claim.ct.first_mut() {
                     *first += K::ONE;
                     return;
                 }

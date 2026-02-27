@@ -105,6 +105,8 @@ impl VmCpu<u64, u64> for FibTwistShoutVm {
         Ok(StepMeta {
             pc_after: self.pc,
             opcode: 0xF1B0, // arbitrary "FIB" opcode for trace readability
+            is_virtual: false,
+            virtual_sequence_remaining: None,
         })
     }
 }

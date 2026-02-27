@@ -289,8 +289,15 @@ fn shout_meta_for_bus(
                     .ok_or_else(|| "2*xlen overflow for RISC-V shout table".to_string())?;
                 Ok((d, 2usize))
             }
-            LutTableSpec::RiscvOpcodePacked { .. } => {
-                Err("RiscvOpcodePacked is not supported in shared-bus circuits".into())
+            LutTableSpec::RiscvOpcodePacked { opcode, xlen } => {
+                if *xlen != 32 {
+                    return Err(format!(
+                        "RiscvOpcodePacked requires xlen=32 in shared-bus circuits (got xlen={xlen})"
+                    ));
+                }
+                let d = neo_memory::riscv::packed::rv32_packed_d(*opcode)
+                    .map_err(|e| format!("invalid packed opcode spec: {e}"))?;
+                Ok((d, 2usize))
             }
             LutTableSpec::RiscvOpcodeEventTablePacked { .. } => {
                 Err("RiscvOpcodeEventTablePacked is not supported in shared-bus circuits".into())

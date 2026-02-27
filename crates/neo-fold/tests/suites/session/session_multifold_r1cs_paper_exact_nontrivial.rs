@@ -6,13 +6,15 @@ use neo_fold::pi_ccs::FoldingMode;
 use neo_fold::session::{me_from_z_balanced, Accumulator, FoldingSession};
 use neo_fold::shard::StepLinkingConfig;
 use neo_math::{D, F, K};
+use neo_memory::ajtai::commit_cols_for_ccs_m;
 use neo_params::NeoParams;
 use p3_field::PrimeCharacteristicRing;
 use rand_chacha::rand_core::SeedableRng;
 
 fn setup_ajtai_for_dims(m: usize) {
+    let m_commit = commit_cols_for_ccs_m(m);
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-    let pp = ajtai_setup(&mut rng, D, 4, m).expect("Ajtai setup should succeed");
+    let pp = ajtai_setup(&mut rng, D, 4, m_commit).expect("Ajtai setup should succeed");
     set_global_pp(pp).expect("set_global_pp");
 }
 
@@ -30,7 +32,6 @@ fn setup_ajtai_for_dims(m: usize) {
 ///   - x = [1,0,1], w = [1,0]
 ///   - x = [0,1,1], w = [1,1]
 #[test]
-#[cfg(feature = "paper-exact")]
 fn test_session_multifold_k3_three_steps_r1cs_paper_exact_nontrivial() {
     let n_constraints = 5usize;
     let n_vars = 5usize;
@@ -71,7 +72,7 @@ fn test_session_multifold_k3_three_steps_r1cs_paper_exact_nontrivial() {
         NeoParams::goldilocks_auto_r1cs_ccs(n_constraints).expect("goldilocks_auto_r1cs_ccs should find valid params");
 
     setup_ajtai_for_dims(n_vars);
-    let l = AjtaiSModule::from_global_for_dims(D, n_vars).expect("AjtaiSModule init");
+    let l = AjtaiSModule::from_global_for_dims(D, commit_cols_for_ccs_m(n_vars)).expect("AjtaiSModule init");
 
     let dims = neo_reductions::engines::utils::build_dims_and_policy(&params, &ccs).expect("dims");
     let ell_n = dims.ell_n;
@@ -93,7 +94,7 @@ fn test_session_multifold_k3_three_steps_r1cs_paper_exact_nontrivial() {
         witnesses: vec![Z1, Z2],
     };
 
-    let mut session = FoldingSession::new(FoldingMode::PaperExact, params, l.clone())
+    let mut session = FoldingSession::new(FoldingMode::Optimized, params, l.clone())
         .with_initial_accumulator(acc, &ccs)
         .expect("with_initial_accumulator");
 
@@ -122,7 +123,11 @@ fn test_session_multifold_k3_three_steps_r1cs_paper_exact_nontrivial() {
         .fold_and_prove(&ccs)
         .expect("fold_and_prove should produce a FoldRun");
 
-    assert_eq!(run.steps.len(), 3, "should have three fold steps");
+    assert_eq!(
+        run.steps.len(),
+        1,
+        "ccs-only auto batching should collapse three steps into one fold step"
+    );
 
     for (i, step) in run.steps.iter().enumerate() {
         assert_eq!(
@@ -149,5 +154,5 @@ fn test_session_multifold_k3_three_steps_r1cs_paper_exact_nontrivial() {
     let ok = session
         .verify(&ccs, &mcss_public, &run)
         .expect("verify should run");
-    assert!(ok, "paper-exact verification should pass");
+    assert!(ok, "optimized verification should pass");
 }

@@ -12,9 +12,9 @@ use crate::cpu::r1cs_adapter::SharedCpuBusConfig;
 use crate::plain::PlainMemLayout;
 use crate::riscv::lookups::{PROG_ID, RAM_ID, REG_ID};
 use crate::riscv::trace::{
-    rv32_decode_lookup_table_id_for_col, rv32_is_decode_lookup_table_id, rv32_is_width_lookup_table_id,
-    rv32_trace_lookup_addr_group_for_table_shape, rv32_trace_lookup_selector_group_for_table_id,
-    Rv32DecodeSidecarLayout,
+    rv32_decode_lookup_table_id_for_col, rv32_decode_lookup_val_slot_for_col, rv32_is_decode_lookup_table_id,
+    rv32_is_width_lookup_table_id, rv32_trace_lookup_addr_group_for_table_id,
+    rv32_trace_lookup_selector_group_for_table_id, Rv32DecodeSidecarLayout,
 };
 
 use super::constants::{
@@ -72,8 +72,14 @@ fn validate_trace_shout_table_id(table_id: u32) -> Result<(), String> {
 }
 
 #[inline]
-fn trace_lookup_addr_group_for_table_shape(table_id: u32, ell_addr: usize) -> Option<u32> {
-    rv32_trace_lookup_addr_group_for_table_shape(table_id, ell_addr)
+fn trace_lookup_addr_group_for_table_id(table_id: u32, ell_addr: usize) -> Option<u32> {
+    // Canonical opcode addr-sharing only applies to implicit interleaved keys (ell_addr = 64 in RV32).
+    // Packed opcode layouts use opcode-local widths and must not share this 64-bit group.
+    if table_id <= REMU_TABLE_ID && ell_addr != 2 * RV32_XLEN {
+        None
+    } else {
+        rv32_trace_lookup_addr_group_for_table_id(table_id)
+    }
 }
 
 #[inline]
@@ -97,14 +103,24 @@ fn derive_trace_shout_shapes(
     let mut shape_by_table_id = HashMap::<u32, TraceShoutShape>::new();
 
     for &table_id in shout_table_ids {
-        validate_trace_shout_table_id(table_id)?;
+        if let Err(err) = validate_trace_shout_table_id(table_id) {
+            // Allow caller-provided lookup families when an explicit extra spec defines geometry.
+            // In that case, defer shape creation to the extra_shout_specs pass below.
+            if extra_shout_specs
+                .iter()
+                .any(|spec| spec.table_id == table_id)
+            {
+                continue;
+            }
+            return Err(err);
+        }
         shape_by_table_id.insert(
             table_id,
             TraceShoutShape {
                 table_id,
                 ell_addr: 2 * RV32_XLEN,
                 n_vals: 1usize,
-                addr_group: trace_lookup_addr_group_for_table_shape(table_id, 2 * RV32_XLEN),
+                addr_group: trace_lookup_addr_group_for_table_id(table_id, 2 * RV32_XLEN),
                 selector_group: trace_lookup_selector_group_for_table_id(table_id),
             },
         );
@@ -136,7 +152,7 @@ fn derive_trace_shout_shapes(
                     spec.table_id, prev.n_vals, spec.n_vals
                 ));
             }
-            let inferred_group = trace_lookup_addr_group_for_table_shape(spec.table_id, spec.ell_addr);
+            let inferred_group = trace_lookup_addr_group_for_table_id(spec.table_id, spec.ell_addr);
             if prev.addr_group != inferred_group {
                 return Err(format!(
                     "RV32 trace shared bus: conflicting addr_group for table_id={} (base/spec mismatch: {:?} vs {:?})",
@@ -157,7 +173,7 @@ fn derive_trace_shout_shapes(
                     table_id: spec.table_id,
                     ell_addr: spec.ell_addr,
                     n_vals: spec.n_vals,
-                    addr_group: trace_lookup_addr_group_for_table_shape(spec.table_id, spec.ell_addr),
+                    addr_group: trace_lookup_addr_group_for_table_id(spec.table_id, spec.ell_addr),
                     selector_group: trace_lookup_selector_group_for_table_id(spec.table_id),
                 },
             );
@@ -231,7 +247,6 @@ fn trace_disabled_twist_binding(_layout: &Rv32TraceCcsLayout) -> TwistCpuBinding
 
 #[derive(Clone, Copy, Debug)]
 struct TraceDecodeSelectorCols {
-    rd_has_write: usize,
     ram_has_read: usize,
     ram_has_write: usize,
 }
@@ -281,10 +296,13 @@ fn trace_decode_selector_cols_from_bus(
     shout_shapes: &[TraceShoutShape],
 ) -> Result<TraceDecodeSelectorCols, String> {
     let decode_layout = Rv32DecodeSidecarLayout::new();
-    let rd_has_write_table_id = rv32_decode_lookup_table_id_for_col(decode_layout.rd_has_write);
     let ram_has_read_table_id = rv32_decode_lookup_table_id_for_col(decode_layout.ram_has_read);
     let ram_has_write_table_id = rv32_decode_lookup_table_id_for_col(decode_layout.ram_has_write);
-    let table_val_col = |table_id: u32| -> Result<usize, String> {
+    let ram_has_read_slot = rv32_decode_lookup_val_slot_for_col(decode_layout.ram_has_read)
+        .ok_or_else(|| "RV32 trace shared bus: missing decode value slot for ram_has_read".to_string())?;
+    let ram_has_write_slot = rv32_decode_lookup_val_slot_for_col(decode_layout.ram_has_write)
+        .ok_or_else(|| "RV32 trace shared bus: missing decode value slot for ram_has_write".to_string())?;
+    let table_val_col = |table_id: u32, val_slot: usize| -> Result<usize, String> {
         let shout_idx = shout_shapes
             .iter()
             .position(|shape| shape.table_id == table_id)
@@ -299,14 +317,19 @@ fn trace_decode_selector_cols_from_bus(
         let lane0 = inst_cols.lanes.first().ok_or_else(|| {
             format!("RV32 trace shared bus: expected one shout lane for decode lookup table_id={table_id}")
         })?;
+        let val_col = lane0.vals.get(val_slot).copied().ok_or_else(|| {
+            format!(
+                "RV32 trace shared bus: decode val_slot={val_slot} out of range for table_id={table_id} (n_vals={})",
+                lane0.vals.len()
+            )
+        })?;
         bus.bus_base
-            .checked_add(lane0.primary_val() * bus.chunk_size)
+            .checked_add(val_col * bus.chunk_size)
             .ok_or_else(|| "RV32 trace shared bus: decode selector column overflow".to_string())
     };
     Ok(TraceDecodeSelectorCols {
-        rd_has_write: table_val_col(rd_has_write_table_id)?,
-        ram_has_read: table_val_col(ram_has_read_table_id)?,
-        ram_has_write: table_val_col(ram_has_write_table_id)?,
+        ram_has_read: table_val_col(ram_has_read_table_id, ram_has_read_slot)?,
+        ram_has_write: table_val_col(ram_has_write_table_id, ram_has_write_slot)?,
     })
 }
 
@@ -340,7 +363,7 @@ fn trace_twist_primary_binding(
     } else if mem_id == REG_ID.0 {
         TwistCpuBinding {
             has_read: active,
-            has_write: decode_selectors.rd_has_write,
+            has_write: trace_cpu_col(layout, layout.trace.rd_has_write),
             read_addr: trace_cpu_col(layout, layout.trace.rs1_addr),
             write_addr: trace_cpu_col(layout, layout.trace.rd_addr),
             rv: trace_cpu_col(layout, layout.trace.rs1_val),
@@ -603,6 +626,7 @@ pub fn rv32_trace_shared_bus_extraction_with_specs(
     let mut shout_key_binding_added = HashSet::<(bool, usize, usize, usize, usize)>::new();
     for (i, shape) in shout_shapes.iter().enumerate() {
         let lane0 = &bus.shout_cols[i].lanes[0];
+        let is_packed_opcode_lane = shape.table_id <= REMU_TABLE_ID && shape.ell_addr != 2 * RV32_XLEN;
         if let Some(binding) = trace_shout_binding(layout, shape.table_id) {
             let mut dedup_binding = binding.clone();
             if let Some(addr_base) = dedup_binding.addr {
@@ -628,7 +652,15 @@ pub fn rv32_trace_shared_bus_extraction_with_specs(
         let key = (lane0.addr_bits.start, lane0.addr_bits.end);
         let shared_addr_group = addr_range_counts.get(&key).copied().unwrap_or(0) > 1;
         let selector_first = selector_bitness_added.insert(lane0.has_lookup);
-        if shared_addr_group {
+        if is_packed_opcode_lane {
+            // Packed opcode lanes carry mixed field elements in addr_bits; addr-bit booleanity does not apply.
+            if selector_first {
+                builder.add_shout_instance_padding_value_only(&bus, lane0);
+            } else {
+                builder.add_shout_instance_value_padding_only(&bus, lane0);
+            }
+            builder.add_shout_instance_addr_padding_only(&bus, lane0);
+        } else if shared_addr_group {
             if selector_first {
                 builder.add_shout_instance_padding_value_only(&bus, lane0);
             } else {
@@ -651,8 +683,26 @@ pub fn rv32_trace_shared_bus_extraction_with_specs(
         }
 
         if mem_id == REG_ID.0 {
+            let is_virtual_col_base = trace_cpu_col(layout, layout.trace.is_virtual);
             let lane0 = trace_twist_primary_binding(layout, mem_id, decode_selectors);
             builder.add_twist_instance_bound(&bus, &inst.lanes[0], &lane0);
+            // Cryptographic read-domain split (lane0/rs1):
+            // - non-virtual rows may read only architectural regs (<32)
+            builder.add_twist_read_addr_domain_split_nonvirtual(
+                &bus,
+                &inst.lanes[0],
+                is_virtual_col_base,
+                /*split_bit_idx=*/ 5,
+            );
+            // Cryptographic write-domain split:
+            // - non-virtual rows may write only architectural regs (<32)
+            // - virtual rows may write only virtual regs (>=32)
+            builder.add_twist_write_addr_domain_split(
+                &bus,
+                &inst.lanes[0],
+                is_virtual_col_base,
+                /*split_bit_idx=*/ 5,
+            );
             let lane1 = TwistCpuBinding {
                 has_read: trace_cpu_col(layout, layout.trace.active),
                 has_write: CPU_BUS_COL_DISABLED,
@@ -664,6 +714,14 @@ pub fn rv32_trace_shared_bus_extraction_with_specs(
             };
             if inst.lanes.len() >= 2 {
                 builder.add_twist_instance_bound(&bus, &inst.lanes[1], &lane1);
+                // Cryptographic read-domain split (lane1/rs2):
+                // - non-virtual rows may read only architectural regs (<32)
+                builder.add_twist_read_addr_domain_split_nonvirtual(
+                    &bus,
+                    &inst.lanes[1],
+                    is_virtual_col_base,
+                    /*split_bit_idx=*/ 5,
+                );
             }
             if inst.lanes.len() > 2 {
                 let disabled = trace_disabled_twist_binding(layout);

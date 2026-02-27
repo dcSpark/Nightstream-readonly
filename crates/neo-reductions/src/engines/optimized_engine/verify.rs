@@ -1,15 +1,14 @@
 //! Optimized-engine verifier implementation for Π_CCS.
 //!
-//! Note: The current verifier is intentionally paper-exact (reference RHS assembly)
-//! even when the prover runs the optimized engine. This keeps verification semantics
-//! stable while allowing prover backends to evolve independently.
+//! The verifier keeps formula-equivalent RHS assembly while avoiding dependencies on
+//! `paper_exact_engine` module paths.
 
 #![allow(non_snake_case)]
 
 use crate::error::PiCcsError;
 use crate::optimized_engine::{PiCcsProof, PiCcsProofVariant};
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::{CcsStructure, McsInstance, MeInstance};
+use neo_ccs::{CcsClaim, CcsStructure, CeClaim};
 use neo_math::KExtensions;
 use neo_math::{D, F, K};
 use neo_params::NeoParams;
@@ -19,19 +18,20 @@ use p3_field::PrimeCharacteristicRing;
 
 use crate::engines::utils;
 
-/// Paper-exact verify implementation.
-///
-/// This function verifies the sumcheck proof using the paper-exact
-/// RHS terminal identity evaluation.
-pub fn paper_exact_verify(
+/// Optimized verifier implementation.
+pub fn optimized_verify(
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
     s: &CcsStructure<F>,
-    mcs_list: &[McsInstance<Cmt, F>],
-    me_inputs: &[MeInstance<Cmt, F, K>],
-    me_outputs: &[MeInstance<Cmt, F, K>],
+    mcs_list: &[CcsClaim<Cmt, F>],
+    me_inputs: &[CeClaim<Cmt, F, K>],
+    me_outputs: &[CeClaim<Cmt, F, K>],
     proof: &PiCcsProof,
 ) -> Result<bool, PiCcsError> {
+    if mcs_list.is_empty() {
+        return Err(PiCcsError::InvalidInput("optimized_verify: empty mcs_list".into()));
+    }
+
     let dims = utils::build_dims_and_policy(params, s)?;
     utils::bind_header_and_instances(tr, params, s, mcs_list, dims)?;
     utils::bind_me_inputs(tr, me_inputs)?;
@@ -40,7 +40,7 @@ pub fn paper_exact_verify(
 
     // Compute the public claimed sum T from ME inputs and α
     // (this is the only legitimate initial sum for sumcheck).
-    let claimed_initial = crate::paper_exact_engine::claimed_initial_sum_from_inputs(s, &ch, me_inputs);
+    let claimed_initial = super::claimed_initial_sum_from_inputs_with_k_mcs(s, &ch, mcs_list.len(), me_inputs);
 
     // Optional tightness check: if prover sent a sum, verify it matches T.
     // This helps debug forged proofs.
@@ -116,17 +116,7 @@ pub fn paper_exact_verify(
     }
     let (s_col_prime, alpha_prime_nc) = r_all_nc.split_at(dims.ell_m);
 
-    // Validate ME input r (if provided)
-    for (idx, me) in me_inputs.iter().enumerate() {
-        if me.r.len() != dims.ell_n {
-            return Err(PiCcsError::InvalidInput(format!(
-                "ME input r length mismatch at accumulator #{}: expected ell_n = {}, got {}",
-                idx,
-                dims.ell_n,
-                me.r.len()
-            )));
-        }
-    }
+    let r_inputs = utils::shared_me_input_r(me_inputs, dims.ell_n)?;
 
     // Strictly enforce NC channel presence and transcript-derived points.
     let d_pad = 1usize
@@ -214,24 +204,42 @@ pub fn paper_exact_verify(
         }
     }
 
-    // Paper-exact RHS assembly (FE-only; NC is verified separately)
-    let rhs = crate::paper_exact_engine::rhs_terminal_identity_fe_paper_exact(
+    utils::validate_ct_constant_term(s, params, me_outputs)?;
+    // MCS-derived outputs must expose X consistent with public x.
+    utils::validate_mcs_output_x_recomposition(params, s.m, mcs_list, me_outputs)?;
+
+    // RHS assembly (FE-only; NC is verified separately)
+    let rhs = super::rhs_terminal_identity_fe_with_k_mcs(
         s,
         params,
         &ch,
         r_prime,
         alpha_prime,
         me_outputs,
-        me_inputs.first().map(|mi| mi.r.as_slice()),
+        mcs_list.len(),
+        r_inputs,
     );
 
-    let rhs_nc = crate::paper_exact_engine::rhs_terminal_identity_nc_paper_exact(
-        params,
-        &ch,
-        s_col_prime,
-        alpha_prime_nc,
-        me_outputs,
-    );
+    let rhs_nc = super::rhs_terminal_identity_nc(params, &ch, s_col_prime, alpha_prime_nc, me_outputs);
 
-    Ok(running_sum == rhs && running_sum_nc == rhs_nc)
+    let ok_fe = running_sum == rhs;
+    let ok_nc = running_sum_nc == rhs_nc;
+
+    #[cfg(feature = "debug-logs")]
+    if !(ok_fe && ok_nc) {
+        eprintln!("\n[verify] split Π_CCS mismatch:");
+        eprintln!("[verify]   FE: running_sum={:?}", running_sum);
+        eprintln!("[verify]   FE: rhs        ={:?}", rhs);
+        eprintln!("[verify]   NC: running_sum={:?}", running_sum_nc);
+        eprintln!("[verify]   NC: rhs        ={:?}", rhs_nc);
+        eprintln!("[verify]   ok_fe={}, ok_nc={}", ok_fe, ok_nc);
+        eprintln!(
+            "[verify]   sizes: k_mcs={}, k_me_in={}, k_out={}",
+            mcs_list.len(),
+            me_inputs.len(),
+            me_outputs.len()
+        );
+    }
+
+    Ok(ok_fe && ok_nc)
 }

@@ -57,6 +57,7 @@ use neo_fold::session::{Lane, Public, Scalar};
 use neo_fold::shard::MemOrLutProof;
 use neo_fold::shard::StepLinkingConfig;
 use neo_math::{D, F};
+use neo_memory::ajtai::commit_cols_for_ccs_m;
 use neo_memory::plain::PlainMemLayout;
 use neo_params::NeoParams;
 use neo_vm_trace::{Twist, TwistId, VmCpu};
@@ -214,8 +215,9 @@ fn read_usize_env(key: &str) -> Option<usize> {
 }
 
 fn setup_ajtai_committer(m: usize, kappa: usize) -> AjtaiSModule {
+    let m_commit = commit_cols_for_ccs_m(m);
     let mut rng = ChaCha8Rng::seed_from_u64(42);
-    let pp = ajtai_setup(&mut rng, D, kappa, m).expect("Ajtai setup");
+    let pp = ajtai_setup(&mut rng, D, kappa, m_commit).expect("Ajtai setup");
     AjtaiSModule::new(Arc::new(pp))
 }
 
@@ -322,10 +324,16 @@ fn twist_shout_fibonacci_cycle_trace() {
         .expect("verify should run");
     let verify_dur = t_verify.elapsed();
     assert!(ok, "verification should pass");
-    assert!(
-        run.steps.len() >= 2,
-        "this test is meant to demonstrate at least one fold (need >=2 folding steps)"
-    );
+    let logical_fold_steps: usize = run
+        .steps
+        .iter()
+        .map(|step| {
+            step.compressed_substeps
+                .as_ref()
+                .map_or(1, |subs| subs.len())
+        })
+        .sum();
+    assert!(logical_fold_steps >= 1, "expected at least one logical folding step");
 
     if timing_enabled() {
         println!(

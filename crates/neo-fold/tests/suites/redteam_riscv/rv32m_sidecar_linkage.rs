@@ -30,7 +30,7 @@ fn rv32_trace_claims_are_bound_to_main_commitment() {
     let mut tampered = false;
     for step in &mut bad_proof.steps {
         for claim in &mut step.mem.val_me_claims {
-            if let Some(first) = claim.y_scalars.first_mut() {
+            if let Some(first) = claim.ct.first_mut() {
                 *first += K::ONE;
                 tampered = true;
                 break;

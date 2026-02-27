@@ -1,11 +1,12 @@
 #![allow(non_snake_case)]
 
 use neo_ccs::{
-    poly::SparsePoly, poly::Term, relations::check_me_consistency, traits::SModuleHomomorphism, CcsStructure, Mat,
-    MeInstance, MeWitness,
+    poly::SparsePoly, poly::Term, relations::check_ce_consistency, traits::SModuleHomomorphism, CcsStructure, CeClaim,
+    CeWitness, Mat,
 };
 use neo_math::ring::D;
 use neo_math::K;
+use neo_params::NeoParams;
 use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as Fq;
 
@@ -31,27 +32,15 @@ impl SModuleHomomorphism<Fq, Vec<Fq>> for TestL {
 
 #[test]
 fn me_consistency_accepts_padded_y_rows() {
-    // CCS: n=4 (power of two), m=3, t=1, f(y)=y0 (linear)
+    let params = NeoParams::goldilocks_127();
+
+    // CCS: n=4 (power of two), SuperNeo-compatible m=D, t=1, f(y)=y0 (linear)
     let n = 4usize;
-    let m = 3usize;
-    let m0 = Mat::from_row_major(
-        n,
-        m,
-        vec![
-            Fq::ONE,
-            Fq::ZERO,
-            Fq::ZERO,
-            Fq::ZERO,
-            Fq::ONE,
-            Fq::ZERO,
-            Fq::ZERO,
-            Fq::ZERO,
-            Fq::ONE,
-            Fq::ONE,
-            Fq::ONE,
-            Fq::ONE,
-        ],
-    );
+    let m = D;
+    let mut m0 = Mat::zero(n, m, Fq::ZERO);
+    for i in 0..n {
+        m0[(i, i)] = Fq::ONE;
+    }
     let f = SparsePoly::new(
         1,
         vec![Term {
@@ -61,14 +50,10 @@ fn me_consistency_accepts_padded_y_rows() {
     );
     let s = CcsStructure::new(vec![m0.clone()], f).unwrap();
 
-    // Construct Z (d×m) with small entries
+    // Construct packed SuperNeo witness Z ∈ F^{D×(m/D)} = F^{D×1}.
     let d = D;
-    let mut Z = Mat::zero(d, m, Fq::ZERO);
-    for c in 0..m {
-        for r in 0..d {
-            Z[(r, c)] = Fq::from_u64(((r + c) % 5) as u64);
-        }
-    }
+    let mut Z = Mat::zero(d, m / D, Fq::ZERO);
+    Z[(0, 0)] = Fq::from_u64(2);
 
     let L = TestL;
 
@@ -93,15 +78,20 @@ fn me_consistency_accepts_padded_y_rows() {
         v
     };
 
-    // y = Z * v (in K^d)
-    let y0 = neo_ccs::utils::mat_vec_mul_fk::<Fq, K>(Z.as_slice(), d, m, &v_k);
+    // y = Z * v in packed SuperNeo layout:
+    // y[rho] = Z[rho,0] * v[rho] for m=D.
+    let mut y0 = vec![K::ZERO; d];
+    for rho in 0..d {
+        y0[rho] = K::from(Z[(rho, 0)]) * v_k[rho];
+    }
 
     // Pad y to 2^{ell_d} (typically 64 for D=54).
     let mut y0_padded = y0.clone();
     let d_pad = D.next_power_of_two();
     y0_padded.resize(d_pad, K::ZERO);
+    let ct0 = y0_padded[0];
 
-    let inst = MeInstance::<_, Fq, K> {
+    let inst = CeClaim::<_, Fq, K> {
         c_step_coords: vec![],
         u_offset: 0,
         u_len: 0,
@@ -109,18 +99,19 @@ fn me_consistency_accepts_padded_y_rows() {
         X,
         r,
         s_col: vec![],
-        y: vec![y0_padded.clone()],
-        y_scalars: vec![K::ZERO],
+        y_ring: vec![y0_padded.clone()],
+        ct: vec![ct0],
+        aux_openings: vec![],
         y_zcol: vec![],
         m_in,
         fold_digest: [0u8; 32],
     };
-    let wit = MeWitness::<Fq> { Z: Z.clone() };
+    let wit = CeWitness::<Fq> { Z: Z.clone() };
 
-    assert!(check_me_consistency(&s, &L, &inst, &wit).is_ok());
+    assert!(check_ce_consistency(&params, &s, &L, &inst, &wit).is_ok());
 
     // Non-zero padding must be rejected.
     let mut inst_bad = inst.clone();
-    inst_bad.y[0][D] += K::ONE;
-    assert!(check_me_consistency(&s, &L, &inst_bad, &wit).is_err());
+    inst_bad.y_ring[0][D] += K::ONE;
+    assert!(check_ce_consistency(&params, &s, &L, &inst_bad, &wit).is_err());
 }

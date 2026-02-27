@@ -12,15 +12,16 @@
 //! - no compressed (RVC) instructions
 //! - 4-byte aligned PC and control-flow targets
 //!
-//! Note: Shout operand keys are encoded via bit interleaving into a `u64` key
-//! (2×32-bit → 64-bit), which is sufficient for RV32. RV64 proving requires a wider key.
+//! Note: Shout operand keys are `u64` and use operand-mode encoding:
+//! - interleaved `(lhs, rhs)` for interleaved-key opcodes
+//! - combined keys for ADD/SUB rollout paths
 //!
 //! # Architecture
 //!
 //! ## Lookup Tables (Shout)
 //!
 //! ALU operations are proven using Neo's Shout (read-only memory) protocol:
-//! - The **index** encodes operands via bit interleaving
+//! - The **index/key** encodes operands via opcode operand mode
 //! - The **value** is the operation result
 //! - MLEs enable efficient sumcheck verification
 //!
@@ -106,46 +107,14 @@ pub const PROG_ID: TwistId = TwistId(1);
 /// This is used by the RV32 trace-wiring circuit in "regfile-as-Twist" mode.
 pub const REG_ID: TwistId = TwistId(2);
 
-/// Poseidon2-Goldilocks hash compute ECALL identifier.
-///
-/// ABI: a0 = POSEIDON2_ECALL_NUM, a1 = input element count,
-///      a2 = input RAM address (elements as 2×u32 LE).
-/// The host reads inputs via untraced loads, computes the hash, and stores the
-/// 4-element digest in CPU-internal state. Use POSEIDON2_READ_ECALL_NUM to
-/// retrieve output words one at a time via register a0.
-pub const POSEIDON2_ECALL_NUM: u32 = 0x504F53;
-
-/// Poseidon2-Goldilocks digest read ECALL identifier (bit 31 set).
-///
-/// ABI: a0 = POSEIDON2_READ_ECALL_NUM. Returns the next u32 word of the
-/// pending Poseidon2 digest in register a0. Call 8 times (4 elements × 2 words)
-/// to retrieve the full digest.
-pub const POSEIDON2_READ_ECALL_NUM: u32 = 0x80504F53;
-
-/// Goldilocks field multiply ECALL identifier ("GLM").
-///
-/// ABI: a0 = GL_MUL_ECALL_NUM, a1 = a_lo, a2 = a_hi, a3 = b_lo, a4 = b_hi.
-/// Computes (a * b) mod p and stores the 64-bit result in CPU state.
-/// Retrieve via GL_READ_ECALL_NUM (2 calls for lo/hi words).
-pub const GL_MUL_ECALL_NUM: u32 = 0x474C4D;
-
-/// Goldilocks field add ECALL identifier ("GLA").
-///
-/// ABI: a0 = GL_ADD_ECALL_NUM, a1 = a_lo, a2 = a_hi, a3 = b_lo, a4 = b_hi.
-/// Computes (a + b) mod p and stores the 64-bit result in CPU state.
-pub const GL_ADD_ECALL_NUM: u32 = 0x474C41;
-
-/// Goldilocks field subtract ECALL identifier ("GLS").
-///
-/// ABI: a0 = GL_SUB_ECALL_NUM, a1 = a_lo, a2 = a_hi, a3 = b_lo, a4 = b_hi.
-/// Computes (a - b) mod p and stores the 64-bit result in CPU state.
-pub const GL_SUB_ECALL_NUM: u32 = 0x474C53;
-
-/// Goldilocks field operation read ECALL identifier (bit 31 set on "GLR").
-///
-/// ABI: a0 = GL_READ_ECALL_NUM. Returns the next u32 word of the
-/// pending field operation result in register a0. Call 2 times (lo/hi).
-pub const GL_READ_ECALL_NUM: u32 = 0x80474C52;
+/// RISC-V CUSTOM-0 opcode used by Poseidon2 precompile instructions.
+pub const POSEIDON2_CUSTOM_OPCODE: u32 = 0x0B;
+/// `funct7` selector for `P2_ABSORB_ELEM`.
+pub const POSEIDON2_ABSORB_FUNCT7: u32 = 0x00;
+/// `funct7` selector for `P2_FINALIZE`.
+pub const POSEIDON2_FINALIZE_FUNCT7: u32 = 0x01;
+/// `funct7` selector for `P2_SQUEEZE_WORD`.
+pub const POSEIDON2_SQUEEZE_FUNCT7: u32 = 0x02;
 
 pub use alu::{compute_op, lookup_entry};
 pub use bits::{interleave_bits, uninterleave_bits};

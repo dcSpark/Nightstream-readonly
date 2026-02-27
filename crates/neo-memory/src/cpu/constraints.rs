@@ -44,7 +44,8 @@ use crate::cpu::bus_layout::{
     build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, BusLayout, ShoutCols, ShoutInstanceShape,
     TwistCols,
 };
-use crate::witness::{LutInstance, MemInstance};
+use crate::riscv::trace::rv32_trace_lookup_n_vals_for_table_id;
+use crate::witness::{LutInstance, LutTableSpec, MemInstance};
 
 /// CPU column layout for binding to the bus.
 ///
@@ -155,8 +156,20 @@ pub enum CpuConstraintLabel {
     TwistHasWriteBoolean,
     /// Bitness: each read address bit is 0 when inactive, boolean when active.
     TwistReadAddrBitBitness,
+    /// REG Twist read-domain split: on non-virtual rows, read-address bit[5] must be 0.
+    ///
+    /// With `split_bit_idx = 5`, this enforces:
+    /// - non-virtual reads target architectural regs (`addr < 32`).
+    /// Virtual rows remain unrestricted (they may read architectural or virtual regs).
+    TwistReadAddressDomainSplit,
     /// Bitness: each write address bit is 0 when inactive, boolean when active.
     TwistWriteAddrBitBitness,
+    /// REG Twist write-domain split: on write rows, `is_virtual` must match write-address bit[5].
+    ///
+    /// This enforces:
+    /// - non-virtual writes target architectural regs (`addr < 32`), and
+    /// - virtual writes target virtual regs (`addr >= 32`).
+    TwistWriteAddressDomainSplit,
     /// Padding: inc_at_write_addr == 0 (when NOT has_write)
     IncrementZeroPadding,
     /// Write: cpu_inc == bus_inc (when has_write)
@@ -329,6 +342,7 @@ enum ShoutPaddingMode {
     WithoutSelectorBitness,
     ValueOnly,
     ValuePaddingOnly,
+    AddrPaddingOnly,
     AddrBitBitnessOnly,
 }
 
@@ -530,6 +544,80 @@ impl<F: Field> CpuConstraintBuilder<F> {
         }
     }
 
+    /// Add write-domain split constraints using a CPU boolean flag and a Twist write-address bit.
+    ///
+    /// Enforces on every row `j`:
+    /// - if `wa_bits[split_bit_idx]` exists:
+    ///   `has_write_j * (flag_j - wa_bit_j) = 0`
+    /// - otherwise:
+    ///   `has_write_j * flag_j = 0`
+    ///
+    /// With `flag = is_virtual` and `split_bit_idx = 5`, this gives:
+    /// - virtual writes => addr bit5 = 1 => `addr >= 32`
+    /// - non-virtual writes => addr bit5 = 0 => `addr < 32`
+    pub fn add_twist_write_addr_domain_split(
+        &mut self,
+        layout: &BusLayout,
+        twist: &TwistCols,
+        flag_col_base: usize,
+        split_bit_idx: usize,
+    ) {
+        let wa_len = twist.wa_bits.end.saturating_sub(twist.wa_bits.start);
+        for j in 0..layout.chunk_size {
+            let bus_has_write = layout.bus_cell(twist.has_write, j);
+            let flag_col = flag_col_base + j;
+            if split_bit_idx < wa_len {
+                let split_bit_col = layout.bus_cell(twist.wa_bits.start + split_bit_idx, j);
+                self.constraints.push(CpuConstraint::new_terms(
+                    CpuConstraintLabel::TwistWriteAddressDomainSplit,
+                    bus_has_write,
+                    false,
+                    vec![(flag_col, F::ONE), (split_bit_col, -F::ONE)],
+                ));
+            } else {
+                // If address bit[split_bit_idx] is not present in this lane/domain, disallow
+                // writes under the flagged mode.
+                self.constraints.push(CpuConstraint::new_zero(
+                    CpuConstraintLabel::TwistWriteAddressDomainSplit,
+                    bus_has_write,
+                    flag_col,
+                ));
+            }
+        }
+    }
+
+    /// Add read-domain split constraints using a CPU virtual-row flag and a Twist read-address bit.
+    ///
+    /// Enforces on every row `j` (when `ra_bits[split_bit_idx]` exists):
+    /// - `(1 - is_virtual_j) * ra_bit_j = 0`
+    ///
+    /// With `split_bit_idx = 5`, this gives:
+    /// - non-virtual reads => addr bit5 = 0 => `addr < 32`
+    /// - virtual reads are unrestricted by this constraint.
+    pub fn add_twist_read_addr_domain_split_nonvirtual(
+        &mut self,
+        layout: &BusLayout,
+        twist: &TwistCols,
+        is_virtual_col_base: usize,
+        split_bit_idx: usize,
+    ) {
+        let ra_len = twist.ra_bits.end.saturating_sub(twist.ra_bits.start);
+        if split_bit_idx >= ra_len {
+            // Bit not present: this lane/domain is already confined below the split threshold.
+            return;
+        }
+
+        for j in 0..layout.chunk_size {
+            let is_virtual_col = is_virtual_col_base + j;
+            let split_bit_col = layout.bus_cell(twist.ra_bits.start + split_bit_idx, j);
+            self.constraints.push(CpuConstraint::new_zero_negated(
+                CpuConstraintLabel::TwistReadAddressDomainSplit,
+                is_virtual_col,
+                split_bit_col,
+            ));
+        }
+    }
+
     /// Add constraints for a Shout (lookup) instance.
     ///
     /// # Constraints Added
@@ -627,6 +715,11 @@ impl<F: Field> CpuConstraintBuilder<F> {
         self.add_shout_instance_padding_mode(layout, shout, ShoutPaddingMode::ValuePaddingOnly);
     }
 
+    /// Add Shout addr zero-padding only: `(1 - has_lookup) * addr_bits[i] = 0`.
+    pub fn add_shout_instance_addr_padding_only(&mut self, layout: &BusLayout, shout: &ShoutCols) {
+        self.add_shout_instance_padding_mode(layout, shout, ShoutPaddingMode::AddrPaddingOnly);
+    }
+
     /// Add unconditional addr-bit booleanity constraints for one shared-address Shout group.
     pub fn add_shout_instance_addr_bit_bitness(&mut self, layout: &BusLayout, shout: &ShoutCols) {
         self.add_shout_instance_padding_mode(layout, shout, ShoutPaddingMode::AddrBitBitnessOnly);
@@ -643,6 +736,7 @@ impl<F: Field> CpuConstraintBuilder<F> {
         );
         let add_gated_addr_bitness = matches!(mode, ShoutPaddingMode::Full | ShoutPaddingMode::WithoutSelectorBitness);
         let add_unconditional_addr_bitness = matches!(mode, ShoutPaddingMode::AddrBitBitnessOnly);
+        let add_addr_zero_padding = matches!(mode, ShoutPaddingMode::AddrPaddingOnly);
 
         for j in 0..layout.chunk_size {
             let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
@@ -652,12 +746,14 @@ impl<F: Field> CpuConstraintBuilder<F> {
             }
 
             if add_value_padding {
-                let bus_val = layout.bus_cell(shout.primary_val(), j);
-                self.constraints.push(CpuConstraint::new_zero_negated(
-                    CpuConstraintLabel::LookupValueZeroPadding,
-                    bus_has_lookup,
-                    bus_val,
-                ));
+                for &val_col in shout.vals.iter() {
+                    let bus_val = layout.bus_cell(val_col, j);
+                    self.constraints.push(CpuConstraint::new_zero_negated(
+                        CpuConstraintLabel::LookupValueZeroPadding,
+                        bus_has_lookup,
+                        bus_val,
+                    ));
+                }
             }
 
             if add_gated_addr_bitness {
@@ -673,6 +769,17 @@ impl<F: Field> CpuConstraintBuilder<F> {
                 for col_id in shout.addr_bits.clone() {
                     let bit = layout.bus_cell(col_id, j);
                     self.add_boolean_constraint(CpuConstraintLabel::ShoutAddrBitBitness, bit);
+                }
+            }
+
+            if add_addr_zero_padding {
+                for col_id in shout.addr_bits.clone() {
+                    let bit = layout.bus_cell(col_id, j);
+                    self.constraints.push(CpuConstraint::new_zero_negated(
+                        CpuConstraintLabel::LookupAddressBitsZeroPadding,
+                        bus_has_lookup,
+                        bit,
+                    ));
                 }
             }
         }
@@ -1051,7 +1158,7 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints_optional_shout<
         lut_insts.iter().map(|inst| ShoutInstanceShape {
             ell_addr: inst.d * inst.ell,
             lanes: inst.lanes.max(1),
-            n_vals: 1usize,
+            n_vals: rv32_trace_lookup_n_vals_for_table_id(inst.table_id),
             addr_group: shout_addr_groups.get(&inst.table_id).copied(),
             selector_group: shout_selector_groups.get(&inst.table_id).copied(),
         }),
@@ -1076,7 +1183,13 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints_optional_shout<
     let mut selector_bitness_added = std::collections::HashSet::<usize>::new();
     let mut shout_key_binding_added = std::collections::HashSet::<(bool, usize, usize, usize, usize)>::new();
     let mut shout_lane_idx = 0usize;
-    for inst_cols in layout.shout_cols.iter() {
+    for (inst_idx, inst_cols) in layout.shout_cols.iter().enumerate() {
+        let is_packed_opcode_lane = matches!(
+            lut_insts
+                .get(inst_idx)
+                .and_then(|inst| inst.table_spec.as_ref()),
+            Some(LutTableSpec::RiscvOpcodePacked { .. } | LutTableSpec::RiscvOpcodeEventTablePacked { .. })
+        );
         for lane_cols in inst_cols.lanes.iter() {
             let key = (lane_cols.addr_bits.start, lane_cols.addr_bits.end);
             let shared_addr_group = addr_range_counts.get(&key).copied().unwrap_or(0) > 1;
@@ -1107,7 +1220,14 @@ pub fn extend_ccs_with_shared_cpu_bus_constraints_optional_shout<
                 // no linkage
             }
             let selector_first = selector_bitness_added.insert(lane_cols.has_lookup);
-            if shared_addr_group {
+            if is_packed_opcode_lane {
+                if selector_first {
+                    builder.add_shout_instance_padding_value_only(&layout, lane_cols);
+                } else {
+                    builder.add_shout_instance_value_padding_only(&layout, lane_cols);
+                }
+                builder.add_shout_instance_addr_padding_only(&layout, lane_cols);
+            } else if shared_addr_group {
                 // Shared address bits across multiple table instances cannot use per-instance
                 // `(1-has_lookup)*addr_bit=0` gating: inactive instances would overconstrain
                 // active ones. Enforce has/value padding per-instance and addr-bit booleanity
@@ -1262,14 +1382,16 @@ pub fn create_shout_padding_constraints<F: Field>(layout: &BusLayout, shout: &Sh
     let mut constraints = Vec::new();
     for j in 0..layout.chunk_size {
         let bus_has_lookup = layout.bus_cell(shout.has_lookup, j);
-        let bus_val = layout.bus_cell(shout.primary_val(), j);
+        for &val_col in shout.vals.iter() {
+            let bus_val = layout.bus_cell(val_col, j);
 
-        // (1 - has_lookup) * val = 0
-        constraints.push(CpuConstraint::new_zero_negated(
-            CpuConstraintLabel::LookupValueZeroPadding,
-            bus_has_lookup,
-            bus_val,
-        ));
+            // (1 - has_lookup) * val = 0
+            constraints.push(CpuConstraint::new_zero_negated(
+                CpuConstraintLabel::LookupValueZeroPadding,
+                bus_has_lookup,
+                bus_val,
+            ));
+        }
 
         // (1 - has_lookup) * addr_bits[i] = 0 for all i
         for col_id in shout.addr_bits.clone() {

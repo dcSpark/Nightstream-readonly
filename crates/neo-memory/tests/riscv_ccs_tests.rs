@@ -12,7 +12,9 @@ use neo_memory::riscv::lookups::{
     decode_program, encode_program, RiscvCpu, RiscvInstruction, RiscvMemOp, RiscvMemory, RiscvOpcode, RiscvShoutTables,
     PROG_ID, RAM_ID, REG_ID,
 };
-use neo_memory::riscv::trace::{rv32_decode_lookup_table_id_for_col, Rv32DecodeSidecarLayout};
+use neo_memory::riscv::trace::{
+    rv32_decode_lookup_table_id_for_col, rv32_trace_lookup_n_vals_for_table_id, Rv32DecodeSidecarLayout,
+};
 use neo_vm_trace::trace_program;
 use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks as F;
@@ -53,10 +55,13 @@ fn decode_selector_specs(prog_d: usize) -> Vec<TraceShoutBusSpec> {
     let decode = Rv32DecodeSidecarLayout::new();
     [decode.rd_has_write, decode.ram_has_read, decode.ram_has_write]
         .into_iter()
-        .map(|col| TraceShoutBusSpec {
-            table_id: rv32_decode_lookup_table_id_for_col(col),
-            ell_addr: prog_d,
-            n_vals: 1usize,
+        .map(|col| {
+            let table_id = rv32_decode_lookup_table_id_for_col(col);
+            TraceShoutBusSpec {
+                table_id,
+                ell_addr: prog_d,
+                n_vals: rv32_trace_lookup_n_vals_for_table_id(table_id),
+            }
         })
         .collect()
 }
@@ -185,12 +190,13 @@ fn rv32_trace_ccs_rejects_tampered_pc_transition() {
     let (x, mut w) = rv32_trace_ccs_witness_from_exec_table(&layout, &exec).expect("trace CCS witness");
     let ccs = build_rv32_trace_wiring_ccs(&layout).expect("trace CCS");
 
-    let idx = layout.cell(layout.trace.pc_before, 1) - layout.m_in;
+    // Uniform kernel stores one physical slot per trace column (row must be 0).
+    let idx = layout.cell(layout.trace.pc_before, 0) - layout.m_in;
     w[idx] = w[idx] + F::ONE;
 
     assert!(
         check_ccs_rowwise_zero(&ccs, &x, &w).is_err(),
-        "tampered pc_before on row 1 must violate trace transition wiring"
+        "tampered pc_before anchor must violate trace CCS wiring"
     );
 }
 

@@ -94,7 +94,7 @@ fn rv32_system_decode_matches_jolt_behavior() {
 }
 
 #[test]
-fn rv32_fence_decode_accepts_fence_rejects_fence_i() {
+fn rv32_fence_decode_accepts_fence_and_fence_i() {
     let fence = RiscvInstruction::Fence { pred: 0xf, succ: 0x0 };
     let encoded = encode_instruction(&fence);
     let decoded = decode_instruction(encoded).expect("decode fence");
@@ -106,6 +106,28 @@ fn rv32_fence_decode_accepts_fence_rejects_fence_i() {
         _ => panic!("expected FENCE decode"),
     }
 
+    let fence_i = RiscvInstruction::FenceI;
+    let encoded_fence_i = encode_instruction(&fence_i);
+    let decoded_fence_i = decode_instruction(encoded_fence_i).expect("decode fence.i");
+    match decoded_fence_i {
+        RiscvInstruction::FenceI => {}
+        _ => panic!("expected FENCE.I decode"),
+    }
+}
+
+#[test]
+fn rv32_fence_i_decode_rejects_invalid_reserved_fields() {
+    // FENCE.I requires imm[11:0]==0 and rd/rs1==x0.
+    let invalid_nonzero_imm = 0x0010_100fu32;
+    assert!(decode_instruction(invalid_nonzero_imm).is_err());
+
+    // FENCE.I with rd != 0
+    let invalid_nonzero_rd = encode_instruction(&RiscvInstruction::FenceI) | (1u32 << 7);
+    assert!(decode_instruction(invalid_nonzero_rd).is_err());
+
     let fence_i = 0x0000_100fu32;
-    assert!(decode_instruction(fence_i).is_err());
+    assert!(matches!(
+        decode_instruction(fence_i).expect("valid canonical fence.i"),
+        RiscvInstruction::FenceI
+    ));
 }

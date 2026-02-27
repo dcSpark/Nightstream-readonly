@@ -83,7 +83,7 @@ fn ccs_digest32(s: &neo_ccs::CcsStructure<F>) -> [u8; 32] {
     out
 }
 
-fn acc_digest32_from_fold_digests(acc: &[neo_ccs::MeInstance<neo_ajtai::Commitment, F, K>]) -> [u8; 32] {
+fn acc_digest32_from_fold_digests(acc: &[neo_ccs::CeClaim<neo_ajtai::Commitment, F, K>]) -> [u8; 32] {
     let mut msg = Vec::new();
     msg.extend_from_slice(&(acc.len() as u32).to_le_bytes());
     for me in acc {
@@ -760,27 +760,27 @@ pub fn prove_step1_full_bundle_poseidon2_batch_40() {
 
     let out0 = &step1.fold.ccs_out[0];
     let t_fe = s.t();
-    assert_eq!(out0.y_scalars.len(), t_fe);
+    assert_eq!(out0.ct.len(), t_fe);
 
     // Flatten FE digit rows into (k_total-1)*t items (out_idx-major, then j).
     let mut y_rows_flat: Vec<Vec<K>> = Vec::with_capacity((k_total - 1) * t_fe);
     let (mut total_y_entries, mut nonzero_c1) = (0usize, 0usize);
     for (i_abs, out) in step1.fold.ccs_out.iter().enumerate().skip(1) {
-        assert_eq!(out.y.len(), t_fe, "ccs_out[{i_abs}].y len mismatch");
+        assert_eq!(out.y_ring.len(), t_fe, "ccs_out[{i_abs}].y_ring len mismatch");
         for j in 0..t_fe {
             assert_eq!(
-                out.y[j].len(),
+                out.y_ring[j].len(),
                 1usize << ell_d,
-                "ccs_out[{i_abs}].y[{j}] must be padded"
+                "ccs_out[{i_abs}].y_ring[{j}] must be padded"
             );
-            total_y_entries += out.y[j].len();
-            for v in &out.y[j] {
+            total_y_entries += out.y_ring[j].len();
+            for v in &out.y_ring[j] {
                 let (_, c1) = v.to_limbs_u64();
                 if c1 != 0 {
                     nonzero_c1 += 1;
                 }
             }
-            y_rows_flat.push(out.y[j].clone());
+            y_rows_flat.push(out.y_ring[j].clone());
         }
     }
     println!("FE y entries: total={total_y_entries} nonzero_c1={nonzero_c1} (c1==0 means base-field digit)");
@@ -878,7 +878,7 @@ pub fn prove_step1_full_bundle_poseidon2_batch_40() {
                 .map(|r| r.iter().map(k_to_repr).collect())
                 .collect(),
             me_inputs_r: me_inputs_r.iter().map(k_to_repr).collect(),
-            y_scalars_0: out0.y_scalars.iter().map(k_to_repr).collect(),
+            y_scalars_0: out0.ct.iter().map(k_to_repr).collect(),
             y_rows: y_rows_flat
                 .iter()
                 .map(|row| row.iter().map(k_to_repr).collect::<Vec<_>>())
@@ -1000,7 +1000,7 @@ pub fn prove_step1_full_bundle_poseidon2_batch_40() {
                 .map(|r| r.iter().map(k_to_repr).collect())
                 .collect(),
             me_inputs_r: me_inputs_r.iter().map(k_to_repr).collect(),
-            y_scalars_0: out0.y_scalars.iter().map(k_to_repr).collect(),
+            y_scalars_0: out0.ct.iter().map(k_to_repr).collect(),
             y_rows: Vec::new(),
         };
 

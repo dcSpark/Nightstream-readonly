@@ -3,7 +3,7 @@
 //! This test reproduces the exact error: "MCS opening failed: length mismatch in x (public): expected 0, got 3"
 
 use neo_ajtai::{setup as ajtai_setup, AjtaiSModule};
-use neo_ccs::{check_mcs_opening, traits::SModuleHomomorphism, Mat, McsInstance, McsWitness};
+use neo_ccs::{check_ccs_claim_opening, traits::SModuleHomomorphism, CcsClaim, CcsWitness, Mat};
 use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks;
 use rand::SeedableRng;
@@ -39,13 +39,13 @@ fn test_mcs_opening_bug_reproduction() {
     let commitment = scheme.commit(&z_matrix);
 
     // ❌ BUG CASE: Set m_in=0 even though we have 3 public inputs
-    let buggy_instance = McsInstance {
+    let buggy_instance = CcsClaim {
         c: commitment.clone(),
         x: public_inputs.clone(), // 3 public inputs
         m_in: 0,                  // ❌ WRONG: Should be 3, not 0!
     };
 
-    let witness = McsWitness {
+    let witness = CcsWitness {
         w: private_witness.clone(),
         Z: z_matrix.clone(),
     };
@@ -54,7 +54,7 @@ fn test_mcs_opening_bug_reproduction() {
         "   Testing buggy case (m_in=0 but providing {} public inputs)...",
         public_inputs.len()
     );
-    let buggy_result = check_mcs_opening(&scheme, &buggy_instance, &witness);
+    let buggy_result = check_ccs_claim_opening(&scheme, &buggy_instance, &witness);
 
     match buggy_result {
         Ok(_) => {
@@ -76,14 +76,14 @@ fn test_mcs_opening_bug_reproduction() {
     }
 
     // ✅ FIXED CASE: Set m_in to actual public input count
-    let fixed_instance = McsInstance {
+    let fixed_instance = CcsClaim {
         c: commitment,
         x: public_inputs.clone(),
         m_in: public_inputs.len(), // ✅ CORRECT: Use actual count
     };
 
     println!("   Testing fixed case (m_in={})...", public_inputs.len());
-    let fixed_result = check_mcs_opening(&scheme, &fixed_instance, &witness);
+    let fixed_result = check_ccs_claim_opening(&scheme, &fixed_instance, &witness);
 
     match fixed_result {
         Ok(_) => {
