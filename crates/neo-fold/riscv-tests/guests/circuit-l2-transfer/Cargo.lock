@@ -59,15 +59,3 @@ name = "unicode-ident"
 version = "1.0.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e6e4313cd5fcd3dad5cafa179702e2b244f760991f45397d14d4ebf38247da75"
-
-[[patch.unused]]
-name = "p3-dft"
-version = "0.3.0"
-
-[[patch.unused]]
-name = "p3-field"
-version = "0.3.0"
-
-[[patch.unused]]
-name = "p3-matrix"
-version = "0.3.0"
