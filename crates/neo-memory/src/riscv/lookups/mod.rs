@@ -12,15 +12,16 @@
 //! - no compressed (RVC) instructions
 //! - 4-byte aligned PC and control-flow targets
 //!
-//! Note: Shout operand keys are encoded via bit interleaving into a `u64` key
-//! (2×32-bit → 64-bit), which is sufficient for RV32. RV64 proving requires a wider key.
+//! Note: Shout operand keys are `u64` and use operand-mode encoding:
+//! - interleaved `(lhs, rhs)` for interleaved-key opcodes
+//! - combined keys for ADD/SUB rollout paths
 //!
 //! # Architecture
 //!
 //! ## Lookup Tables (Shout)
 //!
 //! ALU operations are proven using Neo's Shout (read-only memory) protocol:
-//! - The **index** encodes operands via bit interleaving
+//! - The **index/key** encodes operands via opcode operand mode
 //! - The **value** is the operation result
 //! - MLEs enable efficient sumcheck verification
 //!
@@ -105,6 +106,15 @@ pub const PROG_ID: TwistId = TwistId(1);
 ///
 /// This is used by the RV32 trace-wiring circuit in "regfile-as-Twist" mode.
 pub const REG_ID: TwistId = TwistId(2);
+
+/// RISC-V CUSTOM-0 opcode used by Poseidon2 precompile instructions.
+pub const POSEIDON2_CUSTOM_OPCODE: u32 = 0x0B;
+/// `funct7` selector for `P2_ABSORB_ELEM`.
+pub const POSEIDON2_ABSORB_FUNCT7: u32 = 0x00;
+/// `funct7` selector for `P2_FINALIZE`.
+pub const POSEIDON2_FINALIZE_FUNCT7: u32 = 0x01;
+/// `funct7` selector for `P2_SQUEEZE_WORD`.
+pub const POSEIDON2_SQUEEZE_FUNCT7: u32 = 0x02;
 
 pub use alu::{compute_op, lookup_entry};
 pub use bits::{interleave_bits, uninterleave_bits};

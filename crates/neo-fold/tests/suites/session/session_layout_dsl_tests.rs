@@ -143,6 +143,8 @@ fn ports_fill_from_trace_writes_expected_cells() {
         pc_before: 0,
         pc_after: 4,
         opcode: 0,
+        is_virtual: false,
+        virtual_sequence_remaining: None,
         regs_before: vec![0, 1],
         regs_after: vec![1, 1],
         twist_events: vec![
@@ -173,6 +175,8 @@ fn ports_fill_from_trace_writes_expected_cells() {
         pc_before: 4,
         pc_after: 8,
         opcode: 0,
+        is_virtual: false,
+        virtual_sequence_remaining: None,
         regs_before: vec![1, 1],
         regs_after: vec![1, 2],
         twist_events: Vec::new(),
@@ -213,6 +217,8 @@ fn ports_fill_from_trace_rejects_multiple_events() {
         pc_before: 0,
         pc_after: 0,
         opcode: 0,
+        is_virtual: false,
+        virtual_sequence_remaining: None,
         regs_before: Vec::new(),
         regs_after: Vec::new(),
         twist_events: vec![

@@ -101,6 +101,7 @@ pub fn chi_at_index<Kf: Field>(r: &[Kf], idx: usize) -> Kf {
 use neo_ccs::matrix::Mat;
 use neo_ccs::CcsStructure;
 use neo_math::{F as BaseField, K as KElem};
+use neo_params::NeoParams;
 // Note: p3_field traits are needed for ONE, ZERO, from_u64 on concrete types
 use p3_field::PrimeCharacteristicRing;
 
@@ -116,72 +117,25 @@ use p3_field::PrimeCharacteristicRing;
 ///
 /// Returns: (y_vecs, y_scalars) where
 /// - y_vecs[j][row] = (Z · M_j^T · χ_r)[row] for row in 0..d
-/// - y_scalars[j] = Σ_row y_vecs[j][row] * b^row (base-b recomposition)
+/// - y_scalars[j] follows SuperNeo semantics: constant term of the ring row
 pub fn compute_me_y_for_ccs(
+    params: &NeoParams,
     s: &CcsStructure<BaseField>,
     z_padded: &Mat<BaseField>,
     r: &[KElem],
-    b: u64,
 ) -> (Vec<Vec<KElem>>, Vec<KElem>) {
-    let t = s.t();
     let d = z_padded.rows();
-    let m = s.m;
-    let n = s.n;
 
-    // Ensure z_padded has correct dimensions
-    debug_assert_eq!(
-        z_padded.cols(),
-        m,
-        "Z matrix cols ({}) must match CCS m ({})",
-        z_padded.cols(),
-        m
-    );
-
-    // Build χ_r table (length n, padded to power of 2)
-    let n_pad = n.next_power_of_two();
+    // Validate r length against CCS row-domain dimensions.
+    let n_pad = s.n.next_power_of_two();
     let ell = n_pad.trailing_zeros() as usize;
     debug_assert_eq!(r.len(), ell, "r length ({}) must match ell_n ({})", r.len(), ell);
 
-    let chi_r = build_chi_table(r);
-
-    // Precompute b^row for base-b recomposition
-    let b_k: KElem = BaseField::from_u64(b).into();
-    let mut b_pows = vec![KElem::ONE; d];
-    for i in 1..d {
-        b_pows[i] = b_pows[i - 1] * b_k;
+    let ell_d = d.next_power_of_two().trailing_zeros() as usize;
+    let (mut y_vecs, y_scalars) = neo_reductions::common::compute_y_from_Z_and_r(s, z_padded, r, ell_d, params.b);
+    for yj in &mut y_vecs {
+        yj.truncate(d);
     }
-
-    let mut y_vecs: Vec<Vec<KElem>> = Vec::with_capacity(t);
-    let mut y_scalars: Vec<KElem> = Vec::with_capacity(t);
-
-    for j in 0..t {
-        // Compute v_j = M_j^T · χ_r (length m)
-        // v_j[c] = Σ_{row=0}^{n-1} M_j[row, c] * χ_r[row]
-        let mj = &s.matrices[j];
-        let mut v_j: Vec<KElem> = vec![KElem::ZERO; m];
-        mj.add_mul_transpose_into(&chi_r, &mut v_j, n);
-
-        // Compute y_j = Z · v_j (length d)
-        // y_j[row] = Σ_{c=0}^{m-1} Z[row, c] * v_j[c]
-        let mut y_j: Vec<KElem> = vec![KElem::ZERO; d];
-        for row in 0..d {
-            let z_row = z_padded.row(row);
-            for c in 0..m {
-                let z_rc: KElem = z_row[c].into();
-                y_j[row] += z_rc * v_j[c];
-            }
-        }
-
-        // Compute y_scalar = Σ_row y_j[row] * b^row
-        let mut y_scalar = KElem::ZERO;
-        for (row, &y_row) in y_j.iter().enumerate() {
-            y_scalar += y_row * b_pows[row];
-        }
-
-        y_vecs.push(y_j);
-        y_scalars.push(y_scalar);
-    }
-
     (y_vecs, y_scalars)
 }
 

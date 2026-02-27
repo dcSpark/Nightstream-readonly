@@ -125,8 +125,9 @@ fn load_test_export() -> TestExport {
 }
 
 fn setup_ajtai_for_dims(m: usize) {
+    let m_commit = m.div_ceil(D);
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-    let pp = ajtai_setup(&mut rng, D, 4, m).expect("Ajtai setup should succeed");
+    let pp = ajtai_setup(&mut rng, D, 4, m_commit).expect("Ajtai setup should succeed");
     let _ = set_global_pp(pp);
 }
 
@@ -231,7 +232,7 @@ fn test_starstream_tx_optimized_invalid() {
     let params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("goldilocks_auto_r1cs_ccs should find valid params");
 
     setup_ajtai_for_dims(m_padded);
-    let l = AjtaiSModule::from_global_for_dims(D, m_padded).expect("AjtaiSModule init");
+    let l = AjtaiSModule::from_global_for_dims(D, m_padded.div_ceil(D)).expect("AjtaiSModule init");
 
     let step_spec = StepSpec {
         y_len: export.ivc_params.step_spec.y_len,

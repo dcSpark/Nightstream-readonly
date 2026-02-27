@@ -5,8 +5,14 @@ use p3_goldilocks::Goldilocks as F;
 ///
 /// Table id for decode column `c` is `RV32_TRACE_DECODE_LOOKUP_TABLE_BASE + c`.
 pub const RV32_TRACE_DECODE_LOOKUP_TABLE_BASE: u32 = 0x5256_4400;
+/// Grouped decode lookup table id used in shared-bus trace mode.
+///
+/// In grouped mode, all decode transport columns share one `table_id` and use
+/// value slots (`n_vals`) to carry per-column values.
+pub const RV32_TRACE_DECODE_LOOKUP_GROUPED_TABLE_ID: u32 = RV32_TRACE_DECODE_LOOKUP_TABLE_BASE;
 /// Base address-group id for decode lookup lanes.
 pub const RV32_TRACE_DECODE_ADDR_GROUP_BASE: u32 = 0x5256_4A00;
+const RV32_TRACE_DECODE_LOOKUP_GROUPED: bool = true;
 
 #[derive(Clone, Debug)]
 pub struct Rv32DecodeSidecarLayout {
@@ -33,6 +39,7 @@ pub struct Rv32DecodeSidecarLayout {
     pub op_misc_mem: usize,
     pub op_system: usize,
     pub op_amo: usize,
+    pub op_custom: usize,
     pub op_lui_write: usize,
     pub op_auipc_write: usize,
     pub op_jal_write: usize,
@@ -93,6 +100,7 @@ impl Rv32DecodeSidecarLayout {
         let op_misc_mem = take();
         let op_system = take();
         let op_amo = take();
+        let op_custom = take();
         let op_lui_write = take();
         let op_auipc_write = take();
         let op_jal_write = take();
@@ -148,7 +156,7 @@ impl Rv32DecodeSidecarLayout {
         let rd_is_zero_012 = take();
         let rd_is_zero_0123 = take();
         let rd_is_zero = take();
-        debug_assert_eq!(next, 77);
+        debug_assert_eq!(next, 78);
         Self {
             cols: next,
             opcode,
@@ -173,6 +181,7 @@ impl Rv32DecodeSidecarLayout {
             op_misc_mem,
             op_system,
             op_amo,
+            op_custom,
             op_lui_write,
             op_auipc_write,
             op_jal_write,
@@ -218,7 +227,7 @@ impl Rv32DecodeSidecarLayout {
 
 #[inline]
 pub fn rv32_decode_lookup_backed_cols(layout: &Rv32DecodeSidecarLayout) -> Vec<usize> {
-    let mut out = Vec::with_capacity(56);
+    let mut out = Vec::with_capacity(57);
     out.push(layout.opcode);
     out.push(layout.rs2);
     out.push(layout.rd_has_write);
@@ -238,6 +247,7 @@ pub fn rv32_decode_lookup_backed_cols(layout: &Rv32DecodeSidecarLayout) -> Vec<u
         layout.op_misc_mem,
         layout.op_system,
         layout.op_amo,
+        layout.op_custom,
     ]);
     out.extend_from_slice(&layout.funct3_is);
     out.extend_from_slice(&[layout.imm_i, layout.imm_s, layout.imm_b, layout.imm_j]);
@@ -250,14 +260,46 @@ pub fn rv32_decode_lookup_backed_cols(layout: &Rv32DecodeSidecarLayout) -> Vec<u
     out
 }
 
+/// Decode lookup columns transported on the shared Shout bus in trace mode.
+///
+/// This currently aliases the full decode-backed set. The dedicated entrypoint keeps
+/// call sites explicit and allows future reduction work without touching all users.
+#[inline]
+pub fn rv32_decode_lookup_transport_cols(layout: &Rv32DecodeSidecarLayout) -> Vec<usize> {
+    rv32_decode_lookup_backed_cols(layout)
+}
+
 #[inline]
 pub const fn rv32_decode_lookup_table_id_for_col(col: usize) -> u32 {
-    RV32_TRACE_DECODE_LOOKUP_TABLE_BASE + col as u32
+    if RV32_TRACE_DECODE_LOOKUP_GROUPED {
+        RV32_TRACE_DECODE_LOOKUP_GROUPED_TABLE_ID
+    } else {
+        RV32_TRACE_DECODE_LOOKUP_TABLE_BASE + col as u32
+    }
 }
 
 #[inline]
 pub const fn rv32_is_decode_lookup_table_id(table_id: u32) -> bool {
-    table_id >= RV32_TRACE_DECODE_LOOKUP_TABLE_BASE && table_id < RV32_TRACE_DECODE_LOOKUP_TABLE_BASE + 77
+    (table_id >= RV32_TRACE_DECODE_LOOKUP_TABLE_BASE && table_id < RV32_TRACE_DECODE_LOOKUP_TABLE_BASE + 77)
+        || table_id == RV32_TRACE_DECODE_LOOKUP_GROUPED_TABLE_ID
+}
+
+#[inline]
+pub const fn rv32_is_decode_lookup_grouped_table_id(table_id: u32) -> bool {
+    RV32_TRACE_DECODE_LOOKUP_GROUPED && table_id == RV32_TRACE_DECODE_LOOKUP_GROUPED_TABLE_ID
+}
+
+#[inline]
+pub fn rv32_decode_lookup_transport_n_vals() -> usize {
+    let layout = Rv32DecodeSidecarLayout::new();
+    rv32_decode_lookup_transport_cols(&layout).len().max(1)
+}
+
+#[inline]
+pub fn rv32_decode_lookup_val_slot_for_col(col: usize) -> Option<usize> {
+    let layout = Rv32DecodeSidecarLayout::new();
+    let cols = rv32_decode_lookup_transport_cols(&layout);
+    cols.iter().position(|&c| c == col)
 }
 
 #[inline]
@@ -376,8 +418,10 @@ pub fn rv32_decode_lookup_backed_row_from_instr_word(
     row[layout.op_misc_mem] = is(0x0F);
     row[layout.op_system] = is(0x73);
     row[layout.op_amo] = is(0x2F);
+    row[layout.op_custom] = is(0x0B);
 
-    let rd_has_write_f = if opcode_writes_rd(opcode_u64) && rd_u64 != 0 {
+    let custom_squeeze_writes_rd = opcode_u64 == 0x0B && funct7_u64 == 0x02;
+    let rd_has_write_f = if (opcode_writes_rd(opcode_u64) || custom_squeeze_writes_rd) && rd_u64 != 0 {
         F::ONE
     } else {
         F::ZERO

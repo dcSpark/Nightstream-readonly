@@ -95,9 +95,6 @@ fn test_riscv_circuit_l2_transfer_compiled_trace_prove_verify_with_metrics() {
     let program_base = circuit_l2_transfer_rom::CIRCUIT_L2_TRANSFER_ROM_BASE;
     let program_bytes: &[u8] = &circuit_l2_transfer_rom::CIRCUIT_L2_TRANSFER_ROM;
     let static_instruction_words = program_bytes.len() / 4;
-    let min_trace_len = static_instruction_words;
-    let max_steps = static_instruction_words;
-    let chunk_rows = 1500usize;
 
     let setup_wall_start = Instant::now();
     let decoded_program = decode_program(program_bytes).expect("decode circuit_l2_transfer ROM");
@@ -105,7 +102,7 @@ fn test_riscv_circuit_l2_transfer_compiled_trace_prove_verify_with_metrics() {
     sim_cpu.load_program(program_base, decoded_program);
     let sim_twist = RiscvMemory::with_program_in_twist(32, PROG_ID, program_base, program_bytes);
     let sim_shout = RiscvShoutTables::new(32);
-    let sim_trace = trace_program(sim_cpu, sim_twist, sim_shout, max_steps)
+    let sim_trace = trace_program(sim_cpu, sim_twist, sim_shout, static_instruction_words)
         .expect("trace circuit_l2_transfer ROM for pre-prove metrics");
     println!(
         "trace_sim_steps={} trace_sim_did_halt={} trace_sim_total_twist_events={} trace_sim_total_shout_events={}",
@@ -114,6 +111,13 @@ fn test_riscv_circuit_l2_transfer_compiled_trace_prove_verify_with_metrics() {
         sim_trace.total_twist_events(),
         sim_trace.total_shout_events()
     );
+    let executed_steps = sim_trace.len();
+    let min_trace_len = executed_steps;
+    let max_steps = executed_steps;
+    // Poseidon local lane split requires t_len <= (ccs_m - m_in).
+    // For this circuit/profile that cap is 510, so pick the largest safe chunk automatically.
+    const MAX_SAFE_CHUNK_ROWS: usize = 510;
+    let chunk_rows = executed_steps.min(MAX_SAFE_CHUNK_ROWS);
 
     let wiring = Rv32TraceWiring::from_rom(program_base, program_bytes)
         .xlen(32)
@@ -124,6 +128,7 @@ fn test_riscv_circuit_l2_transfer_compiled_trace_prove_verify_with_metrics() {
     let setup_wall = setup_wall_start.elapsed();
 
     let prove_wall_start = Instant::now();
+    println!("prove_start");
     let prove_result = wiring.prove();
     let prove_wall = prove_wall_start.elapsed();
 
@@ -193,6 +198,7 @@ fn test_riscv_circuit_l2_transfer_compiled_trace_prove_verify_with_metrics() {
     println!("prove_time_total={:?}", run.prove_duration());
 
     let verify_wall_start = Instant::now();
+    println!("verify_start");
     let verify_result = run.verify();
     let verify_wall = verify_wall_start.elapsed();
     println!("verify_time={:?}", run.verify_duration().unwrap_or(verify_wall));

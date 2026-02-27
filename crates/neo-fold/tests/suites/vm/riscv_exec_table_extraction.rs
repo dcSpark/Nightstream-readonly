@@ -1,7 +1,5 @@
 use neo_fold::riscv_trace_shard::Rv32TraceWiring;
-use neo_memory::riscv::exec_table::{
-    Rv32MEventTable, Rv32RamEventKind, Rv32RamEventTable, Rv32RegEventKind, Rv32RegEventTable,
-};
+use neo_memory::riscv::exec_table::{Rv32RamEventKind, Rv32RamEventTable, Rv32RegEventKind, Rv32RegEventTable};
 use neo_memory::riscv::lookups::{encode_program, RiscvInstruction, RiscvMemOp, RiscvOpcode};
 use std::collections::HashMap;
 
@@ -124,8 +122,4 @@ fn exec_table_extracts_from_trace_run_and_pads() {
         .rows
         .iter()
         .any(|r| { r.kind == Rv32RamEventKind::Read && r.addr == 0 && r.prev_val == 7 && r.next_val == 7 }));
-
-    // No RV32M ops in this program.
-    let m = Rv32MEventTable::from_exec_table(&exec).expect("rv32m event table");
-    assert_eq!(m.rows.len(), 0);
 }

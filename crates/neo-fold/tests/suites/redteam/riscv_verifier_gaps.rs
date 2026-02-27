@@ -52,7 +52,7 @@ fn redteam_output_claim_path_rejects_tampered_proof() {
     let mut tampered = false;
     for step in &mut bad_proof.steps {
         for claim in &mut step.mem.val_me_claims {
-            if let Some(first) = claim.y_scalars.first_mut() {
+            if let Some(first) = claim.ct.first_mut() {
                 *first += K::ONE;
                 tampered = true;
                 break;

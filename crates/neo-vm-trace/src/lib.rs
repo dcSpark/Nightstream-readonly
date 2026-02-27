@@ -174,6 +174,12 @@ pub struct StepTrace<Addr, Word> {
     pub pc_after: Addr,
     /// The opcode executed (ISA-specific encoding).
     pub opcode: u32,
+    /// True if this step is part of a virtual/decomposed instruction sequence.
+    #[serde(default)]
+    pub is_virtual: bool,
+    /// Remaining virtual sequence length (inclusive countdown), if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub virtual_sequence_remaining: Option<u32>,
     /// Register state before execution.
     pub regs_before: Vec<Word>,
     /// Register state after execution.
@@ -519,6 +525,10 @@ pub struct StepMeta<Addr> {
     pub pc_after: Addr,
     /// The opcode that was executed.
     pub opcode: u32,
+    /// True if this step is part of a virtual/decomposed instruction sequence.
+    pub is_virtual: bool,
+    /// Remaining virtual sequence length (inclusive countdown), if any.
+    pub virtual_sequence_remaining: Option<u32>,
 }
 
 /// Abstraction for a CPU that can be traced.
@@ -651,6 +661,8 @@ where
             pc_before: pc,
             pc_after: pc,
             opcode: 0,
+            is_virtual: false,
+            virtual_sequence_remaining: None,
             regs_before: regs.clone(),
             regs_after: regs,
             twist_events: Vec::new(),
@@ -680,6 +692,8 @@ where
             pc_before,
             pc_after: meta.pc_after,
             opcode: meta.opcode,
+            is_virtual: meta.is_virtual,
+            virtual_sequence_remaining: meta.virtual_sequence_remaining,
             regs_before,
             regs_after,
             twist_events,
@@ -840,6 +854,8 @@ pub mod test_utils {
             Ok(StepMeta {
                 pc_after: self.pc,
                 opcode: 1,
+                is_virtual: false,
+                virtual_sequence_remaining: None,
             })
         }
     }
@@ -906,6 +922,8 @@ pub mod test_utils {
             Ok(StepMeta {
                 pc_after: self.pc,
                 opcode: 2,
+                is_virtual: false,
+                virtual_sequence_remaining: None,
             })
         }
     }

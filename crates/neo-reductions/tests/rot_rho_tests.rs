@@ -56,14 +56,21 @@ fn test_sample_rot_rhos_succeeds_with_valid_params() {
 }
 
 #[test]
-fn test_rot_rhos_k1_is_identity() {
+fn test_rot_rhos_k1_matches_first_sampled_rho() {
     let params = NeoParams::goldilocks_127();
     let ring = RotRing::goldilocks();
-    let mut tr = Poseidon2Transcript::new(b"test/rot_rhos_k1");
+    let mut tr_single = Poseidon2Transcript::new(b"test/rot_rhos_k1");
+    let mut tr_pair = Poseidon2Transcript::new(b"test/rot_rhos_k1");
 
-    let rhos = sample_rot_rhos_n(&mut tr, &params, &ring, 1).unwrap();
-    assert_eq!(rhos.len(), 1);
-    assert!(rhos[0].is_identity(), "k=1 rho should be identity");
+    let rho_single = sample_rot_rhos_n(&mut tr_single, &params, &ring, 1).unwrap();
+    let rho_pair = sample_rot_rhos_n(&mut tr_pair, &params, &ring, 2).unwrap();
+
+    assert_eq!(rho_single.len(), 1);
+    assert_eq!(rho_pair.len(), 2);
+    assert_eq!(
+        rho_single[0], rho_pair[0],
+        "count=1 must use the same sampled rho as the first rho in count=2"
+    );
 }
 
 #[test]

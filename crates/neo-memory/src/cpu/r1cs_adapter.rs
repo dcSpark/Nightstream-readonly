@@ -4,6 +4,7 @@
 //! R1CS-based CPU, allowing integration with Neo's shared CPU bus architecture.
 
 use crate::addr::write_addr_bits_dim_major_le_into_bus;
+use crate::ajtai::encode_vector_for_ccs_m;
 use crate::builder::CpuArithmetization;
 use crate::cpu::bus_layout::{
     build_bus_layout_for_instances_with_shout_shapes_and_twist_lanes, BusLayout, ShoutInstanceShape,
@@ -16,10 +17,9 @@ use crate::plain::LutTable;
 use crate::plain::PlainMemLayout;
 use crate::riscv::lookups::uninterleave_bits;
 use crate::riscv::packed::{build_rv32_packed_cols, rv32_packed_d};
+use crate::riscv::trace::rv32_trace_lookup_n_vals_for_table_id;
 use crate::witness::{LutInstance, LutTableSpec, MemInstance};
-use neo_ajtai::{decomp_b, DecompStyle};
-use neo_ccs::matrix::Mat;
-use neo_ccs::relations::{CcsStructure, McsInstance, McsWitness};
+use neo_ccs::relations::{CcsClaim, CcsStructure, CcsWitness};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_params::NeoParams;
 use neo_vm_trace::{StepTrace, VmTrace};
@@ -106,6 +106,10 @@ where
     /// When present, we overwrite a reserved tail segment of `z_vec` with Twist/Shout access rows
     /// (in deterministic id order) before Ajtai decomposition + commitment.
     shared_cpu_bus: Option<SharedCpuBusState<F>>,
+    /// Optional lookup-family sharing metadata used by Route-A claim planning in uniform mode.
+    /// This is intentionally independent from physical shared-bus constraint injection.
+    lookup_shout_addr_groups: HashMap<u32, u64>,
+    lookup_shout_selector_groups: HashMap<u32, u64>,
 
     /// Function to map a trace chunk (up to `chunk_size` steps) to the full witness z = (x, w).
     /// The witness MUST satisfy the CCS relation.
@@ -178,9 +182,22 @@ where
             shout_meta,
             shout_specs,
             shared_cpu_bus: None,
+            lookup_shout_addr_groups: HashMap::new(),
+            lookup_shout_selector_groups: HashMap::new(),
             chunk_to_witness,
             _phantom: PhantomData,
         })
+    }
+
+    /// Attach lookup-family sharing metadata without enabling physical shared-bus tail injection.
+    pub fn with_lookup_sharing_groups(
+        mut self,
+        shout_addr_groups: HashMap<u32, u64>,
+        shout_selector_groups: HashMap<u32, u64>,
+    ) -> Self {
+        self.lookup_shout_addr_groups = shout_addr_groups;
+        self.lookup_shout_selector_groups = shout_selector_groups;
+        self
     }
 
     fn shared_bus_schema(
@@ -216,7 +233,7 @@ where
             shout_shapes.push(ShoutInstanceShape {
                 ell_addr,
                 lanes,
-                n_vals: 1usize,
+                n_vals: rv32_trace_lookup_n_vals_for_table_id(*table_id),
                 addr_group: bus.shout_addr_groups.get(table_id).copied(),
                 selector_group: bus.shout_selector_groups.get(table_id).copied(),
             });
@@ -482,7 +499,7 @@ where
         &self,
         trace: &VmTrace<u64, u64>,
         chunk_size: usize,
-    ) -> Result<Vec<(McsInstance<Cmt, Goldilocks>, McsWitness<Goldilocks>)>, Self::Error> {
+    ) -> Result<Vec<(CcsClaim<Cmt, Goldilocks>, CcsWitness<Goldilocks>)>, Self::Error> {
         if chunk_size == 0 {
             return Err("chunk_size must be >= 1".into());
         }
@@ -578,7 +595,12 @@ where
                 }
 
                 // Scratch buffers for per-step event lookup (avoid per-step HashMap allocation).
-                let mut shout_events: Vec<Vec<Option<(u64, Goldilocks)>>> = shared
+                #[derive(Clone)]
+                struct ShoutLaneEvent {
+                    key: u64,
+                    vals: Vec<Option<Goldilocks>>,
+                }
+                let mut shout_events: Vec<Vec<Option<ShoutLaneEvent>>> = shared
                     .layout
                     .shout_cols
                     .iter()
@@ -617,13 +639,41 @@ where
                             format!("unexpected shout_id={id} in one step (chunk_start={chunk_start}, j={j})")
                         })?;
                         let lanes = shout_events[idx].len();
-                        let lane_idx = used_shout[idx];
-                        if lane_idx >= lanes {
+                        let n_vals = shared
+                            .layout
+                            .shout_cols
+                            .get(idx)
+                            .and_then(|inst_cols| inst_cols.lanes.first())
+                            .map(|lane| lane.vals.len())
+                            .unwrap_or(1)
+                            .max(1);
+                        let slot_idx = used_shout[idx];
+                        let total_slots = lanes.checked_mul(n_vals).ok_or_else(|| {
+                            format!("shout slot overflow for shout_id={id} (lanes={lanes}, n_vals={n_vals})")
+                        })?;
+                        if slot_idx >= total_slots {
                             return Err(format!(
-                                "too many shout events for shout_id={id} in one step (chunk_start={chunk_start}, j={j}): lanes={lanes}"
+                                "too many shout events for shout_id={id} in one step (chunk_start={chunk_start}, j={j}): lanes={lanes}, n_vals={n_vals}, total_slots={total_slots}"
                             ));
                         }
-                        shout_events[idx][lane_idx] = Some((ev.key, Goldilocks::from_u64(ev.value)));
+                        let lane_idx = slot_idx / n_vals;
+                        let val_slot = slot_idx % n_vals;
+                        let lane_entry = shout_events[idx][lane_idx].get_or_insert_with(|| ShoutLaneEvent {
+                            key: ev.key,
+                            vals: vec![None; n_vals],
+                        });
+                        if lane_entry.key != ev.key {
+                            return Err(format!(
+                                "mixed shout keys for shout_id={id} in one step (chunk_start={chunk_start}, j={j}, lane={lane_idx}): first_key={}, new_key={}",
+                                lane_entry.key, ev.key
+                            ));
+                        }
+                        if lane_entry.vals[val_slot].is_some() {
+                            return Err(format!(
+                                "duplicate shout value slot for shout_id={id} in one step (chunk_start={chunk_start}, j={j}, lane={lane_idx}, val_slot={val_slot})"
+                            ));
+                        }
+                        lane_entry.vals[val_slot] = Some(Goldilocks::from_u64(ev.value));
                         used_shout[idx] += 1;
                     }
 
@@ -710,7 +760,24 @@ where
                         }
                     }
 
-                    // Shout lanes: addr_bits, has_lookup, vals[0].
+                    let reg_read_pair_u32 = shared
+                        .mem_ids
+                        .binary_search(&crate::riscv::lookups::REG_ID.0)
+                        .ok()
+                        .and_then(|reg_idx| {
+                            let lanes = twist_reads.get(reg_idx)?;
+                            let lhs = lanes
+                                .get(0)
+                                .and_then(|slot| *slot)
+                                .map(|(_, v)| v.as_canonical_u64() as u32)?;
+                            let rhs = lanes
+                                .get(1)
+                                .and_then(|slot| *slot)
+                                .map(|(_, v)| v.as_canonical_u64() as u32)?;
+                            Some((lhs, rhs))
+                        });
+
+                    // Shout lanes: addr_bits, has_lookup, vals[0..n_vals).
                     for (i, table_id) in shared.table_ids.iter().enumerate() {
                         let inst_cols = &shared.layout.shout_cols[i];
                         let (d, n_side) = self
@@ -721,7 +788,17 @@ where
                         let ell = n_side.trailing_zeros() as usize;
 
                         for (lane_idx, shout_cols) in inst_cols.lanes.iter().enumerate() {
-                            if let Some((key, val)) = shout_events[i][lane_idx] {
+                            if let Some(ref lane_event) = shout_events[i][lane_idx] {
+                                let key = lane_event.key;
+                                let primary_val = lane_event
+                                    .vals
+                                    .first()
+                                    .and_then(|slot| *slot)
+                                    .ok_or_else(|| {
+                                        format!(
+                                            "missing primary shout value for table_id={table_id} at step j={j}, lane={lane_idx}"
+                                        )
+                                    })?;
                                 match self.shout_specs.get(table_id) {
                                     Some(LutTableSpec::RiscvOpcodePacked { opcode, xlen }) => {
                                         if *xlen != 32 {
@@ -729,10 +806,13 @@ where
                                                 "packed shout table_id={table_id} requires xlen=32 (got xlen={xlen})"
                                             ));
                                         }
-                                        let (lhs_raw, rhs_raw) = uninterleave_bits(key as u128);
-                                        let lhs = lhs_raw as u32;
-                                        let rhs = rhs_raw as u32;
-                                        let val_u64 = val.as_canonical_u64();
+                                        // Packed lanes should be derived from architectural operands, not key encoding.
+                                        // This keeps packed synthesis correct when some opcodes migrate to combined keys.
+                                        let (lhs, rhs) = reg_read_pair_u32.unwrap_or_else(|| {
+                                            let (lhs_raw, rhs_raw) = uninterleave_bits(key as u128);
+                                            (lhs_raw as u32, rhs_raw as u32)
+                                        });
+                                        let val_u64 = primary_val.as_canonical_u64();
                                         if val_u64 > u32::MAX as u64 {
                                             return Err(format!(
                                                 "packed shout value out of u32 range for table_id={table_id} at step j={j}: val={val_u64}"
@@ -775,7 +855,21 @@ where
                                     }
                                 }
                                 z_vec[shared.layout.bus_cell(shout_cols.has_lookup, j)] = Goldilocks::ONE;
-                                z_vec[shared.layout.bus_cell(shout_cols.primary_val(), j)] = val;
+                                if lane_event.vals.len() != shout_cols.vals.len() {
+                                    return Err(format!(
+                                        "shared-bus shout value slot mismatch for table_id={table_id} at step j={j}, lane={lane_idx}: event_slots={} bus_slots={}",
+                                        lane_event.vals.len(),
+                                        shout_cols.vals.len()
+                                    ));
+                                }
+                                for (val_slot, &col_id) in shout_cols.vals.iter().enumerate() {
+                                    let slot_val = lane_event.vals[val_slot].ok_or_else(|| {
+                                        format!(
+                                            "missing shout value for table_id={table_id} at step j={j}, lane={lane_idx}, val_slot={val_slot}"
+                                        )
+                                    })?;
+                                    z_vec[shared.layout.bus_cell(col_id, j)] = slot_val;
+                                }
                             }
                         }
                     }
@@ -868,8 +962,7 @@ where
                 }
             }
 
-            // 3) Decompose z -> Z matrix
-            let d = self.params.d as usize;
+            // 3) Encode z -> Z matrix
             let m = z_vec.len(); // == ccs.m after padding
 
             // Validate m_in
@@ -878,17 +971,8 @@ where
                 return Err(format!("m_in={} exceeds witness length m={}", m_in, m));
             }
 
-            // Decompose: Z is d x m
-            let z_digits = decomp_b(&z_vec, self.params.b, d, DecompStyle::Balanced);
-
-            // Convert to Mat (row-major d x m)
-            let mut mat_data = vec![Goldilocks::ZERO; d * m];
-            for c in 0..m {
-                for r in 0..d {
-                    mat_data[r * m + c] = z_digits[c * d + r];
-                }
-            }
-            let z_mat = Mat::from_row_major(d, m, mat_data);
+            let z_mat = encode_vector_for_ccs_m(&self.params, self.ccs.m, &z_vec)
+                .map_err(|e| format!("shared_cpu_bus: witness encode failed: {e}"))?;
 
             // 4) Commit to Z
             let c = self.committer.commit(&z_mat);
@@ -897,7 +981,7 @@ where
             let x = z_vec[..m_in].to_vec();
             let w = z_vec[m_in..].to_vec();
 
-            mcss.push((McsInstance { c, x, m_in }, McsWitness { w, Z: z_mat }));
+            mcss.push((CcsClaim { c, x, m_in }, CcsWitness { w, Z: z_mat }));
 
             chunk_start = chunk_end;
         }
@@ -908,28 +992,24 @@ where
     fn build_ccs_steps(
         &self,
         trace: &VmTrace<u64, u64>,
-    ) -> Result<Vec<(McsInstance<Cmt, Goldilocks>, McsWitness<Goldilocks>)>, Self::Error> {
+    ) -> Result<Vec<(CcsClaim<Cmt, Goldilocks>, CcsWitness<Goldilocks>)>, Self::Error> {
         self.build_ccs_chunks(trace, 1)
     }
 
     fn shout_addr_groups(&self) -> &HashMap<u32, u64> {
-        self.shared_cpu_bus
-            .as_ref()
-            .map(|s| &s.cfg.shout_addr_groups)
-            .unwrap_or_else(|| {
-                static EMPTY: std::sync::LazyLock<HashMap<u32, u64>> = std::sync::LazyLock::new(HashMap::new);
-                &EMPTY
-            })
+        if let Some(shared) = self.shared_cpu_bus.as_ref() {
+            &shared.cfg.shout_addr_groups
+        } else {
+            &self.lookup_shout_addr_groups
+        }
     }
 
     fn shout_selector_groups(&self) -> &HashMap<u32, u64> {
-        self.shared_cpu_bus
-            .as_ref()
-            .map(|s| &s.cfg.shout_selector_groups)
-            .unwrap_or_else(|| {
-                static EMPTY: std::sync::LazyLock<HashMap<u32, u64>> = std::sync::LazyLock::new(HashMap::new);
-                &EMPTY
-            })
+        if let Some(shared) = self.shared_cpu_bus.as_ref() {
+            &shared.cfg.shout_selector_groups
+        } else {
+            &self.lookup_shout_selector_groups
+        }
     }
 
     type Error = String;

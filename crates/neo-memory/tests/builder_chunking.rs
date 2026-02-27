@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use neo_ccs::matrix::Mat;
-use neo_ccs::relations::{McsInstance, McsWitness};
+use neo_ccs::relations::{CcsClaim, CcsWitness};
 use neo_memory::builder::{build_shard_witness_shared_cpu_bus, CpuArithmetization};
 use neo_memory::plain::PlainMemLayout;
 use neo_memory::MemInit;
@@ -87,6 +87,8 @@ impl VmCpu<u64, u64> for ScriptCpu {
         Ok(StepMeta {
             pc_after: self.pc,
             opcode: 0xAA,
+            is_virtual: false,
+            virtual_sequence_remaining: None,
         })
     }
 }
@@ -101,7 +103,7 @@ impl CpuArithmetization<Goldilocks, ()> for DummyCpuArith {
         &self,
         trace: &neo_vm_trace::VmTrace<u64, u64>,
         chunk_size: usize,
-    ) -> Result<Vec<(McsInstance<(), Goldilocks>, McsWitness<Goldilocks>)>, Self::Error> {
+    ) -> Result<Vec<(CcsClaim<(), Goldilocks>, CcsWitness<Goldilocks>)>, Self::Error> {
         if chunk_size == 0 {
             return Err("chunk_size must be >= 1".into());
         }
@@ -109,12 +111,12 @@ impl CpuArithmetization<Goldilocks, ()> for DummyCpuArith {
         Ok((0..chunks_len)
             .map(|_| {
                 (
-                    McsInstance {
+                    CcsClaim {
                         c: (),
                         x: vec![],
                         m_in: 0,
                     },
-                    McsWitness {
+                    CcsWitness {
                         w: vec![],
                         Z: Mat::zero(1, 1, Goldilocks::ZERO),
                     },

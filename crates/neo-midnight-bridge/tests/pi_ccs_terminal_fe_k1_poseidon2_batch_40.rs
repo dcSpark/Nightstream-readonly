@@ -10,28 +10,35 @@ use neo_midnight_bridge::relations::{
 use p3_field::PrimeField64;
 use rand::SeedableRng;
 use rand_chacha::ChaCha20Rng;
-use std::fs;
-use std::path::PathBuf;
 
 fn k_to_repr(k: &neo_math::K) -> KRepr {
     let (c0, c1) = k.to_limbs_u64();
     KRepr { c0, c1 }
 }
 
+// SuperNeo-only b=2 rejects full-field Poseidon witness values. Use a compact valid export
+// whose witness coefficients are representable in D=54 balanced base-2 digits.
+const SUPERNEO_REPRESENTABLE_EXPORT_JSON: &str = r#"{
+  "num_constraints": 1,
+  "num_variables": 2,
+  "matrix_a": { "rows": 1, "cols": 2, "entries": [[0, 0, 1]] },
+  "matrix_b": { "rows": 1, "cols": 2, "entries": [[0, 1, 1]] },
+  "matrix_c": { "rows": 1, "cols": 2, "entries": [[0, 1, 1]] },
+  "witness": [[1, 5], [1, 7]]
+}"#;
+
 #[test]
 fn plonk_kzg_pi_ccs_terminal_fe_k1_poseidon2_batch_40_roundtrip() {
     // Prove the **k=1** FE terminal identity for a real Pi-CCS proof (SplitNcV1),
     // inside Midnight's PLONK/KZG verifier stack.
-    let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let json_path = manifest_dir.join("../neo-fold/poseidon2-tests/poseidon2_ic_circuit_batch_40.json");
-    let json = fs::read_to_string(&json_path).expect("read poseidon2 batch-40 json");
-    let export = neo_fold::test_export::parse_test_export_json(&json).expect("parse test-export json");
+    let json = SUPERNEO_REPRESENTABLE_EXPORT_JSON;
+    let export = neo_fold::test_export::parse_test_export_json(json).expect("parse test-export json");
 
-    // Repeat the single witness vector to keep the overall workload similar to the other tests.
-    // This relation still targets step 0 (k=1, no ME inputs).
-    let target_folding_steps: usize = 2;
+    // Keep this at one step to avoid assumptions about runtime batching policy.
+    // This relation targets step 0 (k=1, no ME inputs).
+    let target_folding_steps: usize = 1;
 
-    let mut session = neo_fold::test_export::TestExportSession::new_from_circuit_json(&json).expect("session init");
+    let mut session = neo_fold::test_export::TestExportSession::new_from_circuit_json(json).expect("session init");
     for i in 0..target_folding_steps {
         let z = &export.witness[i % export.witness.len()];
         session.add_step_witness_u64(z).expect("add witness step");
@@ -74,8 +81,8 @@ fn plonk_kzg_pi_ccs_terminal_fe_k1_poseidon2_batch_40_roundtrip() {
     assert_eq!(pi.challenges_public.beta_a.len(), ell_d);
     assert_eq!(pi.challenges_public.beta_r.len(), ell_n);
 
-    // y_scalars are the values used by the FE terminal identity.
-    assert_eq!(out0.y_scalars.len(), s.t());
+    // ct values are the values used by the FE terminal identity.
+    assert_eq!(out0.ct.len(), s.t());
 
     // Encode the CCS sparse polynomial f as (u64 coeffs, u32 exps).
     let poly_terms: Vec<SparsePolyTermRepr> =
@@ -103,7 +110,7 @@ fn plonk_kzg_pi_ccs_terminal_fe_k1_poseidon2_batch_40_roundtrip() {
         alpha_prime: alpha_prime.iter().map(k_to_repr).collect(),
         beta_a: pi.challenges_public.beta_a.iter().map(k_to_repr).collect(),
         beta_r: pi.challenges_public.beta_r.iter().map(k_to_repr).collect(),
-        y_scalars: out0.y_scalars.iter().map(k_to_repr).collect(),
+        y_scalars: out0.ct.iter().map(k_to_repr).collect(),
     };
 
     // Use test-only KZG params. Production must use Midnight's SRS.

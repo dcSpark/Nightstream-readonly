@@ -31,4 +31,7 @@ pub mod riscv_trace_shard;
 // Output binding integration
 pub mod output_binding;
 
+// Time-opening Stage-8 helpers (manifest/reduction/joint lane)
+pub mod time_opening;
+
 mod shard_proof_types;

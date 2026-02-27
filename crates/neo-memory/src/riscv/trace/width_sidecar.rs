@@ -7,8 +7,14 @@ use crate::riscv::exec_table::Rv32ExecTable;
 ///
 /// Table id for width column `c` is `RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE + c`.
 pub const RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE: u32 = 0x5256_5800;
+/// Grouped width lookup table id used in shared-bus trace mode.
+///
+/// In grouped mode, all width transport columns share one `table_id` and use
+/// value slots (`n_vals`) to carry per-column values.
+pub const RV32_TRACE_WIDTH_LOOKUP_GROUPED_TABLE_ID: u32 = RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE;
 /// Base address-group id for width lookup lanes.
 pub const RV32_TRACE_WIDTH_ADDR_GROUP_BASE: u32 = 0x5256_5A00;
+const RV32_TRACE_WIDTH_LOOKUP_GROUPED: bool = true;
 
 #[derive(Clone, Debug)]
 pub struct Rv32WidthSidecarLayout {
@@ -103,12 +109,35 @@ pub fn rv32_width_lookup_backed_cols(layout: &Rv32WidthSidecarLayout) -> Vec<usi
 
 #[inline]
 pub const fn rv32_width_lookup_table_id_for_col(col: usize) -> u32 {
-    RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE + col as u32
+    if RV32_TRACE_WIDTH_LOOKUP_GROUPED {
+        RV32_TRACE_WIDTH_LOOKUP_GROUPED_TABLE_ID
+    } else {
+        RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE + col as u32
+    }
 }
 
 #[inline]
 pub const fn rv32_is_width_lookup_table_id(table_id: u32) -> bool {
-    table_id >= RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE && table_id < RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE + 34
+    (table_id >= RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE && table_id < RV32_TRACE_WIDTH_LOOKUP_TABLE_BASE + 34)
+        || table_id == RV32_TRACE_WIDTH_LOOKUP_GROUPED_TABLE_ID
+}
+
+#[inline]
+pub const fn rv32_is_width_lookup_grouped_table_id(table_id: u32) -> bool {
+    RV32_TRACE_WIDTH_LOOKUP_GROUPED && table_id == RV32_TRACE_WIDTH_LOOKUP_GROUPED_TABLE_ID
+}
+
+#[inline]
+pub fn rv32_width_lookup_transport_n_vals() -> usize {
+    let layout = Rv32WidthSidecarLayout::new();
+    rv32_width_lookup_backed_cols(&layout).len().max(1)
+}
+
+#[inline]
+pub fn rv32_width_lookup_val_slot_for_col(col: usize) -> Option<usize> {
+    let layout = Rv32WidthSidecarLayout::new();
+    let cols = rv32_width_lookup_backed_cols(&layout);
+    cols.iter().position(|&c| c == col)
 }
 
 #[inline]

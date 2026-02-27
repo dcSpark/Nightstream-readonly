@@ -115,7 +115,7 @@ pub fn eq_gadget<F: PrimeField, CS: ConstraintSystem<F>>(
 /// It is gated behind `unsafe-gadgets` to avoid accidental use.
 pub fn range_product_gadget<F: PrimeField, CS: ConstraintSystem<F>>(
     _cs: &mut CS,
-    y: &KNumVar,
+    y_ring: &KNumVar,
     _b: u32,
     _delta: F,
     _label: &str,

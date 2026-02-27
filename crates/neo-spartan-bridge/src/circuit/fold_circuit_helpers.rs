@@ -46,11 +46,11 @@ pub fn alloc_matrix_from_neo<CS: ConstraintSystem<CircuitF>>(
 /// Helper: allocate a table of K elements (y-vectors) from neo_math::K.
 pub fn alloc_y_table_from_neo<CS: ConstraintSystem<CircuitF>>(
     cs: &mut CS,
-    y: &[Vec<neo_math::K>],
+    y_ring: &[Vec<neo_math::K>],
     label: &str,
 ) -> Result<Vec<Vec<KNumVar>>> {
-    let mut table = Vec::with_capacity(y.len());
-    for (j, row) in y.iter().enumerate() {
+    let mut table = Vec::with_capacity(y_ring.len());
+    for (j, row) in y_ring.iter().enumerate() {
         let mut row_vars = Vec::with_capacity(row.len());
         for (idx, k_val) in row.iter().enumerate() {
             let var = alloc_k_from_neo(cs, *k_val, &format!("{}_{}_{}", label, j, idx))?;

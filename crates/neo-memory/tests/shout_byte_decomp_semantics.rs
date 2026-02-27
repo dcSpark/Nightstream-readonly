@@ -19,7 +19,7 @@
 //! - Or filter by name (this test is prefixed accordingly): `cargo test -p neo-memory shout_byte_decomp_semantics --release`
 
 use neo_math::{KExtensions, F};
-use neo_memory::ajtai::encode_vector_balanced_to_mat;
+use neo_memory::ajtai::encode_vector_for_ccs_m;
 use neo_memory::shout::check_shout_semantics;
 use neo_memory::sparse_time::SparseIdxVec;
 use neo_memory::twist_oracle::AddressLookupOracle;
@@ -71,14 +71,14 @@ fn build_single_lane_explicit_lut_witness(
             .iter()
             .map(|&addr| if ((addr >> bit) & 1) == 1 { F::ONE } else { F::ZERO })
             .collect();
-        mats.push(encode_vector_balanced_to_mat(params, &col));
+        mats.push(encode_vector_for_ccs_m(params, steps, &col).expect("pack addr bits"));
     }
 
     let has_lookup: Vec<F> = vec![F::ONE; steps];
-    mats.push(encode_vector_balanced_to_mat(params, &has_lookup));
+    mats.push(encode_vector_for_ccs_m(params, steps, &has_lookup).expect("pack has_lookup"));
 
     let expected_vals: Vec<F> = addrs.iter().map(|&addr| table[addr as usize]).collect();
-    mats.push(encode_vector_balanced_to_mat(params, &expected_vals));
+    mats.push(encode_vector_for_ccs_m(params, steps, &expected_vals).expect("pack expected_vals"));
 
     (inst, LutWitness { mats }, expected_vals)
 }

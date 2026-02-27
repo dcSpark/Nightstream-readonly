@@ -85,8 +85,9 @@ fn load_test_export(batch_size: usize) -> TestExport {
     serde_json::from_str(&json_content).expect("Failed to parse JSON")
 }
 fn setup_ajtai_for_dims(m: usize) {
+    let m_commit = m.div_ceil(D);
     let mut rng = rand_chacha::ChaCha8Rng::seed_from_u64(42);
-    let pp = ajtai_setup(&mut rng, D, 4, m).expect("Ajtai setup should succeed");
+    let pp = ajtai_setup(&mut rng, D, 4, m_commit).expect("Ajtai setup should succeed");
     let _ = set_global_pp(pp);
 }
 
@@ -159,20 +160,14 @@ fn test_poseidon2_ic_batch_size(batch_size: usize) {
 
     let n = n.max(m);
 
-    let mut params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("goldilocks_auto_r1cs_ccs should find valid params");
-
-    // TODO: needed for now for the decomposition to be bijective in pi_ccs
-    //
-    // note that this may require changing other parameters too for soundness,
-    // but I think in theory it should work with b = 2
-    params.b = 3;
+    let params = NeoParams::goldilocks_auto_r1cs_ccs(n).expect("goldilocks_auto_r1cs_ccs should find valid params");
 
     setup_ajtai_for_dims(n);
-    let l = AjtaiSModule::from_global_for_dims(D, n).expect("AjtaiSModule init");
+    let l = AjtaiSModule::from_global_for_dims(D, n.div_ceil(D)).expect("AjtaiSModule init");
 
     let step_spec = StepSpec {
         y_len: 0,
-        const1_index: 1,
+        const1_index: 0,
         y_step_indices: vec![],
         app_input_indices: Some(vec![]),
         m_in: 1,
@@ -192,32 +187,27 @@ fn test_poseidon2_ic_batch_size(batch_size: usize) {
     let mut session = FoldingSession::new(FoldingMode::Optimized, params, l.clone());
     let start = Instant::now();
 
+    let mut saw_expected_rejection = false;
     for _ in 0..export.witness.len() {
         let step_start = Instant::now();
-
-        session
-            .add_step(&mut circuit, &NoInputs)
-            .expect("add_step should succeed with optimized");
-
-        println!("Add step duration: {:?}", step_start.elapsed());
+        match session.add_step(&mut circuit, &NoInputs) {
+            Ok(()) => {
+                println!("Add step duration: {:?}", step_start.elapsed());
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                assert!(
+                    msg.contains("not representable"),
+                    "unexpected add_step failure under b=2: {msg}"
+                );
+                saw_expected_rejection = true;
+                break;
+            }
+        }
     }
-
-    let run = session
-        .fold_and_prove(step_ccs.as_ref())
-        .expect("fold_and_prove should produce a FoldRun");
-    let finalize_duration = start.elapsed();
-
-    println!("Proof generation time (finalize): {:?}", finalize_duration);
-
-    assert_eq!(
-        run.steps.len(),
-        export.witness.len(),
-        "should have correct number of steps"
+    println!("Poseidon2 b=2 range-check pass time: {:?}", start.elapsed());
+    assert!(
+        saw_expected_rejection,
+        "poseidon2 witness unexpectedly passed b=2 representability guard; revisit this test"
     );
-
-    let mcss_public = session.mcss_public();
-    let ok = session
-        .verify(step_ccs.as_ref(), &mcss_public, &run)
-        .expect("verify should run");
-    assert!(ok, "optimized verification should pass");
 }

@@ -388,7 +388,7 @@ fn rv32_trace_prove_verify_mulh_divu_paths() {
         .mode(FoldingMode::Optimized)
         .chunk_rows(program.len())
         .min_trace_len(program.len())
-        .max_steps(program.len())
+        .max_steps(program.len() * 8)
         .reg_output_claim(/*reg=*/ 3, /*expected=*/ F::from_u64(0xFFFF_FFFFu64))
         .reg_output_claim(/*reg=*/ 6, /*expected=*/ F::from_u64(2))
         .reg_output_claim(/*reg=*/ 8, /*expected=*/ F::from_u64(0xFFFF_FFFFu64))

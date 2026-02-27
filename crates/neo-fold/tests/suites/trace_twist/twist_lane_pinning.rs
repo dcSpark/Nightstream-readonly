@@ -11,6 +11,7 @@ use neo_fold::session::{
 use neo_fold::session::{Public, Scalar};
 use neo_fold::shard::StepLinkingConfig;
 use neo_math::{D, F};
+use neo_memory::ajtai::commit_cols_for_ccs_m;
 use neo_memory::plain::PlainMemLayout;
 use neo_params::NeoParams;
 use neo_vm_trace::{Shout, ShoutId, StepMeta, StepTrace, Twist, TwistId, VmCpu};
@@ -179,13 +180,16 @@ impl VmCpu<u64, u64> for PinnedLaneVm {
         Ok(StepMeta {
             pc_after: self.pc,
             opcode: 0,
+            is_virtual: false,
+            virtual_sequence_remaining: None,
         })
     }
 }
 
 fn setup_ajtai_committer(m: usize, kappa: usize) -> AjtaiSModule {
+    let m_commit = commit_cols_for_ccs_m(m);
     let mut rng = ChaCha8Rng::seed_from_u64(42);
-    let pp = ajtai_setup(&mut rng, D, kappa, m).expect("Ajtai setup");
+    let pp = ajtai_setup(&mut rng, D, kappa, m_commit).expect("Ajtai setup");
     AjtaiSModule::new(Arc::new(pp))
 }
 

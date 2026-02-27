@@ -11,7 +11,7 @@ use crate::engines::PiCcsEngine;
 use crate::error::PiCcsError;
 use crate::optimized_engine::PiCcsProofVariant;
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::{CcsStructure, Mat, McsInstance, McsWitness, MeInstance};
+use neo_ccs::{CcsClaim, CcsStructure, CcsWitness, CeClaim, Mat};
 use neo_math::{F, K};
 use neo_params::NeoParams;
 use neo_transcript::Poseidon2Transcript;
@@ -61,12 +61,12 @@ pub fn crosscheck_prove<I, L>(
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
     s: &CcsStructure<F>,
-    mcs_list: &[McsInstance<Cmt, F>],
-    mcs_witnesses: &[McsWitness<F>],
-    me_inputs: &[MeInstance<Cmt, F, K>],
+    mcs_list: &[CcsClaim<Cmt, F>],
+    mcs_witnesses: &[CcsWitness<F>],
+    me_inputs: &[CeClaim<Cmt, F, K>],
     me_witnesses: &[Mat<F>],
     log: &L,
-) -> Result<(Vec<MeInstance<Cmt, F, K>>, PiCcsProof), PiCcsError>
+) -> Result<(Vec<CeClaim<Cmt, F, K>>, PiCcsProof), PiCcsError>
 where
     I: PiCcsEngine,
     L: neo_ccs::traits::SModuleHomomorphism<F, Cmt>,
@@ -94,19 +94,63 @@ where
         "sumcheck_challenges_nc length mismatch"
     );
     let (r_prime, alpha_prime) = proof.sumcheck_challenges.split_at(dims.ell_n);
+    let r_inputs = crate::engines::utils::shared_me_input_r(me_inputs, dims.ell_n)?;
+
+    // SuperNeo transform sanity: when CCS shape is compatible, transformed-matrix
+    // MLE evaluation must match direct MLE evaluation on the same witness and point.
+    if let (Ok(s_bar), Some(first_mcs)) = (s.transform_matrices_superneo(), mcs_witnesses.first()) {
+        let z = recomposed_z_from_witness(params, s, first_mcs);
+        let chi_r = chi_table(r_prime);
+        let direct = crate::superneo_eval::eval_all_mats_direct(s, &z, &chi_r, s.n);
+        let via_bar = crate::superneo_eval::eval_all_mats_transformed(&s_bar, &z, &chi_r, s.n);
+        if direct != via_bar {
+            return Err(PiCcsError::ProtocolError(
+                "crosscheck: transformed-matrix eval mismatch (SuperNeo parity)".into(),
+            ));
+        }
+    }
 
     // 3) Optional cross-checks
     if cfg.initial_sum {
-        let lhs_exact = crate::engines::paper_exact_engine::sum_q_over_hypercube_paper_exact(
-            s,
-            params,
-            mcs_witnesses,
-            me_witnesses,
-            &proof.challenges_public,
-            dims.ell_d,
-            dims.ell_n,
-            me_inputs.get(0).map(|mi| mi.r.as_slice()),
-        );
+        let lhs_exact = if proof.variant == PiCcsProofVariant::SplitNcV1 {
+            let mut total = K::ZERO;
+            let d_sz = 1usize << dims.ell_d;
+            let n_sz = 1usize << dims.ell_n;
+            for xa in 0..d_sz {
+                let alpha_bits: Vec<K> = (0..dims.ell_d)
+                    .map(|bit| if ((xa >> bit) & 1) == 1 { K::ONE } else { K::ZERO })
+                    .collect();
+                for xr in 0..n_sz {
+                    let r_bits: Vec<K> = (0..dims.ell_n)
+                        .map(|bit| if ((xr >> bit) & 1) == 1 { K::ONE } else { K::ZERO })
+                        .collect();
+                    let (q_fe_at_point, _rhs_unused) =
+                        crate::engines::paper_exact_engine::q_eval_at_ext_point_fe_paper_exact_with_inputs(
+                            s,
+                            params,
+                            mcs_witnesses,
+                            me_witnesses,
+                            &alpha_bits,
+                            &r_bits,
+                            &proof.challenges_public,
+                            r_inputs,
+                        );
+                    total += q_fe_at_point;
+                }
+            }
+            total
+        } else {
+            crate::engines::paper_exact_engine::sum_q_over_hypercube_paper_exact(
+                s,
+                params,
+                mcs_witnesses,
+                me_witnesses,
+                &proof.challenges_public,
+                dims.ell_d,
+                dims.ell_n,
+                r_inputs,
+            )
+        };
         let initial_sum_prover = match proof.sc_initial_sum {
             Some(x) => x,
             None => proof
@@ -142,7 +186,7 @@ where
                 dims.ell_d,
                 dims.ell_n,
                 dims.d_sc,
-                me_inputs.first().map(|mi| mi.r.as_slice()),
+                r_inputs,
             );
 
             for (round_idx, (opt_coeffs, &challenge)) in proof
@@ -215,14 +259,15 @@ where
         if detailed_log {
             log_terminal_optimized_header();
         }
-        let rhs_opt = crate::paper_exact_engine::rhs_terminal_identity_fe_paper_exact(
+        let rhs_opt = crate::paper_exact_engine::rhs_terminal_identity_fe_paper_exact_with_k_mcs(
             s,
             params,
             &proof.challenges_public,
             r_prime,
             alpha_prime,
             &out_me_opt,
-            me_inputs.first().map(|mi| mi.r.as_slice()),
+            mcs_list.len(),
+            r_inputs,
         );
         if detailed_log {
             log_terminal_optimized_result(rhs_opt);
@@ -232,7 +277,6 @@ where
             log_terminal_paper_exact_header();
         }
 
-        let r_inputs = me_inputs.get(0).map(|mi| mi.r.as_slice());
         let (lhs_exact, _rhs_unused) =
             crate::engines::paper_exact_engine::q_eval_at_ext_point_fe_paper_exact_with_inputs(
                 s,
@@ -342,7 +386,7 @@ where
                 )));
             }
 
-            for (j, (ya, yb)) in a.y.iter().zip(b.y.iter()).enumerate() {
+            for (j, (ya, yb)) in a.y_ring.iter().zip(b.y_ring.iter()).enumerate() {
                 if ya.len() != yb.len() {
                     log_outputs_y_row_length_mismatch(idx, j, ya.len(), yb.len());
                     return Err(PiCcsError::ProtocolError(format!(
@@ -369,29 +413,23 @@ where
                 }
             }
 
-            if a.y_scalars != b.y_scalars {
-                let match_count = a
-                    .y_scalars
-                    .iter()
-                    .zip(b.y_scalars.iter())
-                    .filter(|(x, y)| x == y)
-                    .count();
-                let mismatches: Vec<(usize, K, K)> = a
-                    .y_scalars
-                    .iter()
-                    .zip(b.y_scalars.iter())
-                    .enumerate()
-                    .filter_map(|(k, (a_val, b_val))| {
-                        if a_val != b_val {
-                            Some((k, *a_val, *b_val))
-                        } else {
-                            None
-                        }
-                    })
-                    .collect();
-                log_outputs_y_scalars_mismatch(idx, match_count, a.y_scalars.len(), &mismatches);
+            if a.ct != b.ct {
+                let match_count = a.ct.iter().zip(b.ct.iter()).filter(|(x, y)| x == y).count();
+                let mismatches: Vec<(usize, K, K)> =
+                    a.ct.iter()
+                        .zip(b.ct.iter())
+                        .enumerate()
+                        .filter_map(|(k, (a_val, b_val))| {
+                            if a_val != b_val {
+                                Some((k, *a_val, *b_val))
+                            } else {
+                                None
+                            }
+                        })
+                        .collect();
+                log_outputs_ct_mismatch(idx, match_count, a.ct.len(), &mismatches);
                 return Err(PiCcsError::ProtocolError(format!(
-                    "crosscheck: y_scalars mismatch at instance {}",
+                    "crosscheck: ct mismatch at instance {}",
                     idx
                 )));
             }
@@ -421,6 +459,30 @@ where
     Ok((out_me_opt, proof))
 }
 
+fn chi_table(point: &[K]) -> Vec<K> {
+    let n = 1usize << point.len();
+    let mut out = vec![K::ZERO; n];
+    for (idx, out_cell) in out.iter_mut().enumerate().take(n) {
+        let mut w = K::ONE;
+        for (bit, p) in point.iter().copied().enumerate() {
+            let is_one = ((idx >> bit) & 1) == 1;
+            w *= if is_one { p } else { K::ONE - p };
+        }
+        *out_cell = w;
+    }
+    out
+}
+
+fn recomposed_z_from_witness(params: &NeoParams, s: &CcsStructure<F>, w: &CcsWitness<F>) -> Vec<K> {
+    let _ = params;
+    crate::common::decode_superneo_coeffs_from_witness_mat(&w.Z, s.m).unwrap_or_else(|e| {
+        panic!(
+            "crosscheck recomposed_z_from_witness: invalid packed witness shape for m={}: {e}",
+            s.m
+        )
+    })
+}
+
 /// Implementation of verify logic for cross-checking.
 /// Verification remains the optimized path; cross-checking is a prover-side aid.
 pub fn crosscheck_verify<I>(
@@ -428,9 +490,9 @@ pub fn crosscheck_verify<I>(
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
     s: &CcsStructure<F>,
-    mcs_list: &[McsInstance<Cmt, F>],
-    me_inputs: &[MeInstance<Cmt, F, K>],
-    me_outputs: &[MeInstance<Cmt, F, K>],
+    mcs_list: &[CcsClaim<Cmt, F>],
+    me_inputs: &[CeClaim<Cmt, F, K>],
+    me_outputs: &[CeClaim<Cmt, F, K>],
     proof: &PiCcsProof,
 ) -> Result<bool, PiCcsError>
 where

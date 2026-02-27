@@ -29,7 +29,7 @@ fn prove_run_addi_halt(imm: i32) -> Rv32TraceWiringRun {
 fn tamper_semantics_related_scalar(proof: &mut ShardProof) {
     for step in &mut proof.steps {
         for claim in &mut step.mem.val_me_claims {
-            if let Some(first) = claim.y_scalars.first_mut() {
+            if let Some(first) = claim.ct.first_mut() {
                 *first += K::ONE;
                 return;
             }

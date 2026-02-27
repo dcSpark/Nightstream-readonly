@@ -15,12 +15,12 @@ use crate::circuit::{FoldRunCircuit, FoldRunInstance, FoldRunWitness};
 use crate::error::{Result, SpartanBridgeError};
 use crate::CircuitF;
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::{CcsStructure, MeInstance};
+use neo_ccs::{CcsStructure, CeClaim};
 use neo_fold::shard::ShardProof as FoldRun;
 use neo_math::{F as NeoF, K as NeoK};
 use neo_params::NeoParams;
 use neo_reductions::common::format_ext;
-use neo_reductions::paper_exact_engine::claimed_initial_sum_from_inputs;
+use neo_reductions::paper_exact_engine::claimed_initial_sum_from_inputs_with_k_mcs;
 use p3_field::PrimeCharacteristicRing;
 
 use spartan2::{provider::GoldilocksP3MerkleMleEngine, spartan::R1CSSNARK, traits::snark::R1CSSNARKTrait};
@@ -54,23 +54,65 @@ impl SpartanProof {
     }
 }
 
+fn materialize_fold_run_for_circuit(fold_run: &FoldRun) -> Result<FoldRun> {
+    // CCS-only batched segments can legally have `proof_steps < public_steps`
+    // without embedding nested substeps in `compressed_substeps`.
+    // In that case, keep the run as-is.
+    if !fold_run
+        .steps
+        .iter()
+        .any(|step| step.compressed_substeps.is_some())
+    {
+        return Ok(fold_run.clone());
+    }
+
+    let mut materialized_steps = Vec::new();
+    for (idx, step) in fold_run.steps.iter().enumerate() {
+        if let Some(prefix_steps) = step.compressed_substeps.as_ref() {
+            for (sub_idx, sub) in prefix_steps.iter().enumerate() {
+                if sub.compressed_substeps.is_some() {
+                    return Err(SpartanBridgeError::InvalidInput(format!(
+                        "FoldRun step {} substep {} is nested-compressed; bridge materialization supports one compression level",
+                        idx, sub_idx
+                    )));
+                }
+                materialized_steps.push(sub.clone());
+            }
+            let mut terminal = step.clone();
+            terminal.compressed_substeps = None;
+            materialized_steps.push(terminal);
+        } else {
+            materialized_steps.push(step.clone());
+        }
+    }
+
+    Ok(FoldRun {
+        steps: materialized_steps,
+        output_proof: fold_run.output_proof.clone(),
+        segment_meta: None,
+    })
+}
+
 fn build_fold_run_circuit(
     params: &NeoParams,
     ccs: &CcsStructure<NeoF>,
-    initial_accumulator: &[MeInstance<Cmt, NeoF, NeoK>],
+    initial_accumulator: &[CeClaim<Cmt, NeoF, NeoK>],
     fold_run: &FoldRun,
-    witness: FoldRunWitness,
+    mut witness: FoldRunWitness,
 ) -> Result<FoldRunCircuit> {
+    let materialized_run = materialize_fold_run_for_circuit(fold_run)?;
+    witness.fold_run = materialized_run.clone();
+
     enforce_sumcheck_degree_bounds(params, ccs, &witness)?;
 
     let params_digest = compute_params_digest(params);
     let ccs_digest = compute_ccs_digest(ccs);
 
     // Extract challenges from FoldRun's Π-CCS proofs (native FS).
-    let pi_ccs_challenges = extract_challenges_from_fold_run(fold_run, params, ccs)?;
+    let pi_ccs_challenges = extract_challenges_from_fold_run(&materialized_run, params, ccs)?;
 
     let instance = FoldRunInstance::from_fold_run(
-        fold_run,
+        &materialized_run,
         params_digest,
         ccs_digest,
         initial_accumulator.to_vec(),
@@ -103,7 +145,7 @@ fn build_fold_run_circuit(
 pub fn setup_fold_run(
     params: &NeoParams,
     ccs: &CcsStructure<NeoF>,
-    initial_accumulator: &[MeInstance<Cmt, NeoF, NeoK>],
+    initial_accumulator: &[CeClaim<Cmt, NeoF, NeoK>],
     fold_run: &FoldRun,
     witness_for_setup: FoldRunWitness,
 ) -> Result<SpartanKeypair> {
@@ -125,7 +167,7 @@ pub fn prove_fold_run(
     pk: &SpartanProverKey,
     params: &NeoParams,
     ccs: &CcsStructure<NeoF>,
-    initial_accumulator: &[MeInstance<Cmt, NeoF, NeoK>],
+    initial_accumulator: &[CeClaim<Cmt, NeoF, NeoK>],
     fold_run: &FoldRun,
     witness: FoldRunWitness,
 ) -> Result<SpartanProof> {
@@ -174,80 +216,36 @@ pub fn prove_fold_run(
                 eprintln!("[spartan-bridge]   dims.ell_n = {}, dims.ell = {}", ell_n, ell);
 
                 // The ME inputs for this step as seen by the native verifier:
-                let me_inputs: Vec<MeInstance<Cmt, NeoF, NeoK>> = if step_idx == 0 {
+                let me_inputs: Vec<CeClaim<Cmt, NeoF, NeoK>> = if step_idx == 0 {
                     initial_accumulator.to_vec()
                 } else {
                     fold_run.steps[step_idx - 1].fold.dec_children.clone()
                 };
 
-                let T_native = claimed_initial_sum_from_inputs::<NeoF>(ccs, &proof.challenges_public, &me_inputs);
+                if step.fold.ccs_out.len() < me_inputs.len() + 1 {
+                    return Err(SpartanBridgeError::InvalidInput(format!(
+                        "step {} invalid output/input partition: k_total={}, me_inputs={}",
+                        step_idx,
+                        step.fold.ccs_out.len(),
+                        me_inputs.len()
+                    )));
+                }
+                let k_mcs = step.fold.ccs_out.len() - me_inputs.len();
+                let T_native = claimed_initial_sum_from_inputs_with_k_mcs::<NeoF>(
+                    ccs,
+                    &proof.challenges_public,
+                    k_mcs,
+                    &me_inputs,
+                );
                 eprintln!(
                     "[spartan-bridge]   native claimed_initial_sum T = {}",
                     format_ext(T_native)
                 );
-                // Host-side recomputation of T using the same formula as
-                // `claimed_initial_sum_from_inputs` (including the outer γ^k).
-                let T_bridge_host: NeoK = {
-                    use core::cmp::min;
-
-                    let k_total = 1 + me_inputs.len();
-                    if k_total < 2 {
-                        NeoK::ZERO
-                    } else {
-                        // Build χ_{α} over the Ajtai domain
-                        let d_sz = 1usize
-                            .checked_shl(proof.challenges_public.alpha.len() as u32)
-                            .unwrap_or(0);
-                        let mut chi_a = vec![NeoK::ZERO; d_sz];
-                        for rho in 0..d_sz {
-                            let mut w = NeoK::ONE;
-                            for (bit, &a) in proof.challenges_public.alpha.iter().enumerate() {
-                                let is_one = ((rho >> bit) & 1) == 1;
-                                w *= if is_one { a } else { NeoK::ONE - a };
-                            }
-                            chi_a[rho] = w;
-                        }
-
-                        // Number of matrices t: use y-table length from ME inputs.
-                        let t = if me_inputs.is_empty() { 0 } else { me_inputs[0].y.len() };
-
-                        // γ^k
-                        let mut gamma_to_k = NeoK::ONE;
-                        for _ in 0..k_total {
-                            gamma_to_k *= proof.challenges_public.gamma;
-                        }
-
-                        let mut inner = NeoK::ZERO;
-                        for j in 0..t {
-                            for (idx, out) in me_inputs.iter().enumerate() {
-                                let i_abs = idx + 2;
-
-                                let yj = &out.y[j];
-                                let mut y_eval = NeoK::ZERO;
-                                let limit = min(d_sz, yj.len());
-                                for rho in 0..limit {
-                                    y_eval += yj[rho] * chi_a[rho];
-                                }
-
-                                let mut weight = NeoK::ONE;
-                                for _ in 0..(i_abs - 1) {
-                                    weight *= proof.challenges_public.gamma;
-                                }
-                                for _ in 0..j {
-                                    weight *= gamma_to_k;
-                                }
-
-                                inner += weight * y_eval;
-                            }
-                        }
-
-                        // Match paper-exact engine: T = γ^k · inner.
-                        gamma_to_k * inner
-                    }
-                };
                 eprintln!(
-                    "[spartan-bridge]   bridge claimed_initial_sum T (host) = {}",
-                    format_ext(T_bridge_host)
+                    "[spartan-bridge]   k_total = {}, k_mcs = {}, me_inputs = {}",
+                    step.fold.ccs_out.len(),
+                    k_mcs,
+                    me_inputs.len()
                 );
                 if let Some(sc0) = proof.sc_initial_sum {
                     eprintln!("[spartan-bridge]   proof.sc_initial_sum = {}", format_ext(sc0));
@@ -256,7 +254,7 @@ pub fn prove_fold_run(
                 }
 
                 // Compute native RHS terminal identity for debugging
-                let rhs_native = neo_reductions::paper_exact_engine::rhs_terminal_identity_paper_exact(
+                let rhs_native = neo_reductions::paper_exact_engine::rhs_terminal_identity_paper_exact_with_k_mcs(
                     &ccs.ensure_identity_first()
                         .map_err(|e| SpartanBridgeError::InvalidInput(format!("Identity check failed: {:?}", e)))?,
                     params,
@@ -264,11 +262,8 @@ pub fn prove_fold_run(
                     &ch.r_prime,
                     &ch.alpha_prime,
                     &step.fold.ccs_out,
-                    if step_idx == 0 {
-                        Some(&initial_accumulator[0].r)
-                    } else {
-                        Some(&fold_run.steps[step_idx - 1].fold.dec_children[0].r)
-                    },
+                    k_mcs,
+                    me_inputs.first().map(|me| me.r.as_slice()),
                 );
                 eprintln!("[spartan-bridge]   rhs_native(α′,r′) = {}", format_ext(rhs_native));
 

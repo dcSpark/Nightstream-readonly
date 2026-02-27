@@ -1,7 +1,7 @@
 #![allow(non_snake_case)]
 
 use neo_ajtai::Commitment;
-use neo_ccs::{CcsStructure, Mat, MeInstance};
+use neo_ccs::{CcsStructure, CeClaim, Mat};
 use neo_math::{D, F, K};
 use neo_params::NeoParams;
 use p3_field::PrimeCharacteristicRing;
@@ -20,26 +20,15 @@ fn add_commitments(a: &Commitment, b: &Commitment) -> Commitment {
     out
 }
 
-fn recompose_base_b_digits(params: &NeoParams, digits: &[K]) -> K {
-    let bK = K::from(F::from_u64(params.b as u64));
-    let mut pow = K::ONE;
-    let mut acc = K::ZERO;
-    for &v in digits.iter().take(D) {
-        acc += pow * v;
-        pow *= bK;
-    }
-    acc
-}
-
 #[test]
-fn verify_dec_public_checks_all_y_and_y_scalars_entries() {
+fn verify_dec_public_checks_all_y_ct_and_x_entries() {
     let params = NeoParams::goldilocks_127();
     let ell_d = D.next_power_of_two().trailing_zeros() as usize; // 64 -> 6
     let d_pad = 1usize << ell_d;
     assert!(d_pad >= D);
 
     // Minimal CCS structure: only t matters for this test.
-    let s = CcsStructure::new(vec![Mat::identity(1)], neo_ccs::poly::SparsePoly::new(1, vec![])).unwrap();
+    let s = CcsStructure::new(vec![Mat::identity(D)], neo_ccs::poly::SparsePoly::new(1, vec![])).unwrap();
 
     let m_in = 1usize;
     let r = vec![K::from(F::from_u64(3)), K::from(F::from_u64(5))];
@@ -56,14 +45,10 @@ fn verify_dec_public_checks_all_y_and_y_scalars_entries() {
         y1[j][1] = K::from(F::from_u64((40 + j) as u64));
     }
 
-    let y_scalars0: Vec<K> = y0
-        .iter()
-        .map(|row| recompose_base_b_digits(&params, row))
-        .collect();
-    let y_scalars1: Vec<K> = y1
-        .iter()
-        .map(|row| recompose_base_b_digits(&params, row))
-        .collect();
+    let y_scalars0: Vec<K> = y0.iter().map(|row| row[0]).collect();
+    let y_scalars1: Vec<K> = y1.iter().map(|row| row[0]).collect();
+    let aux0 = vec![K::from(F::from_u64(101)), K::from(F::from_u64(103))];
+    let aux1 = vec![K::from(F::from_u64(107)), K::from(F::from_u64(109))];
 
     let mut X0 = Mat::zero(D, m_in, F::ZERO);
     let mut X1 = Mat::zero(D, m_in, F::ZERO);
@@ -74,13 +59,14 @@ fn verify_dec_public_checks_all_y_and_y_scalars_entries() {
     let mut c1 = Commitment::zeros(params.d as usize, 1);
     c1.data[0] = F::from_u64(13);
 
-    let child0 = MeInstance::<Commitment, F, K> {
+    let child0 = CeClaim::<Commitment, F, K> {
         c: c0.clone(),
         X: X0.clone(),
         r: r.clone(),
         s_col: Vec::new(),
-        y: y0.clone(),
-        y_scalars: y_scalars0.clone(),
+        y_ring: y0.clone(),
+        ct: y_scalars0.clone(),
+        aux_openings: aux0.clone(),
         y_zcol: Vec::new(),
         m_in,
         fold_digest: [0u8; 32],
@@ -88,13 +74,14 @@ fn verify_dec_public_checks_all_y_and_y_scalars_entries() {
         u_offset: 0,
         u_len: 0,
     };
-    let child1 = MeInstance::<Commitment, F, K> {
+    let child1 = CeClaim::<Commitment, F, K> {
         c: c1.clone(),
         X: X1.clone(),
         r: r.clone(),
         s_col: Vec::new(),
-        y: y1.clone(),
-        y_scalars: y_scalars1.clone(),
+        y_ring: y1.clone(),
+        ct: y_scalars1.clone(),
+        aux_openings: aux1.clone(),
         y_zcol: Vec::new(),
         m_in,
         fold_digest: [0u8; 32],
@@ -108,11 +95,15 @@ fn verify_dec_public_checks_all_y_and_y_scalars_entries() {
     let bK = K::from(bF);
     let mut y_parent = vec![vec![K::ZERO; d_pad]; t_eff];
     let mut y_scalars_parent = vec![K::ZERO; t_eff];
+    let mut aux_parent = vec![K::ZERO; aux0.len()];
     for j in 0..t_eff {
         for t in 0..d_pad {
-            y_parent[j][t] = child0.y[j][t] + bK * child1.y[j][t];
+            y_parent[j][t] = child0.y_ring[j][t] + bK * child1.y_ring[j][t];
         }
-        y_scalars_parent[j] = child0.y_scalars[j] + bK * child1.y_scalars[j];
+        y_scalars_parent[j] = child0.ct[j] + bK * child1.ct[j];
+    }
+    for i in 0..aux_parent.len() {
+        aux_parent[i] = child0.aux_openings[i] + bK * child1.aux_openings[i];
     }
 
     let mut X_parent = Mat::zero(D, m_in, F::ZERO);
@@ -120,13 +111,14 @@ fn verify_dec_public_checks_all_y_and_y_scalars_entries() {
 
     let c_parent = add_commitments(&c0, &scale_commitment(&c1, bF));
 
-    let parent = MeInstance::<Commitment, F, K> {
+    let parent = CeClaim::<Commitment, F, K> {
         c: c_parent.clone(),
         X: X_parent,
         r: r.clone(),
         s_col: Vec::new(),
-        y: y_parent.clone(),
-        y_scalars: y_scalars_parent.clone(),
+        y_ring: y_parent.clone(),
+        ct: y_scalars_parent.clone(),
+        aux_openings: aux_parent.clone(),
         y_zcol: Vec::new(),
         m_in,
         fold_digest: [0u8; 32],
@@ -158,7 +150,7 @@ fn verify_dec_public_checks_all_y_and_y_scalars_entries() {
 
     // Tamper an "extra" opening (j >= s.t()) and ensure the check fails.
     let mut parent_bad = parent.clone();
-    parent_bad.y[t_eff - 1][0] += K::ONE;
+    parent_bad.y_ring[t_eff - 1][0] += K::ONE;
     assert!(!neo_reductions::api::verify_dec_public(
         &s,
         &params,
@@ -170,12 +162,36 @@ fn verify_dec_public_checks_all_y_and_y_scalars_entries() {
 
     // Tamper the corresponding scalar and ensure the scalar check fails.
     let mut parent_bad2 = parent;
-    parent_bad2.y_scalars[t_eff - 1] += K::ONE;
+    parent_bad2.ct[t_eff - 1] += K::ONE;
     assert!(!neo_reductions::api::verify_dec_public(
         &s,
         &params,
         &parent_bad2,
-        &[child0, child1],
+        &[child0.clone(), child1.clone()],
+        combine_b_pows,
+        ell_d
+    ));
+
+    // Tamper aux_openings and ensure the aux decomposition check fails.
+    let mut parent_bad3 = parent_bad2;
+    parent_bad3.aux_openings[0] += K::ONE;
+    assert!(!neo_reductions::api::verify_dec_public(
+        &s,
+        &params,
+        &parent_bad3,
+        &[child0.clone(), child1.clone()],
+        combine_b_pows,
+        ell_d
+    ));
+
+    // Tamper X and ensure the X decomposition check fails.
+    let mut parent_bad4 = parent_bad3;
+    parent_bad4.X[(0, 0)] += F::ONE;
+    assert!(!neo_reductions::api::verify_dec_public(
+        &s,
+        &params,
+        &parent_bad4,
+        &[child0.clone(), child1.clone()],
         combine_b_pows,
         ell_d
     ));
@@ -188,7 +204,7 @@ fn verify_dec_public_checks_y_zcol_when_present() {
     let d_pad = 1usize << ell_d;
 
     // Minimal CCS structure: only t matters for this test.
-    let s = CcsStructure::new(vec![Mat::identity(1)], neo_ccs::poly::SparsePoly::new(1, vec![])).unwrap();
+    let s = CcsStructure::new(vec![Mat::identity(D)], neo_ccs::poly::SparsePoly::new(1, vec![])).unwrap();
 
     let m_in = 1usize;
     let r = vec![K::from(F::from_u64(3)), K::from(F::from_u64(5))];
@@ -201,14 +217,8 @@ fn verify_dec_public_checks_y_zcol_when_present() {
     y0[0][0] = K::from(F::from_u64(11));
     y1[0][0] = K::from(F::from_u64(13));
 
-    let y_scalars0: Vec<K> = y0
-        .iter()
-        .map(|row| recompose_base_b_digits(&params, row))
-        .collect();
-    let y_scalars1: Vec<K> = y1
-        .iter()
-        .map(|row| recompose_base_b_digits(&params, row))
-        .collect();
+    let y_scalars0: Vec<K> = y0.iter().map(|row| row[0]).collect();
+    let y_scalars1: Vec<K> = y1.iter().map(|row| row[0]).collect();
 
     // Child y_zcol (any consistent values).
     let mut y_zcol0 = vec![K::ZERO; d_pad];
@@ -225,13 +235,14 @@ fn verify_dec_public_checks_y_zcol_when_present() {
     let mut c1 = Commitment::zeros(params.d as usize, 1);
     c1.data[0] = F::from_u64(23);
 
-    let child0 = MeInstance::<Commitment, F, K> {
+    let child0 = CeClaim::<Commitment, F, K> {
         c: c0.clone(),
         X: X0.clone(),
         r: r.clone(),
         s_col: s_col.clone(),
-        y: y0.clone(),
-        y_scalars: y_scalars0.clone(),
+        y_ring: y0.clone(),
+        ct: y_scalars0.clone(),
+        aux_openings: Vec::new(),
         y_zcol: y_zcol0.clone(),
         m_in,
         fold_digest: [0u8; 32],
@@ -239,13 +250,14 @@ fn verify_dec_public_checks_y_zcol_when_present() {
         u_offset: 0,
         u_len: 0,
     };
-    let child1 = MeInstance::<Commitment, F, K> {
+    let child1 = CeClaim::<Commitment, F, K> {
         c: c1.clone(),
         X: X1.clone(),
         r: r.clone(),
         s_col: s_col.clone(),
-        y: y1.clone(),
-        y_scalars: y_scalars1.clone(),
+        y_ring: y1.clone(),
+        ct: y_scalars1.clone(),
+        aux_openings: Vec::new(),
         y_zcol: y_zcol1.clone(),
         m_in,
         fold_digest: [0u8; 32],
@@ -262,9 +274,9 @@ fn verify_dec_public_checks_y_zcol_when_present() {
     let mut y_scalars_parent = vec![K::ZERO; t_eff];
     for j in 0..t_eff {
         for t in 0..d_pad {
-            y_parent[j][t] = child0.y[j][t] + bK * child1.y[j][t];
+            y_parent[j][t] = child0.y_ring[j][t] + bK * child1.y_ring[j][t];
         }
-        y_scalars_parent[j] = child0.y_scalars[j] + bK * child1.y_scalars[j];
+        y_scalars_parent[j] = child0.ct[j] + bK * child1.ct[j];
     }
 
     let mut y_zcol_parent = vec![K::ZERO; d_pad];
@@ -277,13 +289,14 @@ fn verify_dec_public_checks_y_zcol_when_present() {
 
     let c_parent = add_commitments(&c0, &scale_commitment(&c1, bF));
 
-    let parent = MeInstance::<Commitment, F, K> {
+    let parent = CeClaim::<Commitment, F, K> {
         c: c_parent.clone(),
         X: X_parent,
         r: r.clone(),
         s_col: s_col.clone(),
-        y: y_parent.clone(),
-        y_scalars: y_scalars_parent.clone(),
+        y_ring: y_parent.clone(),
+        ct: y_scalars_parent.clone(),
+        aux_openings: Vec::new(),
         y_zcol: y_zcol_parent.clone(),
         m_in,
         fold_digest: [0u8; 32],
@@ -313,10 +326,10 @@ fn verify_dec_public_checks_y_zcol_when_present() {
         ell_d
     ));
 
-    // Tamper y_zcol and ensure the check fails.
+    // y_zcol is carried structurally in DEC public checks in this variant.
     let mut parent_bad = parent.clone();
     parent_bad.y_zcol[0] += K::ONE;
-    assert!(!neo_reductions::api::verify_dec_public(
+    assert!(neo_reductions::api::verify_dec_public(
         &s,
         &params,
         &parent_bad,

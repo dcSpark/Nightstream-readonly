@@ -1,5 +1,5 @@
 use neo_ajtai::{AjtaiSModule, Commitment as Cmt};
-use neo_ccs::relations::{McsInstance, McsWitness};
+use neo_ccs::relations::{CcsClaim, CcsWitness};
 use neo_ccs::traits::SModuleHomomorphism;
 use neo_math::K;
 use neo_memory::ajtai::encode_vector_balanced_to_mat;
@@ -9,7 +9,7 @@ use p3_goldilocks::Goldilocks as F;
 
 pub type StepWit = StepWitnessBundle<Cmt, F, K>;
 
-pub fn collect_mcs(instances: &[StepWit]) -> (Vec<McsInstance<Cmt, F>>, Vec<McsWitness<F>>) {
+pub fn collect_mcs(instances: &[StepWit]) -> (Vec<CcsClaim<Cmt, F>>, Vec<CcsWitness<F>>) {
     let mut insts = Vec::with_capacity(instances.len());
     let mut wits = Vec::with_capacity(instances.len());
     for step in instances {
@@ -23,8 +23,8 @@ pub fn collect_mcs(instances: &[StepWit]) -> (Vec<McsInstance<Cmt, F>>, Vec<McsW
 pub fn mcs_recommit_step_after_private_tamper(
     params: &NeoParams,
     committer: &AjtaiSModule,
-    mcs_inst: &mut McsInstance<Cmt, F>,
-    mcs_wit: &mut McsWitness<F>,
+    mcs_inst: &mut CcsClaim<Cmt, F>,
+    mcs_wit: &mut CcsWitness<F>,
     idx_to_tamper: usize,
     delta: F,
 ) {

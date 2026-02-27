@@ -65,8 +65,8 @@ pub fn rv32_packed_d(op: RiscvOpcode) -> Result<usize, PiCcsError> {
         RiscvOpcode::Mulh => 38usize,
         RiscvOpcode::Mulhu => 34usize,
         RiscvOpcode::Mulhsu => 37usize,
-        RiscvOpcode::Div | RiscvOpcode::Rem => 43usize,
-        RiscvOpcode::Divu | RiscvOpcode::Remu => 38usize,
+        RiscvOpcode::Div | RiscvOpcode::Rem => 41usize,
+        RiscvOpcode::Divu | RiscvOpcode::Remu => 37usize,
         _ => {
             return Err(PiCcsError::InvalidInput(format!(
                 "packed RV32 opcode is unsupported: opcode={op:?}"
@@ -138,16 +138,16 @@ pub fn rv32_packed_bitness_roles(op: RiscvOpcode) -> Result<Vec<PackedBitnessRol
         }
         RiscvOpcode::Divu | RiscvOpcode::Remu => {
             out.push(PackedBitnessRole::HasLookup);
-            out.push(PackedBitnessRole::PackedCol(4));
-            push_col_range(&mut out, 6, 32);
+            out.push(PackedBitnessRole::PackedCol(3));
+            push_col_range(&mut out, 5, 32);
         }
         RiscvOpcode::Div | RiscvOpcode::Rem => {
             out.push(PackedBitnessRole::HasLookup);
+            out.push(PackedBitnessRole::PackedCol(4));
             out.push(PackedBitnessRole::PackedCol(5));
             out.push(PackedBitnessRole::PackedCol(6));
             out.push(PackedBitnessRole::PackedCol(7));
-            out.push(PackedBitnessRole::PackedCol(9));
-            push_col_range(&mut out, 11, 32);
+            push_col_range(&mut out, 9, 32);
         }
         _ => {
             return Err(PiCcsError::InvalidInput(format!(
@@ -311,8 +311,6 @@ pub fn build_rv32_packed_cols<F: Field + PrimeCharacteristicRing>(
                 rhs.wrapping_neg()
             };
 
-            let rhs_f = F::from_u64(rhs as u64);
-            let rhs_inv = if rhs_f == F::ZERO { F::ZERO } else { rhs_f.inverse() };
             let rhs_is_zero = rhs == 0;
 
             let (q_abs, r_abs) = if rhs == 0 {
@@ -321,20 +319,16 @@ pub fn build_rv32_packed_cols<F: Field + PrimeCharacteristicRing>(
                 (lhs_abs / rhs_abs, lhs_abs % rhs_abs)
             };
             let q_is_zero = q_abs == 0;
-            let q_f = F::from_u64(q_abs as u64);
-            let q_inv = if q_f == F::ZERO { F::ZERO } else { q_f.inverse() };
             let diff = if rhs == 0 { 0u32 } else { r_abs.wrapping_sub(rhs_abs) };
 
-            let mut packed = Vec::with_capacity(43);
+            let mut packed = Vec::with_capacity(41);
             packed.push(F::from_u64(lhs as u64));
             packed.push(F::from_u64(rhs as u64));
             packed.push(F::from_u64(q_abs as u64));
             packed.push(F::from_u64(r_abs as u64));
-            packed.push(rhs_inv);
             packed.push(f_bool::<F>(rhs_is_zero));
             packed.push(f_bool::<F>(lhs_sign == 1));
             packed.push(f_bool::<F>(rhs_sign == 1));
-            packed.push(q_inv);
             packed.push(f_bool::<F>(q_is_zero));
             packed.push(F::from_u64(diff as u64));
             for bit in 0..32usize {
@@ -343,8 +337,6 @@ pub fn build_rv32_packed_cols<F: Field + PrimeCharacteristicRing>(
             Ok(packed)
         }
         RiscvOpcode::Divu => {
-            let rhs_f = F::from_u64(rhs as u64);
-            let rhs_inv = if rhs_f == F::ZERO { F::ZERO } else { rhs_f.inverse() };
             let rhs_is_zero = rhs == 0;
 
             let rem = if rhs == 0 {
@@ -362,11 +354,10 @@ pub fn build_rv32_packed_cols<F: Field + PrimeCharacteristicRing>(
             }
             let diff = rem.wrapping_sub(rhs);
 
-            let mut packed = Vec::with_capacity(38);
+            let mut packed = Vec::with_capacity(37);
             packed.push(F::from_u64(lhs as u64));
             packed.push(F::from_u64(rhs as u64));
             packed.push(F::from_u64(rem as u64));
-            packed.push(rhs_inv);
             packed.push(f_bool::<F>(rhs_is_zero));
             packed.push(F::from_u64(diff as u64));
             for bit in 0..32usize {
@@ -386,8 +377,6 @@ pub fn build_rv32_packed_cols<F: Field + PrimeCharacteristicRing>(
                 rhs.wrapping_neg()
             };
 
-            let rhs_f = F::from_u64(rhs as u64);
-            let rhs_inv = if rhs_f == F::ZERO { F::ZERO } else { rhs_f.inverse() };
             let rhs_is_zero = rhs == 0;
 
             let (q_abs, r_abs) = if rhs == 0 {
@@ -396,20 +385,16 @@ pub fn build_rv32_packed_cols<F: Field + PrimeCharacteristicRing>(
                 (lhs_abs / rhs_abs, lhs_abs % rhs_abs)
             };
             let r_is_zero = r_abs == 0;
-            let r_f = F::from_u64(r_abs as u64);
-            let r_inv = if r_f == F::ZERO { F::ZERO } else { r_f.inverse() };
             let diff = if rhs == 0 { 0u32 } else { r_abs.wrapping_sub(rhs_abs) };
 
-            let mut packed = Vec::with_capacity(43);
+            let mut packed = Vec::with_capacity(41);
             packed.push(F::from_u64(lhs as u64));
             packed.push(F::from_u64(rhs as u64));
             packed.push(F::from_u64(q_abs as u64));
             packed.push(F::from_u64(r_abs as u64));
-            packed.push(rhs_inv);
             packed.push(f_bool::<F>(rhs_is_zero));
             packed.push(f_bool::<F>(lhs_sign == 1));
             packed.push(f_bool::<F>(rhs_sign == 1));
-            packed.push(r_inv);
             packed.push(f_bool::<F>(r_is_zero));
             packed.push(F::from_u64(diff as u64));
             for bit in 0..32usize {
@@ -418,8 +403,6 @@ pub fn build_rv32_packed_cols<F: Field + PrimeCharacteristicRing>(
             Ok(packed)
         }
         RiscvOpcode::Remu => {
-            let rhs_f = F::from_u64(rhs as u64);
-            let rhs_inv = if rhs_f == F::ZERO { F::ZERO } else { rhs_f.inverse() };
             let rhs_is_zero = rhs == 0;
 
             let quot = if rhs == 0 {
@@ -437,11 +420,10 @@ pub fn build_rv32_packed_cols<F: Field + PrimeCharacteristicRing>(
             }
             let diff = val.wrapping_sub(rhs);
 
-            let mut packed = Vec::with_capacity(38);
+            let mut packed = Vec::with_capacity(37);
             packed.push(F::from_u64(lhs as u64));
             packed.push(F::from_u64(rhs as u64));
             packed.push(F::from_u64(quot as u64));
-            packed.push(rhs_inv);
             packed.push(f_bool::<F>(rhs_is_zero));
             packed.push(F::from_u64(diff as u64));
             for bit in 0..32usize {

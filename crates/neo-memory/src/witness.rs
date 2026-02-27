@@ -1,5 +1,5 @@
 use neo_ccs::matrix::Mat;
-use neo_ccs::relations::{McsInstance, McsWitness};
+use neo_ccs::relations::{CcsClaim, CcsWitness};
 use neo_math::K;
 use neo_reductions::error::PiCcsError;
 use serde::{Deserialize, Serialize};
@@ -11,6 +11,34 @@ use crate::riscv::lookups::RiscvOpcode;
 
 fn default_one_usize() -> usize {
     1
+}
+
+/// Time-domain column payload for shard-local proving.
+///
+/// `cpu_cols` and `mem_cols` are stored in column-major form over time:
+/// `cols[col_id][j]` where `j in [0, t)`.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TimeColumns<F> {
+    pub t: usize,
+    pub cpu_cols: Vec<Vec<F>>,
+    pub mem_cols: Vec<Vec<F>>,
+    /// Chunk-padding activity mask over time (`1` for real step rows, `0` for padded rows).
+    /// This is not the semantic CPU trace `active` column.
+    pub active_col: Vec<F>,
+    /// Logical column ids in the same order as `cpu_cols || mem_cols`.
+    pub col_ids: Vec<usize>,
+}
+
+impl<F> Default for TimeColumns<F> {
+    fn default() -> Self {
+        Self {
+            t: 0,
+            cpu_cols: Vec::new(),
+            mem_cols: Vec::new(),
+            active_col: Vec::new(),
+            col_ids: Vec::new(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -246,19 +274,22 @@ impl<C, F> LutInstance<C, F> {
 /// Per-step bundle that carries CPU + memory witnesses for a single folding step.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StepWitnessBundle<Cmt, F, K> {
-    pub mcs: (McsInstance<Cmt, F>, McsWitness<F>),
+    pub mcs: (CcsClaim<Cmt, F>, CcsWitness<F>),
     pub lut_instances: Vec<(LutInstance<Cmt, F>, LutWitness<F>)>,
     pub mem_instances: Vec<(MemInstance<Cmt, F>, MemWitness<F>)>,
+    #[serde(default)]
+    pub time_columns: TimeColumns<F>,
     #[serde(skip)]
     pub _phantom: PhantomData<K>,
 }
 
-impl<Cmt, F, K> From<(McsInstance<Cmt, F>, McsWitness<F>)> for StepWitnessBundle<Cmt, F, K> {
-    fn from(mcs: (McsInstance<Cmt, F>, McsWitness<F>)) -> Self {
+impl<Cmt, F, K> From<(CcsClaim<Cmt, F>, CcsWitness<F>)> for StepWitnessBundle<Cmt, F, K> {
+    fn from(mcs: (CcsClaim<Cmt, F>, CcsWitness<F>)) -> Self {
         Self {
             mcs,
             lut_instances: Vec::new(),
             mem_instances: Vec::new(),
+            time_columns: TimeColumns::default(),
             _phantom: PhantomData,
         }
     }
@@ -267,19 +298,24 @@ impl<Cmt, F, K> From<(McsInstance<Cmt, F>, McsWitness<F>)> for StepWitnessBundle
 /// Per-step bundle that carries *only public instances* (no witnesses).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StepInstanceBundle<Cmt, F, K> {
-    pub mcs_inst: McsInstance<Cmt, F>,
+    pub mcs_inst: CcsClaim<Cmt, F>,
     pub lut_insts: Vec<LutInstance<Cmt, F>>,
     pub mem_insts: Vec<MemInstance<Cmt, F>>,
+    // Time columns are verifier-local execution context and should not be serialized
+    // as part of public step instances/proofs.
+    #[serde(skip, default)]
+    pub time_columns: TimeColumns<F>,
     #[serde(skip)]
     pub _phantom: PhantomData<K>,
 }
 
-impl<Cmt, F, K> From<McsInstance<Cmt, F>> for StepInstanceBundle<Cmt, F, K> {
-    fn from(mcs_inst: McsInstance<Cmt, F>) -> Self {
+impl<Cmt, F, K> From<CcsClaim<Cmt, F>> for StepInstanceBundle<Cmt, F, K> {
+    fn from(mcs_inst: CcsClaim<Cmt, F>) -> Self {
         Self {
             mcs_inst,
             lut_insts: Vec::new(),
             mem_insts: Vec::new(),
+            time_columns: TimeColumns::default(),
             _phantom: PhantomData,
         }
     }
@@ -299,6 +335,9 @@ impl<Cmt: Clone, F: Clone, K> From<&StepWitnessBundle<Cmt, F, K>> for StepInstan
                 .iter()
                 .map(|(inst, _)| inst.clone())
                 .collect(),
+            // Canonical time columns are verifier-local context (serde-skip on instance),
+            // and are required by Route-A named-opening verification.
+            time_columns: step.time_columns.clone(),
             _phantom: PhantomData,
         }
     }
@@ -310,12 +349,16 @@ impl<Cmt, F, K> From<StepWitnessBundle<Cmt, F, K>> for StepInstanceBundle<Cmt, F
             mcs: (mcs_inst, _mcs_wit),
             lut_instances,
             mem_instances,
+            time_columns,
             _phantom: _,
         } = step;
         Self {
             mcs_inst,
             lut_insts: lut_instances.into_iter().map(|(inst, _)| inst).collect(),
             mem_insts: mem_instances.into_iter().map(|(inst, _)| inst).collect(),
+            // Canonical time columns are verifier-local context (serde-skip on instance),
+            // and are required by Route-A named-opening verification.
+            time_columns,
             _phantom: PhantomData,
         }
     }

@@ -8,7 +8,7 @@
 use crate::error::PiCcsError;
 use crate::optimized_engine::{PiCcsProof, PiCcsProofVariant};
 use neo_ajtai::Commitment as Cmt;
-use neo_ccs::{CcsStructure, McsInstance, MeInstance};
+use neo_ccs::{CcsClaim, CcsStructure, CeClaim};
 use neo_math::KExtensions;
 use neo_math::{D, F, K};
 use neo_params::NeoParams;
@@ -24,11 +24,15 @@ pub fn paper_exact_verify(
     tr: &mut Poseidon2Transcript,
     params: &NeoParams,
     s: &CcsStructure<F>,
-    mcs_list: &[McsInstance<Cmt, F>],
-    me_inputs: &[MeInstance<Cmt, F, K>],
-    me_outputs: &[MeInstance<Cmt, F, K>],
+    mcs_list: &[CcsClaim<Cmt, F>],
+    me_inputs: &[CeClaim<Cmt, F, K>],
+    me_outputs: &[CeClaim<Cmt, F, K>],
     proof: &PiCcsProof,
 ) -> Result<bool, PiCcsError> {
+    if mcs_list.is_empty() {
+        return Err(PiCcsError::InvalidInput("paper_exact_verify: empty mcs_list".into()));
+    }
+
     let dims = crate::engines::utils::build_dims_and_policy(params, s)?;
     crate::engines::utils::bind_header_and_instances(tr, params, s, mcs_list, dims)?;
     crate::engines::utils::bind_me_inputs(tr, me_inputs)?;
@@ -37,7 +41,8 @@ pub fn paper_exact_verify(
 
     // Compute the public claimed sum T from ME inputs and α
     // (this is the only legitimate initial sum for sumcheck).
-    let claimed_initial = crate::paper_exact_engine::claimed_initial_sum_from_inputs(s, &ch, me_inputs);
+    let claimed_initial =
+        crate::paper_exact_engine::claimed_initial_sum_from_inputs_with_k_mcs(s, &ch, mcs_list.len(), me_inputs);
 
     // Optional tightness check: if prover sent a sum, verify it matches T.
     // This helps debug forged proofs.
@@ -107,16 +112,7 @@ pub fn paper_exact_verify(
     }
     let (s_col_prime, alpha_prime_nc) = r_all_nc.split_at(dims.ell_m);
 
-    for (idx, me) in me_inputs.iter().enumerate() {
-        if me.r.len() != dims.ell_n {
-            return Err(PiCcsError::InvalidInput(format!(
-                "ME input r length mismatch at accumulator #{}: expected ell_n = {}, got {}",
-                idx,
-                dims.ell_n,
-                me.r.len()
-            )));
-        }
-    }
+    let r_inputs = crate::engines::utils::shared_me_input_r(me_inputs, dims.ell_n)?;
 
     let d_pad = 1usize
         .checked_shl(dims.ell_d as u32)
@@ -202,14 +198,19 @@ pub fn paper_exact_verify(
         }
     }
 
-    let rhs = crate::paper_exact_engine::rhs_terminal_identity_fe_paper_exact(
+    crate::engines::utils::validate_ct_constant_term(s, params, me_outputs)?;
+    // MCS-derived outputs must expose X consistent with public x.
+    crate::engines::utils::validate_mcs_output_x_recomposition(params, s.m, mcs_list, me_outputs)?;
+
+    let rhs = crate::paper_exact_engine::rhs_terminal_identity_fe_paper_exact_with_k_mcs(
         s,
         params,
         &ch,
         r_prime,
         alpha_prime,
         me_outputs,
-        me_inputs.first().map(|mi| mi.r.as_slice()),
+        mcs_list.len(),
+        r_inputs,
     );
     let rhs_nc = crate::paper_exact_engine::rhs_terminal_identity_nc_paper_exact(
         params,

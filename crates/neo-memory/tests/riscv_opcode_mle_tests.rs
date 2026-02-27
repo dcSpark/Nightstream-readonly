@@ -1,3 +1,4 @@
+use neo_memory::riscv::instruction::operand_mode_keys_enabled;
 use neo_memory::riscv::lookups::{evaluate_opcode_mle, lookup_entry, RiscvOpcode};
 use p3_field::PrimeCharacteristicRing;
 use p3_goldilocks::Goldilocks;
@@ -38,6 +39,14 @@ fn sample_r(xlen: usize, seed: u64) -> Vec<Goldilocks> {
         .collect()
 }
 
+fn eval_low_word_identity(r: &[Goldilocks], xlen: usize) -> Goldilocks {
+    let mut out = Goldilocks::ZERO;
+    for (i, bit) in r.iter().take(xlen).enumerate() {
+        out += Goldilocks::from_u64(1u64 << i) * *bit;
+    }
+    out
+}
+
 #[test]
 fn opcode_mle_matches_naive_for_small_xlen() {
     let xlen = 8usize;
@@ -48,13 +57,22 @@ fn opcode_mle_matches_naive_for_small_xlen() {
         RiscvOpcode::Slt,
         RiscvOpcode::Sltu,
         RiscvOpcode::Sub,
+        RiscvOpcode::Mul,
+        RiscvOpcode::Mulhu,
     ];
 
     for op in ops {
         for seed in seeds {
             let r = sample_r(xlen, seed);
             let got = evaluate_opcode_mle::<Goldilocks>(op, &r, xlen);
-            let expected = eval_mle_naive(op, &r, xlen);
+            let expected = if operand_mode_keys_enabled() {
+                match op {
+                    RiscvOpcode::Sub => eval_low_word_identity(&r, xlen),
+                    _ => eval_mle_naive(op, &r, xlen),
+                }
+            } else {
+                eval_mle_naive(op, &r, xlen)
+            };
             assert_eq!(got, expected, "opcode={op:?}, seed={seed}");
         }
     }
