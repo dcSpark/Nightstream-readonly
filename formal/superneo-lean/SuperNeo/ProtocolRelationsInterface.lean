@@ -20,6 +20,14 @@ namespace ProtocolRelationsInterface
 /-- [Role: Theorem-Target] Curated re-export of `sumcheckInstanceOfContext`. -/
 abbrev sumcheckInstanceOfContext := SuperNeo.sumcheckInstanceOfContext
 
+/-- [Role: Theorem-Target] Curated re-export of `sumcheckFullFieldDenominatorAlignment`. -/
+abbrev sumcheckFullFieldDenominatorAlignment :=
+  SuperNeo.sumcheckFullFieldDenominatorAlignment
+
+/-- [Role: Boundary] Named setup-side boundary for the active Goldilocks/full-field Lund route. -/
+abbrev GoldilocksFullFieldLundBoundary :=
+  SuperNeo.GoldilocksFullFieldLundBoundary
+
 /-- [Role: Theorem-Target] Curated re-export of `ccsRelation`. -/
 abbrev ccsRelation := SuperNeo.ccsRelation
 
@@ -80,6 +88,25 @@ abbrev ceRelaxedRelation_of_ce
 
 /-- [Role: Boundary] Boundary surface `SumCheckTransitionWitness` requiring closure. -/
 abbrev SumCheckTransitionWitness := SuperNeo.SumCheckTransitionWitness
+
+/-- [Role: Theorem-Target] Full-field denominator alignment is exactly `ctx.cset.size = Goldilocks.q`. -/
+theorem sumcheckFullFieldDenominatorAlignment_iff
+  {ctx : ProtocolTargetContext} :
+  sumcheckFullFieldDenominatorAlignment ctx ↔
+    ctx.cset.size = Goldilocks.q :=
+  SuperNeo.sumcheckFullFieldDenominatorAlignment_iff
+
+/-- [Role: Theorem-Target] Build the named Goldilocks/Lund setup boundary from concrete cardinality. -/
+abbrev GoldilocksFullFieldLundBoundary_ofCsetCardinality
+  {ctx : ProtocolTargetContext} :=
+  SuperNeo.GoldilocksFullFieldLundBoundary.ofCsetCardinality (ctx := ctx)
+
+/-- [Role: Theorem-Target] Recover concrete challenge-set cardinality from the named setup boundary. -/
+theorem GoldilocksFullFieldLundBoundary_csetCardinality_eq
+  {ctx : ProtocolTargetContext}
+  (h : GoldilocksFullFieldLundBoundary ctx) :
+  ctx.cset.size = Goldilocks.q :=
+  SuperNeo.GoldilocksFullFieldLundBoundary.csetCardinality_eq h
 
 /-- [Role: Boundary] Boundary surface `SumCheckTransitionWitness.accepted_exists` requiring closure. -/
 abbrev SumCheckTransitionWitness_accepted_exists

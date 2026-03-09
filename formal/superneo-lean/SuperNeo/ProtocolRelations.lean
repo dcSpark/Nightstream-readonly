@@ -17,6 +17,53 @@ def sumcheckInstanceOfContext (ctx : ProtocolTargetContext) : SumCheckInstance :
     domainSize := ctx.cset.size
     claimedValue := ct ctx.invDelta }
 
+/--
+The protocol SumCheck instance is aligned with the full Goldilocks field
+denominator required by the full-field Lund endpoint.
+-/
+def sumcheckFullFieldDenominatorAlignment
+  (ctx : ProtocolTargetContext) : Prop :=
+  SuperNeo.sumcheckLundSoundnessDenominator (sumcheckInstanceOfContext ctx) =
+    Goldilocks.q
+
+theorem sumcheckFullFieldDenominatorAlignment_iff
+  {ctx : ProtocolTargetContext} :
+  sumcheckFullFieldDenominatorAlignment ctx ↔
+    ctx.cset.size = Goldilocks.q := by
+  simp [sumcheckFullFieldDenominatorAlignment, sumcheckInstanceOfContext,
+    SuperNeo.sumcheckLundSoundnessDenominator]
+
+/--
+Minimal setup-side boundary for replaying the active Goldilocks/full-field Lund
+endpoint on one protocol context.
+-/
+structure GoldilocksFullFieldLundBoundary (ctx : ProtocolTargetContext) where
+  denominatorAligned : sumcheckFullFieldDenominatorAlignment ctx
+
+namespace GoldilocksFullFieldLundBoundary
+
+/--
+Canonical setup boundary from the concrete challenge-set cardinality equality
+used by the active Goldilocks route.
+-/
+def ofCsetCardinality
+  {ctx : ProtocolTargetContext}
+  (hCard : ctx.cset.size = Goldilocks.q) :
+  GoldilocksFullFieldLundBoundary ctx :=
+  ⟨(sumcheckFullFieldDenominatorAlignment_iff).2 hCard⟩
+
+/--
+Recover the concrete challenge-set cardinality equality from the named setup
+boundary.
+-/
+theorem csetCardinality_eq
+  {ctx : ProtocolTargetContext}
+  (h : GoldilocksFullFieldLundBoundary ctx) :
+  ctx.cset.size = Goldilocks.q :=
+  (sumcheckFullFieldDenominatorAlignment_iff).1 h.denominatorAligned
+
+end GoldilocksFullFieldLundBoundary
+
 /-- Explicit SumCheck witness carrying the transition facts used by reductions. -/
 structure SumCheckTransitionWitness (ctx : ProtocolTargetContext) where
   transcript : SumCheckTranscript

@@ -2,77 +2,80 @@
 
 ## Purpose
 
-- **What it is**: A compact interpolation module providing the proposition `interpolationProp` (pointwise interpolation/evaluation agreement) and the executable checker `interpolationCase` with sound/complete bridges, used as an obligation carrier for protocol-level arithmetic.
-- **Key property**: `interpolationCase_sound`: `interpolationCase = true → interpolationProp` and `interpolationCase_complete`: `interpolationProp → interpolationCase = true`.
-- **Protocol role**: Interpolation obligations arise when the folding protocol needs to verify that a polynomial evaluates correctly at a given point. Arithmetic obligation statements should rely on local `interpolationProp` hypotheses or `interpolationCase_eq_true_iff`; the legacy universal `interpolationAssumption` surface is refuted and not part of the live theorem path.
+- **What it is**: constructive univariate interpolation over the concrete Goldilocks field, presented through finite coefficient arrays.
+- **Protocol role**: supplies the interpolation/evaluation obligation used by arithmetic side-condition packaging on the SuperNeo path.
 
-## Target Formulas
+## Mathematical Target
 
-- `interpolationProp(xs, ys, coeffs, xEval, expectedEval) ↔ |xs| = |ys| ∧ |coeffs| = |xs| ∧ expectedEval = xEval`
+Let `xs, ys : Array F` with `xs.size = ys.size = n`.
+
+- `coeffArrayPolynomial coeffs` is the polynomial over `ZMod q` whose first `n` coefficients are the entries of `coeffs`.
+- `polyEval coeffs x` is evaluation of `coeffArrayPolynomial coeffs` at `x`.
+- `interpolationNodesDistinct xs` means the sample nodes in `xs` are pairwise distinct.
+- `interpolatesOn xs ys coeffs` means `coeffs.size = n` and `polyEval coeffs xs[i] = ys[i]` for every sample index `i : Fin n`.
+- `interpolateCoeffs xs ys` is the constructive Lagrange interpolation coefficient array obtained from the sample pairs `(xs[i], ys[i])`.
+
+Target properties:
+
+1. If `interpolationNodesDistinct xs`, then `interpolateCoeffs xs ys` interpolates the full sample set:
+   `interpolatesOn xs ys (interpolateCoeffs xs ys)`.
+2. If `interpolationNodesDistinct xs` and `coeffs` interpolates the same sample set, then
+   `coeffs = interpolateCoeffs xs ys`.
+3. `interpolationProp xs ys coeffs evalPoint expectedEval` packages:
+   distinct sample nodes, interpolation on the sample set, and evaluation of `coeffs` at `evalPoint`.
+4. `interpolationCase xs ys coeffs evalPoint expectedEval` is a Boolean checker equivalent to
+   `interpolationProp xs ys coeffs evalPoint expectedEval`.
 
 ## Paper Anchors
 
-Source: ./formal/superneo-lean/SuperNeo.pdf.md
+Source: `./formal/superneo-lean/SuperNeo.pdf.md`
 
-- Definition 6 (Sum-check), Section 4, lines 352-355: polynomial evaluation checks that interpolation supports.
-- Section 7.3 (Π_CCS), lines 440-470: evaluation agreement obligations in CCS folding.
+- Definition 6 / Section 4: polynomial evaluation obligations appearing in sum-check style reasoning.
+- Section 7.3 and Section 7.4: interpolation/evaluation side conditions threaded into protocol arithmetic targets.
 
 ## Module Mapping
 
-| Lean file | Paper section |
+| Lean file | Paper role |
 |---|---|
-| `SuperNeo/Interp.lean` | Infrastructure (supports Sections 7.3-7.4) |
+| `SuperNeo/Interp.lean` | Constructive interpolation/evaluation infrastructure for protocol arithmetic obligations |
 
 ## Contract Surface
 
 | Group | Lean symbol | Kind | Role | Guarantee |
 |---|---|---|---|---|
-| Proposition | `interpolationProp` | def | Definitional | Shape + evaluation agreement |
-| Boundary | `interpolationAssumption` | def | Legacy Boundary | Universal interpolation claim (refuted as stated) |
-| Executable | `interpolationCase` | def | Definitional | `decide interpolationProp` |
-| Sound | `interpolationCase_sound` | theorem | Theorem-Target | `Bool → Prop` |
-| Complete | `interpolationCase_complete` | theorem | Theorem-Target | `Prop → Bool` |
-| Bridge | `interpolationCase_eq_true_iff` | theorem | Theorem-Target | Bool↔Prop closure |
-| Structure | `interpolationProp_sizes` | theorem | Theorem-Target | extracts size equalities |
-| Structure | `interpolationProp_eval_eq` | theorem | Theorem-Target | extracts evaluation equality |
-| Refutation | `not_interpolationAssumption` | theorem | Theorem-Target | universal boundary is false as stated |
-
-## Proof Obligations and Closure Plan
-
-Sound/complete bridges are closed.
-
-Open obligations:
-- `interpolationAssumption` should not be pursued as a theorem target in its current form; it is refuted in-module.
-- Downstream users should rely on local `interpolationProp` hypotheses or `interpolationCase_eq_true_iff` instead.
+| Relation | `interpolationNodesDistinct` | def | Theorem-Target | pairwise-distinct sample nodes |
+| Relation | `interpolatesOn` | def | Theorem-Target | exact interpolation on the sample set |
+| Executable | `polyEval` | def | Theorem-Target | coefficient-array polynomial evaluation |
+| Executable | `interpolateCoeffs` | def | Theorem-Target | constructive Lagrange interpolation coefficients |
+| Correctness | `interpolateCoeffs_interpolatesOn` | theorem | Theorem-Target | constructive interpolant matches all sample values |
+| Uniqueness | `interpolateCoeffs_unique` | theorem | Theorem-Target | sample-wise interpolant is unique |
+| Proposition | `interpolationProp` | def | Theorem-Target | distinctness + interpolation + extra evaluation |
+| Executable | `interpolationCase` | def | Theorem-Target | Boolean interpolation/evaluation checker |
+| Sound | `interpolationCase_sound` | theorem | Theorem-Target | `interpolationCase = true -> interpolationProp` |
+| Complete | `interpolationCase_complete` | theorem | Theorem-Target | `interpolationProp -> interpolationCase = true` |
+| Bridge | `interpolationCase_eq_true_iff` | theorem | Theorem-Target | Boolean/proposition equivalence |
+| Structure | `interpolationProp_sizes` | theorem | Theorem-Target | extracts sample/coefficient size equalities |
+| Structure | `interpolationProp_eval_eq` | theorem | Theorem-Target | extracts the extra evaluation equality |
+| Legacy | `interpolationAssumption` | def | Legacy Boundary / Refuted | universal interpolation claim retained only as an explicit non-target surface |
+| Refutation | `not_interpolationAssumption` | theorem | Theorem-Target | the legacy universal boundary is false as stated |
 
 ## Assumption Ledger
 
-- `interpolationAssumption` [Legacy Boundary / Refuted]: false as currently stated; do not thread it as a real closure target.
+- `interpolationAssumption`: retained only as a legacy/refuted surface so downstream code can state explicitly that the old universal boundary is not a valid theorem target.
 
-## Dependency and Consumer Map
+## Dependencies and Consumers
 
 Upstream dependencies:
-- `SuperNeo/Field.lean`: `F` type for field elements.
+- `SuperNeo/Field.lean`
+- `SuperNeo/PolynomialBridge.lean`
 
 Downstream consumers:
-- `SuperNeo/ArithmeticObligations.lean`: uses `interpolationProp` for arithmetic checks.
+- `SuperNeo/ArithmeticObligations.lean`
+- `SuperNeo/ArithmeticBundle.lean`
+- `SuperNeo/ProtocolTarget.lean`
 
-## Implementation Plan
-
-Full interpolation correctness (Lagrange interpolation formalization) is out of scope for this scaffold module. If needed later, it must be introduced under a different, semantically correct proposition.
-
-## Quality Expectations
-
-Sound/complete pair must form a true biconditional. The module must not silently assume nontrivial mathematical content; the old universal boundary is explicitly refuted.
-
-## Acceptance Criteria
+## Regression Expectations
 
 - `lake build` succeeds.
-- No `sorry`.
-- `interpolationCase_sound` and `interpolationCase_complete` both proved.
-
-## Out of Scope
-
-- Lagrange interpolation algorithm.
-- Polynomial evaluation at arbitrary points.
-- Error-correcting code connections.
+- `lake exe check` remains green.
+- No `sorry` is introduced in the interpolation module.

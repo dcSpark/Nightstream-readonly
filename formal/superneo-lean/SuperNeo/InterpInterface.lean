@@ -15,6 +15,18 @@ namespace InterpInterface
 
 /-! ## Core Surfaces -/
 
+/-- [Role: Theorem-Target] Distinct interpolation nodes. -/
+abbrev interpolationNodesDistinct := SuperNeo.interpolationNodesDistinct
+
+/-- [Role: Theorem-Target] Polynomial evaluation from coefficient arrays. -/
+abbrev polyEval := SuperNeo.polyEval
+
+/-- [Role: Theorem-Target] Constructive interpolation coefficients. -/
+abbrev interpolateCoeffs := SuperNeo.interpolateCoeffs
+
+/-- [Role: Theorem-Target] Pointwise interpolation relation on the sample set. -/
+abbrev interpolatesOn := SuperNeo.interpolatesOn
+
 /-- [Role: Theorem-Target] Curated re-export of `interpolationProp`. -/
 abbrev interpolationProp := SuperNeo.interpolationProp
 
@@ -37,6 +49,15 @@ abbrev interpolationProp_sizes := SuperNeo.interpolationProp_sizes
 
 /-- [Role: Theorem-Target] Curated theorem surface `interpolationProp_eval_eq`. -/
 abbrev interpolationProp_eval_eq := SuperNeo.interpolationProp_eval_eq
+
+/-- [Role: Theorem-Target] Constructive interpolation is correct on the sample nodes. -/
+abbrev interpolateCoeffs_interpolatesOn := SuperNeo.interpolateCoeffs_interpolatesOn
+
+/-- [Role: Theorem-Target] Constructive interpolation coefficients are unique. -/
+abbrev interpolateCoeffs_unique := SuperNeo.interpolateCoeffs_unique
+
+/-- [Role: Theorem-Target] Constructive interpolation yields the theorem-facing proposition. -/
+abbrev interpolateCoeffs_interpolationProp := SuperNeo.interpolateCoeffs_interpolationProp
 
 /-- [Role: Theorem-Target] Curated theorem surface `not_interpolationAssumption`. -/
 abbrev not_interpolationAssumption := SuperNeo.not_interpolationAssumption

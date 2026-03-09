@@ -63,12 +63,16 @@ def finalTheoremAssumptionsOfAlignedPaperCarrierLowNormBoundaryPackages :=
 def finalTheoremAssumptionsOfGoldilocksPaperCarrierBoundaryPackages :=
   @SuperNeo.FinalTheoremAssumptions.ofGoldilocksPaperCarrierBoundaryPackages
 
+/-- Canonical constructor for final theorem assumptions on the Goldilocks Appendix B.2 paper-parameter family, deriving the witness-level SumCheck and local Schwartz-Zippel boundaries from the carried transition witness and reconstructing the internal MSIS boundary from the theorem-level hardness assumption. -/
+noncomputable def finalTheoremAssumptionsOfGoldilocksPaperCarrierDerivedSumcheck :=
+  @SuperNeo.FinalTheoremAssumptions.ofGoldilocksPaperCarrierDerivedSumcheck
+
 /-- Canonical constructor for final theorem assumptions on the Goldilocks Appendix B.2 paper-parameter family and active `paperCarrier`-difference path. -/
 def finalTheoremAssumptionsOfGoldilocksPaperCarrierDiffBoundaryPackages :=
   @SuperNeo.FinalTheoremAssumptions.ofGoldilocksPaperCarrierDiffBoundaryPackages
 
-/-- Canonical constructor for final theorem assumptions on the Goldilocks Appendix B.2 paper-parameter family and active native-bar `paperCarrier`-difference path. -/
-def finalTheoremAssumptionsOfGoldilocksNativePaperCarrierDiffBoundaryPackages :=
+/-- Canonical constructor for final theorem assumptions on the Goldilocks Appendix B.2 paper-parameter family and active native-bar `paperCarrier`-difference path, deriving all local theorem packages internally and keeping only the theorem-level MSIS hardness assumption explicit. -/
+noncomputable def finalTheoremAssumptionsOfGoldilocksNativePaperCarrierDiffBoundaryPackages :=
   @SuperNeo.FinalTheoremAssumptions.ofGoldilocksNativePaperCarrierDiffBoundaryPackages
 
 /-- Canonical constructor for final theorem assumptions on the Goldilocks Appendix B.2 paper-parameter family from a stronger strict low-norm invertibility theorem with threshold at least `5`. -/
@@ -103,47 +107,12 @@ def finalTheoremShapeOfGoldilocksNativePaperCarrierDiffBoundaryPackages :=
 def finalTheoremShapeOfGoldilocksPaperCarrierLowNormBoundaryPackages :=
   @SuperNeo.finalTheoremShape_of_goldilocksPaperCarrierLowNormBoundaryPackages
 
-/-- Access the faithful protocol-facing SumCheck prefix-Lund package. -/
-def finalSumcheckPrefixBoundary
-  {ctx : SuperNeo.ProtocolTargetContext}
-  (hA : FinalTheoremAssumptions ctx) :
-  SuperNeo.SumcheckPrefixLundBoundary ctx :=
-  hA.sumcheckPrefixBoundary
-
 /-- Access canonical SumCheck soundness-error boundary from final assumptions. -/
 def finalSumcheckErrorBoundary
   {ctx : SuperNeo.ProtocolTargetContext}
   (hA : FinalTheoremAssumptions ctx) :
   SuperNeo.ProofSystem.Sumcheck.SoundnessErrorBoundary :=
   hA.sumcheckErrorBoundary
-
-/-- Access the faithful prefix-dependent SumCheck Lund bound from final assumptions. -/
-def finalSumcheckPrefixLundBound
-  {ctx : SuperNeo.ProtocolTargetContext}
-  (hA : FinalTheoremAssumptions ctx) :
-  hA.sumcheckPrefix.game.lundBoundHolds
-      (SuperNeo.ProofSystem.Sumcheck.fullFieldUniformCoinProbModel
-        hA.sumcheckPrefix.game.inst.rounds) :=
-  hA.sumcheckPrefixLundBound
-
-/-- Identify the reduction witness transcript with the faithful SumCheck game transcript. -/
-def finalSumcheckWitnessTranscriptEq
-  {ctx : SuperNeo.ProtocolTargetContext}
-  (hA : FinalTheoremAssumptions ctx) :
-  hA.sumcheckPrefix.game.transcript
-      hA.reduction.sumcheckTransitionWitness.transcript.challenges =
-    hA.reduction.sumcheckTransitionWitness.transcript :=
-  hA.sumcheckWitnessTranscriptEq
-
-/-- Access the faithful game-level SumCheck advantage bound from final assumptions. -/
-def finalSumcheckPrefixAdvantageBound
-  {ctx : SuperNeo.ProtocolTargetContext}
-  (hA : FinalTheoremAssumptions ctx) :
-  hA.sumcheckPrefix.game.advantage
-      (SuperNeo.ProofSystem.Sumcheck.fullFieldUniformCoinProbModel
-        hA.sumcheckPrefix.game.inst.rounds) ≤
-    hA.errorModel.epsSumcheck hA.sumcheckErrorIndex :=
-  hA.sumcheckPrefixAdvantageBound
 
 /-- Access canonical final error-accounting model from final assumptions. -/
 def finalErrorModel
@@ -156,7 +125,7 @@ def finalErrorModel
 def finalSchwartzZippelBoundaryPackage
   {ctx : SuperNeo.ProtocolTargetContext}
   (hA : FinalTheoremAssumptions ctx) :
-  SuperNeo.SchwartzZippelBoundary :=
+  SuperNeo.SchwartzZippelBoundary ctx :=
   hA.schwartzZippelBoundary
 
 /-- Access explicit alignment between error model and Schwartz-Zippel error term. -/
@@ -177,7 +146,7 @@ def finalSchwartzZippelErrorNegligible
 def finalSchwartzZippelAdvantageBound
   {ctx : SuperNeo.ProtocolTargetContext}
   (hA : FinalTheoremAssumptions ctx) :
-  SuperNeo.SchwartzZippelAdvantageBound hA.errorModel.epsSchwartzZippel :=
+  SuperNeo.SchwartzZippelAdvantageBound ctx hA.errorModel.epsSchwartzZippel :=
   hA.schwartzZippelAdvantageBound
 
 /-- Access explicit alignment between error model and SumCheck soundness error. -/

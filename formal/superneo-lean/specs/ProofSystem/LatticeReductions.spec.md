@@ -10,6 +10,7 @@
 
 - `‖subVec n w₁ w₂‖∞ < msisNormBound` = norm transfer from binding collision witnesses (standard: 2B, relaxed: 4TB per Theorem 2).
 - `MSISHardnessAssumption → ∃ ε_MSIS, negl(ε_MSIS) ∧ Adv_MSIS ≤ ε_MSIS` = `msisAdvantageBound_of_hardness`.
+- `MSISHardnessAssumption → MSISHardnessBoundary` = `MSISHardnessBoundary.ofHardness`.
 - `AjtaiBindingAdvantageBound + IsNegligible → AjtaiBindingAssumption` = `no_ajtaiBindingCollision_of_advantageBound`.
 - `AjtaiRelaxedBindingAdvantageBound + IsNegligible → AjtaiRelaxedBindingAssumption` = `no_ajtaiRelaxedBindingCollision_of_advantageBound`.
 - `MSISHardnessAssumption → AjtaiBindingAssumption(params) ∧ AjtaiRelaxedBindingAssumption(params, C)` = `ajtaiBoundaries_of_msis`.
@@ -33,6 +34,7 @@ Source: ./formal/superneo-lean/SuperNeo.pdf.md
 | Standard MSIS break | `msisBreakEvent_of_bindingCollision` | Theorem-Target |
 | Relaxed MSIS break | `msisBreakEvent_of_relaxedBindingCollision` | Theorem-Target |
 | Hardness unpacking | `msisAdvantageBound_of_hardness` | Theorem-Target |
+| Hardness packaging | `MSISHardnessBoundary.ofHardness` | Theorem-Target |
 | Standard binding | `no_ajtaiBindingCollision_of_advantageBound` | Theorem-Target |
 | Ajtai from MSIS (standard) | `ajtaiBinding_of_msis` | Theorem-Target |
 | Ajtai from MSIS (relaxed) | `ajtaiRelaxedBinding_of_msis` | Theorem-Target |
@@ -48,6 +50,7 @@ Source: ./formal/superneo-lean/SuperNeo.pdf.md
 | Extraction | `msisBreakEvent_of_bindingCollision` | Collision → MSIS break | Theorem-Target |
 | Extraction | `msisBreakEvent_of_relaxedBindingCollision` | Relaxed collision → MSIS break | Theorem-Target |
 | Security | `msisAdvantageBound_of_hardness` | Hardness package → explicit negligible + MSIS advantage bound package | Theorem-Target |
+| Security | `MSISHardnessBoundary.ofHardness` | Hardness assumption → canonical explicit MSIS boundary package | Theorem-Target |
 | Binding | `ajtaiBinding_of_msis` | MSIS → standard binding | Theorem-Target |
 | Binding | `ajtaiRelaxedBinding_of_msis` | MSIS → relaxed binding | Theorem-Target |
 | Bundle | `ajtaiBoundaries_of_msis` | MSIS → both bindings | Theorem-Target |
@@ -64,10 +67,11 @@ Source: ./formal/superneo-lean/SuperNeo.pdf.md
 | Constructor | `MSISToAjtaiReductions.ofGoldilocksPaperCarrierAndMSISBoundary` | Specializes reduction package further to the Goldilocks Appendix B.2 parameter family on the active `paperCarrier` path | Theorem-Target |
 | Closed norm law | `normInfVec_subVec_le_derived` | \(\|\text{subVec}\,n\,v_1\,v_2\|_\infty \le \|v_1\|_\infty + \|v_2\|_\infty\) from `Field.centeredAbs_sub_le` + max-fold lemmas | Theorem-Target |
 
-## Proof Obligations and Closure Plan
+## Proof Obligations
 
 - All theorem statements must hold without `sorry`.
-- No module-level `axiom`s; unresolved carrier/algebra laws are threaded explicitly via `LatticeReductionLaws` and carried in `MSISToAjtaiReductions` only for the abstract carrier-parametric route. On the active `paperCarrier` / Goldilocks final-theorem path, Ajtai error/bound packaging and strong-sampling packaging are both derived theorem-natively from the MSIS boundary plus proved sampling bounds.
+- No module-level `axiom`s; carrier/algebra laws that are not definitional are threaded explicitly via `LatticeReductionLaws` and carried in `MSISToAjtaiReductions` only for the abstract carrier-parametric route.
+- The specialized `paperCarrier` and Goldilocks constructors reconstruct the internal MSIS boundary theorem-natively from the theorem-level MSIS hardness assumption, then derive Ajtai error/bound packaging and strong-sampling packaging from that boundary together with the proved sampling bounds.
 
 ## Assumption Ledger
 
@@ -94,13 +98,11 @@ Derived internally (not a boundary field):
   - `SuperNeo.ProtocolTheorem`: imports `LatticeReductions` for `ajtaiBoundaries_of_msis` in the final theorem.
   - `SuperNeo.ProofSystem.Protocol`: uses reduction bundle in the proof-system capstone.
 
-## Implementation Plan
+## Design Notes
 
-- Active protocol path: stable at boundary level and already specialized to the
-  theorem-native `paperCarrier` / Goldilocks route.
-- Optional extension only: discharge the remaining abstract
-  `LatticeReductionLaws` carrier surface if a fully carrier-parametric
-  reduction library is desired beyond the concrete protocol path.
+- The module separates the abstract carrier-parametric route from the specialized `paperCarrier` / Goldilocks route.
+- `LatticeReductionLaws` records the explicit carrier-side laws needed for the abstract route.
+- The specialized constructors expose the concrete paper-facing route without reintroducing those abstract laws at the final-theorem surface.
 
 ## Quality Expectations
 

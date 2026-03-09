@@ -86,6 +86,17 @@ theorem isNegligible_of_zero
   intro n _hn
   simpa [hf n] using (invPolyBound_nonneg c n)
 
+theorem isNegligible_singleton
+  (k : Nat)
+  (a : Rat) :
+  IsNegligible (fun n => if n = k then a else 0) := by
+  intro c
+  refine ⟨k + 1, ?_⟩
+  intro n hn
+  have hNe : n ≠ k := by omega
+  simp [hNe]
+  exact invPolyBound_nonneg c n
+
 theorem isNegligible_add
   {f g : ErrorFn}
   (hf : IsNegligible f)

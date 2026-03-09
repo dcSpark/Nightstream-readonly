@@ -1436,6 +1436,34 @@ theorem msisAdvantageBound_of_hardness
   rcases h with ⟨eps, hNeg, hBound⟩
   exact ⟨eps, hNeg, hBound⟩
 
+namespace MSISHardnessBoundary
+
+/--
+Canonical boundary package reconstructed from the theorem-level MSIS hardness
+assumption.
+-/
+noncomputable def ofHardness
+  {params : AjtaiParams}
+  (h : MSISHardnessAssumption params) :
+  MSISHardnessBoundary params :=
+  let eps := Classical.choose h
+  let hRest := Classical.choose_spec h
+  { epsMSIS := eps
+    advantageBound := hRest.2
+    negligibleEpsMSIS := hRest.1 }
+
+/--
+The reconstructed boundary package immediately recovers the input theorem-level
+MSIS hardness assumption.
+-/
+theorem ofHardness_hardnessFromFields
+  {params : AjtaiParams}
+  (h : MSISHardnessAssumption params) :
+  MSISHardnessAssumption params := by
+  exact (ofHardness h).hardnessFromFields
+
+end MSISHardnessBoundary
+
 /--
 Package an Ajtai binding advantage bound together with negligible error.
 -/

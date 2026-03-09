@@ -11,6 +11,8 @@
 - `ccsRelation(ctx) ↔ protocolTargetProp(ctx)` (CCS = protocol target)
 - `ceRelation(ctx) ↔ ccsRelation(ctx) ∧ ∃ tr, SumCheckAccepted inst tr` where `inst = sumcheckInstanceOfContext ctx`
 - `ceRelaxedRelation(ctx) ↔ ccsRelation(ctx)`
+- `sumcheckFullFieldDenominatorAlignment(ctx) ↔ ctx.cset.size = Goldilocks.q`
+- `GoldilocksFullFieldLundBoundary.ofCsetCardinality(hCard)` packages the active Goldilocks/full-field Lund setup boundary from `hCard : ctx.cset.size = Goldilocks.q`
 - `ceRelation_of_ccsRelation`: `ccsRelation ctx → SumCheckTransitionWitness ctx → ceRelation ctx`
 - `ceRelation_of_ccsRelation_claimTrue`: `ccsRelation ctx → SumCheckClaimTrue inst → ceRelation ctx`
 - `ceRelation_of_claimTrue`: `ProtocolRelationsAssumptions ctx → SumCheckClaimTrue inst → ceRelation ctx`
@@ -38,6 +40,8 @@ Source: ./formal/superneo-lean/SuperNeo.pdf.md
 | Group | Lean symbol | Kind | Role | Guarantee |
 |---|---|---|---|---|
 | Instance | `sumcheckInstanceOfContext` | def | Definitional | Builds SumCheckInstance from ctx |
+| Instance | `sumcheckFullFieldDenominatorAlignment` | def | Theorem-Target | The protocol SumCheck instance satisfies the full-field Lund denominator requirement |
+| Boundary | `GoldilocksFullFieldLundBoundary` | structure | Boundary | Named setup-side boundary for replaying the active Goldilocks/full-field Lund endpoint |
 | Witness | `SumCheckTransitionWitness` | structure | Definitional | transcript, accepted, initialRound, roundSumStep |
 | Relations | `ccsRelation` | def | Definitional | protocolTargetProp ctx |
 | Relations | `ceRelation` | def | Definitional | ccsRelation ∧ ∃ tr, SumCheckAccepted |
@@ -60,17 +64,23 @@ Source: ./formal/superneo-lean/SuperNeo.pdf.md
 | Theorems | `ceClaimTrue_of_ce` | theorem | Theorem-Target | ceRelation → claimTrue |
 | Theorems | `ceClaimTrue_of_native_ce` | theorem | Theorem-Target | ceRelation → claimTrue |
 | Theorems | `ceRelaxedRelation_of_ce` | theorem | Theorem-Target | ceRelation → ceRelaxedRelation |
+| Theorems | `sumcheckFullFieldDenominatorAlignment_iff` | theorem | Theorem-Target | `sumcheckFullFieldDenominatorAlignment ctx ↔ ctx.cset.size = Goldilocks.q` |
+| Constructors | `GoldilocksFullFieldLundBoundary.ofCsetCardinality` | def | Theorem-Target | Builds the named Goldilocks/Lund setup boundary from `ctx.cset.size = Goldilocks.q` |
+| Theorems | `GoldilocksFullFieldLundBoundary.csetCardinality_eq` | theorem | Theorem-Target | Recover `ctx.cset.size = Goldilocks.q` from the named setup boundary |
 | Witness | `SumCheckTransitionWitness.accepted_exists` | theorem | Theorem-Target | Witness → ∃ tr, accepted |
 
-## Proof Obligations and Closure Plan
+## Proof Obligations
 
-All relation-level theorems proved, including native-path constructors. `ProtocolRelationsAssumptions` and `ProtocolRelationsNativeAssumptions` now bundle only the upstream protocol-target boundary. The theorem-native entrypoints are `ccsRelation`, `ceRelation`, and `ceRelaxedRelation` themselves; the claim-true and witness bridges factor through those relations instead of rethreading assumption bundles. Canonical constructors are available from an already-built protocol-target bundle, from the stricter paper-facing `paperCarrier` difference route for `ctx.invDelta` using the proved Goldilocks invertibility theorem internally, and from the stronger strict low-norm invertibility theorem route.
+- The theorem-native relation surfaces are `ccsRelation`, `ceRelation`, and `ceRelaxedRelation`.
+- `ProtocolRelationsAssumptions` and `ProtocolRelationsNativeAssumptions` bundle only the upstream protocol-target boundary needed to construct those relations.
+- Claim-true and witness bridges factor through the relation predicates themselves rather than duplicating separate relation-specific assumption bundles.
+- Canonical constructors exist from an already-built protocol-target bundle, from the paper-facing `paperCarrier` difference route for `ctx.invDelta`, and from the stronger strict low-norm invertibility route.
 
 ## Assumption Ledger
 
-`ProtocolRelationsAssumptions` bundles upstream assumptions: `ProtocolTargetAssumptions`.
-`ProtocolRelationsNativeAssumptions` bundles upstream assumptions: `ProtocolTargetNativeAssumptions`.
-Closure target: ProtocolTarget/Thm3Core remain upstream boundaries; no separate SumCheck boundary bundle remains in this module.
+- `ProtocolRelationsAssumptions` bundles `ProtocolTargetAssumptions`.
+- `ProtocolRelationsNativeAssumptions` bundles `ProtocolTargetNativeAssumptions`.
+- No separate SumCheck boundary bundle is introduced in this module; SumCheck data enters through `SumCheckTransitionWitness` and the relation bridges.
 
 ## Dependency and Consumer Map
 
@@ -85,9 +95,9 @@ Downstream consumers:
 - `SuperNeo/FoldingProtocol.lean`: imports ProtocolRelations for folding relation predicates.
 - `SuperNeo/ProtocolReduction.lean`: imports ProtocolRelations.
 
-## Implementation Plan
+## Design Notes
 
-Current scope complete. Relation predicates and theorems proved; assumption bundling is intentional for composition.
+Assumption bundling is used only to carry upstream protocol-target closure into the relation constructors. The theorem-facing targets remain the relation predicates and their witness/claim-true bridges.
 
 ## Quality Expectations
 

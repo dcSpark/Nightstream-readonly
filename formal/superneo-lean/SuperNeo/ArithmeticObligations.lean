@@ -219,4 +219,26 @@ theorem mleIdentityAtR_of_size
   mleEval qVals r = mleInnerProductForm qVals r := by
   exact mleIdentityAssumption_holds qVals r hSize
 
+/-- The constructive interpolation checker succeeds on the stored interpolation obligation. -/
+theorem ArithmeticObligations.interpolationCase_eq_true
+  {bar m : Array (Array F)}
+  {r : Array F}
+  {rho1 rho2 : F}
+  {hVec : VecModuleHom}
+  {hScal : ScalarModuleHom}
+  {splitScalar : F}
+  {kSplit : Nat}
+  {cset samples : Array Coeffs}
+  {xs ys qVals coeffs : Array F}
+  {xEval expectedEval : F}
+  (h : ArithmeticObligations
+    bar m r rho1 rho2
+    hVec hScal
+    splitScalar kSplit
+    cset samples
+    xs ys qVals coeffs
+    xEval expectedEval) :
+  interpolationCase xs ys coeffs xEval expectedEval = true := by
+  exact interpolationCase_complete h.interpolation
+
 end SuperNeo

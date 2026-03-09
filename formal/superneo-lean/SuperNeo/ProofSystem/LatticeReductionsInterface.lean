@@ -173,6 +173,18 @@ theorem msisAdvantageBound_of_hardness
   ∃ eps : ErrorFn, IsNegligible eps ∧ MSISAdvantageBound params eps :=
   SuperNeo.ProofSystem.msisAdvantageBound_of_hardness (params := params) h
 
+noncomputable def MSISHardnessBoundary_ofHardness
+  {params : AjtaiParams}
+  (h : MSISHardnessAssumption params) :
+  MSISHardnessBoundary params :=
+  SuperNeo.ProofSystem.MSISHardnessBoundary.ofHardness h
+
+theorem MSISHardnessBoundary_ofHardness_hardnessFromFields
+  {params : AjtaiParams}
+  (h : MSISHardnessAssumption params) :
+  (MSISHardnessBoundary_ofHardness h).hardnessFromFields :=
+  SuperNeo.ProofSystem.MSISHardnessBoundary.ofHardness_hardnessFromFields h
+
 theorem no_ajtaiBindingCollision_of_advantageBound
   {params : AjtaiParams}
   {eps : ErrorFn}

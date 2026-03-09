@@ -4,6 +4,7 @@
 - We don't care about backwards compatibility because we are still in development. Keep the code simple and lean.
 - Avoid adding new Rust features or ENVs unless it is explicitly approved.
 - Never modify this file without explicit approval.
+- When creating commits, always include a DCO sign-off (`git commit -s` or an equivalent `Signed-off-by:` trailer).
 - No single file should ever exceed 1,500 lines of code unless explicitly confirmed by the user.
 
 ## Testing

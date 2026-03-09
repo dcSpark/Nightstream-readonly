@@ -287,6 +287,55 @@ private theorem SoundnessGame.lundBoundHolds_of_roundsPos_degreeZero
     _ ≤ SuperNeo.sumcheckLundSoundnessNumerator g.inst := by
           simp [SuperNeo.sumcheckLundSoundnessNumerator, hDegZero]
 
+private theorem SoundnessGame.no_failureEvent_of_roundsZero
+  (g : SoundnessGame)
+  (hRoundsZero : g.inst.rounds = 0) :
+  ∀ coins, ¬ g.failureEvent coins := by
+  intro coins hFail
+  have hAcc :
+      SuperNeo.sumcheckAcceptedForTable g.inst g.table (g.transcript coins) := by
+    simpa [SoundnessGame.failureEvent, SoundnessGame.acceptsOn] using hFail
+  have hTableSize : g.table.size = 1 := by
+    simpa [hRoundsZero] using g.tableSize
+  have hTableNe : g.table.size ≠ 0 := by
+    simp [hTableSize]
+  have hFinalClaim : mleByFolding g.table #[] = g.inst.claimedValue := by
+    simpa [hRoundsZero] using hAcc.2.2.2
+  have hTableSumEqClaimed : SuperNeo.sumcheckTableSum g.table = g.inst.claimedValue := by
+    calc
+      SuperNeo.sumcheckTableSum g.table = g.table[0]! := by
+        rw [sumcheckTableSum_eq_arraySum]
+        simp [arraySum, hTableSize]
+      _ = mleByFolding g.table #[] := by
+          symm
+          exact mleByFolding_empty g.table hTableNe
+      _ = g.inst.claimedValue := hFinalClaim
+  exact g.falseClaim hTableSumEqClaimed
+
+private theorem SoundnessGame.lundBoundHolds_of_roundsZero
+  (g : SoundnessGame)
+  (hRoundsZero : g.inst.rounds = 0) :
+  g.lundBoundHolds (fullFieldUniformCoinProbModel g.inst.rounds) := by
+  unfold SoundnessGame.lundBoundHolds SoundnessGame.advantage
+  have hPrLeZero :
+      (fullFieldUniformCoinProbModel g.inst.rounds).Pr g.failureEvent ≤ 0 := by
+    calc
+      (fullFieldUniformCoinProbModel g.inst.rounds).Pr g.failureEvent
+          ≤ (fullFieldUniformCoinProbModel g.inst.rounds).Pr (fun _ => False) :=
+            (fullFieldUniformCoinProbModel g.inst.rounds).prMonotone
+              (g.no_failureEvent_of_roundsZero hRoundsZero)
+      _ = 0 := (fullFieldUniformCoinProbModel g.inst.rounds).prFalse
+  have hPrZero :
+      (fullFieldUniformCoinProbModel g.inst.rounds).Pr g.failureEvent = 0 :=
+    le_antisymm hPrLeZero
+      ((fullFieldUniformCoinProbModel g.inst.rounds).prNonneg g.failureEvent)
+  calc
+    (fullFieldUniformCoinProbModel g.inst.rounds).Pr g.failureEvent *
+        SuperNeo.sumcheckLundSoundnessDenominator g.inst
+        = 0 := by simp [hPrZero]
+    _ ≤ SuperNeo.sumcheckLundSoundnessNumerator g.inst := by
+          simp [SuperNeo.sumcheckLundSoundnessNumerator, hRoundsZero]
+
 theorem lundSoundnessAssumptionFullFieldAlignedPosRounds_prefix
   (g : SoundnessGame)
   (hAligned : SuperNeo.sumcheckLundSoundnessDenominator g.inst = Goldilocks.q)
@@ -298,6 +347,15 @@ theorem lundSoundnessAssumptionFullFieldAlignedPosRounds_prefix
   · have hDegZero : g.inst.maxDegree = 0 := by
       omega
     exact g.lundBoundHolds_of_roundsPos_degreeZero hRoundsPos hDegZero
+
+theorem lundSoundnessAssumptionFullFieldAligned_prefix
+  (g : SoundnessGame)
+  (hAligned : SuperNeo.sumcheckLundSoundnessDenominator g.inst = Goldilocks.q) :
+  g.lundBoundHolds (fullFieldUniformCoinProbModel g.inst.rounds) := by
+  by_cases hRoundsZero : g.inst.rounds = 0
+  · exact g.lundBoundHolds_of_roundsZero hRoundsZero
+  · exact lundSoundnessAssumptionFullFieldAlignedPosRounds_prefix
+      g hAligned (Nat.pos_iff_ne_zero.mpr hRoundsZero)
 
 end Sumcheck
 

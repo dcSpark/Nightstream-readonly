@@ -68,12 +68,16 @@ def finalTheoremAssumptionsOfAlignedPaperCarrierLowNormBoundaryPackages :=
 def finalTheoremAssumptionsOfGoldilocksPaperCarrierBoundaryPackages :=
   @SuperNeo.FinalTheoremAssumptions.ofGoldilocksPaperCarrierBoundaryPackages
 
+/-- [Role: Theorem-Target] Canonical constructor for final theorem assumptions on the Goldilocks Appendix B.2 paper-parameter family, deriving the witness-level SumCheck and local Schwartz-Zippel boundaries directly from the carried transition witness and reduction arithmetic and reconstructing the internal MSIS boundary from the theorem-level hardness assumption. -/
+noncomputable def finalTheoremAssumptionsOfGoldilocksPaperCarrierDerivedSumcheck :=
+  @SuperNeo.FinalTheoremAssumptions.ofGoldilocksPaperCarrierDerivedSumcheck
+
 /-- [Role: Theorem-Target] Canonical constructor for final theorem assumptions on the Goldilocks Appendix B.2 paper-parameter family and active `paperCarrier`-difference path. -/
 def finalTheoremAssumptionsOfGoldilocksPaperCarrierDiffBoundaryPackages :=
   @SuperNeo.FinalTheoremAssumptions.ofGoldilocksPaperCarrierDiffBoundaryPackages
 
-/-- [Role: Theorem-Target] Canonical constructor for final theorem assumptions on the Goldilocks Appendix B.2 paper-parameter family and active native-bar `paperCarrier`-difference path, discharging the generic Theorem-3 boundary from `thm3CoreAssumption_native`. -/
-def finalTheoremAssumptionsOfGoldilocksNativePaperCarrierDiffBoundaryPackages :=
+/-- [Role: Theorem-Target] Canonical constructor for final theorem assumptions on the Goldilocks Appendix B.2 paper-parameter family and active native-bar `paperCarrier`-difference path, discharging the generic Theorem-3 boundary from `thm3CoreAssumption_native`, deriving the witness-level SumCheck and local Schwartz-Zippel boundaries internally, and keeping only the theorem-level MSIS hardness assumption explicit. -/
+noncomputable def finalTheoremAssumptionsOfGoldilocksNativePaperCarrierDiffBoundaryPackages :=
   @SuperNeo.FinalTheoremAssumptions.ofGoldilocksNativePaperCarrierDiffBoundaryPackages
 
 /-- [Role: Theorem-Target] Canonical constructor for final theorem assumptions on the Goldilocks Appendix B.2 paper-parameter family from a stronger strict low-norm invertibility theorem with threshold at least `5`. -/
@@ -110,10 +114,10 @@ def finalTheoremShapeOfGoldilocksPaperCarrierLowNormBoundaryPackages :=
 
 /-! ## Boundary Surfaces -/
 
-/-- [Role: Boundary] Boundary surface `SchwartzZippelBoundary` requiring closure. -/
+/-- [Role: Boundary] Context-local Schwartz-Zippel boundary surface. -/
 abbrev SchwartzZippelBoundary := SuperNeo.SchwartzZippelBoundary
 
-/-- [Role: Boundary] Boundary surface `msisHardnessAssumption` requiring closure. -/
+/-- [Role: Boundary] Theorem-level MSIS hardness assumption surface; this is the intended explicit security assumption on the active native Goldilocks final route. -/
 abbrev msisHardnessAssumption := SuperNeo.msisHardnessAssumption
 
 /-- [Role: Boundary] Boundary surface `ajtaiBindingAssumption` requiring closure. -/
@@ -122,8 +126,12 @@ abbrev ajtaiBindingAssumption := SuperNeo.ajtaiBindingAssumption
 /-- [Role: Boundary] Boundary surface `ajtaiRelaxedBindingAssumption` requiring closure. -/
 abbrev ajtaiRelaxedBindingAssumption := SuperNeo.ajtaiRelaxedBindingAssumption
 
-/-- [Role: Boundary] Faithful prefix-dependent SumCheck Lund package for protocols. -/
+/-- [Role: Boundary] Faithful prefix-dependent SumCheck Lund package for protocols. Retained as a local replay boundary, not as an active-route final-theorem requirement. -/
 abbrev SumcheckPrefixLundBoundary := SuperNeo.SumcheckPrefixLundBoundary
+
+/-- [Role: Boundary] Named Goldilocks/full-field Lund setup boundary. Retained for local replay surfaces, not required on the active native Goldilocks final-theorem route. -/
+abbrev GoldilocksFullFieldLundBoundary :=
+  SuperNeo.GoldilocksFullFieldLundBoundary
 
 /-- [Role: Boundary] Witness-level SumCheck failure-advantage bound surface. -/
 abbrev sumcheckFailureAdvantageBound :=

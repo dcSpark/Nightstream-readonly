@@ -80,6 +80,19 @@ def ofGoldilocksPaperCarrierAndMSISBoundary
     (goldilocksPaperAjtaiParams_relaxedExpansion_pos messageLength)
     hMsis
 
+/--
+Canonical MSIS-to-Ajtai reduction package on the active Goldilocks Appendix B.2
+paper-carrier path, reconstructed directly from the theorem-level MSIS hardness
+assumption.
+-/
+noncomputable def ofGoldilocksPaperCarrierAndMSISHardness
+  (messageLength : Nat)
+  (hMsis : MSISHardnessAssumption (goldilocksPaperAjtaiParams messageLength)) :
+  MSISToAjtaiReductions (goldilocksPaperAjtaiParams messageLength) :=
+  ofGoldilocksPaperCarrierAndMSISBoundary
+    messageLength
+    (MSISHardnessBoundary.ofHardness hMsis)
+
 end MSISToAjtaiReductions
 
 end SuperNeo.ProofSystem
