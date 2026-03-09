@@ -130,7 +130,7 @@ def boundarySymbolNames : List String :=
   , "lundSoundnessAssumptionFullFieldAlignedPosRounds_prefix"
   ]
 
-/-- Interface scaffold marker; replace with concrete typed wrappers as closure progresses. -/
+/-- Interface inventory marker for the typed surface exposed here. -/
 def interfaceScaffoldReady : Prop := True
 
 theorem interfaceScaffoldReady_true : interfaceScaffoldReady := by

@@ -117,6 +117,20 @@ theorem matrixTransformAssumption_of_p10
   matrixTransformAssumption bar m :=
   SuperNeo.matrixTransformAssumption_of_p10 hThm3
 
+/-- [Role: Theorem-Target] Theorem-native P12 constructor from the finite basis-kernel witness. -/
+theorem matrixTransformAssumption_of_basisKernelAssumption
+  {bar : Array (Array F)} {m : Array (Array F)}
+  (hBasis : thm3BasisKernelAssumption bar) :
+  matrixTransformAssumption bar m :=
+  SuperNeo.matrixTransformAssumption_of_basisKernelAssumption hBasis
+
+/-- [Role: Theorem-Target] Theorem-native P12 constructor from the finite basis-kernel checker. -/
+theorem matrixTransformAssumption_of_basisKernelCheck
+  {bar : Array (Array F)} {m : Array (Array F)}
+  (hCheck : thm3BasisKernelCheck bar = true) :
+  matrixTransformAssumption bar m :=
+  SuperNeo.matrixTransformAssumption_of_basisKernelCheck hCheck
+
 /-- [Role: Theorem-Target] Theorem-native P12 boundary constructor from `(P10 + P11)`. -/
 theorem matrixTransformAssumption_of_p10_p11
   {bar : Array (Array F)} {m : Array (Array F)}

@@ -1,4 +1,5 @@
 import SuperNeo.PiDEC
+import SuperNeo.ProtocolSection71Data
 import SuperNeo.ProofSystem.SumCheck
 
 /-!
@@ -30,6 +31,18 @@ def InteractiveReductionAssumptions.ofProtocolRelations
     sumcheckTransitionWitness := hWitness }
 
 /--
+Canonical constructor from one explicit protocol-side Section 7.5 target-data
+owner and one SumCheck transition witness.
+-/
+def InteractiveReductionAssumptions.ofProtocolTargetData
+  {ctx : ProtocolTargetContext}
+  (hTarget : ProtocolTargetData ctx)
+  (hWitness : SumCheckTransitionWitness ctx) :
+  InteractiveReductionAssumptions ctx :=
+  { reduction := hTarget.assumptions
+    sumcheckTransitionWitness := hWitness }
+
+/--
 Canonical constructor from the paper-facing challenge-difference route for
 `invDelta` plus an explicit SumCheck transition witness.
 -/
@@ -47,10 +60,55 @@ def InteractiveReductionAssumptions.ofPaperCarrierDiff
   (hNe : ctx.invDelta ≠ zeroRq)
   (hWitness : SumCheckTransitionWitness ctx) :
   InteractiveReductionAssumptions ctx :=
-  ofProtocolRelations
-    (ProtocolRelationsAssumptions.ofPaperCarrierDiff
-      hThm3 hArithmetic hDiff hNe)
-    hWitness
+  { reduction := ProtocolTargetAssumptions.ofPaperCarrierDiff
+      hThm3 hArithmetic hDiff hNe
+    sumcheckTransitionWitness := hWitness }
+
+/--
+Canonical constructor from the finite basis-kernel characterization of
+Theorem 3 on the active paper-carrier-difference route plus an explicit
+SumCheck transition witness.
+-/
+def InteractiveReductionAssumptions.ofBasisKernelAssumption
+  {ctx : ProtocolTargetContext}
+  (hBasis : thm3BasisKernelAssumption ctx.bar)
+  (hArithmetic : ArithmeticObligations
+    ctx.bar ctx.m ctx.r ctx.rho1 ctx.rho2
+    ctx.hVec ctx.hScal
+    ctx.splitScalar ctx.kSplit
+    ctx.cset ctx.samples
+    ctx.xs ctx.ys ctx.qVals ctx.coeffs
+    ctx.xEval ctx.expectedEval)
+  (hDiff : samplingDiffSet paperCarrier ctx.invDelta)
+  (hNe : ctx.invDelta ≠ zeroRq)
+  (hWitness : SumCheckTransitionWitness ctx) :
+  InteractiveReductionAssumptions ctx :=
+  { reduction := ProtocolTargetAssumptions.ofBasisKernelAssumption
+      hBasis hArithmetic hDiff hNe
+    sumcheckTransitionWitness := hWitness }
+
+/--
+Canonical constructor from the executable finite basis-kernel checker for
+Theorem 3 on the active paper-carrier-difference route plus an explicit
+SumCheck transition witness.
+-/
+def InteractiveReductionAssumptions.ofBasisKernelCheck
+  {ctx : ProtocolTargetContext}
+  (hCheck : thm3BasisKernelCheck ctx.bar = true)
+  (hArithmetic : ArithmeticObligations
+    ctx.bar ctx.m ctx.r ctx.rho1 ctx.rho2
+    ctx.hVec ctx.hScal
+    ctx.splitScalar ctx.kSplit
+    ctx.cset ctx.samples
+    ctx.xs ctx.ys ctx.qVals ctx.coeffs
+    ctx.xEval ctx.expectedEval)
+  (hDiff : samplingDiffSet paperCarrier ctx.invDelta)
+  (hNe : ctx.invDelta ≠ zeroRq)
+  (hWitness : SumCheckTransitionWitness ctx) :
+  InteractiveReductionAssumptions ctx :=
+  { reduction := ProtocolTargetAssumptions.ofBasisKernelCheck
+      hCheck hArithmetic hDiff hNe
+    sumcheckTransitionWitness := hWitness }
 
 /--
 Canonical constructor for the active native-bar paper-carrier-difference route,
@@ -99,10 +157,9 @@ def InteractiveReductionAssumptions.ofLowNormAtLeastFive
   (hNe : ctx.invDelta ≠ zeroRq)
   (hWitness : SumCheckTransitionWitness ctx) :
   InteractiveReductionAssumptions ctx :=
-  ofProtocolRelations
-    (ProtocolRelationsAssumptions.ofLowNormAtLeastFive
-      hFive hThm3 hArithmetic hInv hDiff hNe)
-    hWitness
+  { reduction := ProtocolTargetAssumptions.ofLowNormAtLeastFive
+      hFive hThm3 hArithmetic hInv hDiff hNe
+    sumcheckTransitionWitness := hWitness }
 
 /--
 Canonical native constructor from relation-level native assumptions plus an
@@ -134,10 +191,9 @@ def InteractiveReductionNativeAssumptions.ofPaperCarrierDiff
   (hNe : ctx.invDelta ≠ zeroRq)
   (hWitness : SumCheckTransitionWitness ctx) :
   InteractiveReductionNativeAssumptions ctx :=
-  ofProtocolRelations
-    (ProtocolRelationsNativeAssumptions.ofPaperCarrierDiff
-      hBarNative hArithmetic hDiff hNe)
-    hWitness
+  { reduction := ProtocolTargetNativeAssumptions.ofPaperCarrierDiff
+      hBarNative hArithmetic hDiff hNe
+    sumcheckTransitionWitness := hWitness }
 
 /--
 Canonical native constructor from any strict low-norm invertibility boundary
@@ -161,10 +217,9 @@ def InteractiveReductionNativeAssumptions.ofLowNormAtLeastFive
   (hNe : ctx.invDelta ≠ zeroRq)
   (hWitness : SumCheckTransitionWitness ctx) :
   InteractiveReductionNativeAssumptions ctx :=
-  ofProtocolRelations
-    (ProtocolRelationsNativeAssumptions.ofLowNormAtLeastFive
-      hFive hBarNative hArithmetic hInv hDiff hNe)
-    hWitness
+  { reduction := ProtocolTargetNativeAssumptions.ofLowNormAtLeastFive
+      hFive hBarNative hArithmetic hInv hDiff hNe
+    sumcheckTransitionWitness := hWitness }
 
 /-- Strong composition statement (knowledge-style). -/
 def strongCompositionStatement (ctx : ProtocolTargetContext) : Prop :=
@@ -182,12 +237,187 @@ theorem strongComposition_of_assumptions
   strongCompositionStatement ctx := by
   exact piDEC_of_assumptions h.reduction h.sumcheckTransitionWitness
 
+/--
+Strong composed reduction theorem from an explicit realized Section 7.1 proof-
+system CE instance.
+-/
+theorem strongComposition_of_section71_ce
+  {ctx : ProtocolTargetContext}
+  (hReal : ProtocolSection71Realization ctx)
+  (hCE :
+    SuperNeo.ProofSystem.ConstraintSystem.CE.Holds
+      hReal.ce hReal.ceStatement hReal.ceWitness) :
+  strongCompositionStatement ctx := by
+  exact piDEC_of_section71_ce hReal hCE
+
+/--
+Strong composed reduction theorem directly from one concrete Section 7.1
+provider bundle.
+-/
+theorem strongComposition_of_section71Provider
+  {ctx : ProtocolTargetContext}
+  (hProvider : ProtocolSection71Provider ctx) :
+  strongCompositionStatement ctx := by
+  exact piDEC_of_section71Provider hProvider
+
+/--
+Strong composed reduction theorem from one generic proof-system Section 7.1
+theorem instance plus its compact specialization package.
+-/
+theorem strongComposition_of_section71Specialization
+  {ctx : ProtocolTargetContext}
+  {Commitment : Type}
+  (hInst : SuperNeo.ProofSystem.ConstraintSystem.Section71Instance Commitment)
+  (hSpec : ProtocolSection71Specialization ctx hInst) :
+  strongCompositionStatement ctx := by
+  exact piDEC_of_section71Specialization hInst hSpec
+
+/--
+Strong composed reduction theorem from one theorem-native Section 7.1 setup.
+-/
+theorem strongComposition_of_section71Setup
+  {ctx : ProtocolTargetContext}
+  (hSetup : ProtocolSection71Setup ctx) :
+  strongCompositionStatement ctx := by
+  exact piDEC_of_section71Setup hSetup
+
+/--
+Strong composed reduction theorem from one paper-faithful Section 7.1 theorem
+instance.
+-/
+theorem strongComposition_of_section71TheoremInstance
+  {ctx : ProtocolTargetContext}
+  (hInst : ProtocolSection71TheoremInstance ctx) :
+  strongCompositionStatement ctx := by
+  exact piDEC_of_section71TheoremInstance hInst
+
+/--
+Strong composed reduction theorem from one theorem-native Section 7.1 context
+object.
+-/
+theorem strongComposition_of_section71Context
+  (hCtx : ProtocolSection71Context) :
+  strongCompositionStatement hCtx.target := by
+  exact piDEC_of_section71Context hCtx
+
+/--
+Strong composed reduction theorem from one protocol-side Section 7.1 data
+package.
+-/
+theorem strongComposition_of_section71Data
+  {ctx : ProtocolTargetContext}
+  (hData : ProtocolSection71Data ctx) :
+  strongCompositionStatement ctx := by
+  exact piDEC_of_section71Data hData
+
+/--
+Strong composed reduction theorem from one protocol-side Section 7.5 target-
+data owner and one accepted transition witness.
+-/
+theorem strongComposition_of_protocolTargetData
+  {ctx : ProtocolTargetContext}
+  (hTarget : ProtocolTargetData ctx)
+  (hWitness : SumCheckTransitionWitness ctx) :
+  strongCompositionStatement ctx := by
+  exact piDEC_of_protocolTargetData hTarget hWitness
+
 /-- Weak composed reduction theorem. -/
 theorem weakComposition_of_assumptions
   {ctx : ProtocolTargetContext}
   (h : InteractiveReductionAssumptions ctx) :
   weakCompositionStatement ctx := by
   rcases strongComposition_of_assumptions h with ⟨_deltaInv, _hMul, hWeak, hClaim⟩
+  exact ⟨hWeak, hClaim⟩
+
+/-- Weak composed reduction theorem from a realized Section 7.1 CE instance. -/
+theorem weakComposition_of_section71_ce
+  {ctx : ProtocolTargetContext}
+  (hReal : ProtocolSection71Realization ctx)
+  (hCE :
+    SuperNeo.ProofSystem.ConstraintSystem.CE.Holds
+      hReal.ce hReal.ceStatement hReal.ceWitness) :
+  weakCompositionStatement ctx := by
+  rcases strongComposition_of_section71_ce hReal hCE with
+    ⟨_deltaInv, _hMul, hWeak, hClaim⟩
+  exact ⟨hWeak, hClaim⟩
+
+/--
+Weak composed reduction theorem directly from one concrete Section 7.1
+provider bundle.
+-/
+theorem weakComposition_of_section71Provider
+  {ctx : ProtocolTargetContext}
+  (hProvider : ProtocolSection71Provider ctx) :
+  weakCompositionStatement ctx := by
+  rcases strongComposition_of_section71Provider hProvider with
+    ⟨_deltaInv, _hMul, hWeak, hClaim⟩
+  exact ⟨hWeak, hClaim⟩
+
+/--
+Weak composed reduction theorem from one generic proof-system Section 7.1
+theorem instance plus its compact specialization package.
+-/
+theorem weakComposition_of_section71Specialization
+  {ctx : ProtocolTargetContext}
+  {Commitment : Type}
+  (hInst : SuperNeo.ProofSystem.ConstraintSystem.Section71Instance Commitment)
+  (hSpec : ProtocolSection71Specialization ctx hInst) :
+  weakCompositionStatement ctx := by
+  rcases strongComposition_of_section71Specialization hInst hSpec with
+    ⟨_deltaInv, _hMul, hWeak, hClaim⟩
+  exact ⟨hWeak, hClaim⟩
+
+/--
+Weak composed reduction theorem from one theorem-native Section 7.1 setup.
+-/
+theorem weakComposition_of_section71Setup
+  {ctx : ProtocolTargetContext}
+  (hSetup : ProtocolSection71Setup ctx) :
+  weakCompositionStatement ctx := by
+  rcases strongComposition_of_section71Setup hSetup with
+    ⟨_deltaInv, _hMul, hWeak, hClaim⟩
+  exact ⟨hWeak, hClaim⟩
+
+/--
+Weak composed reduction theorem from one paper-faithful Section 7.1 theorem
+instance.
+-/
+theorem weakComposition_of_section71TheoremInstance
+  {ctx : ProtocolTargetContext}
+  (hInst : ProtocolSection71TheoremInstance ctx) :
+  weakCompositionStatement ctx := by
+  rcases strongComposition_of_section71TheoremInstance hInst with
+    ⟨_deltaInv, _hMul, hWeak, hClaim⟩
+  exact ⟨hWeak, hClaim⟩
+
+/-- Weak composed reduction theorem from one theorem-native Section 7.1 context object. -/
+theorem weakComposition_of_section71Context
+  (hCtx : ProtocolSection71Context) :
+  weakCompositionStatement hCtx.target := by
+  rcases strongComposition_of_section71Context hCtx with
+    ⟨_deltaInv, _hMul, hWeak, hClaim⟩
+  exact ⟨hWeak, hClaim⟩
+
+/-- Weak composed reduction theorem from one protocol-side Section 7.1 data package. -/
+theorem weakComposition_of_section71Data
+  {ctx : ProtocolTargetContext}
+  (hData : ProtocolSection71Data ctx) :
+  weakCompositionStatement ctx := by
+  rcases strongComposition_of_section71Data hData with
+    ⟨_deltaInv, _hMul, hWeak, hClaim⟩
+  exact ⟨hWeak, hClaim⟩
+
+/--
+Weak composed reduction theorem from one protocol-side Section 7.5 target-data
+owner and one accepted transition witness.
+-/
+theorem weakComposition_of_protocolTargetData
+  {ctx : ProtocolTargetContext}
+  (hTarget : ProtocolTargetData ctx)
+  (hWitness : SumCheckTransitionWitness ctx) :
+  weakCompositionStatement ctx := by
+  rcases strongComposition_of_protocolTargetData hTarget hWitness with
+    ⟨_deltaInv, _hMul, hWeak, hClaim⟩
   exact ⟨hWeak, hClaim⟩
 
 /-- Strong composed reduction theorem (native assumption path). -/

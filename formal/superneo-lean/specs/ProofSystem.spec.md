@@ -27,12 +27,11 @@ Source: ./formal/superneo-lean/SuperNeo.pdf.md
 
 | Group | Symbol | Guarantee | Role |
 |-------|--------|-----------|--------|
-| Barrel | `moduleContractPending` | Curated re-exports of sub-module surfaces | Theorem-Target |
+| Barrel | `barrelContract` | Importing `SuperNeo.ProofSystem` exposes the curated proof-system stack | Definitional |
 
-## Proof Obligations and Closure Plan
+## Proof Obligations
 
 - No local proof obligations. All obligations live in sub-modules.
-- When curated re-exports are added, they should be `abbrev`s pointing to sub-module surfaces.
 
 ## Assumption Ledger
 
@@ -44,10 +43,6 @@ No open boundary assumptions in this module.
 - **Consumers**:
   - `SuperNeo.ProtocolTheorem`: imports `ProofSystem` for Lattice, Security, SumCheck surfaces.
   - `SuperNeo.ProofSystem.Protocol`: uses `ProofSystem` sub-module surfaces.
-
-## Implementation Plan
-
-- Replace `moduleContractPending` with curated `abbrev` re-exports of sub-module surfaces.
 
 ## Quality Expectations
 

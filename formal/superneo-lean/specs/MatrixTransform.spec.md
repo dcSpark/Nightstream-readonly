@@ -17,7 +17,7 @@
   - `matrixVecCtBar bar m z` : `m.map (fun row => ringBlockDot bar row z)` — ring-level matrix-vector product
   - `matrixVecDirect m z` : direct Mz (row-wise field dot product)
   - `matrixTransformAssumption bar m` : `∀ z, MatrixRowsCompatible m z → matrixVecDirect m z = matrixVecCtBar bar m z`
-- Target statement: `matrixTransformAssumption` derived from `thm3CoreAssumption` + block decomposition lemma.
+- Target statement: `matrixTransformAssumption` derived from the Theorem-3 kernel through block decomposition, with theorem-native entrypoints from `thm3CoreAssumption`, the finite basis criterion, and the finite checker.
 
 ## Paper Anchors
 
@@ -48,28 +48,20 @@
 | Check-facing boundary | `matrixTransformCheckAssumption bar m` | None | `∀ z, MatrixRowsCompatible m z → matrixTransformIdentity bar m z = true` | Theorem-Target | — |
 | Thm3 closure | `matrixTransformAssumption_of_thm3CoreAssumption` | `thm3CoreAssumption bar` | `matrixTransformAssumption bar m` | Theorem-Target | — |
 | P10 closure | `matrixTransformAssumption_of_p10` | `thm3CoreAssumption bar` | `matrixTransformAssumption bar m` | Theorem-Target | — |
+| Basis-kernel closure | `matrixTransformAssumption_of_basisKernelAssumption` | `thm3BasisKernelAssumption bar` | `matrixTransformAssumption bar m` | Theorem-Target | — |
+| Basis-kernel checker closure | `matrixTransformAssumption_of_basisKernelCheck` | `thm3BasisKernelCheck bar = true` | `matrixTransformAssumption bar m` | Theorem-Target | — |
 | P10+P11 compatibility | `matrixTransformAssumption_of_p10_p11` | `thm3CoreAssumption bar`, `barLiftLinearityAssumption bar` | `matrixTransformAssumption bar m` (via P10 constructor) | Theorem-Target | — |
 | Check/prop bridges | `matrixTransformIdentity_sound`, `_complete`, `_iff_prop`, `_of_assumption`, `_of_checkAssumption`, `_iff_checkAssumption` | None | Theorem ↔ check equivalence | Theorem-Target | — |
 
-## Proof Obligations and Closure Plan
-
-Closed now:
-- Check/prop bridges (decidability-based).
-- `matrixTransformEq_of_thm3CoreAssumption` proved (no `sorry`): row-wise closure from per-block Theorem-3 applications.
-- `matrixTransformAssumption_of_thm3CoreAssumption`, `matrixTransformAssumption_of_p10`, and `matrixTransformAssumption_of_p10_p11` all closed.
-
-Remaining for proof-complete closure:
-- Discharge the upstream `thm3CoreAssumption` boundary from concrete bar-transform algebra.
-
 ## Assumption Ledger
 
-- Open boundary: `thm3CoreAssumption` (from upstream `Thm3Core.lean`).
-  Closure target: discharge from cyclotomic-specific bar transform.
+- Upstream theorem source: `Thm3Core.lean`.
+  Theorem 4 accepts the canonical Theorem-3 surface `thm3CoreAssumption bar`, and also admits the theorem-native finite basis-kernel witnesses `thm3BasisKernelAssumption bar` and `thm3BasisKernelCheck bar = true`.
 
 ## Dependency and Consumer Map
 
 - Upstream dependencies:
-  - `SuperNeo/Thm3Core.lean`: uses `thm3CoreAssumption`, `innerProduct` for Theorem-3-based derivation.
+  - `SuperNeo/Thm3Core.lean`: uses `thm3CoreAssumption`, `thm3BasisKernelAssumption`, `thm3BasisKernelCheck`, and `innerProduct` for Theorem-3-based derivation.
   - `SuperNeo/Ring.lean` (transitive): uses `ct`, `mulRqPhi`, `superneoBarBlock` for ring-level computation.
   - `SuperNeo/BarLift.lean`: only for compatibility constructor `matrixTransformAssumption_of_p10_p11`; core closure path is P10-only.
 - Downstream consumers:
@@ -82,8 +74,9 @@ Remaining for proof-complete closure:
 
 1. `ctBarDot`, `extractBlock`, `ringBlockDot` defined as ring-level block operations.
 2. `matrixVecCtBar` redefined using `ringBlockDot` (paper-faithful).
-3. `matrixTransformEq_of_thm3CoreAssumption` proved by block-wise reduction and per-block use of `thm3CoreAssumption`.
-4. Sound/complete and check/prop bridges proved via `decide` reasoning.
+3. `matrixTransformEq_of_thm3CoreAssumption` is proved by block-wise reduction and per-block use of `thm3CoreAssumption`.
+4. Finite basis-kernel constructors are obtained by composing the Theorem-3 basis-kernel bridges with the main Theorem-4 derivation.
+5. Sound/complete and check/prop bridges are proved via `decide` reasoning.
 
 ## Quality Expectations
 
@@ -92,8 +85,8 @@ Remaining for proof-complete closure:
 ## Acceptance Criteria
 
 1. `lake build` succeeds.
-2. `matrixTransformAssumption_of_thm3CoreAssumption` and all bridges exported through the interface.
+2. `matrixTransformAssumption_of_thm3CoreAssumption`, `matrixTransformAssumption_of_basisKernelAssumption`, `matrixTransformAssumption_of_basisKernelCheck`, and all bridges are exported through the interface.
 
 ## Out of Scope
 
-- Discharging `thm3CoreAssumption` (upstream responsibility).
+- Classifying additional concrete bar designs beyond the theorem-native Theorem-3 surfaces exported by `Thm3Core.lean`.

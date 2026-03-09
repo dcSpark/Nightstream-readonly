@@ -502,9 +502,11 @@ theorem centeredAbs_mul_ofNat_le (n : Nat) (a : F) :
         _ = (n + 1) * centeredAbs a := by
               simp [Nat.succ_mul, Nat.add_comm, Nat.add_left_comm, Nat.add_assoc]
 
-theorem exists_smallNat_or_neg_of_centeredAbs_le_four
-    (x : F) (hx : centeredAbs x ≤ 4) :
-    ∃ n : Nat, n ≤ 4 ∧ (x = ofNat n ∨ x = - ofNat n) := by
+theorem exists_smallNat_or_neg_of_centeredAbs_le
+    (B : Nat)
+    (x : F)
+    (hx : centeredAbs x ≤ B) :
+    ∃ n : Nat, n ≤ B ∧ (x = ofNat n ∨ x = - ofNat n) := by
   rcases centeredRep_cases x with hL | hR
   · refine ⟨x.val, ?_, ?_⟩
     · have habs : centeredAbs x = x.val := by
@@ -522,8 +524,8 @@ theorem exists_smallNat_or_neg_of_centeredAbs_le_four
         _ = - Int.ofNat (Goldilocks.q - x.val) := by
               congr
               exact (Int.ofNat_sub hqle).symm
-    have hnle4 : n ≤ 4 := by
-      have hNatAbs : Int.natAbs (- Int.ofNat n) ≤ 4 := by
+    have hnleB : n ≤ B := by
+      have hNatAbs : Int.natAbs (- Int.ofNat n) ≤ B := by
         simpa [centeredAbs, hrep]
           using hx
       simpa using hNatAbs
@@ -546,7 +548,12 @@ theorem exists_smallNat_or_neg_of_centeredAbs_le_four
               exact Nat.mod_eq_of_lt hlt
         _ = (- ofNat (Goldilocks.q - x.val)).val := by
               simp [val_neg, ofNat, Nat.mod_eq_of_lt (Nat.sub_lt Goldilocks.q_pos hxpos)]
-    exact ⟨n, hnle4, Or.inr hxEq⟩
+    exact ⟨n, hnleB, Or.inr hxEq⟩
+
+theorem exists_smallNat_or_neg_of_centeredAbs_le_four
+    (x : F) (hx : centeredAbs x ≤ 4) :
+    ∃ n : Nat, n ≤ 4 ∧ (x = ofNat n ∨ x = - ofNat n) := by
+  exact exists_smallNat_or_neg_of_centeredAbs_le 4 x hx
 
 theorem centeredAbs_mul_le_of_centeredAbs_left_le_four
     (x y : F)

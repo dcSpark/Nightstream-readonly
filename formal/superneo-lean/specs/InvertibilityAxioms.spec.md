@@ -2,16 +2,16 @@
 
 ## Purpose
 
-- **What it is**: The invertibility predicate `invertibleRq` on ring elements, the weak norm-window bookkeeping predicate `invertibilityWindowProp`, the paper-faithful strict window `strictInvertibilityWindowProp`, the standalone boundary assumption `lowNormInvertibilityAssumption`, and the narrower active protocol-path boundary `paperCarrierDiffInvertibilityAssumption`.
+- **What it is**: The invertibility predicate `invertibleRq` on ring elements, the weak norm-window bookkeeping predicate `invertibilityWindowProp`, the paper-faithful strict window `strictInvertibilityWindowProp`, the standalone boundary assumption `lowNormInvertibilityAssumption` for actual ring-shaped elements, and the narrower active protocol-path boundary `paperCarrierDiffInvertibilityAssumption`.
 - **Key property**: `invertibleRq a ↔ ∃ aInv, mulRq a aInv = oneRq`; the actual Theorem-8 boundary uses `0 < ‖a‖∞ < B`, not the weak bookkeeping bound `‖a‖∞ ≤ B`.
-- **Protocol role**: Provides the standalone low-norm invertibility boundary from Theorem 8 together with the narrower active protocol-path boundary on nonzero `paperCarrier` differences. The active Goldilocks protocol path now proves the `paperCarrier`-difference theorem in-repo and consumes it directly; the standalone `lowNormInvertibilityAssumption` remains an optional stronger sufficient route for broader/library surfaces.
+- **Protocol role**: Provides the standalone low-norm invertibility boundary from Theorem 8 together with the narrower active protocol-path boundary on nonzero `paperCarrier` differences. Concrete Goldilocks instantiations may discharge either boundary in `InvertibilityGoldilocks.lean`, and downstream protocol routes may consume the narrower boundary directly or derive it from the stronger standalone route.
 
 ## Target Formulas
 
 - `invertibleRq a ↔ ∃ aInv : Coeffs, mulRq a aInv = oneRq`
 - `invertibilityWindowProp B a ↔ normInfCoeffs a ≤ B`
 - `strictInvertibilityWindowProp B a ↔ 0 < normInfCoeffs a ∧ normInfCoeffs a < B`
-- `lowNormInvertibilityAssumption B → ∀ a, (strictInvertibilityWindowProp B a → invertibleRq a)`
+- `lowNormInvertibilityAssumption B → ∀ a, (hasRingDegreeShape a → strictInvertibilityWindowProp B a → invertibleRq a)`
 - `paperCarrierDiffInvertibilityAssumption → ∀ δ, samplingDiffSet paperCarrier δ → δ ≠ 0 → invertibleRq δ`
 - `¬ invertibleRq zeroRq`
 - `¬ (∀ a, invertibilityWindowProp B a → invertibleRq a)` (the old weak reading is false because `zeroRq` lies in the weak window)
@@ -45,7 +45,7 @@ Source: ./formal/superneo-lean/SuperNeo.pdf.md
 | Constants | `goldilocksTheorem8Z` | def | Theorem-Target | concrete `z = 3` |
 | Constants | `goldilocksTheorem8Order` | def | Theorem-Target | concrete `η / z = 27` |
 | Constants | `goldilocksPaperBInv` | def | Theorem-Target | Appendix B.2 floor `383` |
-| Boundary | `lowNormInvertibilityAssumption` | def | Boundary | ∀ a, strict window → invertible |
+| Boundary | `lowNormInvertibilityAssumption` | def | Boundary | ∀ a, ring-shaped strict window → invertible |
 | Boundary | `paperCarrierDiffInvertibilityAssumption` | def | Boundary | ∀ δ, nonzero `paperCarrier` difference → invertible |
 | Theorems | `invertibleRq_of_lowNormAssumption` | theorem | Boundary | Uses assumption to derive invertibility |
 | Theorems | `paperCarrierDiffInvertibilityAssumption_of_lowNormFive` | theorem | Theorem-Target | Optional sufficient route from the standalone low-norm theorem target at `B = 5` into the narrower active protocol-path boundary |
@@ -68,13 +68,13 @@ Source: ./formal/superneo-lean/SuperNeo.pdf.md
 
 ## Proof Obligations and Closure Plan
 
-Closure target: The active Goldilocks `paperCarrier`-difference route is now closed in-repo by `paperCarrierDiffInvertibilityAssumption_goldilocks` (proved in `InvertibilityGoldilocks.lean`). The boundary has been repaired to the strict paper premise `0 < ‖a‖∞ < B`; the old weak reading `‖a‖∞ ≤ B → invertible` is now explicitly refuted in-repo; and the concrete Goldilocks arithmetic side-conditions for the paper's cited Theorem 8 instantiation (`z = 3`, `ord_η(q) = 27`, `b_inv = 383`) are now discharged in-repo. The remaining generic gap is the standalone external low-norm invertibility theorem itself.
+The theorem-facing standalone boundary must quantify over actual ring elements, i.e. ring-shaped coefficient vectors satisfying the strict paper premise `0 < ‖a‖∞ < B`. The weaker bookkeeping window `‖a‖∞ ≤ B` is intentionally separate and is explicitly too weak to characterize invertibility because it contains `zeroRq`. Concrete Goldilocks arithmetic side conditions (`z = 3`, `ord_η(q) = 27`, `b_inv = 383`) live in this component, while specialized constructive Goldilocks proofs may live in `InvertibilityGoldilocks.lean`.
 
 ## Assumption Ledger
 
-- `lowNormInvertibilityAssumption B`: standalone stronger boundary assumption that nonzero elements with `‖a‖∞ < B` are invertible in `Rq`.
+- `lowNormInvertibilityAssumption B`: standalone stronger boundary assumption that ring-shaped nonzero elements with `‖a‖∞ < B` are invertible in `Rq`.
 - `paperCarrierDiffInvertibilityAssumption`: narrower active protocol-path boundary that every nonzero `paperCarrier` difference is invertible in `Rq`.
-- Active Goldilocks closure: `paperCarrierDiffInvertibilityAssumption_goldilocks` is now proved in `InvertibilityGoldilocks.lean` and used directly on the protocol path. The remaining gap is the generic standalone external low-norm invertibility theorem itself, not the arithmetic applicability checks.
+- Concrete Goldilocks proofs may instantiate either boundary in `InvertibilityGoldilocks.lean`.
 
 ## Dependency and Consumer Map
 
@@ -88,7 +88,7 @@ Downstream consumers:
 
 ## Implementation Plan
 
-The weak window bookkeeping surface remains available as a standalone helper, but the active protocol path now uses direct `invertibleRq` witnesses instead of threading any weak-window bookkeeping through arithmetic obligations. Remaining closure work is the concrete number-theoretic proof for the instantiated Goldilocks challenge-difference regime; proving the stronger standalone `lowNormInvertibilityAssumption` remains optional unless a generic Theorem-8 interface is desired.
+Keep the weak bookkeeping window separate from the strict paper premise. Downstream protocol modules may consume direct `invertibleRq` witnesses, the narrower `paperCarrierDiffInvertibilityAssumption`, or the stronger standalone `lowNormInvertibilityAssumption` as appropriate.
 
 ## Quality Expectations
 
@@ -101,5 +101,5 @@ The weak window bookkeeping surface remains available as a standalone helper, bu
 
 ## Out of Scope
 
-- The full external low-norm invertibility theorem cited by the paper's reference [65].
-- Number-theoretic invertibility analysis beyond the now-proved Goldilocks arithmetic applicability checks.
+- External proofs not formalized inside this repo.
+- Number-theoretic invertibility analyses unrelated to the SuperNeo ring and its cited Goldilocks instantiation data.

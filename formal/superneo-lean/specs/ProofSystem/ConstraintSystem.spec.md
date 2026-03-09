@@ -2,8 +2,8 @@
 
 ## Purpose
 
-- **What it is**: Barrel module that re-exports `SuperNeo.ProofSystem.ConstraintSystem.CCS` (CCS, CE, CERelaxed, CERelaxed.ofCE).
-- **Key property**: Importing `SuperNeo.ProofSystem.ConstraintSystem` provides the CCS relation types without importing the submodule directly.
+- **What it is**: Barrel module that re-exports `SuperNeo.ProofSystem.ConstraintSystem.CCS` (Definition 11 structures, Definition 12/13 relation objects, relaxed CE carrier, and Definition 14 parameter constructors).
+- **Key property**: Importing `SuperNeo.ProofSystem.ConstraintSystem` provides the Section 7.1 proof-system relation layer, including coherent theorem-instance packages (`Section71Objects`, `Section71Instance`), without importing the submodule directly.
 - **Protocol role**: Facade for proof-system consumers that need CCS/CE relation objects (Section 7.1).
 
 ## Target Formulas
@@ -13,8 +13,10 @@
 ## Paper Anchors
 
 - **Source**: `./formal/superneo-lean/SuperNeo.pdf.md`
+- Definition 11 (Structure), lines 449–455.
 - Definition 12 (Norm-bounded CCS), lines 457–459.
 - Definition 13 (Norm-bounded CCS Evaluation Relation), lines 461–465.
+- Definition 14 (Global Reduction Parameters), lines 467–475.
 
 ## Module Mapping
 
@@ -26,15 +28,15 @@
 
 | Group | Symbol | Guarantee | Role |
 |-------|--------|-----------|--------|
-| Barrel | re-exports from CCS | `CCS`, `CE`, `CERelaxed`, `CERelaxed.ofCE` | Definitional |
+| Barrel | re-exports from CCS | `CommitmentMap`, `InputProjector`, `CCSStructure`, `GlobalParams`, `Section71Objects`, `Section71Instance`, `CCS`, `CE`, `CERelaxed`, `CERelaxed.ofCE` | Definitional |
 
 ## Proof Obligations and Closure Plan
 
-None (barrel file).
+- Re-export only; no additional formulas or proof obligations beyond `CCS.spec.md`.
 
 ## Assumption Ledger
 
-No open boundary assumptions in this module.
+This barrel introduces no additional boundary assumptions.
 
 ## Dependency and Consumer Map
 

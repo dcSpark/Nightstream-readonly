@@ -6,6 +6,7 @@ import SuperNeo.ProofSystem.Lattice
 import SuperNeo.ProofSystem.LatticePaper
 import SuperNeo.ProofSystem.LatticeReductions
 import SuperNeo.InvertibilityAxioms
+import SuperNeo.InvertibilityGoldilocks
 import SuperNeo.SamplingSet
 
 /-! Section 6 (Interactive reductions) + Appendix C security barrel:

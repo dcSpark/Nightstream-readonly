@@ -17,7 +17,7 @@ namespace ProofSystem.NegligibleInterface
 def implementationModule : String := "SuperNeo.ProofSystem.Negligible"
 
 /-- Canonical paper source used for this module-level interface/spec pair. -/
-def paperSource : String := "/Users/nicolasarqueros/starstream/SuperNeo.pdf.md"
+def paperSource : String := "./formal/superneo-lean/SuperNeo.pdf.md"
 
 /-- Paper sections used to ground this module boundary. -/
 def paperAnchors : List String := ["§6 interactive reductions (security framing)", "§7 theorem-facing assumptions"]
@@ -28,7 +28,7 @@ def exportedSymbolNames : List String := ["ErrorFn", "IsNegligible", "isNegligib
 /-- Assumption/boundary-oriented symbols extracted by naming convention. -/
 def boundarySymbolNames : List String := ["IsNegligible", "isNegligible_zero", "isNegligible_of_zero"]
 
-/-- Interface scaffold marker; replace with concrete typed wrappers as closure progresses. -/
+/-- Interface inventory marker for the typed surface exposed here. -/
 def interfaceScaffoldReady : Prop := True
 
 theorem interfaceScaffoldReady_true : interfaceScaffoldReady := by

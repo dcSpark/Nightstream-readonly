@@ -17,10 +17,34 @@ namespace SuperNeo
 
 namespace SecurityModelInterface
 
-/-- [Role: Theorem-Target] No curated module-level surface extracted yet. -/
-def moduleContractPending : Prop := True
+/-- Canonical implementation module name for this interface. -/
+def implementationModule : String := "SuperNeo.SecurityModel"
 
-theorem moduleContractPending_true : moduleContractPending := by
+/-- Canonical paper source used for this module-level interface/spec pair. -/
+def paperSource : String := "./formal/superneo-lean/SuperNeo.pdf.md"
+
+/-- Paper sections used to ground this barrel interface. -/
+def paperAnchors : List String :=
+  ["§6 Security model", "Appendix B.2 parameters", "Appendix C security items"]
+
+/-- Modules re-exported by the Section 6 security barrel. -/
+def exportedModuleNames : List String :=
+  [ "SuperNeo.InteractiveReductions"
+  , "SuperNeo.ProofSystem.Types"
+  , "SuperNeo.ProofSystem.Security"
+  , "SuperNeo.ProofSystem.Negligible"
+  , "SuperNeo.ProofSystem.Lattice"
+  , "SuperNeo.ProofSystem.LatticePaper"
+  , "SuperNeo.ProofSystem.LatticeReductions"
+  , "SuperNeo.InvertibilityAxioms"
+  , "SuperNeo.InvertibilityGoldilocks"
+  , "SuperNeo.SamplingSet"
+  ]
+
+/-- [Role: Definitional] Barrel contract: importing `SuperNeo.SecurityModel` exposes the full Section 6 security layer. -/
+def barrelContract : Prop := True
+
+theorem barrelContract_true : barrelContract := by
   trivial
 
 end SecurityModelInterface

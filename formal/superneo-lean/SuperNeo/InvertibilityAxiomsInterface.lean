@@ -130,20 +130,21 @@ theorem strictInvertibilityWindowProp_five_of_shape_norm_le_four_of_ne_zeroRq
 
 /-! ## Boundary Surfaces -/
 
-/-- [Role: Boundary] Boundary surface `lowNormInvertibilityAssumption` requiring closure. -/
+/-- [Role: Boundary] Boundary surface `lowNormInvertibilityAssumption` on ring-shaped elements. -/
 abbrev lowNormInvertibilityAssumption := SuperNeo.lowNormInvertibilityAssumption
 
 /-- [Role: Boundary] Active protocol-path invertibility boundary on nonzero paper-carrier differences. -/
 abbrev paperCarrierDiffInvertibilityAssumption :=
   SuperNeo.paperCarrierDiffInvertibilityAssumption
 
-/-- [Role: Boundary] Boundary surface `invertibleRq_of_lowNormAssumption` requiring closure. -/
+/-- [Role: Boundary] Use a shape-aware low-norm boundary assumption to extract invertibility. -/
 theorem invertibleRq_of_lowNormAssumption
   {B : Nat} {a : Coeffs}
   (hInv : lowNormInvertibilityAssumption B)
+  (hShape : hasRingDegreeShape a)
   (hWin : strictInvertibilityWindowProp B a) :
   invertibleRq a :=
-  SuperNeo.invertibleRq_of_lowNormAssumption hInv hWin
+  SuperNeo.invertibleRq_of_lowNormAssumption hInv hShape hWin
 
 /-- [Role: Theorem-Target] Derive the active paper-carrier-difference boundary from Theorem-8 at `B = 5`. -/
 theorem paperCarrierDiffInvertibilityAssumption_of_lowNormFive

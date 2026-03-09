@@ -65,10 +65,13 @@ abbrev sumcheckTableSum := SuperNeo.sumcheckTableSum
 /-- [Role: Theorem-Target] Curated re-export of `SumCheckStatement`. -/
 abbrev SumCheckStatement := SuperNeo.SumCheckStatement
 
-/-- [Role: Theorem-Target] Statement-existence surface for the standalone SumCheck scaffold. -/
+/-- [Role: Theorem-Target] Curated re-export of the Definition-6 theorem witness object. -/
+abbrev SumCheckDefinition6Statement := SuperNeo.SumCheckDefinition6Statement
+
+/-- [Role: Theorem-Target] Definition-6 theorem-witness surface for the standalone SumCheck scaffold. -/
 abbrev sumcheckPaperClaimTrue := SuperNeo.sumcheckPaperClaimTrue
 
-/-- [Role: Theorem-Target] Curated alias to the standalone statement-existence surface. -/
+/-- [Role: Theorem-Target] Curated alias to the Definition-6 theorem-witness surface. -/
 abbrev sumcheckClaimTrue := SuperNeo.sumcheckClaimTrue
 
 /-- [Role: Theorem-Target] Curated re-export of `sumcheckLundSoundnessNumerator`. -/

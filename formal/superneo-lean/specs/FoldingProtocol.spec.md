@@ -13,6 +13,9 @@
 | Module | Paper item |
 |---|---|
 | `ProofSystem.ConstraintSystem` | Definitions 11-13 (CCS structure, relations) |
+| `ProtocolSection71Data` | Explicit protocol-side Definition-14 data owner |
+| `ProtocolSection71Context` | Packaged compact Section 7.1 theorem-native owner |
+| `ProtocolTargetData` | Explicit protocol-side Section 7.5 target-data owner |
 | `ProofSystem.SumCheck` | Proof-system-level sum-check facade |
 | `ProofSystem.Folding` | Proof-system folding wrappers (PiCCS/PiRLC/PiDEC) |
 | `ProtocolRelations` | Section 7.1 relation predicates |

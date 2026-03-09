@@ -20,6 +20,7 @@
 | `ProofSystem.LatticePaper` | Goldilocks Appendix B.2 lattice-parameter family used by the narrowed final-theorem path |
 | `ProofSystem.LatticeReductions` | MSIS-to-Ajtai security reductions |
 | `InvertibilityAxioms` | Theorem 8 (Low-norm invertibility) |
+| `InvertibilityGoldilocks` | Concrete Goldilocks Theorem-8 proof at the Appendix B.2 floor |
 | `SamplingSet` | Definition 17 (Strong sampling), Theorem 9 (Expansion factors) |
 
 ## Contract Surface

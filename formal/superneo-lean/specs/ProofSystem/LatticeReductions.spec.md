@@ -64,14 +64,13 @@ Source: ./formal/superneo-lean/SuperNeo.pdf.md
 | Constructor | `MSISToAjtaiReductions.ofPaperCarrier` | Specializes reduction package to `paperCarrier` from a strong-sampling theorem | Theorem-Target |
 | Constructor | `MSISToAjtaiReductions.ofPaperCarrierFromBounds` | Specializes reduction package to `paperCarrier` from norm bundles (`hSub`, `hMul`) | Theorem-Target |
 | Constructor | `MSISToAjtaiReductions.ofPaperCarrierFromThreeDLeAndMSISBoundary` | Specializes reduction package to the active `paperCarrier` path, deriving Ajtai error terms and bounds directly from an `MSISHardnessBoundary` plus `3*d ≤ params.relaxedExpansion` | Theorem-Target |
-| Constructor | `MSISToAjtaiReductions.ofGoldilocksPaperCarrierAndMSISBoundary` | Specializes reduction package further to the Goldilocks Appendix B.2 parameter family on the active `paperCarrier` path | Theorem-Target |
 | Closed norm law | `normInfVec_subVec_le_derived` | \(\|\text{subVec}\,n\,v_1\,v_2\|_\infty \le \|v_1\|_\infty + \|v_2\|_\infty\) from `Field.centeredAbs_sub_le` + max-fold lemmas | Theorem-Target |
 
 ## Proof Obligations
 
 - All theorem statements must hold without `sorry`.
 - No module-level `axiom`s; carrier/algebra laws that are not definitional are threaded explicitly via `LatticeReductionLaws` and carried in `MSISToAjtaiReductions` only for the abstract carrier-parametric route.
-- The specialized `paperCarrier` and Goldilocks constructors reconstruct the internal MSIS boundary theorem-natively from the theorem-level MSIS hardness assumption, then derive Ajtai error/bound packaging and strong-sampling packaging from that boundary together with the proved sampling bounds.
+- The specialized `paperCarrier` constructors reconstruct the internal MSIS boundary theorem-natively from the theorem-level MSIS hardness assumption, then derive Ajtai error/bound packaging and strong-sampling packaging from that boundary together with the proved sampling bounds. The further Goldilocks Appendix B.2 specialization lives in `specs/ProofSystem/LatticePaper.spec.md`.
 
 ## Assumption Ledger
 
@@ -102,7 +101,8 @@ Derived internally (not a boundary field):
 
 - The module separates the abstract carrier-parametric route from the specialized `paperCarrier` / Goldilocks route.
 - `LatticeReductionLaws` records the explicit carrier-side laws needed for the abstract route.
-- The specialized constructors expose the concrete paper-facing route without reintroducing those abstract laws at the final-theorem surface.
+- The specialized constructors expose the concrete paper-facing carrier route without reintroducing those abstract laws at the final-theorem surface.
+- The concrete Goldilocks Appendix B.2 parameter family is documented separately in `specs/ProofSystem/LatticePaper.spec.md`.
 
 ## Quality Expectations
 

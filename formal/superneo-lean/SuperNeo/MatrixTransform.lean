@@ -272,6 +272,22 @@ theorem matrixTransformAssumption_of_p10
   matrixTransformAssumption bar m := by
   exact matrixTransformAssumption_of_thm3CoreAssumption hThm3
 
+/-- Theorem-native `P12` constructor from the finite basis-kernel Theorem-3 witness. -/
+theorem matrixTransformAssumption_of_basisKernelAssumption
+  {bar : Array (Array F)} {m : Array (Array F)}
+  (hBasis : thm3BasisKernelAssumption bar) :
+  matrixTransformAssumption bar m := by
+  exact matrixTransformAssumption_of_thm3CoreAssumption
+    (thm3CoreAssumption_of_basisKernelAssumption hBasis)
+
+/-- Theorem-native `P12` constructor from the executable finite basis-kernel checker. -/
+theorem matrixTransformAssumption_of_basisKernelCheck
+  {bar : Array (Array F)} {m : Array (Array F)}
+  (hCheck : thm3BasisKernelCheck bar = true) :
+  matrixTransformAssumption bar m := by
+  exact matrixTransformAssumption_of_basisKernelAssumption
+    (thm3BasisKernelAssumption_of_check hCheck)
+
 /--
 Theorem-native `P12` constructor from `(P10 + P11)` boundaries.
 

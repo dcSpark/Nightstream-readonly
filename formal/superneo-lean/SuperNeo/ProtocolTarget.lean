@@ -102,6 +102,48 @@ theorem protocolTargetProp_of_assumptions
   exact protocolTargetProp_of_components h.thm3 h.arithmetic h.invDeltaInvertible
 
 /--
+Derive the protocol target from the finite basis-kernel characterization of
+Theorem 3 rather than a raw `thm3CoreAssumption`.
+-/
+theorem protocolTargetProp_of_basisKernelAssumption
+  {ctx : ProtocolTargetContext}
+  (hBasis : thm3BasisKernelAssumption ctx.bar)
+  (hArithmetic : ArithmeticObligations
+    ctx.bar ctx.m ctx.r ctx.rho1 ctx.rho2
+    ctx.hVec ctx.hScal
+    ctx.splitScalar ctx.kSplit
+    ctx.cset ctx.samples
+    ctx.xs ctx.ys ctx.qVals ctx.coeffs
+    ctx.xEval ctx.expectedEval)
+  (hInvDelta : invertibleRq ctx.invDelta) :
+  protocolTargetProp ctx := by
+  exact protocolTargetProp_of_components
+    (thm3CoreAssumption_of_basisKernelAssumption hBasis)
+    hArithmetic
+    hInvDelta
+
+/--
+Derive the protocol target from the executable finite basis-kernel checker for
+Theorem 3.
+-/
+theorem protocolTargetProp_of_basisKernelCheck
+  {ctx : ProtocolTargetContext}
+  (hCheck : thm3BasisKernelCheck ctx.bar = true)
+  (hArithmetic : ArithmeticObligations
+    ctx.bar ctx.m ctx.r ctx.rho1 ctx.rho2
+    ctx.hVec ctx.hScal
+    ctx.splitScalar ctx.kSplit
+    ctx.cset ctx.samples
+    ctx.xs ctx.ys ctx.qVals ctx.coeffs
+    ctx.xEval ctx.expectedEval)
+  (hInvDelta : invertibleRq ctx.invDelta) :
+  protocolTargetProp ctx := by
+  exact protocolTargetProp_of_basisKernelAssumption
+    (thm3BasisKernelAssumption_of_check hCheck)
+    hArithmetic
+    hInvDelta
+
+/--
 Derive protocol target from native assumptions, closing Theorem-3 by rewriting
 `ctx.bar` to `nativeBarMatrix`.
 -/
@@ -113,6 +155,47 @@ theorem protocolTargetProp_of_native_assumptions
   have hThm3 : thm3CoreAssumption ctx.bar := by
     simpa [hBar] using thm3CoreAssumption_native
   exact protocolTargetProp_of_components hThm3 hArithmetic hInvDelta
+
+/--
+Derive the protocol target directly on the active paper-carrier-difference
+route without first packaging the assumptions into a boundary bundle.
+-/
+theorem protocolTargetProp_of_paperCarrierDiff
+  {ctx : ProtocolTargetContext}
+  (hThm3 : thm3CoreAssumption ctx.bar)
+  (hArithmetic : ArithmeticObligations
+    ctx.bar ctx.m ctx.r ctx.rho1 ctx.rho2
+    ctx.hVec ctx.hScal
+    ctx.splitScalar ctx.kSplit
+    ctx.cset ctx.samples
+    ctx.xs ctx.ys ctx.qVals ctx.coeffs
+    ctx.xEval ctx.expectedEval)
+  (hDiff : samplingDiffSet paperCarrier ctx.invDelta)
+  (hNe : ctx.invDelta ≠ zeroRq) :
+  protocolTargetProp ctx := by
+  exact protocolTargetProp_of_components hThm3 hArithmetic
+    (paperCarrierDiffInvertibilityAssumption_goldilocks ctx.invDelta hDiff hNe)
+
+/--
+Derive the protocol target directly on the active native-bar
+paper-carrier-difference route.
+-/
+theorem protocolTargetProp_of_native_paperCarrierDiff
+  {ctx : ProtocolTargetContext}
+  (hBarNative : ctx.bar = nativeBarMatrix)
+  (hArithmetic : ArithmeticObligations
+    ctx.bar ctx.m ctx.r ctx.rho1 ctx.rho2
+    ctx.hVec ctx.hScal
+    ctx.splitScalar ctx.kSplit
+    ctx.cset ctx.samples
+    ctx.xs ctx.ys ctx.qVals ctx.coeffs
+    ctx.xEval ctx.expectedEval)
+  (hDiff : samplingDiffSet paperCarrier ctx.invDelta)
+  (hNe : ctx.invDelta ≠ zeroRq) :
+  protocolTargetProp ctx := by
+  have hThm3 : thm3CoreAssumption ctx.bar := by
+    simpa [hBarNative] using thm3CoreAssumption_native
+  exact protocolTargetProp_of_paperCarrierDiff hThm3 hArithmetic hDiff hNe
 
 /--
 Paper-facing invertibility bridge: if `invDelta` is a nonzero difference of two
@@ -161,6 +244,52 @@ def ProtocolTargetAssumptions.ofPaperCarrierDiff
     invDeltaInvertible := invertibleRq_of_paperCarrierDiff hDiff hNe }
 
 /--
+Canonical protocol-target constructor on the paper-facing challenge-difference
+path, deriving Theorem 3 from its finite basis-kernel characterization.
+-/
+def ProtocolTargetAssumptions.ofBasisKernelAssumption
+  {ctx : ProtocolTargetContext}
+  (hBasis : thm3BasisKernelAssumption ctx.bar)
+  (arithmetic : ArithmeticObligations
+    ctx.bar ctx.m ctx.r ctx.rho1 ctx.rho2
+    ctx.hVec ctx.hScal
+    ctx.splitScalar ctx.kSplit
+    ctx.cset ctx.samples
+    ctx.xs ctx.ys ctx.qVals ctx.coeffs
+    ctx.xEval ctx.expectedEval)
+  (hDiff : samplingDiffSet paperCarrier ctx.invDelta)
+  (hNe : ctx.invDelta ≠ zeroRq) :
+  ProtocolTargetAssumptions ctx :=
+  ofPaperCarrierDiff
+    (thm3CoreAssumption_of_basisKernelAssumption hBasis)
+    arithmetic
+    hDiff
+    hNe
+
+/--
+Canonical protocol-target constructor on the paper-facing challenge-difference
+path, deriving Theorem 3 from the executable finite basis-kernel checker.
+-/
+def ProtocolTargetAssumptions.ofBasisKernelCheck
+  {ctx : ProtocolTargetContext}
+  (hCheck : thm3BasisKernelCheck ctx.bar = true)
+  (arithmetic : ArithmeticObligations
+    ctx.bar ctx.m ctx.r ctx.rho1 ctx.rho2
+    ctx.hVec ctx.hScal
+    ctx.splitScalar ctx.kSplit
+    ctx.cset ctx.samples
+    ctx.xs ctx.ys ctx.qVals ctx.coeffs
+    ctx.xEval ctx.expectedEval)
+  (hDiff : samplingDiffSet paperCarrier ctx.invDelta)
+  (hNe : ctx.invDelta ≠ zeroRq) :
+  ProtocolTargetAssumptions ctx :=
+  ofBasisKernelAssumption
+    (thm3BasisKernelAssumption_of_check hCheck)
+    arithmetic
+    hDiff
+    hNe
+
+/--
 Canonical protocol-target constructor from any strict low-norm invertibility
 boundary whose threshold is at least `5`, specialized to the active
 paper-carrier-difference route.
@@ -181,9 +310,10 @@ def ProtocolTargetAssumptions.ofLowNormAtLeastFive
   (hDiff : samplingDiffSet paperCarrier ctx.invDelta)
   (hNe : ctx.invDelta ≠ zeroRq) :
   ProtocolTargetAssumptions ctx :=
+  let hShape := (samplingDiffSet_paperCarrier_hasRingDegreeShape_and_norm_le_four hDiff).1
   { thm3 := thm3
     arithmetic := arithmetic
-    invDeltaInvertible := invertibleRq_of_lowNormAssumption hInv
+    invDeltaInvertible := invertibleRq_of_lowNormAssumption hInv hShape
       (strictInvertibilityWindowProp_mono hFive
         (strictInvertibilityWindowProp_five_of_paperCarrierDiff hDiff hNe)) }
 
@@ -229,9 +359,10 @@ def ProtocolTargetNativeAssumptions.ofLowNormAtLeastFive
   (hDiff : samplingDiffSet paperCarrier ctx.invDelta)
   (hNe : ctx.invDelta ≠ zeroRq) :
   ProtocolTargetNativeAssumptions ctx :=
+  let hShape := (samplingDiffSet_paperCarrier_hasRingDegreeShape_and_norm_le_four hDiff).1
   { barNative := barNative
     arithmetic := arithmetic
-    invDeltaInvertible := invertibleRq_of_lowNormAssumption hInv
+    invDeltaInvertible := invertibleRq_of_lowNormAssumption hInv hShape
       (strictInvertibilityWindowProp_mono hFive
         (strictInvertibilityWindowProp_five_of_paperCarrierDiff hDiff hNe)) }
 end SuperNeo

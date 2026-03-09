@@ -30,7 +30,7 @@ def exportedSymbolNames : List String := ["Instance", "Transcript", "RoundConsis
 /-- Assumption/boundary-oriented symbols extracted by naming convention. -/
 def boundarySymbolNames : List String := []
 
-/-- Interface scaffold marker; replace with concrete typed wrappers as closure progresses. -/
+/-- Interface inventory marker for the typed surface exposed here. -/
 def interfaceScaffoldReady : Prop := True
 
 theorem interfaceScaffoldReady_true : interfaceScaffoldReady := by

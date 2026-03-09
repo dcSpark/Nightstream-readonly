@@ -12,10 +12,22 @@ namespace SuperNeo
 
 namespace RegressionInterface
 
-/-- [Role: Theorem-Target] No curated module-level surface extracted yet. -/
-def moduleContractPending : Prop := True
+/-- Canonical implementation module name for this interface. -/
+def implementationModule : String := "SuperNeo.Regression"
 
-theorem moduleContractPending_true : moduleContractPending := by
+/-- Canonical paper source used for this module-level interface/spec pair. -/
+def paperSource : String := "./formal/superneo-lean/SuperNeo.pdf.md"
+
+/-- Paper sections used to ground this regression entrypoint. -/
+def paperAnchors : List String := ["Appendix B.2 Goldilocks parameters"]
+
+/-- Modules imported by the regression entrypoint. -/
+def exportedModuleNames : List String := ["SuperNeo.Golden.GoldilocksGolden"]
+
+/-- [Role: Definitional] Entry-point contract: compiling `SuperNeo.Regression` checks the golden-vector import surface. -/
+def entrypointContract : Prop := True
+
+theorem entrypointContract_true : entrypointContract := by
   trivial
 
 end RegressionInterface

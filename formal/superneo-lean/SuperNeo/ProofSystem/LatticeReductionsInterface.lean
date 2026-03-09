@@ -1,4 +1,5 @@
 import SuperNeo.ProofSystem.LatticeReductions
+import SuperNeo.ProofSystem.LatticeReductionsDerived
 import SuperNeo.SamplingSet
 
 /-!
@@ -121,6 +122,24 @@ def MSISToAjtaiReductions_ofPaperCarrierFromThreeDLe
     (params := params)
     hTd hExpPos epsBinding epsRelaxedBinding hBindBound hRelaxedBound hBindNeg hRelaxedNeg
 
+def MSISToAjtaiReductions_ofLawsAndMSISBoundary
+  {params : AjtaiParams}
+  (laws : LatticeReductionLaws params)
+  (hExpPos : 0 < params.relaxedExpansion)
+  (hMsis : MSISHardnessBoundary params) :
+  MSISToAjtaiReductions params :=
+  SuperNeo.ProofSystem.MSISToAjtaiReductions.ofLawsAndMSISBoundary
+    laws hExpPos hMsis
+
+def MSISToAjtaiReductions_ofPaperCarrierFromThreeDLeAndMSISBoundary
+  {params : AjtaiParams}
+  (hTd : 3 * d ≤ params.relaxedExpansion)
+  (hExpPos : 0 < params.relaxedExpansion)
+  (hMsis : MSISHardnessBoundary params) :
+  MSISToAjtaiReductions params :=
+  SuperNeo.ProofSystem.MSISToAjtaiReductions.ofPaperCarrierFromThreeDLeAndMSISBoundary
+    (params := params) hTd hExpPos hMsis
+
 /-! ## Extractor and Norm-Transfer Theorems -/
 
 theorem bindingCollision_subWitness_norm_lt_msisNormBound
@@ -182,7 +201,7 @@ noncomputable def MSISHardnessBoundary_ofHardness
 theorem MSISHardnessBoundary_ofHardness_hardnessFromFields
   {params : AjtaiParams}
   (h : MSISHardnessAssumption params) :
-  (MSISHardnessBoundary_ofHardness h).hardnessFromFields :=
+  MSISHardnessAssumption params :=
   SuperNeo.ProofSystem.MSISHardnessBoundary.ofHardness_hardnessFromFields h
 
 theorem no_ajtaiBindingCollision_of_advantageBound

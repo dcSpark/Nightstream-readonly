@@ -29,9 +29,9 @@ def invertibilityWindowProp (B : Nat) (a : Coeffs) : Prop :=
 def strictInvertibilityWindowProp (B : Nat) (a : Coeffs) : Prop :=
   0 < normInfCoeffs a ∧ normInfCoeffs a < B
 
-/-- External Theorem-8-style boundary: strictly low-norm nonzero elements are invertible in `Rq`. -/
+/-- External Theorem-8-style boundary: strictly low-norm ring elements are invertible in `Rq`. -/
 def lowNormInvertibilityAssumption (B : Nat) : Prop :=
-  ∀ a : Coeffs, strictInvertibilityWindowProp B a → invertibleRq a
+  ∀ a : Coeffs, hasRingDegreeShape a → strictInvertibilityWindowProp B a → invertibleRq a
 
 /--
 Active protocol-path invertibility boundary: every nonzero difference of two
@@ -156,9 +156,10 @@ theorem not_all_window_elements_invertible (B : Nat) :
 theorem invertibleRq_of_lowNormAssumption
   {B : Nat} {a : Coeffs}
   (hInv : lowNormInvertibilityAssumption B)
+  (hShape : hasRingDegreeShape a)
   (hWin : strictInvertibilityWindowProp B a) :
   invertibleRq a := by
-  exact hInv a hWin
+  exact hInv a hShape hWin
 
 /--
 Any strict low-norm invertibility theorem with threshold at least `5` implies
@@ -171,12 +172,12 @@ theorem paperCarrierDiffInvertibilityAssumption_of_lowNormAtLeastFive
   (hInv : lowNormInvertibilityAssumption B) :
   paperCarrierDiffInvertibilityAssumption := by
   intro δ hDiff hNe
-  exact invertibleRq_of_lowNormAssumption hInv
+  rcases samplingDiffSet_paperCarrier_hasRingDegreeShape_and_norm_le_four hDiff with
+    ⟨hShape, hNorm⟩
+  exact invertibleRq_of_lowNormAssumption hInv hShape
     (strictInvertibilityWindowProp_mono hFive
       (strictInvertibilityWindowProp_five_of_shape_norm_le_four_of_ne_zeroRq
-        (samplingDiffSet_paperCarrier_hasRingDegreeShape_and_norm_le_four hDiff).1
-        (samplingDiffSet_paperCarrier_hasRingDegreeShape_and_norm_le_four hDiff).2
-        hNe))
+        hShape hNorm hNe))
 
 /--
 The strict low-norm Theorem-8 boundary at `B = 5` implies the narrower active

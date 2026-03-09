@@ -3,7 +3,7 @@
 ## Purpose
 
 - **What it is**: Barrel module that re-exports `SuperNeo.ProofSystem.Folding.PiCCS`, `PiRLC`, and `PiDEC` (the three folding reduction wrappers).
-- **Key property**: Importing `SuperNeo.ProofSystem.Folding` provides Π_CCS, Π_RLC, and Π_DEC proof-system wrappers without importing submodules directly.
+- **Key property**: Importing `SuperNeo.ProofSystem.Folding` provides the compatibility assumption wrappers together with the paper-facing realized/provider entrypoints, the generic proof-system `Section71Instance` plus compact-specialization entrypoints, the packaged theorem-native `ProtocolSection71Setup` entrypoints, the fully paper-faithful `ProtocolSection71TheoremInstance` entrypoints, the single-object `ProtocolSection71Context` entrypoints, the explicit protocol-side Definition-14 `ProtocolSection71Data` entrypoints, and the explicit protocol-side Section 7.5 `ProtocolTargetData` entrypoints for Π_CCS, Π_RLC, and Π_DEC without importing submodules directly.
 - **Protocol role**: Facade for proof-system consumers that need the three folding reductions (Section 7.2–7.5).
 
 ## Target Formulas

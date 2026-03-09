@@ -19,10 +19,40 @@ namespace SuperNeo
 
 namespace FoldingProtocolInterface
 
-/-- [Role: Theorem-Target] No curated module-level surface extracted yet. -/
-def moduleContractPending : Prop := True
+/-- Canonical implementation module name for this interface. -/
+def implementationModule : String := "SuperNeo.FoldingProtocol"
 
-theorem moduleContractPending_true : moduleContractPending := by
+/-- Canonical paper source used for this module-level interface/spec pair. -/
+def paperSource : String := "./formal/superneo-lean/SuperNeo.pdf.md"
+
+/-- Paper sections used to ground this barrel interface. -/
+def paperAnchors : List String :=
+  ["§7 Folding protocol", "Appendix D deferred protocol proofs"]
+
+/-- Modules re-exported by the Section 7 folding barrel. -/
+def exportedModuleNames : List String :=
+  [ "SuperNeo.ProofSystem.ConstraintSystem"
+  , "SuperNeo.ProofSystem.SumCheck"
+  , "SuperNeo.ProofSystem.Folding"
+  , "SuperNeo.ProtocolRelations"
+  , "SuperNeo.ProtocolSection71Data"
+  , "SuperNeo.ProtocolSection71Context"
+  , "SuperNeo.PiCCS"
+  , "SuperNeo.PiRLC"
+  , "SuperNeo.PiDEC"
+  , "SuperNeo.ArithmeticBundle"
+  , "SuperNeo.ArithmeticObligations"
+  , "SuperNeo.ProtocolTarget"
+  , "SuperNeo.ProtocolTargetData"
+  , "SuperNeo.ProtocolMathTarget"
+  , "SuperNeo.ProtocolTheorem"
+  , "SuperNeo.ProofSystem.Protocol"
+  ]
+
+/-- [Role: Definitional] Barrel contract: importing `SuperNeo.FoldingProtocol` exposes the full Section 7 protocol stack. -/
+def barrelContract : Prop := True
+
+theorem barrelContract_true : barrelContract := by
   trivial
 
 end FoldingProtocolInterface

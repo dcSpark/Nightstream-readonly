@@ -30,7 +30,7 @@ abbrev ProtocolTargetAssumptions := SuperNeo.ProtocolTargetAssumptions
 /-- [Role: Boundary] Native boundary bundle for protocol target assumptions. -/
 abbrev ProtocolTargetNativeAssumptions := SuperNeo.ProtocolTargetNativeAssumptions
 
-/-- [Role: Boundary] Boundary surface `matrixTransformAssumption_of_thm3CoreAssumption` requiring closure. -/
+/-- [Role: Theorem-Target] Re-export the theorem-native MatrixTransform constructor from Theorem 3. -/
 theorem matrixTransformAssumption_of_thm3CoreAssumption
   {bar m : Array (Array F)}
   (h : thm3CoreAssumption bar) :
@@ -44,12 +44,89 @@ theorem protocolTargetProp_of_assumptions
   protocolTargetProp ctx :=
   SuperNeo.protocolTargetProp_of_assumptions h
 
+/--
+[Role: Theorem-Target] Derive `protocolTargetProp` from the finite
+basis-kernel characterization of Theorem 3.
+-/
+theorem protocolTargetProp_of_basisKernelAssumption
+  {ctx : ProtocolTargetContext}
+  (hBasis : thm3BasisKernelAssumption ctx.bar)
+  (hArithmetic : ArithmeticObligations
+    ctx.bar ctx.m ctx.r ctx.rho1 ctx.rho2
+    ctx.hVec ctx.hScal
+    ctx.splitScalar ctx.kSplit
+    ctx.cset ctx.samples
+    ctx.xs ctx.ys ctx.qVals ctx.coeffs
+    ctx.xEval ctx.expectedEval)
+  (hInvDelta : invertibleRq ctx.invDelta) :
+  protocolTargetProp ctx :=
+  SuperNeo.protocolTargetProp_of_basisKernelAssumption
+    hBasis hArithmetic hInvDelta
+
+/--
+[Role: Theorem-Target] Derive `protocolTargetProp` from the executable finite
+basis-kernel checker for Theorem 3.
+-/
+theorem protocolTargetProp_of_basisKernelCheck
+  {ctx : ProtocolTargetContext}
+  (hCheck : thm3BasisKernelCheck ctx.bar = true)
+  (hArithmetic : ArithmeticObligations
+    ctx.bar ctx.m ctx.r ctx.rho1 ctx.rho2
+    ctx.hVec ctx.hScal
+    ctx.splitScalar ctx.kSplit
+    ctx.cset ctx.samples
+    ctx.xs ctx.ys ctx.qVals ctx.coeffs
+    ctx.xEval ctx.expectedEval)
+  (hInvDelta : invertibleRq ctx.invDelta) :
+  protocolTargetProp ctx :=
+  SuperNeo.protocolTargetProp_of_basisKernelCheck
+    hCheck hArithmetic hInvDelta
+
 /-- [Role: Boundary] Native constructor surface for `protocolTargetProp`. -/
 theorem protocolTargetProp_of_native_assumptions
   {ctx : ProtocolTargetContext}
   (h : ProtocolTargetNativeAssumptions ctx) :
   protocolTargetProp ctx :=
   SuperNeo.protocolTargetProp_of_native_assumptions h
+
+/--
+[Role: Theorem-Target] Derive `protocolTargetProp` directly on the active
+paper-carrier-difference route.
+-/
+theorem protocolTargetProp_of_paperCarrierDiff
+  {ctx : ProtocolTargetContext}
+  (hThm3 : thm3CoreAssumption ctx.bar)
+  (hArithmetic : ArithmeticObligations
+    ctx.bar ctx.m ctx.r ctx.rho1 ctx.rho2
+    ctx.hVec ctx.hScal
+    ctx.splitScalar ctx.kSplit
+    ctx.cset ctx.samples
+    ctx.xs ctx.ys ctx.qVals ctx.coeffs
+    ctx.xEval ctx.expectedEval)
+  (hDiff : samplingDiffSet paperCarrier ctx.invDelta)
+  (hNe : ctx.invDelta ≠ zeroRq) :
+  protocolTargetProp ctx :=
+  SuperNeo.protocolTargetProp_of_paperCarrierDiff hThm3 hArithmetic hDiff hNe
+
+/--
+[Role: Theorem-Target] Derive `protocolTargetProp` directly on the active
+native-bar paper-carrier-difference route.
+-/
+theorem protocolTargetProp_of_native_paperCarrierDiff
+  {ctx : ProtocolTargetContext}
+  (hBarNative : ctx.bar = nativeBarMatrix)
+  (hArithmetic : ArithmeticObligations
+    ctx.bar ctx.m ctx.r ctx.rho1 ctx.rho2
+    ctx.hVec ctx.hScal
+    ctx.splitScalar ctx.kSplit
+    ctx.cset ctx.samples
+    ctx.xs ctx.ys ctx.qVals ctx.coeffs
+    ctx.xEval ctx.expectedEval)
+  (hDiff : samplingDiffSet paperCarrier ctx.invDelta)
+  (hNe : ctx.invDelta ≠ zeroRq) :
+  protocolTargetProp ctx :=
+  SuperNeo.protocolTargetProp_of_native_paperCarrierDiff
+    hBarNative hArithmetic hDiff hNe
 
 /-! ## Paper-Facing Invertibility Bridge -/
 
@@ -76,6 +153,22 @@ paper-facing challenge-difference route.
 abbrev ProtocolTargetAssumptions_ofPaperCarrierDiff
   {ctx : ProtocolTargetContext} :=
   SuperNeo.ProtocolTargetAssumptions.ofPaperCarrierDiff (ctx := ctx)
+
+/--
+[Role: Theorem-Target] Canonical protocol-target constructor from the finite
+basis-kernel characterization of Theorem 3 on the active paper-facing route.
+-/
+abbrev ProtocolTargetAssumptions_ofBasisKernelAssumption
+  {ctx : ProtocolTargetContext} :=
+  SuperNeo.ProtocolTargetAssumptions.ofBasisKernelAssumption (ctx := ctx)
+
+/--
+[Role: Theorem-Target] Canonical protocol-target constructor from the
+executable finite basis-kernel checker on the active paper-facing route.
+-/
+abbrev ProtocolTargetAssumptions_ofBasisKernelCheck
+  {ctx : ProtocolTargetContext} :=
+  SuperNeo.ProtocolTargetAssumptions.ofBasisKernelCheck (ctx := ctx)
 
 /--
 [Role: Theorem-Target] Canonical protocol-target constructor from a stronger
